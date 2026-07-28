@@ -25,6 +25,7 @@ from openworkproof.models import (
     ACTION_RECEIPT_ADAPTER,
     ActionReceipt,
     AcceptanceReceipt,
+    CapabilityGrant,
     WorkOrder,
 )
 from openworkproof.signing import key_id, sign_payload
@@ -558,6 +559,24 @@ def signed_work_order(
     return WorkOrder.model_validate(
         sign_payload(
             "work-order",
+            candidate,
+            ephemeral_role_keys["Maintainer"][0],
+        )
+    )
+
+
+@pytest.fixture
+def signed_root_grant(
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+) -> CapabilityGrant:
+    candidate = signed_work_order.root_grant_template.model_dump(mode="json")
+    candidate["work_order_digest"] = signed_work_order.digest
+    return CapabilityGrant.model_validate(
+        sign_payload(
+            "capability-grant",
             candidate,
             ephemeral_role_keys["Maintainer"][0],
         )
