@@ -1,0 +1,8 @@
+.demo-state/
+.gate-evidence/
+.pytest_cache/
+.venv/
+__pycache__/
+*.egg-info/
+dist/
+proof-bundle.zip

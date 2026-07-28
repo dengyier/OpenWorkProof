@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools==83.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openworkproof"
+version = "0.1.0"
+description = "Agent work contracts and verifiable execution protocol"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "cryptography==49.0.0",
+  "jsonschema==4.26.0",
+  "pydantic==2.13.4",
+  "rfc8785==0.1.4",
+  "rich==15.0.0",
+  "typer==0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pip-tools==7.5.2",
+  "pytest==9.1.1",
+  "setuptools==83.0.0",
+]
+mcp = ["mcp==1.28.1"]
+
+[project.scripts]
+owp = "openworkproof.cli:app"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+openworkproof = ["schemas/v0.1/*.json"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+  "docker: requires a running local Docker daemon",
+  "agentteams: requires the Day 0 pinned AgentTeams runtime",
+]
