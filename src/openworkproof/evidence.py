@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -24,11 +25,14 @@ from openworkproof.models import (
     AcceptanceReceipt,
     ActionReceiptEnvelope,
     AgentRequest,
+    ApprovalRequestedReceipt,
     CapabilityGrant,
     CompositionCause,
     ComposeProofArguments,
+    GrantConsumedReceipt,
     GrantIssuedReceipt,
     GrantRevokedReceipt,
+    RollbackReceipt,
     SidecarEvent,
     SystemEventReceipt,
     ToolCallReceipt,
@@ -44,6 +48,7 @@ from openworkproof.signing import (
     verify_payload,
     verify_work_order_identity_bindings,
 )
+from openworkproof.state import _agent_direct_call_is_authorized
 
 
 BUSY_TIMEOUT_MS = 135_000
@@ -2240,12 +2245,240 @@ def _child_policy_decision(
     return True, None
 
 
+@dataclass(frozen=True)
+class _GrantReplayState:
+    remaining_tool_calls: int
+    remaining_repair_rounds: int
+    use_count: int
+    revoked: bool
+
+
+def _replay_grant_quota_history(
+    work_order: WorkOrder,
+    receipts,
+    grants: dict[str, CapabilityGrant],
+) -> dict[str, _GrantReplayState]:
+    mutable: dict[str, dict[str, int | bool]] = {}
+
+    def add_grant(grant: CapabilityGrant) -> None:
+        if grant.grant_id in mutable:
+            raise _child_issuance_error(
+                "Grant quota replay encountered duplicate authority"
+            )
+        mutable[grant.grant_id] = {
+            "tool_calls": grant.quota.tool_calls,
+            "repair_rounds": grant.quota.repair_rounds,
+            "use_count": 0,
+            "revoked": False,
+        }
+
+    def consume_authority(grant: CapabilityGrant) -> None:
+        state = mutable.get(grant.grant_id)
+        if state is None or state["revoked"] is True:
+            raise _child_issuance_error(
+                "Grant quota replay references inactive authority"
+            )
+        if grant.usage_mode == "single_use" and state["use_count"] != 0:
+            raise _child_issuance_error(
+                "single-use Grant was consumed more than once"
+            )
+        state["use_count"] = int(state["use_count"]) + 1
+
+    charge_types = (
+        GrantConsumedReceipt,
+        ToolCallReceipt,
+        ApprovalRequestedReceipt,
+        RollbackReceipt,
+    )
+
+    def validate_direct_call(receipt, *, require_active: bool):
+        grant = grants.get(receipt.grant_id)
+        state = mutable.get(receipt.grant_id)
+        request = receipt.nested_claim
+        elapsed = (
+            receipt.occurred_at - request.requested_at
+        ).total_seconds()
+        if (
+            grant is None
+            or state is None
+            or receipt.actor_id != grant.subject_agent_id
+            or receipt.actor_key_id != grant.subject_key_id
+            or request.actor_id != grant.subject_agent_id
+            or request.actor_key_id != grant.subject_key_id
+            or request.signer_key_id != grant.subject_key_id
+            or request.grant_id != grant.grant_id
+            or request.work_order_digest != work_order.digest
+            or request.requested_at < work_order.issued_at
+            or request.requested_at > work_order.deadline
+            or receipt.occurred_at < work_order.issued_at
+            or receipt.occurred_at > work_order.deadline
+            or elapsed < 0
+            or elapsed > 300
+        ):
+            raise _child_issuance_error(
+                "Grant call binding failed semantic replay"
+            )
+        role_authorized = _agent_direct_call_is_authorized(
+            receipt,
+            work_order,
+        )
+        if require_active and not role_authorized:
+            raise _child_issuance_error(
+                "Grant direct-call role failed semantic replay"
+            )
+        if require_active and (
+            state["revoked"] is True
+            or request.tool_name not in grant.allowed_tools
+            or request.requested_at < grant.valid_from
+            or request.requested_at > grant.expires_at
+            or receipt.occurred_at < grant.valid_from
+            or receipt.occurred_at > grant.expires_at
+        ):
+            raise _child_issuance_error(
+                "Grant charge authority failed semantic replay"
+            )
+        return grant, state, role_authorized
+
+    for receipt in receipts:
+        if isinstance(receipt, GrantIssuedReceipt):
+            if (
+                receipt.policy_decision != "allow"
+                or receipt.execution_status != "succeeded"
+            ):
+                continue
+            grant = grants.get(receipt.issued_grant_id)
+            if grant is None:
+                raise _child_issuance_error(
+                    "Grant quota replay cannot resolve issuance"
+                )
+            if grant.parent_grant_id is None:
+                add_grant(grant)
+                continue
+            parent = grants.get(grant.parent_grant_id)
+            parent_state = mutable.get(grant.parent_grant_id)
+            if parent is None or parent_state is None:
+                raise _child_issuance_error(
+                    "Grant quota replay references non-prior parent"
+                )
+            consume_authority(parent)
+            for metric in ("tool_calls", "repair_rounds"):
+                remaining = int(parent_state[metric]) - getattr(
+                    grant.quota,
+                    metric,
+                )
+                if remaining < 0:
+                    raise _child_issuance_error(
+                        "Grant quota replay over-allocates parent"
+                    )
+                parent_state[metric] = remaining
+            add_grant(grant)
+            continue
+
+        if isinstance(receipt, GrantRevokedReceipt):
+            if (
+                receipt.policy_decision != "allow"
+                or receipt.execution_status != "succeeded"
+            ):
+                if receipt.quota_charge is not None:
+                    raise _child_issuance_error(
+                        "denied Grant receipt cannot charge quota"
+                    )
+                continue
+            authorizer = grants.get(receipt.authorizing_grant_id)
+            target_state = mutable.get(receipt.revoked_grant_id)
+            if authorizer is None or target_state is None:
+                raise _child_issuance_error(
+                    "Grant quota replay cannot resolve revocation"
+                )
+            consume_authority(authorizer)
+            target_state["revoked"] = True
+            continue
+
+        if not isinstance(receipt, charge_types):
+            if (
+                receipt.policy_decision == "deny"
+                and receipt.quota_charge is not None
+            ):
+                raise _child_issuance_error(
+                    "denied Grant receipt cannot charge quota"
+                )
+            continue
+        if receipt.policy_decision == "deny":
+            if receipt.quota_charge is not None:
+                raise _child_issuance_error(
+                    "denied Grant receipt cannot charge quota"
+                )
+            if (
+                isinstance(receipt, GrantConsumedReceipt)
+                and receipt.amount != 1
+            ):
+                raise _child_issuance_error(
+                    "start_retry must consume exactly one repair round"
+                )
+            _, _, role_authorized = validate_direct_call(
+                receipt,
+                require_active=False,
+            )
+            role_denied = receipt.policy_error_code == "ROLE_DENIED"
+            if role_authorized == role_denied:
+                raise _child_issuance_error(
+                    "denied Grant role decision failed semantic replay"
+                )
+            continue
+        charge = receipt.quota_charge
+        if charge is None:
+            raise _child_issuance_error(
+                "started Grant receipt must charge quota"
+            )
+        if (
+            isinstance(receipt, GrantConsumedReceipt)
+            and receipt.amount != 1
+        ):
+            raise _child_issuance_error(
+                "start_retry must consume exactly one repair round"
+            )
+        grant, state, _ = validate_direct_call(
+            receipt,
+            require_active=True,
+        )
+        if charge.grant_id != grant.grant_id:
+            raise _child_issuance_error(
+                "Grant charge does not match direct call"
+            )
+        remaining = int(state[charge.metric])
+        if charge.amount > remaining:
+            raise _child_issuance_error(
+                "Grant quota is exhausted"
+            )
+        expected_after = remaining - charge.amount
+        if charge.remaining_after != expected_after:
+            raise _child_issuance_error(
+                "Grant quota remaining_after failed semantic replay"
+            )
+        consume_authority(grant)
+        state[charge.metric] = expected_after
+
+    if set(mutable) != set(grants):
+        raise _child_issuance_error(
+            "Grant quota replay is incomplete"
+        )
+    return {
+        grant_id: _GrantReplayState(
+            remaining_tool_calls=int(state["tool_calls"]),
+            remaining_repair_rounds=int(state["repair_rounds"]),
+            use_count=int(state["use_count"]),
+            revoked=bool(state["revoked"]),
+        )
+        for grant_id, state in mutable.items()
+    }
+
+
 def _validate_grant_history_semantics(
     work_order: WorkOrder,
     receipts,
     grants: dict[str, CapabilityGrant],
     attempts: dict[str, CapabilityGrant],
-) -> None:
+) -> dict[str, _GrantReplayState]:
     bindings = {
         binding.role: binding for binding in work_order.key_bindings
     }
@@ -2262,16 +2495,12 @@ def _validate_grant_history_semantics(
             )
             target = prior_effective.get(receipt.revoked_grant_id)
             request = receipt.nested_claim
-            if (
+            binding_invalid = (
                 authorizer is None
                 or authorizer.parent_grant_id is not None
                 or target is None
                 or target.parent_grant_id != authorizer.grant_id
                 or target.grant_id in revoked_grants
-                or receipt.policy_decision != "allow"
-                or receipt.policy_error_code is not None
-                or receipt.execution_status != "succeeded"
-                or receipt.execution_error_code is not None
                 or receipt.state_before != receipt.state_after
                 or receipt.actor_id != manager.subject_id
                 or receipt.actor_key_id != manager.key_id
@@ -2283,19 +2512,47 @@ def _validate_grant_history_semantics(
                 or request.tool_name != "owp.revoke_grant"
                 or request.requested_at < work_order.issued_at
                 or request.requested_at > work_order.deadline
-                or request.requested_at < authorizer.valid_from
-                or request.requested_at > authorizer.expires_at
                 or receipt.occurred_at < request.requested_at
                 or (
                     receipt.occurred_at - request.requested_at
                 ).total_seconds()
                 > 300
-                or receipt.occurred_at < authorizer.valid_from
-                or receipt.occurred_at > authorizer.expires_at
+                or receipt.occurred_at > work_order.deadline
+            )
+            allowed_invalid = (
+                receipt.policy_decision == "allow"
+                and (
+                    authorizer is None
+                    or receipt.policy_error_code is not None
+                    or receipt.execution_status != "succeeded"
+                    or receipt.execution_error_code is not None
+                    or request.requested_at < authorizer.valid_from
+                    or request.requested_at > authorizer.expires_at
+                    or receipt.occurred_at < authorizer.valid_from
+                    or receipt.occurred_at > authorizer.expires_at
+                )
+            )
+            denied_invalid = (
+                receipt.policy_decision == "deny"
+                and (
+                    receipt.policy_error_code is None
+                    or receipt.execution_status != "denied"
+                    or receipt.execution_error_code is not None
+                    or receipt.quota_charge is not None
+                )
+            )
+            if (
+                binding_invalid
+                or allowed_invalid
+                or denied_invalid
+                or receipt.policy_decision not in {"allow", "deny"}
             ):
                 raise _child_issuance_error(
                     "Grant revocation history failed semantic replay"
                 )
+            if receipt.policy_decision == "deny":
+                prior_receipts.append(receipt)
+                continue
             revoked_grants.add(target.grant_id)
             prior_receipts.append(receipt)
             continue
@@ -2421,6 +2678,11 @@ def _validate_grant_history_semantics(
         raise _child_issuance_error(
             "Grant history replay is incomplete"
         )
+    return _replay_grant_quota_history(
+        work_order,
+        receipts,
+        grants,
+    )
 
 
 def _build_child_receipt(

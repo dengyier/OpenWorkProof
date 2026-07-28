@@ -102,20 +102,26 @@ MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent，AgentTeams 组织 Agen
 - Receipt、Grant、attempt、reservation、event、state 和 version 闭包；
 - 300 秒历史时钟重放、61 条常规 Receipt 容量门；
 - 并发确认快照、提交事实分类、成功发行唯一性和并发撤销单胜。
+- 从签名 Receipt 重放 Grant 余额、single-use 次数和撤销状态；
+- parent 直接计费与 child 额度预留合并计算，child 消费不重复扣减
+  parent；
+- deny 零计费、失败但已启动的工具/回滚计费，以及 direct-call
+  角色交集。
 
 当前验证快照：
 
-- Receipt-chain 专项：185 passed；
-- 全量测试：881 passed；
-- 独立规格复核：7B2A_SPEC_PASS；
-- 独立质量复核：7B2A_QUALITY_PASS；
+- Receipt-chain 专项：199 passed；
+- 全量测试：895 passed；
+- 独立规格复核：7B2B_SPEC_PASS；
+- 独立质量复核：7B2B_QUALITY_PASS；
 - pip check、compileall 和 git diff check：通过。
 
 重要边界：
 
-上述 Task 7B2a 稳定切片已经提交并推送到公开 GitHub。Task 7 仍未完成：
-Grant 消费、工具计费、证据发布与恢复、acceptance 事务和完整
-validate_grant_chain 尚未实现；Day 0 执行门仍为 FAIL。
+上述 Task 7B2b 稳定切片已经完成本地实现与独立复核。它从已有
+签名 Receipt 重放额度语义，但尚未实现真实原子消费/工具事务、
+超额 deny 持久化、证据发布与恢复、acceptance 事务和完整
+validate_grant_chain；Task 7 仍未完成，Day 0 执行门仍为 FAIL。
 
 
 六、快速开始
@@ -143,7 +149,7 @@ validate_grant_chain 尚未实现；Day 0 执行门仍为 FAIL。
 
 说明：
 
-- 当前公开快照对应 Task 7B2a，fresh 全量验证为 881 passed；
+- 当前公开快照对应 Task 7B2b，fresh 全量验证为 895 passed；
 - pyproject.toml 已预留 owp 命令入口，但 CLI 模块尚未完成，因此本文件
   暂不提供 CLI 使用命令；
 - 不应把测试通过理解为 Day 0、独立验收或赛事提交已经完成。
@@ -180,12 +186,14 @@ Rich 及其源码仍归属于原权利人；OpenWorkProof 只拥有自有协议�
 - 协议模型、签名、状态、谓词和 Schema；
 - Task 6A 确定性源码、补丁和重放原语；
 - Task 7B2a 账本初始化、Root/child Grant 签发与 child Grant 撤销切片；
-- Task 7B2a 独立规格和质量复核；
-- Task 7B2a 稳定切片已提交并推送到公开 GitHub。
+- Task 7B2b 签名历史额度、single-use、撤销和角色语义回放切片；
+- Task 7B2b 独立规格和质量复核。
 
 尚未完成：
 
-- Task 7 的 Grant 消费、工具计费和全局 nonce/quota 重放；
+- Task 7 的真实原子 Grant 消费、工具事务、超额 deny 和全局
+  nonce 处理；
+- 完整 policy denial 优先级重算与 validate_grant_chain；
 - 证据发布、崩溃恢复和 acceptance 事务闭包；
 - CLI、MCP Sidecar 和 AgentTeams 接线；
 - Rich #4196 完整演示；

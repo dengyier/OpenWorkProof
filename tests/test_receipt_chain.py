@@ -5153,15 +5153,20 @@ def _linked_tool_receipt(
     ],
     label: str,
     policy_decision: str = "allow",
+    policy_error_code: str | None = None,
+    actor_role: str = "Manager",
+    execution_status: str = "succeeded",
     expected_state_version: int | None = None,
     remaining_after: int | None = None,
+    requested_at: str = "2026-01-01T00:00:02Z",
+    occurred_at: str = "2026-01-01T00:00:05Z",
 ):
     from test_contract import agent_arguments_digest
     from test_state import _tool_receipt
 
     receipt = _tool_receipt(
         tool_name=tool_name,
-        actor_role="Manager",
+        actor_role=actor_role,
         signed_work_order=signed_work_order,
         sidecar_receipt_factory=sidecar_receipt_factory,
         ephemeral_role_keys=role_keys,
@@ -5177,23 +5182,36 @@ def _linked_tool_receipt(
             "sequence": sequence,
             "nonce": _grant_id(f"{label}:nonce"),
             "previous_receipt_digest": previous_receipt.digest,
-            "occurred_at": "2026-01-01T00:00:05Z",
+            "occurred_at": occurred_at,
             "policy_decision": policy_decision,
             "policy_error_code": (
-                "STATE_DENIED"
+                policy_error_code or "STATE_DENIED"
                 if policy_decision == "deny"
                 else None
             ),
             "execution_status": (
                 "denied"
                 if policy_decision == "deny"
-                else "succeeded"
+                else execution_status
             ),
-            "execution_error_code": None,
+            "execution_error_code": (
+                "HANDLER_ERROR"
+                if execution_status == "failed"
+                else None
+            ),
             "output_digest": (
                 None
                 if policy_decision == "deny"
-                else raw["output_digest"]
+                else (
+                    _jcs_digest(
+                        {
+                            "status": "failed",
+                            "error_code": "HANDLER_ERROR",
+                        }
+                    )
+                    if execution_status == "failed"
+                    else raw["output_digest"]
+                )
             ),
             "quota_charge": (
                 None
@@ -5207,6 +5225,14 @@ def _linked_tool_receipt(
             ),
         }
     )
+    if policy_decision == "deny":
+        for field_name in (
+            "toolchain_id",
+            "execution_context_id",
+            "container_instance_id_digest",
+            "fixed_test_source_digest",
+        ):
+            raw["correlation_factors"][field_name] = None
     if expected_state_version is not None:
         raw["request_arguments"]["expected_state_version"] = (
             expected_state_version
@@ -5240,10 +5266,11 @@ def _linked_tool_receipt(
     claim["grant_id"] = root.grant_id
     claim["arguments_digest"] = raw["arguments_digest"]
     claim["nonce"] = raw["nonce"]
+    claim["requested_at"] = requested_at
     signed_claim = sign_payload(
         "agent-request",
         claim,
-        role_keys["Manager"][0],
+        role_keys[actor_role][0],
     )
     raw["nested_claim"] = signed_claim
     raw["nested_claim_digest"] = signed_claim["digest"]
@@ -5254,6 +5281,905 @@ def _linked_tool_receipt(
             role_keys["Sidecar"][0],
         )
     )
+
+
+def _grant_replay_inputs(
+    ledger_path: Path,
+    work_order: WorkOrder,
+):
+    connection = connect_ledger(ledger_path)
+    try:
+        receipts = evidence._validated_receipt_prefix(
+            connection,
+            work_order,
+        )
+        grants = evidence._validated_effective_grants(
+            connection,
+            work_order,
+            receipts,
+        )
+        attempts = evidence._validated_grant_attempts(
+            connection,
+            work_order,
+            receipts,
+        )
+    finally:
+        connection.close()
+    return receipts, grants, attempts
+
+
+def _grant_replay_context(
+    *,
+    tmp_path: Path,
+    label: str,
+    work_order: WorkOrder,
+    root: CapabilityGrant,
+    role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    now: datetime,
+    child_updates: dict[str, object] | None = None,
+    with_child: bool = False,
+):
+    ledger_path = tmp_path / f"{label}.sqlite3"
+    _activate_ledger_root(
+        ledger_path,
+        work_order,
+        root,
+        role_keys,
+        now,
+    )
+    child = None
+    if with_child:
+        child = _child_grant(
+            work_order,
+            root,
+            role_keys,
+            label=label,
+            updates=child_updates,
+        )
+        _issue_child(
+            ledger_path,
+            child,
+            _delegation_request(
+                work_order,
+                root,
+                child,
+                role_keys,
+                actor_role="Manager",
+                nonce=_grant_id(f"{label}:request"),
+            ),
+            role_keys,
+            now,
+        )
+    receipts, grants, attempts = _grant_replay_inputs(
+        ledger_path,
+        work_order,
+    )
+    return ledger_path, child, receipts, grants, attempts
+
+
+def _resign_linked_agent_receipt(
+    receipt,
+    *,
+    grant_id: str,
+    tool_name: str,
+    arguments: dict[str, object],
+    actor_role: str,
+    label: str,
+    role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    updates: dict[str, object],
+):
+    raw = receipt.model_dump(mode="json")
+    raw.update(
+        {
+            "receipt_id": _grant_id(f"{label}:receipt"),
+            "nonce": _grant_id(f"{label}:nonce"),
+            **updates,
+        }
+    )
+    if "grant_id" in raw:
+        raw["grant_id"] = grant_id
+    claim = raw["nested_claim"]
+    claim.update(
+        {
+            "grant_id": grant_id,
+            "arguments_digest": evidence.request_arguments_digest(
+                tool_name,
+                arguments,
+            ),
+            "nonce": raw["nonce"],
+            "requested_at": "2026-01-01T00:00:02Z",
+        }
+    )
+    signed_claim = sign_payload(
+        "agent-request",
+        claim,
+        role_keys[actor_role][0],
+    )
+    raw["nested_claim"] = signed_claim
+    raw["nested_claim_digest"] = signed_claim["digest"]
+    return evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            raw,
+            role_keys["Sidecar"][0],
+        )
+    )
+
+
+def _linked_grant_consumed_receipt(
+    *,
+    grant: CapabilityGrant,
+    sequence: int,
+    previous_receipt,
+    remaining_after: int | None,
+    signed_work_order: WorkOrder,
+    sidecar_receipt_factory,
+    role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    label: str,
+    policy_decision: str = "allow",
+    amount: int = 1,
+):
+    receipt = sidecar_receipt_factory(
+        state_before="needs_rework",
+        state_after=(
+            "needs_rework"
+            if policy_decision == "deny"
+            else "retrying"
+        ),
+        event_type="grant_consumed",
+        actor_role="Manager",
+        policy_decision=policy_decision,
+        execution_status=(
+            "denied" if policy_decision == "deny" else "succeeded"
+        ),
+        sequence=sequence,
+        previous_receipt_digest=previous_receipt.digest,
+        parent_receipt_ids=(previous_receipt.receipt_id,),
+    )
+    arguments = {
+        "grant_id": grant.grant_id,
+        "metric": "repair_rounds",
+        "amount": amount,
+    }
+    return _resign_linked_agent_receipt(
+        receipt,
+        grant_id=grant.grant_id,
+        tool_name="owp.start_retry",
+        arguments=arguments,
+        actor_role="Manager",
+        label=label,
+        role_keys=role_keys,
+        updates={
+            "amount": amount,
+            "remaining_after": remaining_after,
+            "quota_charge": (
+                None
+                if policy_decision == "deny"
+                else {
+                    "grant_id": grant.grant_id,
+                    "metric": "repair_rounds",
+                    "amount": amount,
+                    "remaining_after": remaining_after,
+                }
+            ),
+        },
+    )
+
+
+def _linked_failed_rollback_receipt(
+    *,
+    grant: CapabilityGrant,
+    sequence: int,
+    previous_receipt,
+    remaining_after: int,
+    signed_work_order: WorkOrder,
+    sidecar_receipt_factory,
+    role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    label: str,
+    actor_role: str = "Developer",
+):
+    receipt = sidecar_receipt_factory(
+        state_before="running",
+        state_after="running",
+        event_type="rollback",
+        actor_role=actor_role,
+        execution_status="failed",
+        sequence=sequence,
+        previous_receipt_digest=previous_receipt.digest,
+        parent_receipt_ids=(previous_receipt.receipt_id,),
+    )
+    raw = receipt.model_dump(mode="json")
+    arguments = {
+        "target_patch_receipt_id": raw["target_patch_receipt_id"],
+        "target_patch_digest": raw["target_patch_digest"],
+        "before_commit": raw["before_commit"],
+    }
+    return _resign_linked_agent_receipt(
+        receipt,
+        grant_id=grant.grant_id,
+        tool_name="owp.rollback_patch",
+        arguments=arguments,
+        actor_role=actor_role,
+        label=label,
+        role_keys=role_keys,
+        updates={
+            "quota_charge": {
+                "grant_id": grant.grant_id,
+                "metric": "tool_calls",
+                "amount": 1,
+                "remaining_after": remaining_after,
+            },
+        },
+    )
+
+
+def _linked_denied_revocation_receipt(
+    *,
+    authorizer: CapabilityGrant,
+    target: CapabilityGrant,
+    sequence: int,
+    previous_receipt,
+    signed_work_order: WorkOrder,
+    sidecar_receipt_factory,
+    role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    label: str,
+):
+    receipt = sidecar_receipt_factory(
+        state_before="running",
+        state_after="running",
+        event_type="grant_revoked",
+        actor_role="Manager",
+        policy_decision="deny",
+        execution_status="denied",
+        sequence=sequence,
+        previous_receipt_digest=previous_receipt.digest,
+        parent_receipt_ids=(previous_receipt.receipt_id,),
+    )
+    raw = receipt.model_dump(mode="json")
+    arguments = {
+        "authorizing_grant_id": authorizer.grant_id,
+        "revoked_grant_id": target.grant_id,
+        "revocation_reason": raw["revocation_reason"],
+    }
+    return _resign_linked_agent_receipt(
+        receipt,
+        grant_id=authorizer.grant_id,
+        tool_name="owp.revoke_grant",
+        arguments=arguments,
+        actor_role="Manager",
+        label=label,
+        role_keys=role_keys,
+        updates={
+            "authorizing_grant_id": authorizer.grant_id,
+            "revoked_grant_id": target.grant_id,
+        },
+    )
+
+
+def test_grant_quota_replay_allows_last_child_unit_without_double_charging_parent(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    _, child, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="last-child-unit",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+        child_updates={"quota": {"tool_calls": 1, "repair_rounds": 0}},
+    )
+    assert child is not None
+    wrong = _linked_tool_receipt(
+        tool_name="owp.repo_read",
+        state_before="running",
+        state_after="running",
+        sequence=3,
+        previous_receipt=receipts[-1],
+        root=child,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="last-child-unit:wrong",
+        actor_role="Developer",
+        remaining_after=1,
+    )
+    with pytest.raises(
+        evidence.ChildGrantIssuanceError,
+        match="quota",
+    ):
+        evidence._validate_grant_history_semantics(
+            signed_work_order,
+            (*receipts, wrong),
+            grants,
+            attempts,
+        )
+    charged = _linked_tool_receipt(
+        tool_name="owp.repo_read",
+        state_before="running",
+        state_after="running",
+        sequence=3,
+        previous_receipt=receipts[-1],
+        root=child,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="last-child-unit:charge",
+        actor_role="Developer",
+        remaining_after=0,
+    )
+    root_remaining = signed_root_grant.quota.tool_calls - 2
+    parent_charge = _linked_tool_receipt(
+        tool_name="owp.create_pr_proposal",
+        state_before="running",
+        state_after="running",
+        sequence=4,
+        previous_receipt=charged,
+        root=signed_root_grant,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="last-child-unit:parent-charge",
+        remaining_after=root_remaining,
+    )
+    replay = evidence._validate_grant_history_semantics(
+        signed_work_order,
+        (*receipts, charged, parent_charge),
+        grants,
+        attempts,
+    )
+
+    assert replay[child.grant_id].remaining_tool_calls == 0
+    assert replay[signed_root_grant.grant_id].remaining_tool_calls == root_remaining
+
+
+@pytest.mark.parametrize("case", ("revoked", "single_use", "wrong_actor"))
+def test_grant_quota_replay_rejects_invalid_child_charge(
+    tmp_path: Path,
+    case: str,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    ledger_path, child, _, _, _ = _grant_replay_context(
+        tmp_path=tmp_path,
+        label=f"invalid-child-charge:{case}",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+        child_updates=(
+            {"usage_mode": "single_use"}
+            if case == "single_use"
+            else None
+        ),
+    )
+    assert child is not None
+    if case == "revoked":
+        _revoke_child(
+            ledger_path,
+            signed_root_grant,
+            child,
+            _revocation_request(
+                signed_work_order,
+                signed_root_grant,
+                child,
+                ephemeral_role_keys,
+                actor_role="Manager",
+                nonce=_grant_id("invalid-child-charge:revoke"),
+            ),
+            ephemeral_role_keys,
+            fixed_now,
+        )
+    receipts, grants, attempts = _grant_replay_inputs(
+        ledger_path,
+        signed_work_order,
+    )
+    first = _linked_tool_receipt(
+        tool_name="owp.repo_read",
+        state_before="running",
+        state_after="running",
+        sequence=len(receipts) + 1,
+        previous_receipt=receipts[-1],
+        root=child,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label=f"invalid-child-charge:{case}:first",
+        actor_role="Manager" if case == "wrong_actor" else "Developer",
+        remaining_after=1,
+    )
+    replay_receipts = (*receipts, first)
+    if case == "single_use":
+        second = _linked_tool_receipt(
+            tool_name="owp.repo_read",
+            state_before="running",
+            state_after="running",
+            sequence=len(receipts) + 2,
+            previous_receipt=first,
+            root=child,
+            signed_work_order=signed_work_order,
+            sidecar_receipt_factory=sidecar_receipt_factory,
+            role_keys=ephemeral_role_keys,
+            label="invalid-child-charge:single-use:second",
+            actor_role="Developer",
+            remaining_after=0,
+        )
+        replay_receipts = (*replay_receipts, second)
+
+    with pytest.raises(evidence.ChildGrantIssuanceError):
+        evidence._validate_grant_history_semantics(
+            signed_work_order,
+            replay_receipts,
+            grants,
+            attempts,
+        )
+
+
+def test_denied_charge_is_free_and_does_not_consume_single_use_grant(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    _, child, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="denied-is-free",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+        child_updates={
+            "usage_mode": "single_use",
+            "quota": {"tool_calls": 1, "repair_rounds": 0},
+        },
+    )
+    assert child is not None
+    valid_consumption_denial = _linked_grant_consumed_receipt(
+        grant=signed_root_grant,
+        sequence=3,
+        previous_receipt=receipts[-1],
+        remaining_after=None,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="denied-is-free:valid-consumption",
+        policy_decision="deny",
+    )
+    denied_replay = evidence._validate_grant_history_semantics(
+        signed_work_order,
+        (*receipts, valid_consumption_denial),
+        grants,
+        attempts,
+    )
+    assert denied_replay[signed_root_grant.grant_id].remaining_repair_rounds == 1
+    invalid_amount = _linked_grant_consumed_receipt(
+        grant=signed_root_grant,
+        sequence=3,
+        previous_receipt=receipts[-1],
+        remaining_after=None,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="denied-is-free:invalid-amount",
+        policy_decision="deny",
+        amount=2,
+    )
+    with pytest.raises(evidence.ChildGrantIssuanceError):
+        evidence._validate_grant_history_semantics(
+            signed_work_order,
+            (*receipts, invalid_amount),
+            grants,
+            attempts,
+        )
+    denied = _linked_tool_receipt(
+        tool_name="owp.repo_read",
+        state_before="running",
+        state_after="running",
+        sequence=3,
+        previous_receipt=receipts[-1],
+        root=child,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="denied-is-free:deny",
+        policy_decision="deny",
+        actor_role="Developer",
+    )
+    charged = _linked_tool_receipt(
+        tool_name="owp.repo_read",
+        state_before="running",
+        state_after="running",
+        sequence=4,
+        previous_receipt=denied,
+        root=child,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="denied-is-free:allow",
+        actor_role="Developer",
+        remaining_after=0,
+    )
+
+    replay = evidence._validate_grant_history_semantics(
+        signed_work_order,
+        (*receipts, denied, charged),
+        grants,
+        attempts,
+    )
+
+    assert replay[child.grant_id].remaining_tool_calls == 0
+    assert replay[child.grant_id].use_count == 1
+
+
+def test_started_failures_charge_and_metrics_replay_independently(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    _, child, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="started-failures",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+        child_updates={
+            "allowed_tools": [
+                "owp.apply_patch",
+                "owp.repo_read",
+                "owp.rollback_patch",
+            ],
+        },
+    )
+    assert child is not None
+    failed_tool = _linked_tool_receipt(
+        tool_name="owp.repo_read",
+        state_before="running",
+        state_after="running",
+        sequence=3,
+        previous_receipt=receipts[-1],
+        root=child,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="started-failures:tool",
+        actor_role="Developer",
+        execution_status="failed",
+        remaining_after=child.quota.tool_calls - 1,
+    )
+    failed_rollback = _linked_failed_rollback_receipt(
+        grant=child,
+        sequence=4,
+        previous_receipt=failed_tool,
+        remaining_after=child.quota.tool_calls - 2,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="started-failures:rollback",
+    )
+    repair = _linked_grant_consumed_receipt(
+        grant=signed_root_grant,
+        sequence=5,
+        previous_receipt=failed_rollback,
+        remaining_after=0,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="started-failures:repair",
+    )
+
+    replay = evidence._validate_grant_history_semantics(
+        signed_work_order,
+        (*receipts, failed_tool, failed_rollback, repair),
+        grants,
+        attempts,
+    )
+
+    root = replay[signed_root_grant.grant_id]
+    assert (
+        root.remaining_tool_calls
+        == signed_root_grant.quota.tool_calls - child.quota.tool_calls
+    )
+    assert root.remaining_repair_rounds == 0
+    assert replay[child.grant_id].remaining_tool_calls == 0
+
+
+@pytest.mark.parametrize("receipt_kind", ("tool", "rollback"))
+def test_manager_root_cannot_charge_developer_direct_calls(
+    tmp_path: Path,
+    receipt_kind: str,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    _, _, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label=f"manager-direct-{receipt_kind}",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+    )
+    if receipt_kind == "tool":
+        charged = _linked_tool_receipt(
+            tool_name="owp.repo_read",
+            state_before="running",
+            state_after="running",
+            sequence=2,
+            previous_receipt=receipts[-1],
+            root=signed_root_grant,
+            signed_work_order=signed_work_order,
+            sidecar_receipt_factory=sidecar_receipt_factory,
+            role_keys=ephemeral_role_keys,
+            label="manager-direct-tool",
+            remaining_after=signed_root_grant.quota.tool_calls - 1,
+        )
+    else:
+        charged = _linked_failed_rollback_receipt(
+            grant=signed_root_grant,
+            sequence=2,
+            previous_receipt=receipts[-1],
+            remaining_after=signed_root_grant.quota.tool_calls - 1,
+            signed_work_order=signed_work_order,
+            sidecar_receipt_factory=sidecar_receipt_factory,
+            role_keys=ephemeral_role_keys,
+            label="manager-direct-rollback",
+            actor_role="Manager",
+        )
+
+    with pytest.raises(
+        evidence.ChildGrantIssuanceError,
+        match="role",
+    ):
+        evidence._validate_grant_history_semantics(
+            signed_work_order,
+            (*receipts, charged),
+            grants,
+            attempts,
+        )
+    if receipt_kind == "tool":
+        denied = _linked_tool_receipt(
+            tool_name="owp.repo_read",
+            state_before="running",
+            state_after="running",
+            sequence=2,
+            previous_receipt=receipts[-1],
+            root=signed_root_grant,
+            signed_work_order=signed_work_order,
+            sidecar_receipt_factory=sidecar_receipt_factory,
+            role_keys=ephemeral_role_keys,
+            label="manager-direct-role-denied",
+            policy_decision="deny",
+            policy_error_code="ROLE_DENIED",
+        )
+        replay = evidence._validate_grant_history_semantics(
+            signed_work_order,
+            (*receipts, denied),
+            grants,
+            attempts,
+        )
+        assert replay[signed_root_grant.grant_id].use_count == 0
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("unknown", "wrong_actor", "wrong_role", "stale"),
+)
+def test_denied_tool_receipt_still_requires_authentic_grant_call_binding(
+    tmp_path: Path,
+    case: str,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    _, child, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label=f"denied-binding:{case}",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+    )
+    assert child is not None
+    unissued = _child_grant(
+        signed_work_order,
+        signed_root_grant,
+        ephemeral_role_keys,
+        label="denied-binding:never-issued",
+    )
+    grant = (
+        unissued
+        if case == "unknown"
+        else signed_root_grant
+        if case == "wrong_role"
+        else child
+    )
+    actor_role = (
+        "Manager"
+        if case in {"wrong_actor", "wrong_role"}
+        else "Developer"
+    )
+    denied = _linked_tool_receipt(
+        tool_name="owp.repo_read",
+        state_before="running",
+        state_after="running",
+        sequence=3,
+        previous_receipt=receipts[-1],
+        root=grant,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label=f"denied-binding:{case}:receipt",
+        policy_decision="deny",
+        actor_role=actor_role,
+        occurred_at=(
+            "2026-01-01T00:05:03Z"
+            if case == "stale"
+            else "2026-01-01T00:00:05Z"
+        ),
+    )
+
+    with pytest.raises(evidence.ChildGrantIssuanceError):
+        evidence._validate_grant_history_semantics(
+            signed_work_order,
+            (*receipts, denied),
+            grants,
+            attempts,
+        )
+
+
+def test_denied_revocation_is_authenticated_but_does_not_revoke_or_consume(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    _, child, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="denied-revocation",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+    )
+    assert child is not None
+    denied = _linked_denied_revocation_receipt(
+        authorizer=signed_root_grant,
+        target=child,
+        sequence=3,
+        previous_receipt=receipts[-1],
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="denied-revocation",
+    )
+
+    replay = evidence._validate_grant_history_semantics(
+        signed_work_order,
+        (*receipts, denied),
+        grants,
+        attempts,
+    )
+
+    assert replay[child.grant_id].revoked is False
+    assert replay[signed_root_grant.grant_id].use_count == 1
+
+
+def test_denied_tool_on_revoked_grant_is_free_but_authentic(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    ledger_path, child, _, _, _ = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="denied-on-revoked",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+        child_updates={
+            "usage_mode": "single_use",
+            "quota": {"tool_calls": 1, "repair_rounds": 0},
+        },
+    )
+    assert child is not None
+    _revoke_child(
+        ledger_path,
+        signed_root_grant,
+        child,
+        _revocation_request(
+            signed_work_order,
+            signed_root_grant,
+            child,
+            ephemeral_role_keys,
+            actor_role="Manager",
+            nonce=_grant_id("denied-on-revoked:revoke"),
+        ),
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    receipts, grants, attempts = _grant_replay_inputs(
+        ledger_path,
+        signed_work_order,
+    )
+    denied = _linked_tool_receipt(
+        tool_name="owp.repo_read",
+        state_before="running",
+        state_after="running",
+        sequence=4,
+        previous_receipt=receipts[-1],
+        root=child,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="denied-on-revoked:receipt",
+        policy_decision="deny",
+        actor_role="Developer",
+    )
+
+    replay = evidence._validate_grant_history_semantics(
+        signed_work_order,
+        (*receipts, denied),
+        grants,
+        attempts,
+    )
+
+    assert replay[child.grant_id].revoked is True
+    assert replay[child.grant_id].use_count == 0
 
 
 def _composition_trigger(

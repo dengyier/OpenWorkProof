@@ -99,7 +99,12 @@ def _snapshot_json(
         node_count += 1
         if node_count > MAX_JSON_NODES:
             raise ValueError("JSON payload exceeds node budget")
-        if field_name in _NON_NEGATIVE_INTEGER_FIELDS and (
+        nullable_remaining = (
+            field_name == "remaining_after" and current is None
+        )
+        if field_name in _NON_NEGATIVE_INTEGER_FIELDS and not (
+            nullable_remaining
+        ) and (
             type(current) is not int
             or not 0 <= current <= _MAX_SAFE_INTEGER
         ):
