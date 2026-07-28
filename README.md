@@ -88,7 +88,7 @@ MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent，AgentTeams 组织 Agen
 五、当前已经实现的能力
 --------------------
 
-当前本地开发分支已经实现并验证：
+当前公开 main 分支已经实现并验证：
 
 - WorkOrder、CapabilityGrant、ActionReceipt 和 AcceptanceReceipt 模型；
 - RFC 8785 JCS 规范化、Ed25519 签名和域分离摘要；
@@ -98,22 +98,24 @@ MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent，AgentTeams 组织 Agen
 - 确定性源码工件、受限补丁、WorkspaceManifest 和离线重放；
 - SQLite 权威账本初始化和唯一 Root Grant 激活；
 - child Grant 原子签发、永久 ID 预留、policy-deny 审计历史；
+- child Grant 原子撤销、签名历史回放和 duplicate nonce 防重；
 - Receipt、Grant、attempt、reservation、event、state 和 version 闭包；
 - 300 秒历史时钟重放、61 条常规 Receipt 容量门；
-- 并发确认快照、提交事实分类和成功发行唯一性。
+- 并发确认快照、提交事实分类、成功发行唯一性和并发撤销单胜。
 
 当前验证快照：
 
-- Receipt-chain 专项：167 passed；
-- 本地全量测试：863 passed；
-- 独立规格复核：7B1_SPEC_PASS；
-- 独立质量复核：7B1_QUALITY_PASS；
+- Receipt-chain 专项：185 passed；
+- 全量测试：881 passed；
+- 独立规格复核：7B2A_SPEC_PASS；
+- 独立质量复核：7B2A_QUALITY_PASS；
 - pip check、compileall 和 git diff check：通过。
 
 重要边界：
 
-上述 Task 7B1 代码目前只存在于本地工作区，尚未提交，也尚未推送到
-公开 GitHub。公开仓库当前仍是已验证的 Task 6A 快照。
+上述 Task 7B2a 稳定切片已经提交并推送到公开 GitHub。Task 7 仍未完成：
+Grant 消费、工具计费、证据发布与恢复、acceptance 事务和完整
+validate_grant_chain 尚未实现；Day 0 执行门仍为 FAIL。
 
 
 六、快速开始
@@ -141,7 +143,7 @@ MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent，AgentTeams 组织 Agen
 
 说明：
 
-- 当前公开快照对应 Task 6A，其测试数量可能少于本地 Task 7B1 快照；
+- 当前公开快照对应 Task 7B2a，fresh 全量验证为 881 passed；
 - pyproject.toml 已预留 owp 命令入口，但 CLI 模块尚未完成，因此本文件
   暂不提供 CLI 使用命令；
 - 不应把测试通过理解为 Day 0、独立验收或赛事提交已经完成。
@@ -177,12 +179,13 @@ Rich 及其源码仍归属于原权利人；OpenWorkProof 只拥有自有协议�
 - 项目方向与初赛方案设计；
 - 协议模型、签名、状态、谓词和 Schema；
 - Task 6A 确定性源码、补丁和重放原语；
-- Task 7B1 本地账本初始化、Root/child Grant 签发切片；
-- Task 7B1 独立规格和质量复核。
+- Task 7B2a 账本初始化、Root/child Grant 签发与 child Grant 撤销切片；
+- Task 7B2a 独立规格和质量复核；
+- Task 7B2a 稳定切片已提交并推送到公开 GitHub。
 
 尚未完成：
 
-- Task 7 的 Grant 消费、撤销、全局 nonce/quota 重放；
+- Task 7 的 Grant 消费、工具计费和全局 nonce/quota 重放；
 - 证据发布、崩溃恢复和 acceptance 事务闭包；
 - CLI、MCP Sidecar 和 AgentTeams 接线；
 - Rich #4196 完整演示；
