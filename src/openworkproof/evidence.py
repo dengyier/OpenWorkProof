@@ -25,6 +25,7 @@ from openworkproof.models import (
     AcceptanceReceipt,
     ActionReceiptEnvelope,
     AgentRequest,
+    ApplyPatchArguments,
     ApprovalRequestedReceipt,
     CapabilityGrant,
     CompositionCause,
@@ -32,7 +33,9 @@ from openworkproof.models import (
     GrantConsumedReceipt,
     GrantIssuedReceipt,
     GrantRevokedReceipt,
+    PatchResultEvidence,
     RollbackReceipt,
+    RunTestsArguments,
     SidecarEvent,
     SystemEventReceipt,
     ToolCallReceipt,
@@ -139,6 +142,36 @@ class GrantRevocationCommittedError(RuntimeError):
         self.receipt = receipt
 
 
+class RetryConsumptionError(RuntimeError):
+    """A retry request failed before it became a ledger fact."""
+
+    code = "REQUEST_INTEGRITY_INVALID"
+
+
+class RetryEvidenceRecoveryError(RetryConsumptionError):
+    """Committed evidence cannot be read until publication recovery completes."""
+
+    code = "RECOVERY_REQUIRED"
+
+
+class RetryEvidenceIntegrityError(RetryConsumptionError):
+    """The immutable evidence needed for retry authorization is invalid."""
+
+    code = "REQUEST_INTEGRITY_INVALID"
+
+
+class RetryConsumptionCommittedError(RuntimeError):
+    """Retry consumption committed, but local completion was indeterminate."""
+
+    committed = True
+
+    def __init__(self, receipt: GrantConsumedReceipt) -> None:
+        super().__init__(
+            "retry consumption committed but completion was indeterminate"
+        )
+        self.receipt = receipt
+
+
 _SCHEMA = (
     """
     CREATE TABLE sequence_counter (
@@ -219,6 +252,21 @@ _SCHEMA = (
         event_type TEXT NOT NULL,
         metric TEXT,
         amount INTEGER
+    )
+    """,
+    """
+    CREATE TABLE evidence_publications (
+        publication_id TEXT PRIMARY KEY,
+        receipt_id TEXT NOT NULL REFERENCES receipts(receipt_id),
+        pending_path TEXT NOT NULL UNIQUE,
+        final_path TEXT NOT NULL UNIQUE,
+        digest TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+        media_type TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (
+            state IN ('COMMITTING', 'COMMITTED')
+        ),
+        UNIQUE (receipt_id, final_path)
     )
     """,
     """
@@ -512,6 +560,7 @@ def _verify_initialized_snapshot(
         "receipts",
         "receipt_parents",
         "grant_events",
+        "evidence_publications",
         "acceptance_receipts",
     )
     counts = tuple(
@@ -3605,3 +3654,986 @@ def revoke_child_grant(
     raise _grant_revocation_error(
         "Grant revocation failed atomically"
     ) from _error_cause("Grant revocation failures", errors)
+
+
+def _retry_error(message: str) -> RetryConsumptionError:
+    return RetryConsumptionError(message)
+
+
+@dataclass(frozen=True)
+class _RetryEpisode:
+    root_issuance: GrantIssuedReceipt
+    failure: ToolCallReceipt
+    rollback: RollbackReceipt
+    target_patch: ToolCallReceipt
+    patch_result: PatchResultEvidence
+
+
+def _receipt_by_id(receipts) -> dict[str, ActionReceiptEnvelope]:
+    return {receipt.receipt_id: receipt for receipt in receipts}
+
+
+def _successful_issuance_for(
+    receipts,
+    grant_id: str,
+) -> GrantIssuedReceipt:
+    matches = tuple(
+        receipt
+        for receipt in receipts
+        if (
+            isinstance(receipt, GrantIssuedReceipt)
+            and receipt.policy_decision == "allow"
+            and receipt.execution_status == "succeeded"
+            and receipt.issued_grant_id == grant_id
+        )
+    )
+    if len(matches) != 1:
+        raise RetryEvidenceIntegrityError(
+            "retry episode Grant issuance is ambiguous"
+        )
+    return matches[0]
+
+
+def _close_evidence_descriptors(descriptors: list[int]) -> None:
+    for descriptor in reversed(descriptors):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _open_evidence_chain(
+    root: Path,
+    parts: tuple[str, ...],
+    *,
+    expected_size: int,
+) -> tuple[list[int], tuple[tuple[int, int, int, int, int | None], ...]]:
+    common_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    directory_flags = common_flags | getattr(os, "O_DIRECTORY", 0)
+    descriptors: list[int] = []
+    identities: list[tuple[int, int, int, int, int | None]] = []
+    try:
+        current_descriptor = os.open(root, directory_flags)
+        descriptors.append(current_descriptor)
+        for part in parts[:-1]:
+            metadata = os.fstat(current_descriptor)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise OSError("evidence path parent is not a directory")
+            identities.append(
+                (
+                    metadata.st_dev,
+                    metadata.st_ino,
+                    metadata.st_mode,
+                    metadata.st_nlink,
+                    None,
+                )
+            )
+            current_descriptor = os.open(
+                part,
+                directory_flags,
+                dir_fd=current_descriptor,
+            )
+            descriptors.append(current_descriptor)
+        metadata = os.fstat(current_descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise OSError("evidence path parent is not a directory")
+        identities.append(
+            (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_mode,
+                metadata.st_nlink,
+                None,
+            )
+        )
+        descriptor = os.open(
+            parts[-1],
+            common_flags,
+            dir_fd=current_descriptor,
+        )
+        descriptors.append(descriptor)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_size != expected_size
+        ):
+            raise OSError("committed evidence is not a stable regular file")
+        identities.append(
+            (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_mode,
+                metadata.st_nlink,
+                metadata.st_size,
+            )
+        )
+    except OSError:
+        _close_evidence_descriptors(descriptors)
+        raise
+    return descriptors, tuple(identities)
+
+
+def _read_committed_patch_result(
+    connection: sqlite3.Connection,
+    *,
+    work_order: WorkOrder,
+    target_patch: ToolCallReceipt,
+    evidence_root: Path,
+) -> PatchResultEvidence:
+    committing = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM evidence_publications
+        WHERE state = 'COMMITTING'
+        """
+    ).fetchone()
+    if (
+        committing is None
+        or len(committing) != 1
+        or type(committing[0]) is not int
+    ):
+        raise RetryEvidenceIntegrityError(
+            "evidence publication state is malformed"
+        )
+    if committing[0] != 0:
+        raise RetryEvidenceRecoveryError(
+            "evidence publication recovery is required"
+        )
+
+    result_refs = tuple(
+        reference
+        for reference in target_patch.evidence_refs
+        if reference.media_type == "application/json"
+    )
+    if len(result_refs) != 1:
+        raise RetryEvidenceIntegrityError(
+            "target patch result reference is ambiguous"
+        )
+    reference = result_refs[0]
+    diff_refs = tuple(
+        item
+        for item in target_patch.evidence_refs
+        if item.media_type == "text/x-diff"
+    )
+    policy_slots = {
+        f"{work_order.evidence_policy.evidence_root}/{artifact.path}": artifact
+        for artifact in work_order.evidence_policy.artifacts
+    }
+    result_slot = policy_slots.get(reference.path)
+    diff_slot = (
+        policy_slots.get(diff_refs[0].path)
+        if len(diff_refs) == 1
+        else None
+    )
+    if (
+        result_slot is None
+        or diff_slot is None
+        or result_slot.media_type != reference.media_type
+        or diff_slot.media_type != diff_refs[0].media_type
+        or reference.size_bytes > result_slot.max_size_bytes
+        or diff_refs[0].size_bytes > diff_slot.max_size_bytes
+        or result_slot.purpose != "patch_result"
+        or diff_slot.purpose != "patch_input"
+        or result_slot.ordinal != diff_slot.ordinal
+    ):
+        raise RetryEvidenceIntegrityError(
+            "target patch evidence is not bound to paired WorkOrder slots"
+        )
+    rows = connection.execute(
+        """
+        SELECT
+            final_path,
+            digest,
+            media_type,
+            size_bytes,
+            state
+        FROM evidence_publications
+        WHERE receipt_id = ? AND final_path = ?
+        ORDER BY final_path
+        LIMIT 2
+        """,
+        (target_patch.receipt_id, reference.path),
+    ).fetchall()
+    if len(rows) != 1:
+        raise RetryEvidenceIntegrityError(
+            "target patch has no unique committed publication"
+        )
+    (
+        final_path,
+        stored_digest,
+        stored_media_type,
+        stored_size,
+        publication_state,
+    ) = rows[0]
+    if (
+        final_path != reference.path
+        or stored_digest != reference.sha256
+        or stored_media_type != reference.media_type
+        or stored_size != reference.size_bytes
+        or publication_state != "COMMITTED"
+    ):
+        raise RetryEvidenceIntegrityError(
+            "target patch publication does not match its EvidenceRef"
+        )
+
+    root = Path(evidence_root)
+    prefix = f"{work_order.evidence_policy.evidence_root}/"
+    if (
+        not reference.path.startswith(prefix)
+        or reference.path.startswith("/")
+    ):
+        raise RetryEvidenceIntegrityError(
+            "evidence path is outside the WorkOrder evidence root"
+        )
+    relative = reference.path[len(prefix) :]
+    parts = Path(relative).parts
+    if (
+        not parts
+        or any(part in {"", ".", ".."} for part in parts)
+        or Path(relative).is_absolute()
+    ):
+        raise RetryEvidenceIntegrityError(
+            "evidence path is not a safe relative path"
+    )
+    descriptors: list[int] = []
+    recheck_descriptors: list[int] = []
+    try:
+        try:
+            descriptors, identities = _open_evidence_chain(
+                root,
+                parts,
+                expected_size=reference.size_bytes,
+            )
+            descriptor = descriptors[-1]
+            payload = os.read(descriptor, reference.size_bytes + 1)
+            after = os.fstat(descriptor)
+            if (
+                len(payload) != reference.size_bytes
+                or (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_mode,
+                    after.st_nlink,
+                    after.st_size,
+                )
+                != identities[-1]
+            ):
+                raise OSError("committed evidence changed while being read")
+        except OSError as error:
+            raise RetryEvidenceIntegrityError(
+                "committed evidence bytes are unavailable or unstable"
+            ) from error
+        if hashlib.sha256(payload).hexdigest() != reference.sha256:
+            raise RetryEvidenceIntegrityError(
+                "committed evidence digest does not match its EvidenceRef"
+            )
+        try:
+            parsed = json.loads(payload)
+            if rfc8785.dumps(parsed) != payload:
+                raise ValueError("patch result is not canonical JCS")
+            result = PatchResultEvidence.model_validate(parsed)
+        except Exception as error:
+            raise RetryEvidenceIntegrityError(
+                "committed PatchResultEvidence is malformed"
+            ) from error
+        arguments = target_patch.request_arguments
+        if (
+            target_patch.output_digest != reference.sha256
+            or not isinstance(arguments, ApplyPatchArguments)
+            or result.patch_digest != arguments.patch_digest
+            or result.patch_size_bytes != arguments.patch_size_bytes
+            or result.replay_profile_digest
+            != work_order.replay_profile_digest
+        ):
+            raise RetryEvidenceIntegrityError(
+                "committed PatchResultEvidence does not match the patch receipt"
+            )
+        try:
+            recheck_descriptors, recheck_identities = _open_evidence_chain(
+                root,
+                parts,
+                expected_size=reference.size_bytes,
+            )
+        except OSError as error:
+            raise RetryEvidenceIntegrityError(
+                "committed evidence namespace changed during validation"
+            ) from error
+        if recheck_identities != identities:
+            raise RetryEvidenceIntegrityError(
+                "committed evidence namespace changed during validation"
+            )
+        return result
+    finally:
+        _close_evidence_descriptors(recheck_descriptors)
+        _close_evidence_descriptors(descriptors)
+
+
+def _validated_retry_episode(
+    connection: sqlite3.Connection,
+    *,
+    work_order: WorkOrder,
+    receipts,
+    grants: dict[str, CapabilityGrant],
+    evidence_root: Path,
+    current_state: str,
+) -> _RetryEpisode:
+    by_id = _receipt_by_id(receipts)
+    root_matches = tuple(
+        receipt
+        for receipt in receipts
+        if (
+            isinstance(receipt, GrantIssuedReceipt)
+            and receipt.parent_grant_id is None
+            and receipt.policy_decision == "allow"
+            and receipt.execution_status == "succeeded"
+        )
+    )
+    if len(root_matches) != 1:
+        raise RetryEvidenceIntegrityError(
+            "retry root issuance is unavailable"
+        )
+    failures = tuple(
+        receipt
+        for receipt in receipts
+        if (
+            isinstance(receipt, ToolCallReceipt)
+            and receipt.tool_name == "owp.run_tests"
+            and receipt.policy_decision == "allow"
+            and receipt.execution_status == "succeeded"
+            and receipt.state_before in {"running", "retrying"}
+            and receipt.state_after == "needs_rework"
+        )
+    )
+    if not failures:
+        raise RetryEvidenceIntegrityError(
+            "retry episode failure is unavailable"
+        )
+    failure = failures[-1]
+    try:
+        failure.validate_predicates_against(work_order)
+    except ValueError as error:
+        raise RetryEvidenceIntegrityError(
+            "retry failure predicates do not match the WorkOrder"
+        ) from error
+    postcondition_ids = {
+        spec.predicate_id
+        for spec in work_order.postconditions
+        if failure.tool_name in spec.applies_to_tools
+    }
+    if not any(
+        result.predicate_id in postcondition_ids
+        and not result.passed
+        and result.error_code == "PREDICATE_FALSE"
+        for result in failure.predicate_results
+    ):
+        raise RetryEvidenceIntegrityError(
+            "retry failure has no false Verifier postcondition"
+        )
+    verifier_grant = grants.get(failure.grant_id)
+    verifier_issuance = _successful_issuance_for(
+        receipts,
+        failure.grant_id,
+    )
+    parent_receipts = tuple(
+        by_id[parent_id] for parent_id in failure.parent_receipt_ids
+    )
+    patch_matches = tuple(
+        receipt
+        for receipt in parent_receipts
+        if (
+            isinstance(receipt, ToolCallReceipt)
+            and receipt.tool_name == "owp.apply_patch"
+            and receipt.policy_decision == "allow"
+            and receipt.execution_status == "succeeded"
+        )
+    )
+    if (
+        verifier_grant is None
+        or verifier_grant.subject_agent_id != failure.actor_id
+        or verifier_grant.subject_key_id != failure.actor_key_id
+        or len(patch_matches) != 1
+        or failure.parent_receipt_ids
+        != (
+            verifier_issuance.receipt_id,
+            patch_matches[0].receipt_id,
+        )
+    ):
+        raise RetryEvidenceIntegrityError(
+            "retry episode failure DAG is invalid or ambiguous"
+        )
+    target_patch = patch_matches[0]
+    patch_result = _read_committed_patch_result(
+        connection,
+        work_order=work_order,
+        target_patch=target_patch,
+        evidence_root=evidence_root,
+    )
+    failure_arguments = failure.request_arguments
+    verifier_profile = next(
+        (
+            profile
+            for profile in work_order.test_profiles
+            if profile.test_mode == "verifier"
+        ),
+        None,
+    )
+    if (
+        verifier_profile is None
+        or not isinstance(failure_arguments, RunTestsArguments)
+        or (
+            failure_arguments.test_mode,
+            failure_arguments.command_digest,
+            failure_arguments.source_commit,
+            failure_arguments.container_image_digest,
+            failure_arguments.fixed_test_source_digest,
+        )
+        != (
+            "verifier",
+            verifier_profile.command_digest,
+            work_order.source_commit,
+            verifier_profile.container_image_digest,
+            verifier_profile.fixed_test_source_digest,
+        )
+        or failure_arguments.candidate_commit
+        != patch_result.candidate_commit
+        or failure_arguments.workspace_manifest_digest
+        != patch_result.workspace_manifest_digest
+    ):
+        raise RetryEvidenceIntegrityError(
+            "retry failure does not test the target patch result"
+        )
+    rollbacks = tuple(
+        receipt
+        for receipt in receipts
+        if (
+            isinstance(receipt, RollbackReceipt)
+            and receipt.sequence > failure.sequence
+            and receipt.policy_decision == "allow"
+            and receipt.execution_status == "succeeded"
+            and receipt.target_patch_receipt_id
+            == target_patch.receipt_id
+            and receipt.target_patch_digest == target_patch.digest
+        )
+    )
+    if len(rollbacks) != 1:
+        raise RetryEvidenceIntegrityError(
+            "retry episode rollback is unavailable or ambiguous"
+        )
+    rollback = rollbacks[0]
+    developer_grant = grants.get(rollback.grant_id)
+    developer_issuance = _successful_issuance_for(
+        receipts,
+        rollback.grant_id,
+    )
+    expected_rollback_parents = (
+        developer_issuance.receipt_id,
+        target_patch.receipt_id,
+        failure.receipt_id,
+    )
+    if (
+        developer_grant is None
+        or developer_grant.subject_agent_id != rollback.actor_id
+        or developer_grant.subject_key_id != rollback.actor_key_id
+        or rollback.parent_receipt_ids != expected_rollback_parents
+        or rollback.state_before != "needs_rework"
+        or rollback.state_after != "needs_rework"
+    ):
+        raise RetryEvidenceIntegrityError(
+            "retry episode rollback DAG is invalid"
+        )
+    try:
+        rollback.validate_target_patch(target_patch, patch_result)
+    except ValueError as error:
+        raise RetryEvidenceIntegrityError(
+            "retry rollback does not match the committed patch result"
+        ) from error
+    if current_state == "needs_rework" and any(
+        receipt.state_after != "needs_rework"
+        for receipt in receipts[failure.sequence - 1 :]
+        if receipt.sequence > failure.sequence
+    ):
+        raise RetryEvidenceIntegrityError(
+            "retry episode is not the current immutable episode"
+        )
+    return _RetryEpisode(
+        root_issuance=root_matches[0],
+        failure=failure,
+        rollback=rollback,
+        target_patch=target_patch,
+        patch_result=patch_result,
+    )
+
+
+def _build_retry_receipt(
+    work_order: WorkOrder,
+    request: AgentRequest,
+    sidecar_private_key: Ed25519PrivateKey,
+    now: datetime,
+    *,
+    sequence: int,
+    state: str,
+    tip: ActionReceiptEnvelope,
+    parents: tuple[str, ...],
+    allowed: bool,
+    policy_error_code: str | None,
+    remaining_after: int | None,
+) -> GrantConsumedReceipt:
+    receipt_id = hashlib.sha256(
+        rfc8785.dumps(
+            {
+                "domain": "openworkproof/receipt-id/v0.1",
+                "request_digest": request.digest,
+                "entropy": secrets.token_hex(32),
+            }
+        )
+    ).hexdigest()
+    raw = {
+        "protocol_version": "0.1",
+        "receipt_id": receipt_id,
+        "work_order_digest": work_order.digest,
+        "actor_type": "agent",
+        "actor_id": request.actor_id,
+        "actor_key_id": request.actor_key_id,
+        "nested_claim_type": "agent-request",
+        "nested_claim_digest": request.digest,
+        "nested_claim": request.model_dump(mode="json"),
+        "gateway_signer_key_id": key_id(sidecar_private_key.public_key()),
+        "event_type": "grant_consumed",
+        "policy_decision": "allow" if allowed else "deny",
+        "policy_error_code": None if allowed else policy_error_code,
+        "execution_status": "succeeded" if allowed else "denied",
+        "execution_error_code": None,
+        "quota_charge": (
+            {
+                "grant_id": request.grant_id,
+                "metric": "repair_rounds",
+                "amount": 1,
+                "remaining_after": remaining_after,
+            }
+            if allowed
+            else None
+        ),
+        "state_before": state,
+        "state_after": "retrying" if allowed else state,
+        "parent_receipt_ids": list(parents),
+        "correlation_factors": None,
+        "evidence_refs": [],
+        "occurred_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "sequence": sequence,
+        "nonce": request.nonce,
+        "previous_receipt_digest": tip.digest,
+        "grant_id": request.grant_id,
+        "metric": "repair_rounds",
+        "amount": 1,
+        "remaining_after": remaining_after,
+    }
+    receipt = GrantConsumedReceipt.model_validate(
+        sign_payload("action-receipt", raw, sidecar_private_key)
+    )
+    receipt.validate_against_work_order(work_order)
+    return receipt
+
+
+def _confirm_committed_retry_receipt(
+    ledger_path: Path,
+    expected: GrantConsumedReceipt,
+) -> GrantConsumedReceipt | None:
+    connection: sqlite3.Connection | None = None
+    result: GrantConsumedReceipt | None = None
+    try:
+        connection = _connect_ledger_direct(ledger_path)
+        connection.execute("BEGIN")
+        work_order = load_authoritative_work_order(connection)
+        receipts = _validated_receipt_prefix(connection, work_order)
+        grants = _validated_effective_grants(
+            connection,
+            work_order,
+            receipts,
+        )
+        attempts = _validated_grant_attempts(
+            connection,
+            work_order,
+            receipts,
+        )
+        _validate_grant_reservation_closure(
+            connection,
+            work_order,
+            grants,
+            attempts,
+        )
+        _validate_grant_history_semantics(
+            work_order,
+            receipts,
+            grants,
+            attempts,
+        )
+        _validate_grant_event_index(connection, receipts, grants)
+        matches = tuple(
+            receipt
+            for receipt in receipts
+            if receipt.nonce == expected.nonce
+        )
+        if len(matches) == 1 and matches[0] == expected:
+            result = expected
+    except Exception:
+        result = None
+    finally:
+        _best_effort_rollback(connection)
+        _best_effort_close(connection)
+    return result
+
+
+def start_retry(
+    ledger_path: Path,
+    *,
+    request: AgentRequest,
+    sidecar_private_key: Ed25519PrivateKey,
+    evidence_root: Path,
+    clock: Callable[[], datetime],
+) -> GrantConsumedReceipt:
+    """Atomically consume one root repair round and enter ``retrying``."""
+
+    path = Path(ledger_path)
+    if not path.is_file():
+        raise _retry_error("retry consumption ledger is unavailable")
+    connection: sqlite3.Connection | None = None
+    receipt_result: GrantConsumedReceipt | None = None
+    primary_error: Exception | None = None
+    secondary_errors: list[Exception] = []
+    try:
+        try:
+            connection = connect_ledger(path)
+        except Exception as error:
+            raise _retry_error(
+                "retry consumption ledger could not be opened"
+            ) from error
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            work_order = load_authoritative_work_order(connection)
+            receipts = _validated_receipt_prefix(connection, work_order)
+            grants = _validated_effective_grants(
+                connection,
+                work_order,
+                receipts,
+            )
+            attempts = _validated_grant_attempts(
+                connection,
+                work_order,
+                receipts,
+            )
+            _validate_grant_reservation_closure(
+                connection,
+                work_order,
+                grants,
+                attempts,
+            )
+            replay = _validate_grant_history_semantics(
+                work_order,
+                receipts,
+                grants,
+                attempts,
+            )
+            _validate_grant_event_index(
+                connection,
+                receipts,
+                grants,
+            )
+        except RetryConsumptionError:
+            raise
+        except Exception as error:
+            raise _retry_error(
+                "retry consumption ledger history is invalid"
+            ) from error
+        if (
+            not isinstance(request, AgentRequest)
+            or not isinstance(sidecar_private_key, Ed25519PrivateKey)
+            or not isinstance(evidence_root, Path)
+        ):
+            raise _retry_error("retry consumption input is malformed")
+        if len(receipts) >= MAX_ROUTINE_ACTION_RECEIPTS:
+            raise _retry_error(
+                "routine retry receipt capacity is exhausted"
+            )
+        if any(receipt.nonce == request.nonce for receipt in receipts):
+            raise _retry_error("retry consumption nonce is already committed")
+        try:
+            utc_now = _freeze_trusted_utc_second(clock())
+        except Exception as error:
+            raise _retry_error(
+                "retry consumption trusted clock is invalid"
+            ) from error
+        bindings = {
+            binding.role: binding for binding in work_order.key_bindings
+        }
+        manager = bindings["Manager"]
+        sidecar = bindings["Sidecar"]
+        request_grant = grants.get(request.grant_id)
+        root = grants.get(work_order.root_grant_template.grant_id)
+        arguments = {
+            "grant_id": request.grant_id,
+            "metric": "repair_rounds",
+            "amount": 1,
+        }
+        if (
+            request_grant is None
+            or root is None
+            or root.parent_grant_id is not None
+            or request_grant.subject_agent_id != request.actor_id
+            or request_grant.subject_key_id != request.actor_key_id
+            or key_id(sidecar_private_key.public_key()) != sidecar.key_id
+            or not verify_nested_claim(request, work_order)
+            or request.work_order_digest != work_order.digest
+            or request.signer_key_id != request_grant.subject_key_id
+            or request.tool_name != "owp.start_retry"
+            or request.arguments_digest
+            != request_arguments_digest("owp.start_retry", arguments)
+            or request.requested_at < work_order.issued_at
+            or request.requested_at > work_order.deadline
+            or utc_now < request.requested_at
+            or (utc_now - request.requested_at).total_seconds() > 300
+        ):
+            raise _retry_error(
+                "retry consumption request binding is invalid"
+            )
+        tip = _tip_receipt(receipts)
+        if utc_now < tip.occurred_at:
+            raise _retry_error(
+                "retry consumption time precedes the verified chain tip"
+            )
+        state_row = connection.execute(
+            """
+            SELECT current_state, version
+            FROM work_order_state
+            WHERE singleton = 1 AND work_order_digest = ?
+            """,
+            (work_order.digest,),
+        ).fetchone()
+        sequence_row = connection.execute(
+            """
+            SELECT next_sequence
+            FROM sequence_counter
+            WHERE singleton = 1
+            """
+        ).fetchone()
+        if state_row is None or sequence_row is None:
+            raise _retry_error(
+                "retry consumption ledger state is unavailable"
+            )
+        current_state, current_version = state_row
+        sequence = sequence_row[0]
+        episode = _validated_retry_episode(
+            connection,
+            work_order=work_order,
+            receipts=receipts,
+            grants=grants,
+            evidence_root=evidence_root,
+            current_state=current_state,
+        )
+        request_issuance = _successful_issuance_for(
+            receipts,
+            request_grant.grant_id,
+        )
+        if current_state == "needs_rework":
+            base_parents = (
+                request_issuance.receipt_id,
+                episode.failure.receipt_id,
+                episode.rollback.receipt_id,
+            )
+        else:
+            base_parents = (
+                request_issuance.receipt_id,
+                episode.failure.receipt_id,
+                episode.rollback.receipt_id,
+                tip.receipt_id,
+            )
+        receipt_sequence = {
+            receipt.receipt_id: receipt.sequence
+            for receipt in receipts
+        }
+        parents = tuple(
+            sorted(
+                set(base_parents),
+                key=receipt_sequence.__getitem__,
+            )
+        )
+        root_replay = replay.get(root.grant_id)
+        if root_replay is None:
+            raise _retry_error(
+                "retry root quota history is unavailable"
+            )
+        if current_state != "needs_rework":
+            allowed = False
+            policy_error_code = "STATE_DENIED"
+            remaining_after = None
+        elif (
+            request_grant.grant_id != root.grant_id
+            or request_grant.parent_grant_id is not None
+            or request.actor_id != manager.subject_id
+            or request.actor_key_id != manager.key_id
+        ):
+            allowed = False
+            policy_error_code = "ROLE_DENIED"
+            remaining_after = None
+        elif (
+            root_replay.revoked
+            or utc_now < root.valid_from
+            or utc_now > root.expires_at
+        ):
+            allowed = False
+            policy_error_code = "CAPABILITY_DENIED"
+            remaining_after = None
+        elif root_replay.remaining_repair_rounds == 0:
+            allowed = False
+            policy_error_code = "QUOTA_EXHAUSTED"
+            remaining_after = None
+        else:
+            allowed = True
+            policy_error_code = None
+            remaining_after = (
+                root_replay.remaining_repair_rounds - 1
+            )
+        receipt = _build_retry_receipt(
+            work_order,
+            request,
+            sidecar_private_key,
+            utc_now,
+            sequence=sequence,
+            state=current_state,
+            tip=tip,
+            parents=parents,
+            allowed=allowed,
+            policy_error_code=policy_error_code,
+            remaining_after=remaining_after,
+        )
+        receipt_result = receipt
+        connection.execute(
+            """
+            INSERT INTO receipts (
+                receipt_id,
+                work_order_digest,
+                nonce,
+                sequence,
+                previous_digest,
+                receipt_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                receipt.receipt_id,
+                work_order.digest,
+                request.nonce,
+                sequence,
+                tip.digest,
+                _canonical_json(receipt.model_dump(mode="json")),
+            ),
+        )
+        for parent_id in receipt.parent_receipt_ids:
+            connection.execute(
+                """
+                INSERT INTO receipt_parents (
+                    child_receipt_id,
+                    parent_receipt_id
+                )
+                VALUES (?, ?)
+                """,
+                (receipt.receipt_id, parent_id),
+            )
+        if allowed:
+            connection.execute(
+                """
+                INSERT INTO grant_events (
+                    event_id,
+                    receipt_id,
+                    grant_id,
+                    event_type,
+                    metric,
+                    amount
+                )
+                VALUES (?, ?, ?, 'grant_consumed', 'repair_rounds', 1)
+                """,
+                (
+                    hashlib.sha256(
+                        f"grant-consumed:{receipt.receipt_id}".encode(
+                            "ascii"
+                        )
+                    ).hexdigest(),
+                    receipt.receipt_id,
+                    root.grant_id,
+                ),
+            )
+        state_update = connection.execute(
+            """
+            UPDATE work_order_state
+            SET current_state = ?, version = version + 1
+            WHERE singleton = 1
+              AND work_order_digest = ?
+              AND current_state = ?
+              AND version = ?
+            """,
+            (
+                receipt.state_after,
+                work_order.digest,
+                current_state,
+                current_version,
+            ),
+        )
+        sequence_update = connection.execute(
+            """
+            UPDATE sequence_counter
+            SET next_sequence = next_sequence + 1
+            WHERE singleton = 1 AND next_sequence = ?
+            """,
+            (sequence,),
+        )
+        if state_update.rowcount != 1 or sequence_update.rowcount != 1:
+            raise _retry_error(
+                "retry consumption ledger counters could not be advanced"
+            )
+        connection.execute("COMMIT")
+    except Exception as error:
+        primary_error = error
+        rollback_error = _best_effort_rollback(connection)
+        if rollback_error is not None:
+            secondary_errors.append(
+                _contextualize_secondary("rollback", rollback_error)
+            )
+
+    closed, close_errors = _close_with_retries(connection)
+    if primary_error is not None:
+        secondary_errors.extend(close_errors)
+    if primary_error is None and closed:
+        if receipt_result is None:
+            raise _retry_error(
+                "retry consumption produced no receipt"
+            )
+        return receipt_result
+    committed_receipt = (
+        _confirm_committed_retry_receipt(path, receipt_result)
+        if receipt_result is not None
+        else None
+    )
+    errors = (
+        ([primary_error] if primary_error is not None else [])
+        + secondary_errors
+        + ([] if primary_error is not None else list(close_errors))
+    )
+    if committed_receipt is not None:
+        raise RetryConsumptionCommittedError(
+            committed_receipt
+        ) from _error_cause(
+            "retry consumption committed completion failures",
+            errors,
+        )
+    if (
+        isinstance(primary_error, RetryConsumptionError)
+        and not secondary_errors
+    ):
+        raise primary_error
+    raise _retry_error(
+        "retry consumption failed atomically"
+    ) from _error_cause("retry consumption failures", errors)

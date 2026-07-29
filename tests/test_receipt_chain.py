@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import threading
@@ -6294,6 +6295,2037 @@ def _append_action_receipt(
                 charge.amount,
             ),
         )
+
+
+def _retry_request(
+    work_order: WorkOrder,
+    root: CapabilityGrant,
+    role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    *,
+    nonce: str,
+    actor_role: str = "Manager",
+    requested_at: str = "2026-01-01T00:00:05Z",
+    tool_name: str = "owp.start_retry",
+    arguments: dict[str, object] | None = None,
+    grant_id: str | None = None,
+) -> AgentRequest:
+    binding = role_keys[actor_role][1]
+    effective_grant_id = root.grant_id if grant_id is None else grant_id
+    exact_arguments = arguments or {
+        "grant_id": effective_grant_id,
+        "metric": "repair_rounds",
+        "amount": 1,
+    }
+    return AgentRequest.model_validate(
+        sign_payload(
+            "agent-request",
+            {
+                "claim_type": "agent-request",
+                "work_order_digest": work_order.digest,
+                "grant_id": effective_grant_id,
+                "actor_id": binding["subject_id"],
+                "actor_key_id": binding["key_id"],
+                "tool_name": tool_name,
+                "arguments_digest": evidence.request_arguments_digest(
+                    tool_name,
+                    exact_arguments,
+                ),
+                "nonce": nonce,
+                "requested_at": requested_at,
+                "authentication_method": "agent_signature",
+                "model_id": "model",
+                "model_version": "1",
+                "prompt_template_digest": "a" * 64,
+                "context_source_digest": "b" * 64,
+            },
+            role_keys[actor_role][0],
+        )
+    )
+
+
+def _retry_episode(
+    *,
+    tmp_path: Path,
+    label: str,
+    work_order: WorkOrder,
+    root: CapabilityGrant,
+    role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    now: datetime,
+    sidecar_receipt_factory,
+    failure_test_passed: bool = False,
+):
+    from test_state import _tool_receipt
+
+    ledger_path = tmp_path / f"{label}.sqlite3"
+    evidence_root = tmp_path / f"{label}-evidence"
+    evidence_root.mkdir()
+    _activate_ledger_root(
+        ledger_path,
+        work_order,
+        root,
+        role_keys,
+        now,
+    )
+    developer = _child_grant(
+        work_order,
+        root,
+        role_keys,
+        label=f"{label}:developer",
+        updates={
+            "allowed_tools": [
+                "owp.apply_patch",
+                "owp.rollback_patch",
+            ],
+            "quota": {"tool_calls": 4, "repair_rounds": 0},
+        },
+    )
+    verifier = _child_grant(
+        work_order,
+        root,
+        role_keys,
+        label=f"{label}:verifier",
+        subject_role="Verifier",
+        updates={"quota": {"tool_calls": 2, "repair_rounds": 0}},
+    )
+    developer_issuance = _issue_child(
+        ledger_path,
+        developer,
+        _delegation_request(
+            work_order,
+            root,
+            developer,
+            role_keys,
+            actor_role="Manager",
+            nonce=_grant_id(f"{label}:developer-request"),
+        ),
+        role_keys,
+        now,
+    )
+    verifier_issuance = _issue_child(
+        ledger_path,
+        verifier,
+        _delegation_request(
+            work_order,
+            root,
+            verifier,
+            role_keys,
+            actor_role="Manager",
+            nonce=_grant_id(f"{label}:verifier-request"),
+        ),
+        role_keys,
+        now,
+    )
+    receipts, _, _ = _grant_replay_inputs(ledger_path, work_order)
+    root_issuance = receipts[0]
+
+    patch_bytes = b"0123456789"
+    patch_digest = hashlib.sha256(patch_bytes).hexdigest()
+    patch_result = {
+        "schema_version": "openworkproof-patch-result/0.1",
+        "parent_commit": work_order.source_commit,
+        "parent_manifest_digest": "b" * 64,
+        "candidate_commit": "2" * 40,
+        "workspace_manifest_digest": "c" * 64,
+        "patch_digest": patch_digest,
+        "patch_size_bytes": len(patch_bytes),
+        "replay_profile_digest": work_order.replay_profile_digest,
+    }
+    result_bytes = rfc8785.dumps(patch_result)
+    result_digest = hashlib.sha256(result_bytes).hexdigest()
+    result_path = "evidence/patch-result/01.json"
+    final_path = evidence_root / "patch-result/01.json"
+    final_path.parent.mkdir()
+    final_path.write_bytes(result_bytes)
+
+    patch = _tool_receipt(
+        tool_name="owp.apply_patch",
+        actor_role="Developer",
+        signed_work_order=work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        ephemeral_role_keys=role_keys,
+    )
+    patch_raw = patch.model_dump(mode="json")
+    patch_arguments = {
+        "target_paths": ["src/x"],
+        "patch_digest": patch_digest,
+        "patch_size_bytes": len(patch_bytes),
+    }
+    patch_raw.update(
+        {
+            "receipt_id": _grant_id(f"{label}:patch-receipt"),
+            "grant_id": developer.grant_id,
+            "request_arguments": patch_arguments,
+            "arguments_digest": evidence.request_arguments_digest(
+                "owp.apply_patch",
+                patch_arguments,
+            ),
+            "output_digest": result_digest,
+            "state_before": "running",
+            "state_after": "running",
+            "parent_receipt_ids": [developer_issuance.receipt_id],
+            "sequence": 4,
+            "nonce": _grant_id(f"{label}:patch-nonce"),
+            "previous_receipt_digest": verifier_issuance.digest,
+            "occurred_at": "2026-01-01T00:00:05Z",
+            "evidence_refs": [
+                {
+                    "path": "evidence/patch-input/01.diff",
+                    "sha256": patch_digest,
+                    "media_type": "text/x-diff",
+                    "size_bytes": len(patch_bytes),
+                },
+                {
+                    "path": result_path,
+                    "sha256": result_digest,
+                    "media_type": "application/json",
+                    "size_bytes": len(result_bytes),
+                },
+            ],
+            "quota_charge": {
+                "grant_id": developer.grant_id,
+                "metric": "tool_calls",
+                "amount": 1,
+                "remaining_after": 3,
+            },
+        }
+    )
+    patch_claim = patch_raw["nested_claim"]
+    patch_claim.update(
+        {
+            "grant_id": developer.grant_id,
+            "arguments_digest": patch_raw["arguments_digest"],
+            "nonce": patch_raw["nonce"],
+            "requested_at": "2026-01-01T00:00:05Z",
+        }
+    )
+    patch_claim = sign_payload(
+        "agent-request",
+        patch_claim,
+        role_keys["Developer"][0],
+    )
+    patch_raw["nested_claim"] = patch_claim
+    patch_raw["nested_claim_digest"] = patch_claim["digest"]
+    patch = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            patch_raw,
+            role_keys["Sidecar"][0],
+        )
+    )
+
+    failure = sidecar_receipt_factory(
+        state_before="running",
+        state_after="needs_rework",
+        event_type="tool_call",
+        actor_role="Verifier",
+        sequence=5,
+        previous_receipt_digest=patch.digest,
+        parent_receipt_ids=(
+            verifier_issuance.receipt_id,
+            patch.receipt_id,
+        ),
+        occurred_at="2026-01-01T00:00:05Z",
+        test_passed=failure_test_passed,
+    )
+    failure_raw = failure.model_dump(mode="json")
+    failure_arguments = failure_raw["request_arguments"]
+    failure_arguments["candidate_commit"] = patch_result[
+        "candidate_commit"
+    ]
+    failure_arguments["workspace_manifest_digest"] = patch_result[
+        "workspace_manifest_digest"
+    ]
+    failure_raw.update(
+        {
+            "receipt_id": _grant_id(f"{label}:failure-receipt"),
+            "grant_id": verifier.grant_id,
+            "arguments_digest": evidence.request_arguments_digest(
+                "owp.run_tests",
+                failure_arguments,
+            ),
+            "nonce": _grant_id(f"{label}:failure-nonce"),
+            "quota_charge": {
+                "grant_id": verifier.grant_id,
+                "metric": "tool_calls",
+                "amount": 1,
+                "remaining_after": 1,
+            },
+        }
+    )
+    failure_claim = failure_raw["nested_claim"]
+    failure_claim.update(
+        {
+            "grant_id": verifier.grant_id,
+            "arguments_digest": failure_raw["arguments_digest"],
+            "nonce": failure_raw["nonce"],
+            "requested_at": "2026-01-01T00:00:05Z",
+        }
+    )
+    failure_claim = sign_payload(
+        "agent-request",
+        failure_claim,
+        role_keys["Verifier"][0],
+    )
+    failure_raw["nested_claim"] = failure_claim
+    failure_raw["nested_claim_digest"] = failure_claim["digest"]
+    failure = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            failure_raw,
+            role_keys["Sidecar"][0],
+        )
+    )
+
+    rollback = sidecar_receipt_factory(
+        state_before="needs_rework",
+        state_after="needs_rework",
+        event_type="rollback",
+        actor_role="Developer",
+        sequence=6,
+        previous_receipt_digest=failure.digest,
+        parent_receipt_ids=(
+            developer_issuance.receipt_id,
+            patch.receipt_id,
+            failure.receipt_id,
+        ),
+        occurred_at="2026-01-01T00:00:05Z",
+    )
+    rollback_raw = rollback.model_dump(mode="json")
+    rollback_arguments = {
+        "target_patch_receipt_id": patch.receipt_id,
+        "target_patch_digest": patch.digest,
+        "before_commit": patch_result["candidate_commit"],
+    }
+    rollback_raw.update(
+        {
+            "receipt_id": _grant_id(f"{label}:rollback-receipt"),
+            "grant_id": developer.grant_id,
+            "target_patch_receipt_id": patch.receipt_id,
+            "target_patch_digest": patch.digest,
+            "before_commit": patch_result["candidate_commit"],
+            "after_commit": patch_result["parent_commit"],
+            "after_manifest_digest": patch_result[
+                "parent_manifest_digest"
+            ],
+            "nonce": _grant_id(f"{label}:rollback-nonce"),
+            "quota_charge": {
+                "grant_id": developer.grant_id,
+                "metric": "tool_calls",
+                "amount": 1,
+                "remaining_after": 2,
+            },
+        }
+    )
+    rollback_claim = rollback_raw["nested_claim"]
+    rollback_claim.update(
+        {
+            "grant_id": developer.grant_id,
+            "arguments_digest": evidence.request_arguments_digest(
+                "owp.rollback_patch",
+                rollback_arguments,
+            ),
+            "nonce": rollback_raw["nonce"],
+            "requested_at": "2026-01-01T00:00:05Z",
+        }
+    )
+    rollback_claim = sign_payload(
+        "agent-request",
+        rollback_claim,
+        role_keys["Developer"][0],
+    )
+    rollback_raw["nested_claim"] = rollback_claim
+    rollback_raw["nested_claim_digest"] = rollback_claim["digest"]
+    rollback = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            rollback_raw,
+            role_keys["Sidecar"][0],
+        )
+    )
+
+    connection = connect_ledger(ledger_path)
+    try:
+        for receipt in (patch, failure, rollback):
+            _append_action_receipt(connection, receipt)
+        connection.execute(
+            "UPDATE sequence_counter SET next_sequence = 7"
+        )
+        connection.execute(
+            """
+            UPDATE work_order_state
+            SET current_state = 'needs_rework', version = 6
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO evidence_publications (
+                publication_id,
+                receipt_id,
+                pending_path,
+                final_path,
+                digest,
+                media_type,
+                size_bytes,
+                state
+            )
+            VALUES (?, ?, ?, ?, ?, 'application/json', ?, 'COMMITTED')
+            """,
+            (
+                _grant_id(f"{label}:publication"),
+                patch.receipt_id,
+                f".pending/{_grant_id(f'{label}:publication')}",
+                result_path,
+                result_digest,
+                len(result_bytes),
+            ),
+        )
+    finally:
+        connection.close()
+    return {
+        "ledger_path": ledger_path,
+        "evidence_root": evidence_root,
+        "final_path": final_path,
+        "root_issuance": root_issuance,
+        "developer_issuance": developer_issuance,
+        "verifier_issuance": verifier_issuance,
+        "developer": developer,
+        "verifier": verifier,
+        "patch": patch,
+        "failure": failure,
+        "rollback": rollback,
+        "patch_result": patch_result,
+        "result_path": result_path,
+    }
+
+
+def _move_retry_patch_result_ref(
+    episode,
+    *,
+    new_path: str,
+    role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+) -> None:
+    new_final = episode["evidence_root"] / new_path.removeprefix(
+        "evidence/"
+    )
+    new_final.parent.mkdir(parents=True, exist_ok=True)
+    new_final.write_bytes(episode["final_path"].read_bytes())
+
+    patch_raw = episode["patch"].model_dump(mode="json")
+    patch_raw["evidence_refs"][1]["path"] = new_path
+    patch = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            patch_raw,
+            role_keys["Sidecar"][0],
+        )
+    )
+    failure_raw = episode["failure"].model_dump(mode="json")
+    failure_raw["previous_receipt_digest"] = patch.digest
+    failure = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            failure_raw,
+            role_keys["Sidecar"][0],
+        )
+    )
+    rollback_raw = episode["rollback"].model_dump(mode="json")
+    rollback_raw["previous_receipt_digest"] = failure.digest
+    rollback_raw["target_patch_digest"] = patch.digest
+    rollback_arguments = {
+        "target_patch_receipt_id": patch.receipt_id,
+        "target_patch_digest": patch.digest,
+        "before_commit": rollback_raw["before_commit"],
+    }
+    rollback_claim = rollback_raw["nested_claim"]
+    rollback_claim["arguments_digest"] = evidence.request_arguments_digest(
+        "owp.rollback_patch",
+        rollback_arguments,
+    )
+    rollback_claim = sign_payload(
+        "agent-request",
+        rollback_claim,
+        role_keys["Developer"][0],
+    )
+    rollback_raw["nested_claim"] = rollback_claim
+    rollback_raw["nested_claim_digest"] = rollback_claim["digest"]
+    rollback = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            rollback_raw,
+            role_keys["Sidecar"][0],
+        )
+    )
+
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        for receipt in (patch, failure, rollback):
+            connection.execute(
+                """
+                UPDATE receipts
+                SET previous_digest = ?, receipt_json = ?
+                WHERE receipt_id = ?
+                """,
+                (
+                    receipt.previous_receipt_digest,
+                    _canonical_json(receipt.model_dump(mode="json")),
+                    receipt.receipt_id,
+                ),
+            )
+        connection.execute(
+            """
+            UPDATE evidence_publications
+            SET final_path = ?
+            WHERE receipt_id = ?
+            """,
+            (new_path, patch.receipt_id),
+        )
+    finally:
+        connection.close()
+    episode.update(
+        {
+            "patch": patch,
+            "failure": failure,
+            "rollback": rollback,
+            "final_path": new_final,
+            "result_path": new_path,
+        }
+    )
+
+
+def _rewrite_retry_failure_argument(
+    episode,
+    *,
+    field: str,
+    value: str,
+    role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+) -> None:
+    failure_raw = episode["failure"].model_dump(mode="json")
+    failure_raw["request_arguments"][field] = value
+    if field == "fixed_test_source_digest":
+        failure_raw["correlation_factors"][field] = value
+    failure_raw["arguments_digest"] = evidence.request_arguments_digest(
+        "owp.run_tests",
+        failure_raw["request_arguments"],
+    )
+    failure_claim = failure_raw["nested_claim"]
+    failure_claim["arguments_digest"] = failure_raw["arguments_digest"]
+    failure_claim = sign_payload(
+        "agent-request",
+        failure_claim,
+        role_keys["Verifier"][0],
+    )
+    failure_raw["nested_claim"] = failure_claim
+    failure_raw["nested_claim_digest"] = failure_claim["digest"]
+    failure = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            failure_raw,
+            role_keys["Sidecar"][0],
+        )
+    )
+    rollback_raw = episode["rollback"].model_dump(mode="json")
+    rollback_raw["previous_receipt_digest"] = failure.digest
+    rollback = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            rollback_raw,
+            role_keys["Sidecar"][0],
+        )
+    )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        for receipt in (failure, rollback):
+            connection.execute(
+                """
+                UPDATE receipts
+                SET previous_digest = ?, receipt_json = ?
+                WHERE receipt_id = ?
+                """,
+                (
+                    receipt.previous_receipt_digest,
+                    _canonical_json(receipt.model_dump(mode="json")),
+                    receipt.receipt_id,
+                ),
+            )
+    finally:
+        connection.close()
+    episode.update({"failure": failure, "rollback": rollback})
+
+
+def test_start_retry_atomically_consumes_last_root_repair_round(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label="retry-success",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    request = _retry_request(
+        signed_work_order,
+        signed_root_grant,
+        ephemeral_role_keys,
+        nonce=_grant_id("retry-success:request"),
+    )
+
+    receipt = evidence.start_retry(
+        episode["ledger_path"],
+        request=request,
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        evidence_root=episode["evidence_root"],
+        clock=lambda: fixed_now,
+    )
+
+    assert receipt.policy_decision == "allow"
+    assert receipt.execution_status == "succeeded"
+    assert receipt.state_before == "needs_rework"
+    assert receipt.state_after == "retrying"
+    assert receipt.remaining_after == 0
+    assert receipt.quota_charge.model_dump(mode="json") == {
+        "grant_id": signed_root_grant.grant_id,
+        "metric": "repair_rounds",
+        "amount": 1,
+        "remaining_after": 0,
+    }
+    assert receipt.parent_receipt_ids == (
+        episode["root_issuance"].receipt_id,
+        episode["failure"].receipt_id,
+        episode["rollback"].receipt_id,
+    )
+    assert receipt.parent_receipt_ids != tuple(
+        sorted(receipt.parent_receipt_ids)
+    )
+    assert receipt.previous_receipt_digest == episode["rollback"].digest
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        assert tuple(
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(evidence_publications)"
+            ).fetchall()
+        ) == (
+            "publication_id",
+            "receipt_id",
+            "pending_path",
+            "final_path",
+            "digest",
+            "size_bytes",
+            "media_type",
+            "state",
+        )
+        assert connection.execute(
+            "SELECT current_state, version FROM work_order_state"
+        ).fetchone() == ("retrying", 7)
+        assert connection.execute(
+            "SELECT next_sequence FROM sequence_counter"
+        ).fetchone() == (8,)
+        assert connection.execute(
+            """
+            SELECT grant_id, event_type, metric, amount
+            FROM grant_events
+            WHERE receipt_id = ?
+            """,
+            (receipt.receipt_id,),
+        ).fetchone() == (
+            signed_root_grant.grant_id,
+            "grant_consumed",
+            "repair_rounds",
+            1,
+        )
+    finally:
+        connection.close()
+
+
+def test_start_retry_rejects_all_pass_verifier_failure_without_writes(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label="retry-all-pass-failure",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        failure_test_passed=True,
+    )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        before = _ledger_integrity_snapshot(connection)
+    finally:
+        connection.close()
+
+    with pytest.raises(evidence.RetryEvidenceIntegrityError):
+        evidence.start_retry(
+            episode["ledger_path"],
+            request=_retry_request(
+                signed_work_order,
+                signed_root_grant,
+                ephemeral_role_keys,
+                nonce=_grant_id("retry-all-pass-failure:request"),
+            ),
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            evidence_root=episode["evidence_root"],
+            clock=lambda: fixed_now,
+        )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        assert _ledger_integrity_snapshot(connection) == before
+    finally:
+        connection.close()
+
+
+def test_start_retry_authenticated_developer_child_appends_role_denial(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label="retry-role-denial",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    denied = evidence.start_retry(
+        episode["ledger_path"],
+        request=_retry_request(
+            signed_work_order,
+            signed_root_grant,
+            ephemeral_role_keys,
+            nonce=_grant_id("retry-role-denial:request"),
+            actor_role="Developer",
+            grant_id=episode["developer"].grant_id,
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        evidence_root=episode["evidence_root"],
+        clock=lambda: fixed_now,
+    )
+
+    assert denied.grant_id == episode["developer"].grant_id
+    assert denied.policy_decision == "deny"
+    assert denied.execution_status == "denied"
+    assert denied.policy_error_code == "ROLE_DENIED"
+    assert denied.state_before == denied.state_after == "needs_rework"
+    assert denied.remaining_after is None
+    assert denied.quota_charge is None
+    assert denied.parent_receipt_ids == (
+        episode["developer_issuance"].receipt_id,
+        episode["failure"].receipt_id,
+        episode["rollback"].receipt_id,
+    )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        assert tuple(
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT parent.parent_receipt_id
+                FROM receipt_parents AS parent
+                JOIN receipts AS receipt
+                  ON receipt.receipt_id = parent.parent_receipt_id
+                WHERE parent.child_receipt_id = ?
+                ORDER BY receipt.sequence
+                """,
+                (denied.receipt_id,),
+            ).fetchall()
+        ) == denied.parent_receipt_ids
+        assert connection.execute(
+            "SELECT current_state, version FROM work_order_state"
+        ).fetchone() == ("needs_rework", 7)
+        assert connection.execute(
+            "SELECT next_sequence FROM sequence_counter"
+        ).fetchone() == (8,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM grant_events WHERE receipt_id = ?",
+            (denied.receipt_id,),
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+def test_start_retry_state_denial_precedes_role_denial_for_developer_child(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label="retry-child-state-denial",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    allowed = evidence.start_retry(
+        episode["ledger_path"],
+        request=_retry_request(
+            signed_work_order,
+            signed_root_grant,
+            ephemeral_role_keys,
+            nonce=_grant_id("retry-child-state-denial:allow"),
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        evidence_root=episode["evidence_root"],
+        clock=lambda: fixed_now,
+    )
+    denied = evidence.start_retry(
+        episode["ledger_path"],
+        request=_retry_request(
+            signed_work_order,
+            signed_root_grant,
+            ephemeral_role_keys,
+            nonce=_grant_id("retry-child-state-denial:deny"),
+            actor_role="Developer",
+            grant_id=episode["developer"].grant_id,
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        evidence_root=episode["evidence_root"],
+        clock=lambda: fixed_now,
+    )
+
+    assert denied.grant_id == episode["developer"].grant_id
+    assert denied.policy_decision == "deny"
+    assert denied.execution_status == "denied"
+    assert denied.policy_error_code == "STATE_DENIED"
+    assert denied.state_before == denied.state_after == "retrying"
+    assert denied.remaining_after is None
+    assert denied.quota_charge is None
+    assert denied.parent_receipt_ids == (
+        episode["developer_issuance"].receipt_id,
+        episode["failure"].receipt_id,
+        episode["rollback"].receipt_id,
+        allowed.receipt_id,
+    )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        assert tuple(
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT parent.parent_receipt_id
+                FROM receipt_parents AS parent
+                JOIN receipts AS receipt
+                  ON receipt.receipt_id = parent.parent_receipt_id
+                WHERE parent.child_receipt_id = ?
+                ORDER BY receipt.sequence
+                """,
+                (denied.receipt_id,),
+            ).fetchall()
+        ) == denied.parent_receipt_ids
+        assert connection.execute(
+            "SELECT current_state, version FROM work_order_state"
+        ).fetchone() == ("retrying", 8)
+        assert connection.execute(
+            "SELECT next_sequence FROM sequence_counter"
+        ).fetchone() == (9,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM grant_events WHERE receipt_id = ?",
+            (denied.receipt_id,),
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    (
+        ("command_digest", "0" * 64),
+        ("source_commit", "3" * 40),
+        ("container_image_digest", f"sha256:{'0' * 64}"),
+        ("fixed_test_source_digest", "0" * 64),
+    ),
+)
+def test_start_retry_rejects_failure_outside_fixed_verifier_profile_without_writes(
+    tmp_path: Path,
+    field: str,
+    invalid_value: str,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label=f"retry-verifier-profile-{field}",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    assert (
+        getattr(episode["failure"].request_arguments, field)
+        != invalid_value
+    )
+    _rewrite_retry_failure_argument(
+        episode,
+        field=field,
+        value=invalid_value,
+        role_keys=ephemeral_role_keys,
+    )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        before = _ledger_integrity_snapshot(connection)
+    finally:
+        connection.close()
+
+    with pytest.raises(evidence.RetryEvidenceIntegrityError):
+        evidence.start_retry(
+            episode["ledger_path"],
+            request=_retry_request(
+                signed_work_order,
+                signed_root_grant,
+                ephemeral_role_keys,
+                nonce=_grant_id(f"retry-verifier-profile-{field}:request"),
+            ),
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            evidence_root=episode["evidence_root"],
+            clock=lambda: fixed_now,
+        )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        assert _ledger_integrity_snapshot(connection) == before
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "result_path",
+    (
+        "evidence/verifier-result/01.json",
+        "evidence/patch-result/02.json",
+    ),
+)
+def test_start_retry_rejects_patch_result_in_wrong_work_order_slot_without_writes(
+    tmp_path: Path,
+    result_path: str,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label=f"retry-slot-{result_path.split('/')[-2]}",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    _move_retry_patch_result_ref(
+        episode,
+        new_path=result_path,
+        role_keys=ephemeral_role_keys,
+    )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        before = _ledger_integrity_snapshot(connection)
+    finally:
+        connection.close()
+
+    with pytest.raises(evidence.RetryEvidenceIntegrityError):
+        evidence.start_retry(
+            episode["ledger_path"],
+            request=_retry_request(
+                signed_work_order,
+                signed_root_grant,
+                ephemeral_role_keys,
+                nonce=_grant_id(f"retry-slot-{result_path}:request"),
+            ),
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            evidence_root=episode["evidence_root"],
+            clock=lambda: fixed_now,
+        )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        assert _ledger_integrity_snapshot(connection) == before
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("replacement_kind", ("directory", "symlink"))
+def test_start_retry_rejects_changed_intermediate_evidence_namespace_without_writes(
+    tmp_path: Path,
+    replacement_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label="retry-directory-race",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    trusted_directory = episode["evidence_root"] / "patch-result"
+    renamed_directory = episode["evidence_root"] / "patch-result-trusted"
+    outside_directory = tmp_path / "outside-evidence"
+    outside_directory.mkdir()
+    outside_file = outside_directory / "01.json"
+    trusted_bytes = episode["final_path"].read_bytes()
+    outside_file.write_bytes(trusted_bytes)
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        before = _ledger_integrity_snapshot(connection)
+    finally:
+        connection.close()
+    original_open = evidence.os.open
+    swapped = False
+
+    def replace_canonical_directory() -> None:
+        trusted_directory.rename(renamed_directory)
+        if replacement_kind == "symlink":
+            trusted_directory.symlink_to(outside_directory)
+        else:
+            trusted_directory.mkdir()
+            (trusted_directory / "01.json").write_bytes(
+                b"x" * len(trusted_bytes)
+            )
+
+    def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        path_value = os.fspath(path)
+        if (
+            not swapped
+            and path_value == "patch-result"
+            and dir_fd is not None
+        ):
+            descriptor = original_open(
+                path,
+                flags,
+                mode,
+                dir_fd=dir_fd,
+            )
+            replace_canonical_directory()
+            swapped = True
+            return descriptor
+        if not swapped and Path(path_value) == episode["final_path"]:
+            replace_canonical_directory()
+            swapped = True
+        return original_open(
+            path,
+            flags,
+            mode,
+            dir_fd=dir_fd,
+        )
+
+    monkeypatch.setattr(evidence.os, "open", racing_open)
+    with pytest.raises(evidence.RetryEvidenceIntegrityError):
+        evidence.start_retry(
+            episode["ledger_path"],
+            request=_retry_request(
+                signed_work_order,
+                signed_root_grant,
+                ephemeral_role_keys,
+                nonce=_grant_id(
+                    f"retry-directory-race:{replacement_kind}:request"
+                ),
+            ),
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            evidence_root=episode["evidence_root"],
+            clock=lambda: fixed_now,
+        )
+
+    assert swapped
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        assert _ledger_integrity_snapshot(connection) == before
+    finally:
+        connection.close()
+
+
+def test_start_retry_closes_pinned_evidence_descriptors_when_read_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label="retry-read-failure",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        before = _ledger_integrity_snapshot(connection)
+    finally:
+        connection.close()
+    original_open = evidence.os.open
+    original_close = evidence.os.close
+    opened_descriptors: set[int] = set()
+    closed_descriptors: set[int] = set()
+
+    def tracking_open(path, flags, mode=0o777, *, dir_fd=None):
+        descriptor = original_open(
+            path,
+            flags,
+            mode,
+            dir_fd=dir_fd,
+        )
+        opened_descriptors.add(descriptor)
+        return descriptor
+
+    def tracking_close(descriptor):
+        closed_descriptors.add(descriptor)
+        return original_close(descriptor)
+
+    def failing_read(descriptor, size):
+        raise OSError("injected evidence read failure")
+
+    monkeypatch.setattr(evidence.os, "open", tracking_open)
+    monkeypatch.setattr(evidence.os, "close", tracking_close)
+    monkeypatch.setattr(evidence.os, "read", failing_read)
+    with pytest.raises(evidence.RetryEvidenceIntegrityError):
+        evidence.start_retry(
+            episode["ledger_path"],
+            request=_retry_request(
+                signed_work_order,
+                signed_root_grant,
+                ephemeral_role_keys,
+                nonce=_grant_id("retry-read-failure:request"),
+            ),
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            evidence_root=episode["evidence_root"],
+            clock=lambda: fixed_now,
+        )
+
+    assert opened_descriptors
+    assert opened_descriptors <= closed_descriptors
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        assert _ledger_integrity_snapshot(connection) == before
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "missing",
+        "committing",
+        "final_path",
+        "media_type",
+        "size",
+        "tampered",
+        "symlink",
+        "hardlink",
+    ),
+)
+def test_start_retry_rejects_uncommitted_or_unsafe_patch_evidence_without_writes(
+    tmp_path: Path,
+    case: str,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label=f"retry-evidence-{case}",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        if case == "missing":
+            connection.execute("DELETE FROM evidence_publications")
+        elif case == "committing":
+            connection.execute(
+                "UPDATE evidence_publications SET state = 'COMMITTING'"
+            )
+        elif case == "final_path":
+            connection.execute(
+                "UPDATE evidence_publications SET final_path = 'evidence/other.json'"
+            )
+        elif case == "media_type":
+            connection.execute(
+                "UPDATE evidence_publications SET media_type = 'text/x-diff'"
+            )
+        elif case == "size":
+            connection.execute(
+                "UPDATE evidence_publications SET size_bytes = size_bytes + 1"
+            )
+        before = _ledger_integrity_snapshot(connection)
+    finally:
+        connection.close()
+    if case == "tampered":
+        episode["final_path"].write_bytes(
+            b"x" * episode["final_path"].stat().st_size
+        )
+    elif case == "symlink":
+        target = tmp_path / "symlink-target.json"
+        target.write_bytes(episode["final_path"].read_bytes())
+        episode["final_path"].unlink()
+        episode["final_path"].symlink_to(target)
+    elif case == "hardlink":
+        os.link(
+            episode["final_path"],
+            tmp_path / "second-evidence-link.json",
+        )
+
+    expected_error = (
+        evidence.RetryEvidenceRecoveryError
+        if case == "committing"
+        else evidence.RetryEvidenceIntegrityError
+    )
+    with pytest.raises(expected_error) as captured:
+        evidence.start_retry(
+            episode["ledger_path"],
+            request=_retry_request(
+                signed_work_order,
+                signed_root_grant,
+                ephemeral_role_keys,
+                nonce=_grant_id(f"retry-evidence-{case}:request"),
+            ),
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            evidence_root=episode["evidence_root"],
+            clock=lambda: fixed_now,
+        )
+    assert captured.value.code == (
+        "RECOVERY_REQUIRED"
+        if case == "committing"
+        else "REQUEST_INTEGRITY_INVALID"
+    )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        assert _ledger_integrity_snapshot(connection) == before
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "wrong_actor",
+        "bad_signature",
+        "wrong_arguments",
+        "unknown_grant",
+        "stale",
+        "duplicate_nonce",
+    ),
+)
+def test_start_retry_rejects_unauthenticated_or_duplicate_requests_without_writes(
+    tmp_path: Path,
+    case: str,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label=f"retry-request-{case}",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    request = _retry_request(
+        signed_work_order,
+        signed_root_grant,
+        ephemeral_role_keys,
+        nonce=_grant_id(f"retry-request-{case}:request"),
+        actor_role="Developer" if case == "wrong_actor" else "Manager",
+        requested_at=(
+            "2026-01-01T00:00:05Z"
+            if case != "stale"
+            else "2026-01-01T00:00:00Z"
+        ),
+        arguments=(
+            {
+                "grant_id": signed_root_grant.grant_id,
+                "metric": "repair_rounds",
+                "amount": 2,
+            }
+            if case == "wrong_arguments"
+            else None
+        ),
+        grant_id=(
+            _grant_id("retry-request:unknown")
+            if case == "unknown_grant"
+            else None
+        ),
+    )
+    clock = (
+        lambda: datetime(
+            2026,
+            1,
+            1,
+            0,
+            5,
+            1,
+            tzinfo=timezone.utc,
+        )
+        if case == "stale"
+        else lambda: fixed_now
+    )
+    if case == "bad_signature":
+        request = request.model_copy(update={"model_id": "tampered"})
+    if case == "duplicate_nonce":
+        evidence.start_retry(
+            episode["ledger_path"],
+            request=request,
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            evidence_root=episode["evidence_root"],
+            clock=lambda: fixed_now,
+        )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        before = _ledger_integrity_snapshot(connection)
+    finally:
+        connection.close()
+
+    with pytest.raises(evidence.RetryConsumptionError):
+        evidence.start_retry(
+            episode["ledger_path"],
+            request=request,
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            evidence_root=episode["evidence_root"],
+            clock=clock,
+        )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        assert _ledger_integrity_snapshot(connection) == before
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("wrong_failure_context", "wrong_rollback_result", "ambiguous_rollback"),
+)
+def test_start_retry_rejects_wrong_or_ambiguous_episode_without_writes(
+    tmp_path: Path,
+    case: str,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label=f"retry-episode-{case}",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        failure = episode["failure"]
+        rollback = episode["rollback"]
+        if case == "wrong_failure_context":
+            failure_raw = failure.model_dump(mode="json")
+            failure_raw["request_arguments"]["candidate_commit"] = "3" * 40
+            failure_raw["arguments_digest"] = (
+                evidence.request_arguments_digest(
+                    "owp.run_tests",
+                    failure_raw["request_arguments"],
+                )
+            )
+            failure_claim = failure_raw["nested_claim"]
+            failure_claim["arguments_digest"] = failure_raw[
+                "arguments_digest"
+            ]
+            failure_claim = sign_payload(
+                "agent-request",
+                failure_claim,
+                ephemeral_role_keys["Verifier"][0],
+            )
+            failure_raw["nested_claim"] = failure_claim
+            failure_raw["nested_claim_digest"] = failure_claim["digest"]
+            failure = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+                sign_payload(
+                    "action-receipt",
+                    failure_raw,
+                    ephemeral_role_keys["Sidecar"][0],
+                )
+            )
+            rollback_raw = rollback.model_dump(mode="json")
+            rollback_raw["previous_receipt_digest"] = failure.digest
+            rollback = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+                sign_payload(
+                    "action-receipt",
+                    rollback_raw,
+                    ephemeral_role_keys["Sidecar"][0],
+                )
+            )
+            connection.execute(
+                "UPDATE receipts SET receipt_json = ? WHERE receipt_id = ?",
+                (
+                    _canonical_json(failure.model_dump(mode="json")),
+                    failure.receipt_id,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE receipts
+                SET previous_digest = ?, receipt_json = ?
+                WHERE receipt_id = ?
+                """,
+                (
+                    failure.digest,
+                    _canonical_json(rollback.model_dump(mode="json")),
+                    rollback.receipt_id,
+                ),
+            )
+        elif case == "wrong_rollback_result":
+            rollback_raw = rollback.model_dump(mode="json")
+            rollback_raw["after_commit"] = "3" * 40
+            rollback = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+                sign_payload(
+                    "action-receipt",
+                    rollback_raw,
+                    ephemeral_role_keys["Sidecar"][0],
+                )
+            )
+            connection.execute(
+                "UPDATE receipts SET receipt_json = ? WHERE receipt_id = ?",
+                (
+                    _canonical_json(rollback.model_dump(mode="json")),
+                    rollback.receipt_id,
+                ),
+            )
+        else:
+            duplicate_raw = rollback.model_dump(mode="json")
+            duplicate_raw.update(
+                {
+                    "receipt_id": _grant_id(
+                        "retry-episode:duplicate-rollback-receipt"
+                    ),
+                    "sequence": 7,
+                    "nonce": _grant_id(
+                        "retry-episode:duplicate-rollback-nonce"
+                    ),
+                    "previous_receipt_digest": rollback.digest,
+                    "quota_charge": {
+                        "grant_id": episode["developer"].grant_id,
+                        "metric": "tool_calls",
+                        "amount": 1,
+                        "remaining_after": 1,
+                    },
+                }
+            )
+            duplicate_claim = duplicate_raw["nested_claim"]
+            duplicate_claim["nonce"] = duplicate_raw["nonce"]
+            duplicate_claim = sign_payload(
+                "agent-request",
+                duplicate_claim,
+                ephemeral_role_keys["Developer"][0],
+            )
+            duplicate_raw["nested_claim"] = duplicate_claim
+            duplicate_raw["nested_claim_digest"] = duplicate_claim["digest"]
+            duplicate = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+                sign_payload(
+                    "action-receipt",
+                    duplicate_raw,
+                    ephemeral_role_keys["Sidecar"][0],
+                )
+            )
+            _append_action_receipt(connection, duplicate)
+            connection.execute("UPDATE sequence_counter SET next_sequence = 8")
+            connection.execute("UPDATE work_order_state SET version = 7")
+        before = _ledger_integrity_snapshot(connection)
+    finally:
+        connection.close()
+
+    with pytest.raises(evidence.RetryEvidenceIntegrityError):
+        evidence.start_retry(
+            episode["ledger_path"],
+            request=_retry_request(
+                signed_work_order,
+                signed_root_grant,
+                ephemeral_role_keys,
+                nonce=_grant_id(f"retry-episode-{case}:request"),
+            ),
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            evidence_root=episode["evidence_root"],
+            clock=lambda: fixed_now,
+        )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        assert _ledger_integrity_snapshot(connection) == before
+    finally:
+        connection.close()
+
+
+def test_start_retry_authenticated_non_needs_rework_appends_state_denial(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label="retry-state-denial",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    allowed = evidence.start_retry(
+        episode["ledger_path"],
+        request=_retry_request(
+            signed_work_order,
+            signed_root_grant,
+            ephemeral_role_keys,
+            nonce=_grant_id("retry-state-denial:allow"),
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        evidence_root=episode["evidence_root"],
+        clock=lambda: fixed_now,
+    )
+
+    denied = evidence.start_retry(
+        episode["ledger_path"],
+        request=_retry_request(
+            signed_work_order,
+            signed_root_grant,
+            ephemeral_role_keys,
+            nonce=_grant_id("retry-state-denial:deny"),
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        evidence_root=episode["evidence_root"],
+        clock=lambda: fixed_now,
+    )
+
+    assert denied.policy_decision == "deny"
+    assert denied.execution_status == "denied"
+    assert denied.policy_error_code == "STATE_DENIED"
+    assert denied.state_before == denied.state_after == "retrying"
+    assert denied.remaining_after is None
+    assert denied.quota_charge is None
+    assert denied.parent_receipt_ids == (
+        episode["root_issuance"].receipt_id,
+        episode["failure"].receipt_id,
+        episode["rollback"].receipt_id,
+        allowed.receipt_id,
+    )
+    assert denied.parent_receipt_ids != tuple(
+        sorted(denied.parent_receipt_ids)
+    )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT current_state, version FROM work_order_state"
+        ).fetchone() == ("retrying", 8)
+        assert connection.execute(
+            "SELECT next_sequence FROM sequence_counter"
+        ).fetchone() == (9,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM grant_events WHERE receipt_id = ?",
+            (denied.receipt_id,),
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+def _append_followup_retry_episode(
+    episode,
+    *,
+    previous_receipt,
+    role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+):
+    patch_raw = episode["patch"].model_dump(mode="json")
+    result_path = "evidence/patch-result/02.json"
+    patch_raw.update(
+        {
+            "receipt_id": _grant_id("followup:patch-receipt"),
+            "state_before": "retrying",
+            "state_after": "retrying",
+            "parent_receipt_ids": [
+                episode["developer_issuance"].receipt_id
+            ],
+            "sequence": 8,
+            "nonce": _grant_id("followup:patch-nonce"),
+            "previous_receipt_digest": previous_receipt.digest,
+            "evidence_refs": [
+                {
+                    **patch_raw["evidence_refs"][0],
+                    "path": "evidence/patch-input/02.diff",
+                },
+                {
+                    **patch_raw["evidence_refs"][1],
+                    "path": result_path,
+                },
+            ],
+            "quota_charge": {
+                "grant_id": episode["developer"].grant_id,
+                "metric": "tool_calls",
+                "amount": 1,
+                "remaining_after": 1,
+            },
+        }
+    )
+    patch_claim = patch_raw["nested_claim"]
+    patch_claim["nonce"] = patch_raw["nonce"]
+    patch_claim = sign_payload(
+        "agent-request",
+        patch_claim,
+        role_keys["Developer"][0],
+    )
+    patch_raw["nested_claim"] = patch_claim
+    patch_raw["nested_claim_digest"] = patch_claim["digest"]
+    patch = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            patch_raw,
+            role_keys["Sidecar"][0],
+        )
+    )
+
+    failure_raw = episode["failure"].model_dump(mode="json")
+    failure_raw.update(
+        {
+            "receipt_id": _grant_id("followup:failure-receipt"),
+            "state_before": "retrying",
+            "state_after": "needs_rework",
+            "parent_receipt_ids": [
+                episode["verifier_issuance"].receipt_id,
+                patch.receipt_id,
+            ],
+            "sequence": 9,
+            "nonce": _grant_id("followup:failure-nonce"),
+            "previous_receipt_digest": patch.digest,
+            "quota_charge": {
+                "grant_id": episode["verifier"].grant_id,
+                "metric": "tool_calls",
+                "amount": 1,
+                "remaining_after": 0,
+            },
+        }
+    )
+    failure_claim = failure_raw["nested_claim"]
+    failure_claim["nonce"] = failure_raw["nonce"]
+    failure_claim = sign_payload(
+        "agent-request",
+        failure_claim,
+        role_keys["Verifier"][0],
+    )
+    failure_raw["nested_claim"] = failure_claim
+    failure_raw["nested_claim_digest"] = failure_claim["digest"]
+    failure = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            failure_raw,
+            role_keys["Sidecar"][0],
+        )
+    )
+
+    rollback_raw = episode["rollback"].model_dump(mode="json")
+    rollback_arguments = {
+        "target_patch_receipt_id": patch.receipt_id,
+        "target_patch_digest": patch.digest,
+        "before_commit": rollback_raw["before_commit"],
+    }
+    rollback_raw.update(
+        {
+            "receipt_id": _grant_id("followup:rollback-receipt"),
+            "target_patch_receipt_id": patch.receipt_id,
+            "target_patch_digest": patch.digest,
+            "parent_receipt_ids": [
+                episode["developer_issuance"].receipt_id,
+                patch.receipt_id,
+                failure.receipt_id,
+            ],
+            "sequence": 10,
+            "nonce": _grant_id("followup:rollback-nonce"),
+            "previous_receipt_digest": failure.digest,
+            "quota_charge": {
+                "grant_id": episode["developer"].grant_id,
+                "metric": "tool_calls",
+                "amount": 1,
+                "remaining_after": 0,
+            },
+        }
+    )
+    rollback_claim = rollback_raw["nested_claim"]
+    rollback_claim.update(
+        {
+            "arguments_digest": evidence.request_arguments_digest(
+                "owp.rollback_patch",
+                rollback_arguments,
+            ),
+            "nonce": rollback_raw["nonce"],
+        }
+    )
+    rollback_claim = sign_payload(
+        "agent-request",
+        rollback_claim,
+        role_keys["Developer"][0],
+    )
+    rollback_raw["nested_claim"] = rollback_claim
+    rollback_raw["nested_claim_digest"] = rollback_claim["digest"]
+    rollback = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            rollback_raw,
+            role_keys["Sidecar"][0],
+        )
+    )
+
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        for receipt in (patch, failure, rollback):
+            _append_action_receipt(connection, receipt)
+        connection.execute(
+            "UPDATE sequence_counter SET next_sequence = 11"
+        )
+        connection.execute(
+            """
+            UPDATE work_order_state
+            SET current_state = 'needs_rework', version = 10
+            """
+        )
+        second_path = episode["final_path"].with_name("02.json")
+        second_path.write_bytes(episode["final_path"].read_bytes())
+        connection.execute(
+            """
+            INSERT INTO evidence_publications (
+                publication_id,
+                receipt_id,
+                pending_path,
+                final_path,
+                digest,
+                media_type,
+                size_bytes,
+                state
+            )
+            SELECT
+                ?, ?, ?, ?, digest, media_type, size_bytes, state
+            FROM evidence_publications
+            WHERE receipt_id = ?
+            """,
+            (
+                _grant_id("followup:publication"),
+                patch.receipt_id,
+                ".pending/followup-publication",
+                result_path,
+                episode["patch"].receipt_id,
+            ),
+        )
+    finally:
+        connection.close()
+    return failure, rollback
+
+
+def test_start_retry_quota_exhaustion_appends_free_same_state_denial(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label="retry-quota-denial",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    consumed = evidence.start_retry(
+        episode["ledger_path"],
+        request=_retry_request(
+            signed_work_order,
+            signed_root_grant,
+            ephemeral_role_keys,
+            nonce=_grant_id("retry-quota-denial:consume"),
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        evidence_root=episode["evidence_root"],
+        clock=lambda: fixed_now,
+    )
+    failure, rollback = _append_followup_retry_episode(
+        episode,
+        previous_receipt=consumed,
+        role_keys=ephemeral_role_keys,
+    )
+
+    denied = evidence.start_retry(
+        episode["ledger_path"],
+        request=_retry_request(
+            signed_work_order,
+            signed_root_grant,
+            ephemeral_role_keys,
+            nonce=_grant_id("retry-quota-denial:deny"),
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        evidence_root=episode["evidence_root"],
+        clock=lambda: fixed_now,
+    )
+
+    assert denied.policy_decision == "deny"
+    assert denied.policy_error_code == "QUOTA_EXHAUSTED"
+    assert denied.execution_status == "denied"
+    assert denied.state_before == denied.state_after == "needs_rework"
+    assert denied.remaining_after is None
+    assert denied.quota_charge is None
+    assert denied.parent_receipt_ids == (
+        episode["root_issuance"].receipt_id,
+        failure.receipt_id,
+        rollback.receipt_id,
+    )
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT current_state, version FROM work_order_state"
+        ).fetchone() == ("needs_rework", 11)
+        assert connection.execute(
+            "SELECT next_sequence FROM sequence_counter"
+        ).fetchone() == (12,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM grant_events WHERE receipt_id = ?",
+            (denied.receipt_id,),
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+def test_concurrent_start_retry_serializes_the_last_repair_round(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label="retry-concurrent",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    requests = tuple(
+        _retry_request(
+            signed_work_order,
+            signed_root_grant,
+            ephemeral_role_keys,
+            nonce=_grant_id(f"retry-concurrent:request:{index}"),
+        )
+        for index in range(2)
+    )
+
+    def consume(request: AgentRequest):
+        return evidence.start_retry(
+            episode["ledger_path"],
+            request=request,
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            evidence_root=episode["evidence_root"],
+            clock=lambda: fixed_now,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(consume, requests))
+
+    allowed = tuple(
+        receipt
+        for receipt in results
+        if receipt.policy_decision == "allow"
+    )
+    denied = tuple(
+        receipt
+        for receipt in results
+        if receipt.policy_decision == "deny"
+    )
+    assert len(allowed) == 1
+    assert len(denied) == 1
+    assert denied[0].policy_error_code == "STATE_DENIED"
+    assert allowed[0].quota_charge.remaining_after == 0
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        assert connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM grant_events
+            WHERE event_type = 'grant_consumed'
+              AND metric = 'repair_rounds'
+            """
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT current_state, version FROM work_order_state"
+        ).fetchone() == ("retrying", 8)
+        assert connection.execute(
+            "SELECT next_sequence FROM sequence_counter"
+        ).fetchone() == (9,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("failure_kind", ("commit_ack", "close_failure"))
+def test_start_retry_reports_committed_truth_after_local_completion_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label=f"retry-committed-{failure_kind}",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    real_connect = evidence.connect_ledger
+    wrapped: list[_FaultingConnection] = []
+
+    def failing_connect(path: Path):
+        raw = real_connect(path)
+        if failure_kind == "commit_ack":
+            connection = _FaultingConnection(
+                raw,
+                fail_when=lambda sql: sql == "COMMIT",
+                fail_after_execute=True,
+            )
+        else:
+            connection = _CloseAlwaysFailsConnection(raw)
+        wrapped.append(connection)
+        return connection
+
+    monkeypatch.setattr(evidence, "connect_ledger", failing_connect)
+    request = _retry_request(
+        signed_work_order,
+        signed_root_grant,
+        ephemeral_role_keys,
+        nonce=_grant_id(f"retry-committed-{failure_kind}:request"),
+    )
+    try:
+        with pytest.raises(
+            evidence.RetryConsumptionCommittedError
+        ) as captured:
+            evidence.start_retry(
+                episode["ledger_path"],
+                request=request,
+                sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+                evidence_root=episode["evidence_root"],
+                clock=lambda: fixed_now,
+            )
+        assert captured.value.committed is True
+        assert captured.value.receipt.policy_decision == "allow"
+        assert captured.value.receipt.remaining_after == 0
+    finally:
+        monkeypatch.setattr(evidence, "connect_ledger", real_connect)
+        for connection in wrapped:
+            if isinstance(connection, _CloseAlwaysFailsConnection):
+                connection.force_close()
+
+    connection = real_connect(episode["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT current_state, version FROM work_order_state"
+        ).fetchone() == ("retrying", 7)
+        assert connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM grant_events
+            WHERE receipt_id = ?
+              AND event_type = 'grant_consumed'
+            """,
+            (captured.value.receipt.receipt_id,),
+        ).fetchone() == (1,)
+    finally:
+        connection.close()
 
 
 @pytest.mark.parametrize(
