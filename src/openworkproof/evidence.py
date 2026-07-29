@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+from itertools import islice
 import json
 import os
 from pathlib import Path
@@ -17,28 +18,37 @@ import tempfile
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
+    Ed25519PublicKey,
 )
 import rfc8785
 
+from openworkproof.composition import (
+    AuthorizationCausalityError,
+    replay_authorization_causality,
+)
 from openworkproof.models import (
     ACTION_RECEIPT_ADAPTER,
     AcceptanceReceipt,
     ActionReceiptEnvelope,
     AgentRequest,
     ApplyPatchArguments,
+    ApprovalDecisionReceipt,
     ApprovalRequestedReceipt,
     CapabilityGrant,
     CompositionCause,
     ComposeProofArguments,
+    CreatePrProposalArguments,
     GrantConsumedReceipt,
     GrantIssuedReceipt,
     GrantRevokedReceipt,
     PatchResultEvidence,
+    RepoReadArguments,
     RollbackReceipt,
     RunTestsArguments,
     SidecarEvent,
     SystemEventReceipt,
     TestResultEvidence,
+    TerminationDecisionReceipt,
     ToolCallReceipt,
     WorkOrder,
     _load_canonical_json,
@@ -48,6 +58,13 @@ from openworkproof.predicates import (
     EvaluationContext,
     evaluate_required_predicates,
     select_required_predicates,
+)
+from openworkproof.policy import (
+    AuthorizationPolicyError,
+    _child_policy_decision as _policy_child_decision,
+    _replay_grant_quota_history as _policy_quota_replay,
+    _validate_grant_history_semantics as _policy_history_replay,
+    replay_authorization_policy,
 )
 from openworkproof.repo_tools import (
     ResolutionManifest,
@@ -66,6 +83,8 @@ from openworkproof.signing import (
 from openworkproof.state import (
     TaskState,
     _agent_direct_call_is_authorized,
+    _validate_contract_expiry,
+    _validate_termination,
     append_receipt,
     apply_state_transition,
 )
@@ -140,6 +159,11 @@ class ChildGrantIssuanceCommittedError(RuntimeError):
             "child Grant issuance committed but completion was indeterminate"
         )
         self.receipt = receipt
+
+
+@dataclass(frozen=True)
+class AuthorizationChainResult:
+    """Immutable success marker for a fully validated authorization chain."""
 
 
 class GrantRevocationError(RuntimeError):
@@ -984,7 +1008,7 @@ def _replay_receipt_publication_ledger(
         grants,
         attempts,
     )
-    _validate_grant_history_semantics(
+    _policy_history_replay(
         work_order,
         receipts,
         grants,
@@ -1154,7 +1178,7 @@ def _validate_authoritative_receipt_predicates(
         raise ValueError("predicate authority replay is incomplete")
     tip = receipts[-1]
     grant = grants.get(receipt.grant_id)
-    quota_states = _replay_grant_quota_history(
+    quota_states = _policy_quota_replay(
         work_order,
         receipts,
         grants,
@@ -4515,6 +4539,15 @@ def _bounded_rows(
     return rows
 
 
+def _bounded_input(values, *, cap: int, label: str):
+    bounded = tuple(islice(values, cap + 1))
+    if len(bounded) > cap:
+        raise _child_issuance_error(
+            f"{label} exceeds its bounded input capacity"
+        )
+    return bounded
+
+
 def _derive_protocol_transaction_version(
     *,
     action_receipts,
@@ -5259,582 +5292,350 @@ def _validate_grant_event_index(
         )
 
 
-def _parent_remaining_quota(
-    parent: CapabilityGrant,
-    grants: dict[str, CapabilityGrant],
-    receipts,
-) -> dict[str, int]:
-    remaining = {
-        "tool_calls": parent.quota.tool_calls,
-        "repair_rounds": parent.quota.repair_rounds,
-    }
-    for receipt in receipts:
-        charge = receipt.quota_charge
-        if charge is not None and charge.grant_id == parent.grant_id:
-            remaining[charge.metric] -= charge.amount
-    for child in grants.values():
-        if child.parent_grant_id != parent.grant_id:
-            continue
-        remaining["tool_calls"] -= child.quota.tool_calls
-        remaining["repair_rounds"] -= child.quota.repair_rounds
-    return remaining
-
-
-def _child_policy_decision(
+def _authorization_public_keys_snapshot(
     work_order: WorkOrder,
-    parent: CapabilityGrant,
-    candidate: CapabilityGrant,
-    request: AgentRequest,
-    signing_binding,
-    bindings: dict[str, object],
-    now: datetime,
-    effective_grants: dict[str, CapabilityGrant],
-    receipts,
-) -> tuple[bool, str | None]:
-    manager = bindings["Manager"]
-    developer = bindings["Developer"]
-    verifier = bindings["Verifier"]
-    matching_subjects = tuple(
-        binding
-        for binding in (developer, verifier)
-        if (
-            candidate.subject_agent_id == binding.subject_id
-            and candidate.subject_key_id == binding.key_id
-        )
+    public_keys: Mapping[str, Ed25519PublicKey],
+) -> dict[str, Ed25519PublicKey]:
+    expected_key_ids = tuple(
+        binding.key_id for binding in work_order.key_bindings
     )
-    authority_valid = (
-        signing_binding.role == "Manager"
-        and signing_binding.key_id == manager.key_id
-        and parent.subject_agent_id == manager.subject_id
-        and parent.subject_key_id == manager.key_id
-        and request.actor_id == manager.subject_id
-        and request.actor_key_id == manager.key_id
-    )
-    subject_valid = len(matching_subjects) == 1
-    if not authority_valid or not subject_valid:
-        return False, "ROLE_DENIED"
-
-    tools_valid = (
-        set(candidate.allowed_tools) <= set(parent.allowed_tools)
-        and set(candidate.allowed_tools) <= set(work_order.allowed_tools)
-    )
-    roots_valid = (
-        _roots_within(
-            candidate.allowed_read_roots,
-            parent.allowed_read_roots,
-        )
-        and _roots_within(
-            candidate.allowed_read_roots,
-            work_order.allowed_read_roots,
-        )
-        and _roots_within(
-            candidate.allowed_write_roots,
-            parent.allowed_write_roots,
-        )
-        and _roots_within(
-            candidate.allowed_write_roots,
-            work_order.allowed_write_roots,
-        )
-    )
-    verifier_write_valid = not (
-        matching_subjects[0].role == "Verifier"
-        and candidate.allowed_write_roots
-    )
-    if matching_subjects[0].role == "Verifier":
-        role_tools = {"owp.run_tests"}
-    else:
-        role_tools = {
-            "owp.apply_patch",
-            "owp.repo_read",
-            "owp.rollback_patch",
-        }
-        if any(
-            profile.test_mode == "developer"
-            for profile in work_order.test_profiles
-        ):
-            role_tools.add("owp.run_tests")
-    role_tools_valid = set(candidate.allowed_tools) <= role_tools
-    time_valid = (
-        work_order.issued_at
-        <= candidate.issued_at
-        <= candidate.valid_from
-        < candidate.expires_at
-        == work_order.deadline
-        and parent.valid_from
-        <= candidate.issued_at
-        <= candidate.valid_from
-        < candidate.expires_at
-        <= parent.expires_at
-        and parent.valid_from <= now <= parent.expires_at
-        and 0
-        <= (now - candidate.issued_at).total_seconds()
-        <= 300
-    )
-    rights_valid = (
-        candidate.may_delegate is False
-        and candidate.usage_mode in {"single_use", "metered"}
-    )
-    remaining = _parent_remaining_quota(
-        parent,
-        effective_grants,
-        receipts,
-    )
-    quota_valid = (
-        candidate.quota.tool_calls <= remaining["tool_calls"]
-        and candidate.quota.repair_rounds
-        <= remaining["repair_rounds"]
-    )
-    if not quota_valid:
-        return False, "QUOTA_EXHAUSTED"
-    if not (
-        tools_valid
-        and role_tools_valid
-        and roots_valid
-        and verifier_write_valid
-        and time_valid
-        and rights_valid
-    ):
-        return False, "CAPABILITY_DENIED"
-    return True, None
-
-
-@dataclass(frozen=True)
-class _GrantReplayState:
-    remaining_tool_calls: int
-    remaining_repair_rounds: int
-    use_count: int
-    revoked: bool
-
-
-def _replay_grant_quota_history(
-    work_order: WorkOrder,
-    receipts,
-    grants: dict[str, CapabilityGrant],
-) -> dict[str, _GrantReplayState]:
-    mutable: dict[str, dict[str, int | bool]] = {}
-
-    def add_grant(grant: CapabilityGrant) -> None:
-        if grant.grant_id in mutable:
-            raise _child_issuance_error(
-                "Grant quota replay encountered duplicate authority"
-            )
-        mutable[grant.grant_id] = {
-            "tool_calls": grant.quota.tool_calls,
-            "repair_rounds": grant.quota.repair_rounds,
-            "use_count": 0,
-            "revoked": False,
-        }
-
-    def consume_authority(grant: CapabilityGrant) -> None:
-        state = mutable.get(grant.grant_id)
-        if state is None or state["revoked"] is True:
-            raise _child_issuance_error(
-                "Grant quota replay references inactive authority"
-            )
-        if grant.usage_mode == "single_use" and state["use_count"] != 0:
-            raise _child_issuance_error(
-                "single-use Grant was consumed more than once"
-            )
-        state["use_count"] = int(state["use_count"]) + 1
-
-    charge_types = (
-        GrantConsumedReceipt,
-        ToolCallReceipt,
-        ApprovalRequestedReceipt,
-        RollbackReceipt,
-    )
-
-    def validate_direct_call(receipt, *, require_active: bool):
-        grant = grants.get(receipt.grant_id)
-        state = mutable.get(receipt.grant_id)
-        request = receipt.nested_claim
-        elapsed = (
-            receipt.occurred_at - request.requested_at
-        ).total_seconds()
-        if (
-            grant is None
-            or state is None
-            or receipt.actor_id != grant.subject_agent_id
-            or receipt.actor_key_id != grant.subject_key_id
-            or request.actor_id != grant.subject_agent_id
-            or request.actor_key_id != grant.subject_key_id
-            or request.signer_key_id != grant.subject_key_id
-            or request.grant_id != grant.grant_id
-            or request.work_order_digest != work_order.digest
-            or request.requested_at < work_order.issued_at
-            or request.requested_at > work_order.deadline
-            or receipt.occurred_at < work_order.issued_at
-            or receipt.occurred_at > work_order.deadline
-            or elapsed < 0
-            or elapsed > 300
-        ):
-            raise _child_issuance_error(
-                "Grant call binding failed semantic replay"
-            )
-        role_authorized = _agent_direct_call_is_authorized(
-            receipt,
-            work_order,
-        )
-        if require_active and not role_authorized:
-            raise _child_issuance_error(
-                "Grant direct-call role failed semantic replay"
-            )
-        if require_active and (
-            state["revoked"] is True
-            or request.tool_name not in grant.allowed_tools
-            or request.requested_at < grant.valid_from
-            or request.requested_at > grant.expires_at
-            or receipt.occurred_at < grant.valid_from
-            or receipt.occurred_at > grant.expires_at
-        ):
-            raise _child_issuance_error(
-                "Grant charge authority failed semantic replay"
-            )
-        return grant, state, role_authorized
-
-    for receipt in receipts:
-        if isinstance(receipt, GrantIssuedReceipt):
-            if (
-                receipt.policy_decision != "allow"
-                or receipt.execution_status != "succeeded"
-            ):
-                continue
-            grant = grants.get(receipt.issued_grant_id)
-            if grant is None:
-                raise _child_issuance_error(
-                    "Grant quota replay cannot resolve issuance"
-                )
-            if grant.parent_grant_id is None:
-                add_grant(grant)
-                continue
-            parent = grants.get(grant.parent_grant_id)
-            parent_state = mutable.get(grant.parent_grant_id)
-            if parent is None or parent_state is None:
-                raise _child_issuance_error(
-                    "Grant quota replay references non-prior parent"
-                )
-            consume_authority(parent)
-            for metric in ("tool_calls", "repair_rounds"):
-                remaining = int(parent_state[metric]) - getattr(
-                    grant.quota,
-                    metric,
-                )
-                if remaining < 0:
-                    raise _child_issuance_error(
-                        "Grant quota replay over-allocates parent"
-                    )
-                parent_state[metric] = remaining
-            add_grant(grant)
-            continue
-
-        if isinstance(receipt, GrantRevokedReceipt):
-            if (
-                receipt.policy_decision != "allow"
-                or receipt.execution_status != "succeeded"
-            ):
-                if receipt.quota_charge is not None:
-                    raise _child_issuance_error(
-                        "denied Grant receipt cannot charge quota"
-                    )
-                continue
-            authorizer = grants.get(receipt.authorizing_grant_id)
-            target_state = mutable.get(receipt.revoked_grant_id)
-            if authorizer is None or target_state is None:
-                raise _child_issuance_error(
-                    "Grant quota replay cannot resolve revocation"
-                )
-            consume_authority(authorizer)
-            target_state["revoked"] = True
-            continue
-
-        if not isinstance(receipt, charge_types):
-            if (
-                receipt.policy_decision == "deny"
-                and receipt.quota_charge is not None
-            ):
-                raise _child_issuance_error(
-                    "denied Grant receipt cannot charge quota"
-                )
-            continue
-        if receipt.policy_decision == "deny":
-            if receipt.quota_charge is not None:
-                raise _child_issuance_error(
-                    "denied Grant receipt cannot charge quota"
-                )
-            if (
-                isinstance(receipt, GrantConsumedReceipt)
-                and receipt.amount != 1
-            ):
-                raise _child_issuance_error(
-                    "start_retry must consume exactly one repair round"
-                )
-            _, _, role_authorized = validate_direct_call(
-                receipt,
-                require_active=False,
-            )
-            role_denied = receipt.policy_error_code == "ROLE_DENIED"
-            if role_authorized == role_denied:
-                raise _child_issuance_error(
-                    "denied Grant role decision failed semantic replay"
-                )
-            continue
-        charge = receipt.quota_charge
-        if charge is None:
-            raise _child_issuance_error(
-                "started Grant receipt must charge quota"
-            )
-        if (
-            isinstance(receipt, GrantConsumedReceipt)
-            and receipt.amount != 1
-        ):
-            raise _child_issuance_error(
-                "start_retry must consume exactly one repair round"
-            )
-        grant, state, _ = validate_direct_call(
-            receipt,
-            require_active=True,
-        )
-        if charge.grant_id != grant.grant_id:
-            raise _child_issuance_error(
-                "Grant charge does not match direct call"
-            )
-        remaining = int(state[charge.metric])
-        if charge.amount > remaining:
-            raise _child_issuance_error(
-                "Grant quota is exhausted"
-            )
-        expected_after = remaining - charge.amount
-        if charge.remaining_after != expected_after:
-            raise _child_issuance_error(
-                "Grant quota remaining_after failed semantic replay"
-            )
-        consume_authority(grant)
-        state[charge.metric] = expected_after
-
-    if set(mutable) != set(grants):
-        raise _child_issuance_error(
-            "Grant quota replay is incomplete"
-        )
-    return {
-        grant_id: _GrantReplayState(
-            remaining_tool_calls=int(state["tool_calls"]),
-            remaining_repair_rounds=int(state["repair_rounds"]),
-            use_count=int(state["use_count"]),
-            revoked=bool(state["revoked"]),
-        )
-        for grant_id, state in mutable.items()
-    }
-
-
-def _validate_grant_history_semantics(
-    work_order: WorkOrder,
-    receipts,
-    grants: dict[str, CapabilityGrant],
-    attempts: dict[str, CapabilityGrant],
-) -> dict[str, _GrantReplayState]:
-    bindings = {
-        binding.role: binding for binding in work_order.key_bindings
-    }
-    manager = bindings["Manager"]
-    prior_effective: dict[str, CapabilityGrant] = {}
-    prior_receipts = []
-    seen_attempts: set[str] = set()
-    revoked_grants: set[str] = set()
-    root_seen = False
-    for receipt in receipts:
-        if isinstance(receipt, GrantRevokedReceipt):
-            authorizer = prior_effective.get(
-                receipt.authorizing_grant_id
-            )
-            target = prior_effective.get(receipt.revoked_grant_id)
-            request = receipt.nested_claim
-            binding_invalid = (
-                authorizer is None
-                or authorizer.parent_grant_id is not None
-                or target is None
-                or target.parent_grant_id != authorizer.grant_id
-                or target.grant_id in revoked_grants
-                or receipt.state_before != receipt.state_after
-                or receipt.actor_id != manager.subject_id
-                or receipt.actor_key_id != manager.key_id
-                or request.actor_id != manager.subject_id
-                or request.actor_key_id != manager.key_id
-                or request.signer_key_id != manager.key_id
-                or request.work_order_digest != work_order.digest
-                or request.grant_id != authorizer.grant_id
-                or request.tool_name != "owp.revoke_grant"
-                or request.requested_at < work_order.issued_at
-                or request.requested_at > work_order.deadline
-                or receipt.occurred_at < request.requested_at
-                or (
-                    receipt.occurred_at - request.requested_at
-                ).total_seconds()
-                > 300
-                or receipt.occurred_at > work_order.deadline
-            )
-            allowed_invalid = (
-                receipt.policy_decision == "allow"
-                and (
-                    authorizer is None
-                    or receipt.policy_error_code is not None
-                    or receipt.execution_status != "succeeded"
-                    or receipt.execution_error_code is not None
-                    or request.requested_at < authorizer.valid_from
-                    or request.requested_at > authorizer.expires_at
-                    or receipt.occurred_at < authorizer.valid_from
-                    or receipt.occurred_at > authorizer.expires_at
-                )
-            )
-            denied_invalid = (
-                receipt.policy_decision == "deny"
-                and (
-                    receipt.policy_error_code is None
-                    or receipt.execution_status != "denied"
-                    or receipt.execution_error_code is not None
-                    or receipt.quota_charge is not None
-                )
-            )
-            if (
-                binding_invalid
-                or allowed_invalid
-                or denied_invalid
-                or receipt.policy_decision not in {"allow", "deny"}
-            ):
-                raise _child_issuance_error(
-                    "Grant revocation history failed semantic replay"
-                )
-            if receipt.policy_decision == "deny":
-                prior_receipts.append(receipt)
-                continue
-            revoked_grants.add(target.grant_id)
-            prior_receipts.append(receipt)
-            continue
-        if not isinstance(receipt, GrantIssuedReceipt):
-            prior_receipts.append(receipt)
-            continue
-        if receipt.parent_grant_id is None:
-            root = grants.get(receipt.issued_grant_id)
-            request = receipt.nested_claim
-            if (
-                root_seen
-                or receipt.sequence != 1
-                or root is None
-                or root.parent_grant_id is not None
-                or receipt.candidate_grant_digest != root.digest
-                or receipt.actor_id != manager.subject_id
-                or receipt.actor_key_id != manager.key_id
-                or not _request_matches_candidate_issuer(
-                    request,
-                    manager,
-                )
-                or request.work_order_digest != work_order.digest
-                or request.grant_id != root.grant_id
-                or request.tool_name != "owp.activate_root_grant"
-                or request.requested_at < work_order.issued_at
-                or request.requested_at > work_order.deadline
-                or request.requested_at < root.valid_from
-                or request.requested_at > root.expires_at
-                or receipt.occurred_at < request.requested_at
-                or (
-                    receipt.occurred_at - request.requested_at
-                ).total_seconds()
-                > 300
-                or receipt.occurred_at < root.valid_from
-                or receipt.occurred_at > root.expires_at
-            ):
-                raise _child_issuance_error(
-                    "root activation history failed semantic replay"
-                )
-            root_seen = True
-            prior_effective[root.grant_id] = root
-            prior_receipts.append(receipt)
-            continue
-
-        parent = prior_effective.get(receipt.parent_grant_id)
-        if receipt.policy_decision == "allow":
-            candidate = grants.get(receipt.issued_grant_id)
-        else:
-            candidate = attempts.get(
-                receipt.candidate_grant_digest
-            )
-        if parent is None or candidate is None:
-            raise _child_issuance_error(
-                "Grant history references non-prior authority"
-            )
-        signing_binding = _child_signing_binding(
-            work_order,
-            candidate,
-        )
-        request = receipt.nested_claim
-        if (
-            receipt.actor_id != signing_binding.subject_id
-            or receipt.actor_key_id != signing_binding.key_id
-            or not _request_matches_candidate_issuer(
-                request,
-                signing_binding,
-            )
-            or candidate.parent_grant_id != parent.grant_id
-            or request.work_order_digest != work_order.digest
-            or request.grant_id != parent.grant_id
-            or request.tool_name != "owp.delegate_grant"
-            or request.requested_at < work_order.issued_at
-            or request.requested_at > work_order.deadline
-            or receipt.occurred_at < request.requested_at
-            or (
-                receipt.occurred_at - request.requested_at
-            ).total_seconds()
-            > 300
-        ):
-            raise _child_issuance_error(
-                "Grant history request binding failed semantic replay"
-            )
-        allowed, error_code = _child_policy_decision(
-            work_order,
-            parent,
-            candidate,
-            request,
-            signing_binding,
-            bindings,
-            receipt.occurred_at,
-            prior_effective,
-            tuple(prior_receipts),
-        )
-        if receipt.policy_decision == "allow":
-            if (
-                not allowed
-                or error_code is not None
-                or receipt.policy_error_code is not None
-                or receipt.execution_status != "succeeded"
-                or receipt.issued_grant_id != candidate.grant_id
-            ):
-                raise _child_issuance_error(
-                    "allowed Grant history fails policy replay"
-                )
-            prior_effective[candidate.grant_id] = candidate
-        else:
-            if (
-                allowed
-                or error_code is None
-                or receipt.policy_error_code != error_code
-                or receipt.execution_status != "denied"
-            ):
-                raise _child_issuance_error(
-                    "denied Grant history fails policy replay"
-                )
-            seen_attempts.add(candidate.digest)
-        prior_receipts.append(receipt)
     if (
-        not root_seen
-        or set(prior_effective) != set(grants)
-        or seen_attempts != set(attempts)
+        len(expected_key_ids) != 5
+        or any(
+            not isinstance(key_id_value, str)
+            for key_id_value in expected_key_ids
+        )
+        or len(set(expected_key_ids)) != 5
     ):
         raise _child_issuance_error(
-            "Grant history replay is incomplete"
+            "WorkOrder must bind exactly five unique public keys"
         )
-    return _replay_grant_quota_history(
-        work_order,
-        receipts,
-        grants,
+    try:
+        supplied_key_ids = tuple(
+            islice(public_keys, len(expected_key_ids) + 1)
+        )
+    except Exception as error:
+        raise _child_issuance_error(
+            "authorization key iteration failed"
+        ) from error
+    if (
+        len(supplied_key_ids) != len(expected_key_ids)
+        or any(
+            not isinstance(key_id_value, str)
+            for key_id_value in supplied_key_ids
+        )
+        or len(set(supplied_key_ids)) != len(supplied_key_ids)
+        or set(supplied_key_ids) != set(expected_key_ids)
+    ):
+        raise _child_issuance_error(
+            "authorization key set must exactly match WorkOrder bindings"
+        )
+    snapshot: dict[str, Ed25519PublicKey] = {}
+    for key_id_value in expected_key_ids:
+        try:
+            public_key = public_keys[key_id_value]
+        except Exception as error:
+            raise _child_issuance_error(
+                "authorization public key access failed"
+            ) from error
+        if (
+            not isinstance(public_key, Ed25519PublicKey)
+            or key_id(public_key) != key_id_value
+        ):
+            raise _child_issuance_error(
+                "authorization chain references an unknown public key"
+            )
+        snapshot[key_id_value] = public_key
+    return snapshot
+
+
+def _authorization_memory_ledger(
+    work_order: WorkOrder,
+    grants: tuple[CapabilityGrant, ...],
+    attempts: tuple[CapabilityGrant, ...],
+    receipts: tuple[ActionReceiptEnvelope, ...],
+) -> sqlite3.Connection:
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(":memory:")
+        connection.execute("PRAGMA foreign_keys = ON")
+        _create_schema(connection)
+        connection.execute(
+            "INSERT INTO work_orders VALUES (?, ?)",
+            (
+                work_order.digest,
+                _canonical_json(work_order.model_dump(mode="json")),
+            ),
+        )
+        for grant, kind in (
+            *((item, "effective") for item in grants),
+            *((item, "attempt") for item in attempts),
+        ):
+            connection.execute(
+                "INSERT INTO grant_id_reservations VALUES (?, ?, ?, ?)",
+                (grant.grant_id, work_order.digest, grant.digest, kind),
+            )
+        for grant in sorted(
+            grants,
+            key=lambda item: item.parent_grant_id is not None,
+        ):
+            connection.execute(
+                "INSERT INTO grants VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    grant.grant_id,
+                    work_order.digest,
+                    grant.parent_grant_id,
+                    grant.subject_agent_id,
+                    grant.usage_mode,
+                    _canonical_json(grant.model_dump(mode="json")),
+                ),
+            )
+        for candidate in attempts:
+            connection.execute(
+                "INSERT INTO grant_attempts VALUES (?, ?, ?, ?)",
+                (
+                    candidate.digest,
+                    candidate.grant_id,
+                    work_order.digest,
+                    _canonical_json(candidate.model_dump(mode="json")),
+                ),
+            )
+        for receipt in receipts:
+            connection.execute(
+                "INSERT INTO receipts VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    receipt.receipt_id,
+                    work_order.digest,
+                    receipt.nonce,
+                    receipt.sequence,
+                    receipt.previous_receipt_digest,
+                    _canonical_json(receipt.model_dump(mode="json")),
+                ),
+            )
+        for receipt in receipts:
+            for parent_id in receipt.parent_receipt_ids:
+                connection.execute(
+                    "INSERT INTO receipt_parents VALUES (?, ?)",
+                    (receipt.receipt_id, parent_id),
+                )
+            charge = receipt.quota_charge
+            issued = (
+                receipt.issued_grant_id
+                if isinstance(receipt, GrantIssuedReceipt)
+                and receipt.policy_decision == "allow"
+                else None
+            )
+            if issued is not None or charge is not None:
+                event_id = hashlib.sha256(
+                    (
+                        f"grant-issued:{receipt.receipt_id}"
+                        if issued is not None
+                        else f"grant-charge:{receipt.receipt_id}"
+                    ).encode("ascii")
+                ).hexdigest()
+                connection.execute(
+                    "INSERT INTO grant_events VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        event_id,
+                        receipt.receipt_id,
+                        (
+                            issued
+                            if issued is not None
+                            else charge.grant_id
+                        ),
+                        (
+                            "grant_issued"
+                            if issued is not None
+                            else receipt.event_type
+                        ),
+                        None if issued is not None else charge.metric,
+                        None if issued is not None else charge.amount,
+                    ),
+                )
+        version = _derive_protocol_transaction_version(
+            action_receipts=receipts,
+            acceptance_receipts=(),
+        )
+        connection.execute(
+            "INSERT INTO sequence_counter VALUES (1, ?)",
+            (len(receipts) + 1,),
+        )
+        connection.execute(
+            "INSERT INTO work_order_state VALUES (1, ?, ?, ?)",
+            (
+                work_order.digest,
+                receipts[-1].state_after if receipts else "issued",
+                version,
+            ),
+        )
+        return connection
+    except Exception as primary_error:
+        _, close_errors = _close_with_retries(connection)
+        raise _child_issuance_error(
+            "authorization memory ledger construction failed"
+        ) from _error_cause(
+            "authorization memory ledger construction failures",
+            [primary_error, *close_errors],
+        )
+
+
+def _validate_authorization_system_events(
+    work_order: WorkOrder,
+    receipts: tuple[ActionReceiptEnvelope, ...],
+) -> None:
+    for receipt in receipts:
+        if not (
+            isinstance(receipt, SystemEventReceipt)
+            and receipt.system_event_name == "contract_expired"
+        ):
+            continue
+        cause = receipt.cause
+        if (
+            getattr(cause, "deadline", None) != work_order.deadline
+            or getattr(cause, "observed_at", None) != receipt.occurred_at
+            or getattr(cause, "tip_receipt_digest", None)
+            != receipt.previous_receipt_digest
+            or receipt.occurred_at <= work_order.deadline
+        ):
+            raise _child_issuance_error(
+                "contract expiry failed historical replay"
+            )
+
+
+def validate_grant_chain(
+    work_order: WorkOrder,
+    grants: Iterable[CapabilityGrant],
+    grant_attempts: Iterable[CapabilityGrant],
+    receipts: Iterable[ActionReceiptEnvelope],
+    public_keys: Mapping[str, Ed25519PublicKey],
+) -> AuthorizationChainResult:
+    """Validate an offline Sidecar-signed authorization assertion chain.
+
+    The five-input API has no ResolutionManifest preimage bytes. Path replay
+    therefore verifies the signed request/resolution assertion, its exact
+    vector closure, and child-Grant scope; it does not independently rehash
+    ResolutionManifest bytes.
+    """
+
+    connection: sqlite3.Connection | None = None
+    result: AuthorizationChainResult | None = None
+    primary_error: Exception | None = None
+    try:
+        if (
+            not isinstance(work_order, WorkOrder)
+            or not isinstance(public_keys, Mapping)
+            or not verify_work_order_identity_bindings(work_order)
+        ):
+            raise ValueError("WorkOrder identity bindings are invalid")
+        key_snapshot = _authorization_public_keys_snapshot(
+            work_order,
+            public_keys,
+        )
+        maintainer = work_order.key_bindings[0]
+        if not verify_payload(
+            "work-order",
+            work_order.model_dump(mode="json"),
+            key_snapshot[maintainer.key_id],
+        ):
+            raise ValueError("WorkOrder signature is invalid")
+        supplied_grants = _bounded_input(
+            grants,
+            cap=MAX_EFFECTIVE_GRANTS,
+            label="effective Grants",
+        )
+        supplied_attempts = _bounded_input(
+            grant_attempts,
+            cap=MAX_GRANT_ATTEMPTS,
+            label="Grant attempts",
+        )
+        supplied_receipts = _bounded_input(
+            receipts,
+            cap=MAX_RECEIPTS,
+            label="receipt history",
+        )
+        connection = _authorization_memory_ledger(
+            work_order,
+            supplied_grants,
+            supplied_attempts,
+            supplied_receipts,
+        )
+        validated_receipts = _validated_receipt_prefix(
+            connection,
+            work_order,
+        )
+        effective = _validated_effective_grants(
+            connection,
+            work_order,
+            validated_receipts,
+        )
+        attempts = _validated_grant_attempts(
+            connection,
+            work_order,
+            validated_receipts,
+        )
+        _validate_grant_reservation_closure(
+            connection,
+            work_order,
+            effective,
+            attempts,
+        )
+        try:
+            causal_state = replay_authorization_causality(
+                work_order,
+                validated_receipts,
+            )
+            replay_authorization_policy(
+                work_order,
+                effective,
+                attempts,
+                validated_receipts,
+                causal_state,
+            )
+        except AuthorizationCausalityError as error:
+            raise _child_issuance_error(
+                "receipt is denied by the frozen state machine"
+            ) from error
+        except AuthorizationPolicyError as error:
+            message = (
+                "PR approval failed historical replay"
+                if "allowed tool failed" in str(error)
+                else "receipt is denied by the frozen state machine"
+                if "frozen state machine" in str(error)
+                else "authorization policy failed historical replay"
+            )
+            raise _child_issuance_error(
+                message
+            ) from error
+        _validate_authorization_system_events(
+            work_order,
+            validated_receipts,
+        )
+        _validate_grant_event_index(
+            connection,
+            validated_receipts,
+            effective,
+        )
+        result = AuthorizationChainResult()
+    except Exception as error:
+        primary_error = error
+    closed, close_errors = _close_with_retries(connection)
+    if primary_error is None and closed:
+        assert result is not None
+        return result
+    if (
+        isinstance(primary_error, ChildGrantIssuanceError)
+        and not close_errors
+    ):
+        raise primary_error
+    errors = (
+        ([] if primary_error is None else [primary_error])
+        + list(close_errors)
+    )
+    raise _child_issuance_error(
+        "authorization chain validation failed closed"
+    ) from _error_cause(
+        "authorization chain validation failures",
+        errors,
     )
 
 
@@ -5849,7 +5650,7 @@ def _build_child_receipt(
     policy_error_code: str | None,
     sequence: int,
     state: str,
-    tip_receipt_id: str,
+    parent_receipt_ids: tuple[str, ...],
     tip_receipt_digest: str,
 ) -> GrantIssuedReceipt:
     occurred_at = (
@@ -5876,7 +5677,7 @@ def _build_child_receipt(
         "quota_charge": None,
         "state_before": state,
         "state_after": state,
-        "parent_receipt_ids": [tip_receipt_id],
+        "parent_receipt_ids": list(parent_receipt_ids),
         "correlation_factors": None,
         "evidence_refs": [],
         "occurred_at": occurred_at,
@@ -5950,7 +5751,7 @@ def _confirm_committed_child_receipt(
             grants,
             attempts,
         )
-        _validate_grant_history_semantics(
+        _policy_history_replay(
             work_order,
             receipts,
             grants,
@@ -6063,7 +5864,7 @@ def issue_child_grant(
             effective_grants,
             grant_attempts,
         )
-        _validate_grant_history_semantics(
+        grant_states = _policy_history_replay(
             work_order,
             receipts,
             effective_grants,
@@ -6121,16 +5922,16 @@ def issue_child_grant(
             raise _child_issuance_error(
                 "child Grant issuance is unavailable in current state"
             )
-        allowed, policy_error_code = _child_policy_decision(
+        allowed, policy_error_code = _policy_child_decision(
             work_order,
             parent,
+            grant_states.get(parent.grant_id),
             candidate,
             request,
             signing_binding,
             bindings,
             utc_now,
-            effective_grants,
-            receipts,
+            state_allowed=True,
         )
         kind = "effective" if allowed else "attempt"
         count = (
@@ -6142,8 +5943,12 @@ def issue_child_grant(
             raise _child_issuance_error(
                 f"child Grant {kind} capacity is exhausted"
             )
-        tip_receipt_id = tip.receipt_id
         tip_receipt_digest = tip.digest
+        authorizing_issuance = _successful_issuance_for(
+            receipts,
+            parent.grant_id,
+        )
+        parent_receipt_ids = (authorizing_issuance.receipt_id,)
         receipt = _build_child_receipt(
             work_order,
             candidate,
@@ -6154,7 +5959,7 @@ def issue_child_grant(
             policy_error_code=policy_error_code,
             sequence=sequence,
             state=current_state,
-            tip_receipt_id=tip_receipt_id,
+            parent_receipt_ids=parent_receipt_ids,
             tip_receipt_digest=tip_receipt_digest,
         )
         receipt_result = receipt
@@ -6244,16 +6049,17 @@ def issue_child_grant(
                 _canonical_json(receipt.model_dump(mode="json")),
             ),
         )
-        connection.execute(
-            """
-            INSERT INTO receipt_parents (
-                child_receipt_id,
-                parent_receipt_id
+        for parent_receipt_id in parent_receipt_ids:
+            connection.execute(
+                """
+                INSERT INTO receipt_parents (
+                    child_receipt_id,
+                    parent_receipt_id
+                )
+                VALUES (?, ?)
+                """,
+                (receipt.receipt_id, parent_receipt_id),
             )
-            VALUES (?, ?)
-            """,
-            (receipt.receipt_id, tip_receipt_id),
-        )
         if allowed:
             connection.execute(
                 """
@@ -6362,7 +6168,7 @@ def _build_revocation_receipt(
     revocation_reason: str,
     sequence: int,
     state: str,
-    tip_receipt_id: str,
+    parent_receipt_ids: tuple[str, ...],
     tip_receipt_digest: str,
 ) -> GrantRevokedReceipt:
     occurred_at = (
@@ -6399,7 +6205,7 @@ def _build_revocation_receipt(
         "quota_charge": None,
         "state_before": state,
         "state_after": state,
-        "parent_receipt_ids": [tip_receipt_id],
+        "parent_receipt_ids": list(parent_receipt_ids),
         "correlation_factors": None,
         "evidence_refs": [],
         "occurred_at": occurred_at,
@@ -6444,7 +6250,7 @@ def _confirm_committed_revocation_receipt(
             grants,
             attempts,
         )
-        _validate_grant_history_semantics(
+        _policy_history_replay(
             work_order,
             receipts,
             grants,
@@ -6523,7 +6329,7 @@ def revoke_child_grant(
                 effective_grants,
                 grant_attempts,
             )
-            _validate_grant_history_semantics(
+            _policy_history_replay(
                 work_order,
                 receipts,
                 effective_grants,
@@ -6642,6 +6448,22 @@ def revoke_child_grant(
             raise _grant_revocation_error(
                 "Grant revocation is unavailable in current state"
             )
+        parent_receipts = sorted(
+            (
+                _successful_issuance_for(
+                    receipts,
+                    authorizing_grant_id,
+                ),
+                _successful_issuance_for(
+                    receipts,
+                    revoked_grant_id,
+                ),
+            ),
+            key=lambda item: item.sequence,
+        )
+        parent_receipt_ids = tuple(
+            item.receipt_id for item in parent_receipts
+        )
         receipt = _build_revocation_receipt(
             work_order,
             request,
@@ -6652,7 +6474,7 @@ def revoke_child_grant(
             revocation_reason=revocation_reason,
             sequence=sequence,
             state=current_state,
-            tip_receipt_id=tip.receipt_id,
+            parent_receipt_ids=parent_receipt_ids,
             tip_receipt_digest=tip.digest,
         )
         receipt_result = receipt
@@ -6677,16 +6499,17 @@ def revoke_child_grant(
                 _canonical_json(receipt.model_dump(mode="json")),
             ),
         )
-        connection.execute(
-            """
-            INSERT INTO receipt_parents (
-                child_receipt_id,
-                parent_receipt_id
+        for parent_receipt_id in parent_receipt_ids:
+            connection.execute(
+                """
+                INSERT INTO receipt_parents (
+                    child_receipt_id,
+                    parent_receipt_id
+                )
+                VALUES (?, ?)
+                """,
+                (receipt.receipt_id, parent_receipt_id),
             )
-            VALUES (?, ?)
-            """,
-            (receipt.receipt_id, tip.receipt_id),
-        )
         state_update = connection.execute(
             """
             UPDATE work_order_state
@@ -6765,6 +6588,14 @@ def _retry_error(message: str) -> RetryConsumptionError:
 
 
 @dataclass(frozen=True)
+class _ReworkEpisode:
+    root_issuance: GrantIssuedReceipt
+    failure: ToolCallReceipt
+    rollback: RollbackReceipt
+    target_patch: ToolCallReceipt
+
+
+@dataclass(frozen=True)
 class _RetryEpisode:
     root_issuance: GrantIssuedReceipt
     failure: ToolCallReceipt
@@ -6796,6 +6627,198 @@ def _successful_issuance_for(
             "retry episode Grant issuance is ambiguous"
         )
     return matches[0]
+
+
+def _reconstruct_rework_episode(
+    *,
+    work_order: WorkOrder,
+    receipts,
+    grants: dict[str, CapabilityGrant],
+    current_state: str,
+    retry_receipt: GrantConsumedReceipt | None = None,
+) -> _ReworkEpisode:
+    by_id = _receipt_by_id(receipts)
+    root_matches = tuple(
+        receipt
+        for receipt in receipts
+        if (
+            isinstance(receipt, GrantIssuedReceipt)
+            and receipt.parent_grant_id is None
+            and receipt.policy_decision == "allow"
+            and receipt.execution_status == "succeeded"
+        )
+    )
+    if len(root_matches) != 1:
+        raise RetryEvidenceIntegrityError(
+            "retry root issuance is unavailable"
+        )
+    failures = tuple(
+        receipt
+        for receipt in receipts
+        if (
+            isinstance(receipt, ToolCallReceipt)
+            and receipt.tool_name == "owp.run_tests"
+            and receipt.policy_decision == "allow"
+            and receipt.execution_status == "succeeded"
+            and receipt.state_before in {"running", "retrying"}
+            and receipt.state_after == "needs_rework"
+        )
+    )
+    if not failures:
+        raise RetryEvidenceIntegrityError(
+            "retry episode failure is unavailable"
+        )
+    failure = failures[-1]
+    try:
+        failure.validate_predicates_against(work_order)
+    except ValueError as error:
+        raise RetryEvidenceIntegrityError(
+            "retry failure predicates do not match the WorkOrder"
+        ) from error
+    postcondition_ids = {
+        spec.predicate_id
+        for spec in work_order.postconditions
+        if failure.tool_name in spec.applies_to_tools
+    }
+    if not any(
+        result.predicate_id in postcondition_ids
+        and not result.passed
+        and result.error_code == "PREDICATE_FALSE"
+        for result in failure.predicate_results
+    ):
+        raise RetryEvidenceIntegrityError(
+            "retry failure has no false Verifier postcondition"
+        )
+    verifier_grant = grants.get(failure.grant_id)
+    verifier_issuance = _successful_issuance_for(
+        receipts,
+        failure.grant_id,
+    )
+    parent_receipts = tuple(
+        by_id.get(parent_id) for parent_id in failure.parent_receipt_ids
+    )
+    patch_matches = tuple(
+        receipt
+        for receipt in parent_receipts
+        if (
+            isinstance(receipt, ToolCallReceipt)
+            and receipt.tool_name == "owp.apply_patch"
+            and receipt.policy_decision == "allow"
+            and receipt.execution_status == "succeeded"
+        )
+    )
+    if (
+        verifier_grant is None
+        or verifier_grant.subject_agent_id != failure.actor_id
+        or verifier_grant.subject_key_id != failure.actor_key_id
+        or len(patch_matches) != 1
+        or failure.parent_receipt_ids
+        != (
+            verifier_issuance.receipt_id,
+            patch_matches[0].receipt_id,
+        )
+    ):
+        raise RetryEvidenceIntegrityError(
+            "retry episode failure DAG is invalid or ambiguous"
+        )
+    target_patch = patch_matches[0]
+    episode_end = (
+        retry_receipt.sequence if retry_receipt is not None else None
+    )
+    rollbacks = tuple(
+        receipt
+        for receipt in receipts
+        if (
+            isinstance(receipt, RollbackReceipt)
+            and receipt.sequence > failure.sequence
+            and (
+                episode_end is None
+                or receipt.sequence < episode_end
+            )
+            and receipt.policy_decision == "allow"
+            and receipt.execution_status == "succeeded"
+            and receipt.target_patch_receipt_id
+            == target_patch.receipt_id
+            and receipt.target_patch_digest == target_patch.digest
+        )
+    )
+    if len(rollbacks) != 1:
+        raise RetryEvidenceIntegrityError(
+            "retry episode rollback is unavailable or ambiguous"
+        )
+    rollback = rollbacks[0]
+    developer_grant = grants.get(rollback.grant_id)
+    developer_issuance = _successful_issuance_for(
+        receipts,
+        rollback.grant_id,
+    )
+    expected_rollback_parents = (
+        developer_issuance.receipt_id,
+        target_patch.receipt_id,
+        failure.receipt_id,
+    )
+    if (
+        developer_grant is None
+        or developer_grant.subject_agent_id != rollback.actor_id
+        or developer_grant.subject_key_id != rollback.actor_key_id
+        or rollback.parent_receipt_ids != expected_rollback_parents
+        or rollback.state_before != "needs_rework"
+        or rollback.state_after != "needs_rework"
+    ):
+        raise RetryEvidenceIntegrityError(
+            "retry episode rollback DAG is invalid"
+        )
+    tail = tuple(
+        receipt
+        for receipt in receipts
+        if failure.sequence < receipt.sequence
+        and (
+            retry_receipt is None
+            or receipt.sequence < retry_receipt.sequence
+        )
+    )
+    if (
+        retry_receipt is not None or current_state == "needs_rework"
+    ) and any(receipt.state_after != "needs_rework" for receipt in tail):
+        raise RetryEvidenceIntegrityError(
+            "retry episode is not the current immutable episode"
+    )
+    if retry_receipt is not None:
+        quota_charge = retry_receipt.quota_charge
+        retry_issuance = _successful_issuance_for(
+            receipts,
+            retry_receipt.grant_id,
+        )
+        expected_retry_parents = tuple(
+            receipt.receipt_id
+            for receipt in sorted(
+                (retry_issuance, failure, rollback),
+                key=lambda receipt: receipt.sequence,
+            )
+        )
+        if (
+            retry_receipt.state_before != "needs_rework"
+            or retry_receipt.state_after != "retrying"
+            or retry_receipt.policy_decision != "allow"
+            or retry_receipt.execution_status != "succeeded"
+            or retry_receipt.metric != "repair_rounds"
+            or retry_receipt.amount != 1
+            or quota_charge is None
+            or quota_charge.grant_id != retry_receipt.grant_id
+            or quota_charge.metric != "repair_rounds"
+            or quota_charge.amount != 1
+            or retry_receipt.parent_receipt_ids
+            != expected_retry_parents
+        ):
+            raise RetryEvidenceIntegrityError(
+                "retry charge is not bound to the reconstructed episode"
+            )
+    return _ReworkEpisode(
+        root_issuance=root_matches[0],
+        failure=failure,
+        rollback=rollback,
+        target_patch=target_patch,
+    )
 
 
 def _close_evidence_descriptors(descriptors: list[int]) -> None:
@@ -7092,98 +7115,19 @@ def _validated_retry_episode(
     evidence_root: Path,
     current_state: str,
 ) -> _RetryEpisode:
-    by_id = _receipt_by_id(receipts)
-    root_matches = tuple(
-        receipt
-        for receipt in receipts
-        if (
-            isinstance(receipt, GrantIssuedReceipt)
-            and receipt.parent_grant_id is None
-            and receipt.policy_decision == "allow"
-            and receipt.execution_status == "succeeded"
-        )
+    episode = _reconstruct_rework_episode(
+        work_order=work_order,
+        receipts=receipts,
+        grants=grants,
+        current_state=current_state,
     )
-    if len(root_matches) != 1:
-        raise RetryEvidenceIntegrityError(
-            "retry root issuance is unavailable"
-        )
-    failures = tuple(
-        receipt
-        for receipt in receipts
-        if (
-            isinstance(receipt, ToolCallReceipt)
-            and receipt.tool_name == "owp.run_tests"
-            and receipt.policy_decision == "allow"
-            and receipt.execution_status == "succeeded"
-            and receipt.state_before in {"running", "retrying"}
-            and receipt.state_after == "needs_rework"
-        )
-    )
-    if not failures:
-        raise RetryEvidenceIntegrityError(
-            "retry episode failure is unavailable"
-        )
-    failure = failures[-1]
-    try:
-        failure.validate_predicates_against(work_order)
-    except ValueError as error:
-        raise RetryEvidenceIntegrityError(
-            "retry failure predicates do not match the WorkOrder"
-        ) from error
-    postcondition_ids = {
-        spec.predicate_id
-        for spec in work_order.postconditions
-        if failure.tool_name in spec.applies_to_tools
-    }
-    if not any(
-        result.predicate_id in postcondition_ids
-        and not result.passed
-        and result.error_code == "PREDICATE_FALSE"
-        for result in failure.predicate_results
-    ):
-        raise RetryEvidenceIntegrityError(
-            "retry failure has no false Verifier postcondition"
-        )
-    verifier_grant = grants.get(failure.grant_id)
-    verifier_issuance = _successful_issuance_for(
-        receipts,
-        failure.grant_id,
-    )
-    parent_receipts = tuple(
-        by_id[parent_id] for parent_id in failure.parent_receipt_ids
-    )
-    patch_matches = tuple(
-        receipt
-        for receipt in parent_receipts
-        if (
-            isinstance(receipt, ToolCallReceipt)
-            and receipt.tool_name == "owp.apply_patch"
-            and receipt.policy_decision == "allow"
-            and receipt.execution_status == "succeeded"
-        )
-    )
-    if (
-        verifier_grant is None
-        or verifier_grant.subject_agent_id != failure.actor_id
-        or verifier_grant.subject_key_id != failure.actor_key_id
-        or len(patch_matches) != 1
-        or failure.parent_receipt_ids
-        != (
-            verifier_issuance.receipt_id,
-            patch_matches[0].receipt_id,
-        )
-    ):
-        raise RetryEvidenceIntegrityError(
-            "retry episode failure DAG is invalid or ambiguous"
-        )
-    target_patch = patch_matches[0]
     patch_result = _read_committed_patch_result(
         connection,
         work_order=work_order,
-        target_patch=target_patch,
+        target_patch=episode.target_patch,
         evidence_root=evidence_root,
     )
-    failure_arguments = failure.request_arguments
+    failure_arguments = episode.failure.request_arguments
     verifier_profile = next(
         (
             profile
@@ -7217,64 +7161,20 @@ def _validated_retry_episode(
         raise RetryEvidenceIntegrityError(
             "retry failure does not test the target patch result"
         )
-    rollbacks = tuple(
-        receipt
-        for receipt in receipts
-        if (
-            isinstance(receipt, RollbackReceipt)
-            and receipt.sequence > failure.sequence
-            and receipt.policy_decision == "allow"
-            and receipt.execution_status == "succeeded"
-            and receipt.target_patch_receipt_id
-            == target_patch.receipt_id
-            and receipt.target_patch_digest == target_patch.digest
-        )
-    )
-    if len(rollbacks) != 1:
-        raise RetryEvidenceIntegrityError(
-            "retry episode rollback is unavailable or ambiguous"
-        )
-    rollback = rollbacks[0]
-    developer_grant = grants.get(rollback.grant_id)
-    developer_issuance = _successful_issuance_for(
-        receipts,
-        rollback.grant_id,
-    )
-    expected_rollback_parents = (
-        developer_issuance.receipt_id,
-        target_patch.receipt_id,
-        failure.receipt_id,
-    )
-    if (
-        developer_grant is None
-        or developer_grant.subject_agent_id != rollback.actor_id
-        or developer_grant.subject_key_id != rollback.actor_key_id
-        or rollback.parent_receipt_ids != expected_rollback_parents
-        or rollback.state_before != "needs_rework"
-        or rollback.state_after != "needs_rework"
-    ):
-        raise RetryEvidenceIntegrityError(
-            "retry episode rollback DAG is invalid"
-        )
     try:
-        rollback.validate_target_patch(target_patch, patch_result)
+        episode.rollback.validate_target_patch(
+            episode.target_patch,
+            patch_result,
+        )
     except ValueError as error:
         raise RetryEvidenceIntegrityError(
             "retry rollback does not match the committed patch result"
         ) from error
-    if current_state == "needs_rework" and any(
-        receipt.state_after != "needs_rework"
-        for receipt in receipts[failure.sequence - 1 :]
-        if receipt.sequence > failure.sequence
-    ):
-        raise RetryEvidenceIntegrityError(
-            "retry episode is not the current immutable episode"
-        )
     return _RetryEpisode(
-        root_issuance=root_matches[0],
-        failure=failure,
-        rollback=rollback,
-        target_patch=target_patch,
+        root_issuance=episode.root_issuance,
+        failure=episode.failure,
+        rollback=episode.rollback,
+        target_patch=episode.target_patch,
         patch_result=patch_result,
     )
 
@@ -7376,7 +7276,7 @@ def _confirm_committed_retry_receipt(
             grants,
             attempts,
         )
-        _validate_grant_history_semantics(
+        _policy_history_replay(
             work_order,
             receipts,
             grants,
@@ -7442,7 +7342,7 @@ def start_retry(
                 grants,
                 attempts,
             )
-            replay = _validate_grant_history_semantics(
+            replay = _policy_history_replay(
                 work_order,
                 receipts,
                 grants,

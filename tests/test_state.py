@@ -689,6 +689,49 @@ def test_same_state_tool_gate_uses_exact_direct_call_role_matrix(
 
 
 @pytest.mark.parametrize(
+    "state",
+    ("locally_verified", "evidence_incomplete"),
+)
+def test_manager_compose_requires_canonical_context_in_same_state(
+    state: str,
+    signed_work_order: WorkOrder,
+    sidecar_receipt_factory,
+    ephemeral_role_keys: dict,
+    public_keys: dict,
+    fixed_now: datetime,
+) -> None:
+    receipt = _tool_receipt(
+        tool_name="owp.compose_proof",
+        actor_role="Manager",
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        ephemeral_role_keys=ephemeral_role_keys,
+    )
+    raw = receipt.model_dump(mode="json")
+    raw["state_before"] = state
+    raw["state_after"] = state
+    receipt = ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            raw,
+            ephemeral_role_keys["Sidecar"][0],
+        )
+    )
+
+    api = _api()
+    decision = api.append_receipt(
+        work_order=signed_work_order,
+        state=api.TaskState(state),
+        receipt=receipt,
+        public_keys=public_keys,
+        now=fixed_now,
+    )
+
+    assert decision.allowed is False
+    assert decision.error_code == "COMPOSITION_VALIDATOR_UNAVAILABLE"
+
+
+@pytest.mark.parametrize(
     ("actor_role", "expected_error"),
     [
         ("Developer", "TRANSITION_CONTEXT_UNAVAILABLE"),

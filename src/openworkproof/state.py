@@ -638,6 +638,17 @@ def append_receipt(
             "STATE_DENIED",
             "Agent direct call is outside the frozen role matrix",
         )
+    if (
+        isinstance(parsed, ToolCallReceipt)
+        and parsed.tool_name == "owp.compose_proof"
+        and role == "Manager"
+        and state
+        in {TaskState.LOCALLY_VERIFIED, TaskState.EVIDENCE_INCOMPLETE}
+    ):
+        return _denied(
+            "COMPOSITION_VALIDATOR_UNAVAILABLE",
+            "same-state composition requires canonical receipt history",
+        )
     if state is TaskState.EVIDENCE_INCOMPLETE:
         if (
             isinstance(parsed, ToolCallReceipt)

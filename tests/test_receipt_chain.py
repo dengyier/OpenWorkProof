@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -19,9 +21,14 @@ import pytest
 import rfc8785
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
+    Ed25519PublicKey,
 )
 
 import openworkproof.evidence as evidence
+from openworkproof.composition import (
+    AuthorizationCausalityError,
+    replay_authorization_causality,
+)
 from openworkproof.evidence import (
     BUSY_TIMEOUT_MS,
     LedgerInitializationError,
@@ -32,6 +39,10 @@ from openworkproof.evidence import (
     load_authoritative_work_order,
 )
 from openworkproof.models import AgentRequest, CapabilityGrant, WorkOrder
+from openworkproof.policy import (
+    AuthorizationPolicyError,
+    _validate_grant_history_semantics as _policy_history_replay,
+)
 from openworkproof.repo_tools import (
     ResolutionManifest,
     ResolutionManifestEntry,
@@ -40,12 +51,75 @@ from openworkproof.repo_tools import (
 from openworkproof.signing import digest_payload, key_id, sign_payload
 
 
+def _validate_grant_history_semantics(*args, **kwargs):
+    try:
+        return _policy_history_replay(*args, **kwargs)
+    except AuthorizationPolicyError as error:
+        raise evidence.ChildGrantIssuanceError(str(error)) from error
+
+
 def _jcs_digest(value: object) -> str:
     return hashlib.sha256(rfc8785.dumps(value)).hexdigest()
 
 
 def _canonical_json(value: object) -> str:
     return rfc8785.dumps(value).decode("utf-8")
+
+
+class _FiniteSinglePass:
+    def __init__(self, count: int) -> None:
+        self._values = iter(range(count))
+        self.iter_calls = 0
+        self.yielded = 0
+
+    def __iter__(self):
+        if self.iter_calls:
+            raise AssertionError("finite input was iterated more than once")
+        self.iter_calls += 1
+        return self
+
+    def __next__(self):
+        value = next(self._values)
+        self.yielded += 1
+        return value
+
+
+class _CountingPublicKeyMapping(Mapping[object, object]):
+    def __init__(
+        self,
+        entries: tuple[tuple[object, object], ...],
+        *,
+        iteration_error_at: int | None = None,
+        value_error_key: object | None = None,
+    ) -> None:
+        self._entries = entries
+        self._iteration_error_at = iteration_error_at
+        self._value_error_key = value_error_key
+        self.iter_calls = 0
+        self.yielded = 0
+        self.value_reads: dict[object, int] = {}
+
+    def __iter__(self):
+        if self.iter_calls:
+            raise AssertionError("public key mapping was iterated more than once")
+        self.iter_calls += 1
+        for index, (key, _) in enumerate(self._entries):
+            if index == self._iteration_error_at:
+                raise RuntimeError("public key iteration failed")
+            self.yielded += 1
+            yield key
+
+    def __len__(self) -> int:
+        raise AssertionError("public key mapping length must not be read")
+
+    def __getitem__(self, key: object) -> object:
+        self.value_reads[key] = self.value_reads.get(key, 0) + 1
+        if key == self._value_error_key:
+            raise RuntimeError("public key value read failed")
+        for candidate, value in self._entries:
+            if candidate == key:
+                return value
+        raise KeyError(key)
 
 
 def _resigned_work_order(
@@ -66,6 +140,87 @@ def _resigned_work_order(
             "signer_key_id": signed["signer_key_id"],
             "signature": signed["signature"],
         }
+    )
+
+
+def _work_order_with_tool_predicate(
+    work_order: WorkOrder,
+    private_key: Ed25519PrivateKey,
+    tool_name: str,
+) -> WorkOrder:
+    original = next(
+        spec
+        for spec in work_order.preconditions
+        if spec.name == "tool_allowed"
+    )
+    replacement = type(original).from_parts(
+        name=original.name,
+        version=original.version,
+        applies_to_tools=original.applies_to_tools,
+        arguments={
+            **original.arguments,
+            "tool_name": tool_name,
+        },
+    )
+    preconditions = tuple(
+        sorted(
+            (
+                replacement if spec is original else spec
+                for spec in work_order.preconditions
+            ),
+            key=lambda spec: spec.predicate_id,
+        )
+    )
+    return _resigned_work_order(
+        work_order,
+        private_key,
+        json_updates={
+            "preconditions": [
+                spec.model_dump(mode="json")
+                for spec in preconditions
+            ],
+        },
+        model_updates={"preconditions": preconditions},
+    )
+
+
+def _work_order_with_pr_chain_predicates(
+    work_order: WorkOrder,
+    private_key: Ed25519PrivateKey,
+) -> WorkOrder:
+    original = next(
+        spec
+        for spec in work_order.preconditions
+        if spec.name == "tool_allowed"
+    )
+    replacement = type(original).from_parts(
+        name=original.name,
+        version=original.version,
+        applies_to_tools=("owp.create_pr_proposal",),
+        arguments={
+            **original.arguments,
+            "tool_name": "owp.create_pr_proposal",
+        },
+    )
+    preconditions = tuple(
+        sorted(
+            (
+                replacement if spec is original else spec
+                for spec in work_order.preconditions
+            ),
+            key=lambda spec: spec.predicate_id,
+        )
+    )
+    return _resigned_work_order(
+        work_order,
+        private_key,
+        json_updates={
+            "preconditions": [
+                spec.model_dump(mode="json")
+                for spec in preconditions
+            ],
+        },
+        model_updates={"preconditions": preconditions},
     )
 
 
@@ -391,6 +546,399 @@ def _activate_ledger_root(
         sidecar_private_key=role_keys["Sidecar"][0],
         clock=lambda: now,
     )
+
+
+def test_validate_grant_chain_accepts_signed_root_history(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now,
+) -> None:
+    ledger_path = tmp_path / "ledger.sqlite3"
+    initialize_ledger(ledger_path, signed_work_order)
+    receipt = activate_root_grant(
+        ledger_path,
+        signed_root_grant,
+        _activation_request(
+            signed_work_order,
+            signed_root_grant,
+            ephemeral_role_keys,
+            actor_role="Manager",
+            nonce="a" * 64,
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        clock=lambda: fixed_now,
+    )
+    supplied_keys = _CountingPublicKeyMapping(
+        tuple(public_keys.items())
+    )
+
+    result = evidence.validate_grant_chain(
+        signed_work_order,
+        (signed_root_grant,),
+        (),
+        (receipt,),
+        supplied_keys,
+    )
+
+    assert result == evidence.AuthorizationChainResult()
+    assert dataclasses.is_dataclass(evidence.AuthorizationChainResult)
+    assert dataclasses.fields(evidence.AuthorizationChainResult) == ()
+    assert supplied_keys.iter_calls == 1
+    assert supplied_keys.yielded == 5
+    assert supplied_keys.value_reads == {
+        binding.key_id: 1 for binding in signed_work_order.key_bindings
+    }
+    with pytest.raises(FrozenInstanceError):
+        result.invalid = True
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("extra", "missing", "wrong_type", "wrong_fingerprint"),
+)
+def test_validate_grant_chain_rejects_invalid_public_key_set(
+    tmp_path: Path,
+    case: str,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now,
+) -> None:
+    ledger_path = tmp_path / f"invalid-public-key-{case}.sqlite3"
+    initialize_ledger(ledger_path, signed_work_order)
+    receipt = activate_root_grant(
+        ledger_path,
+        signed_root_grant,
+        _activation_request(
+            signed_work_order,
+            signed_root_grant,
+            ephemeral_role_keys,
+            actor_role="Manager",
+            nonce=_grant_id(f"invalid-public-key-{case}:activation"),
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        clock=lambda: fixed_now,
+    )
+    supplied_keys = dict(public_keys)
+    bound_key_id = signed_work_order.key_bindings[0].key_id
+    replacement = Ed25519PrivateKey.generate().public_key()
+    if case == "extra":
+        supplied_keys[key_id(replacement)] = replacement
+    elif case == "missing":
+        supplied_keys.pop(bound_key_id)
+    elif case == "wrong_type":
+        supplied_keys[bound_key_id] = object()
+    else:
+        supplied_keys[bound_key_id] = replacement
+
+    with pytest.raises(evidence.ChildGrantIssuanceError):
+        evidence.validate_grant_chain(
+            signed_work_order,
+            (signed_root_grant,),
+            (),
+            (receipt,),
+            supplied_keys,
+        )
+
+
+def test_validate_grant_chain_stops_at_six_public_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    signed_work_order: WorkOrder,
+    public_keys: dict[str, Ed25519PublicKey],
+) -> None:
+    extras = tuple(
+        (f"ed25519:{index:064x}", Ed25519PrivateKey.generate().public_key())
+        for index in range(1, 20)
+    )
+    supplied = _CountingPublicKeyMapping(
+        (*tuple(public_keys.items()), *extras)
+    )
+    builder_called = False
+
+    def forbidden_builder(*args, **kwargs):
+        nonlocal builder_called
+        builder_called = True
+        raise AssertionError("oversized key mapping reached builder")
+
+    monkeypatch.setattr(
+        evidence,
+        "_authorization_memory_ledger",
+        forbidden_builder,
+    )
+
+    with pytest.raises(evidence.ChildGrantIssuanceError):
+        evidence.validate_grant_chain(
+            signed_work_order,
+            (),
+            (),
+            (),
+            supplied,
+        )
+
+    assert supplied.iter_calls == 1
+    assert supplied.yielded == 6
+    assert supplied.value_reads == {}
+    assert builder_called is False
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "missing",
+        "duplicate",
+        "non_str",
+        "wrong_type",
+        "wrong_fingerprint",
+        "iteration_error",
+        "value_error",
+    ),
+)
+def test_validate_grant_chain_fails_closed_for_hostile_public_key_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    signed_work_order: WorkOrder,
+    public_keys: dict[str, Ed25519PublicKey],
+) -> None:
+    entries = list(public_keys.items())
+    expected_key = signed_work_order.key_bindings[0].key_id
+    iteration_error_at = None
+    value_error_key = None
+    if case == "missing":
+        entries.pop()
+    elif case == "duplicate":
+        entries[-1] = entries[0]
+    elif case == "non_str":
+        entries[-1] = (object(), entries[-1][1])
+    elif case == "wrong_type":
+        entries[0] = (expected_key, object())
+    elif case == "wrong_fingerprint":
+        entries[0] = (
+            expected_key,
+            Ed25519PrivateKey.generate().public_key(),
+        )
+    elif case == "iteration_error":
+        iteration_error_at = 2
+    else:
+        value_error_key = expected_key
+    supplied = _CountingPublicKeyMapping(
+        tuple(entries),
+        iteration_error_at=iteration_error_at,
+        value_error_key=value_error_key,
+    )
+
+    def forbidden_builder(*args, **kwargs):
+        raise AssertionError("invalid key mapping reached builder")
+
+    monkeypatch.setattr(
+        evidence,
+        "_authorization_memory_ledger",
+        forbidden_builder,
+    )
+
+    with pytest.raises(evidence.ChildGrantIssuanceError) as caught:
+        evidence.validate_grant_chain(
+            signed_work_order,
+            (),
+            (),
+            (),
+            supplied,
+        )
+
+    assert type(caught.value) is evidence.ChildGrantIssuanceError
+    assert supplied.iter_calls == 1
+    if case == "iteration_error":
+        assert any(
+            isinstance(error, RuntimeError)
+            and "public key iteration failed" in str(error)
+            for error in _exception_tree(caught.value)
+        )
+    if case == "value_error":
+        assert any(
+            isinstance(error, RuntimeError)
+            and "public key value read failed" in str(error)
+            for error in _exception_tree(caught.value)
+        )
+
+
+def test_validate_grant_chain_calls_shared_reducers_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict[str, Ed25519PublicKey],
+    fixed_now,
+) -> None:
+    ledger_path = tmp_path / "thin-orchestrator.sqlite3"
+    initialize_ledger(ledger_path, signed_work_order)
+    receipt = activate_root_grant(
+        ledger_path,
+        signed_root_grant,
+        _activation_request(
+            signed_work_order,
+            signed_root_grant,
+            ephemeral_role_keys,
+            actor_role="Manager",
+            nonce=_grant_id("thin-orchestrator:activation"),
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        clock=lambda: fixed_now,
+    )
+    real_causality = evidence.replay_authorization_causality
+    real_policy = evidence.replay_authorization_policy
+    calls = {"causality": 0, "policy": 0}
+
+    def record_causality(*args, **kwargs):
+        calls["causality"] += 1
+        return real_causality(*args, **kwargs)
+
+    def record_policy(*args, **kwargs):
+        calls["policy"] += 1
+        return real_policy(*args, **kwargs)
+
+    monkeypatch.setattr(
+        evidence,
+        "replay_authorization_causality",
+        record_causality,
+    )
+    monkeypatch.setattr(
+        evidence,
+        "replay_authorization_policy",
+        record_policy,
+    )
+
+    assert evidence.validate_grant_chain(
+        signed_work_order,
+        (signed_root_grant,),
+        (),
+        (receipt,),
+        public_keys,
+    ) == evidence.AuthorizationChainResult()
+    assert calls == {"causality": 1, "policy": 1}
+
+
+def test_validate_grant_chain_recomputes_sidecar_event_digest_binding(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    from test_contract import system_input_digest
+
+    ledger_path = tmp_path / "ledger.sqlite3"
+    initialize_ledger(ledger_path, signed_work_order)
+    root = activate_root_grant(
+        ledger_path,
+        signed_root_grant,
+        _activation_request(
+            signed_work_order,
+            signed_root_grant,
+            ephemeral_role_keys,
+            actor_role="Manager",
+            nonce="b" * 64,
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        clock=lambda: fixed_now,
+    )
+    expiry = sidecar_receipt_factory(
+        state_before="running",
+        state_after="frozen",
+        event_type="system_event",
+        event_name="contract_expired",
+        sequence=2,
+        previous_receipt_digest=root.digest,
+        parent_receipt_ids=(root.receipt_id,),
+        occurred_at="2026-01-02T00:00:01Z",
+    )
+    raw = expiry.model_dump(mode="json")
+    raw["cause"]["tip_receipt_digest"] = "c" * 64
+    input_digest = system_input_digest(
+        "contract_expired",
+        signed_work_order.digest,
+        raw["cause"],
+    )
+    raw["input_digest"] = input_digest
+    raw["nested_claim"]["cause"] = copy.deepcopy(raw["cause"])
+    raw["nested_claim"]["input_digest"] = input_digest
+    raw["nested_claim_digest"] = input_digest
+    mismatched = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            raw,
+            ephemeral_role_keys["Sidecar"][0],
+        )
+    )
+
+    with pytest.raises(evidence.ChildGrantIssuanceError):
+        evidence.validate_grant_chain(
+            signed_work_order,
+            (signed_root_grant,),
+            (),
+            (root, mismatched),
+            public_keys,
+        )
+
+
+def test_validate_grant_chain_rejects_human_decision_without_request(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    ledger_path = tmp_path / "ledger.sqlite3"
+    initialize_ledger(ledger_path, signed_work_order)
+    root = activate_root_grant(
+        ledger_path,
+        signed_root_grant,
+        _activation_request(
+            signed_work_order,
+            signed_root_grant,
+            ephemeral_role_keys,
+            actor_role="Manager",
+            nonce="d" * 64,
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        clock=lambda: fixed_now,
+    )
+    orphan = sidecar_receipt_factory(
+        state_before="running",
+        state_after="running",
+        event_type="approval_decision",
+        actor_role="Maintainer",
+        sequence=2,
+        previous_receipt_digest=root.digest,
+        parent_receipt_ids=(root.receipt_id,),
+        occurred_at="2026-01-01T00:00:06Z",
+    )
+
+    with pytest.raises(evidence.ChildGrantIssuanceError):
+        evidence.validate_grant_chain(
+            signed_work_order,
+            (signed_root_grant,),
+            (),
+            (root, orphan),
+            public_keys,
+        )
 
 
 def _issue_child(
@@ -936,6 +1484,28 @@ class _CloseAlwaysFailsConnection(_FaultingConnection):
     def close(self) -> None:
         self.close_attempts += 1
         raise sqlite3.OperationalError("persistent close failure")
+
+    def force_close(self) -> None:
+        if not self.closed:
+            self._connection.close()
+            self.closed = True
+
+
+class _AuthorizationMemoryFaultConnection(_FaultingConnection):
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        fail_when: Callable[[str], bool],
+    ) -> None:
+        super().__init__(connection, fail_when=fail_when)
+        self.close_attempts = 0
+
+    def close(self) -> None:
+        self.close_attempts += 1
+        raise sqlite3.OperationalError(
+            "authorization memory close failed"
+        )
 
     def force_close(self) -> None:
         if not self.closed:
@@ -2061,7 +2631,7 @@ def test_manager_atomically_revokes_direct_child_without_deleting_or_charging(
         assert snapshot[0]["state"][0][2] == 3
         assert len(snapshot[0]["grants"]) == 2
         assert len(snapshot[0]["receipts"]) == 3
-        assert len(snapshot[1]) == 2
+        assert len(snapshot[1]) == 3
         assert len(snapshot[2]) == 2
     finally:
         connection.close()
@@ -2542,7 +3112,7 @@ def test_resigned_revocation_target_tamper_is_rejected_before_next_write(
             evidence.ChildGrantIssuanceError,
             match="revocation history failed semantic replay",
         ):
-            evidence._validate_grant_history_semantics(
+            _validate_grant_history_semantics(
                 replay_work_order,
                 replay_receipts,
                 replay_grants,
@@ -2676,7 +3246,7 @@ def test_committed_revocation_reports_one_committed_fact(
     try:
         after = _ledger_integrity_snapshot(after_connection)
         assert len(after[0]["receipts"]) == len(before[0]["receipts"]) + 1
-        assert len(after[1]) == len(before[1]) + 1
+        assert len(after[1]) == len(before[1]) + 2
         assert len(after[2]) == len(before[2])
         assert after[0]["sequence"][0][1] == (
             before[0]["sequence"][0][1] + 1
@@ -5182,6 +5752,7 @@ def _linked_tool_receipt(
     raw = receipt.model_dump(mode="json")
     raw.update(
         {
+            "work_order_digest": signed_work_order.digest,
             "receipt_id": _grant_id(f"{label}:receipt"),
             "grant_id": root.grant_id,
             "state_before": state_before,
@@ -5271,6 +5842,7 @@ def _linked_tool_receipt(
             }
         )
     claim = raw["nested_claim"]
+    claim["work_order_digest"] = signed_work_order.digest
     claim["grant_id"] = root.grant_id
     claim["arguments_digest"] = raw["arguments_digest"]
     claim["nonce"] = raw["nonce"]
@@ -5327,6 +5899,7 @@ def _grant_replay_context(
     ],
     now: datetime,
     child_updates: dict[str, object] | None = None,
+    child_subject_role: str = "Developer",
     with_child: bool = False,
 ):
     ledger_path = tmp_path / f"{label}.sqlite3"
@@ -5344,6 +5917,7 @@ def _grant_replay_context(
             root,
             role_keys,
             label=label,
+            subject_role=child_subject_role,
             updates=child_updates,
         )
         _issue_child(
@@ -5367,6 +5941,1064 @@ def _grant_replay_context(
     return ledger_path, child, receipts, grants, attempts
 
 
+@pytest.mark.parametrize(
+    ("field_name", "cap"),
+    (
+        ("grants", evidence.MAX_EFFECTIVE_GRANTS),
+        ("grant_attempts", evidence.MAX_GRANT_ATTEMPTS),
+        ("receipts", evidence.MAX_RECEIPTS),
+    ),
+)
+def test_validate_grant_chain_consumes_exact_cap_once(
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+    cap: int,
+    signed_work_order: WorkOrder,
+    public_keys: dict,
+) -> None:
+    supplied = _FiniteSinglePass(cap)
+
+    def stop_after_bounded_input(
+        work_order,
+        grants,
+        attempts,
+        receipts,
+    ):
+        selected = {
+            "grants": grants,
+            "grant_attempts": attempts,
+            "receipts": receipts,
+        }[field_name]
+        assert len(selected) == cap
+        raise evidence.ChildGrantIssuanceError(
+            "bounded input reached builder"
+        )
+
+    monkeypatch.setattr(
+        evidence,
+        "_authorization_memory_ledger",
+        stop_after_bounded_input,
+    )
+    inputs = {
+        "grants": (),
+        "grant_attempts": (),
+        "receipts": (),
+    }
+    inputs[field_name] = supplied
+
+    with pytest.raises(
+        evidence.ChildGrantIssuanceError,
+        match="bounded input reached builder",
+    ):
+        evidence.validate_grant_chain(
+            signed_work_order,
+            inputs["grants"],
+            inputs["grant_attempts"],
+            inputs["receipts"],
+            public_keys,
+        )
+
+    assert supplied.iter_calls == 1
+    assert supplied.yielded == cap
+
+
+@pytest.mark.parametrize(
+    ("field_name", "cap"),
+    (
+        ("grants", evidence.MAX_EFFECTIVE_GRANTS),
+        ("grant_attempts", evidence.MAX_GRANT_ATTEMPTS),
+        ("receipts", evidence.MAX_RECEIPTS),
+    ),
+)
+def test_validate_grant_chain_rejects_cap_plus_one_without_building(
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+    cap: int,
+    signed_work_order: WorkOrder,
+    public_keys: dict,
+) -> None:
+    supplied = _FiniteSinglePass(cap + 1)
+    builder_called = False
+
+    def forbidden_builder(*args, **kwargs):
+        nonlocal builder_called
+        builder_called = True
+        raise AssertionError("oversized input reached builder")
+
+    monkeypatch.setattr(
+        evidence,
+        "_authorization_memory_ledger",
+        forbidden_builder,
+    )
+    inputs = {
+        "grants": (),
+        "grant_attempts": (),
+        "receipts": (),
+    }
+    inputs[field_name] = supplied
+
+    with pytest.raises(
+        evidence.ChildGrantIssuanceError,
+        match="exceeds its bounded input capacity",
+    ):
+        evidence.validate_grant_chain(
+            signed_work_order,
+            inputs["grants"],
+            inputs["grant_attempts"],
+            inputs["receipts"],
+            public_keys,
+        )
+
+    assert supplied.iter_calls == 1
+    assert supplied.yielded == cap + 1
+    assert builder_called is False
+
+
+def test_validate_grant_chain_preserves_build_and_close_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    signed_work_order: WorkOrder,
+    public_keys: dict,
+) -> None:
+    real_connect = evidence.sqlite3.connect
+    wrapped: list[_AuthorizationMemoryFaultConnection] = []
+
+    def build_failing_connect(path: str):
+        connection = _AuthorizationMemoryFaultConnection(
+            real_connect(path),
+            fail_when=lambda statement: statement.startswith(
+                "INSERT INTO WORK_ORDERS"
+            ),
+        )
+        wrapped.append(connection)
+        return connection
+
+    monkeypatch.setattr(
+        evidence.sqlite3,
+        "connect",
+        build_failing_connect,
+    )
+    try:
+        with pytest.raises(
+            evidence.ChildGrantIssuanceError
+        ) as caught:
+            evidence.validate_grant_chain(
+                signed_work_order,
+                (),
+                (),
+                (),
+                public_keys,
+            )
+        errors = _exception_tree(caught.value)
+        assert any(
+            isinstance(error, sqlite3.OperationalError)
+            and "INSERT INTO WORK_ORDERS" in str(error)
+            for error in errors
+        )
+        assert any(
+            isinstance(error, sqlite3.OperationalError)
+            and "authorization memory close failed" in str(error)
+            for error in errors
+        )
+        assert wrapped[0].close_attempts == 3
+    finally:
+        for connection in wrapped:
+            connection.force_close()
+
+
+def test_validate_grant_chain_preserves_primary_and_final_close_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    signed_work_order: WorkOrder,
+    public_keys: dict,
+) -> None:
+    real_connect = evidence.sqlite3.connect
+    wrapped: list[_AuthorizationMemoryFaultConnection] = []
+
+    def close_failing_connect(path: str):
+        connection = _AuthorizationMemoryFaultConnection(
+            real_connect(path),
+            fail_when=lambda statement: False,
+        )
+        wrapped.append(connection)
+        return connection
+
+    def fail_validation(*args, **kwargs):
+        raise evidence.ChildGrantIssuanceError(
+            "primary authorization validation failed"
+        )
+
+    monkeypatch.setattr(
+        evidence.sqlite3,
+        "connect",
+        close_failing_connect,
+    )
+    monkeypatch.setattr(
+        evidence,
+        "_validated_receipt_prefix",
+        fail_validation,
+    )
+    try:
+        with pytest.raises(
+            evidence.ChildGrantIssuanceError
+        ) as caught:
+            evidence.validate_grant_chain(
+                signed_work_order,
+                (),
+                (),
+                (),
+                public_keys,
+            )
+        errors = _exception_tree(caught.value)
+        assert any(
+            isinstance(error, evidence.ChildGrantIssuanceError)
+            and "primary authorization validation failed" in str(error)
+            for error in errors
+        )
+        assert any(
+            isinstance(error, sqlite3.OperationalError)
+            and "authorization memory close failed" in str(error)
+            for error in errors
+        )
+        assert wrapped[0].close_attempts == 3
+    finally:
+        for connection in wrapped:
+            connection.force_close()
+
+
+def test_validate_grant_chain_rejects_child_without_authorizing_parent(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+) -> None:
+    _, child, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="child-without-authorizing-parent",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+    )
+    assert child is not None
+    child_issuance = receipts[-1]
+    raw = child_issuance.model_dump(mode="json")
+    raw["parent_receipt_ids"] = []
+    forged = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            raw,
+            ephemeral_role_keys["Sidecar"][0],
+        )
+    )
+
+    with pytest.raises(evidence.ChildGrantIssuanceError):
+        evidence.validate_grant_chain(
+            signed_work_order,
+            tuple(grants.values()),
+            tuple(attempts.values()),
+            (*receipts[:-1], forged),
+            public_keys,
+        )
+
+
+def test_validate_grant_chain_accepts_two_produced_child_issuances(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+) -> None:
+    ledger_path, _, _, _, _ = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="two-produced-children",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+    )
+    second = _child_grant(
+        signed_work_order,
+        signed_root_grant,
+        ephemeral_role_keys,
+        label="two-produced-children:second",
+    )
+    _issue_child(
+        ledger_path,
+        second,
+        _delegation_request(
+            signed_work_order,
+            signed_root_grant,
+            second,
+            ephemeral_role_keys,
+            actor_role="Manager",
+            nonce=_grant_id("two-produced-children:second-request"),
+        ),
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    receipts, grants, attempts = _grant_replay_inputs(
+        ledger_path,
+        signed_work_order,
+    )
+
+    replay_authorization_causality(signed_work_order, receipts)
+    result = evidence.validate_grant_chain(
+        signed_work_order,
+        tuple(grants.values()),
+        tuple(attempts.values()),
+        receipts,
+        public_keys,
+    )
+
+    assert isinstance(result, evidence.AuthorizationChainResult)
+
+
+def test_validate_grant_chain_accepts_produced_revocation_parents(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+) -> None:
+    ledger_path, child, _, _, _ = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="produced-revocation-parents",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+    )
+    assert child is not None
+    _revoke_child(
+        ledger_path,
+        signed_root_grant,
+        child,
+        _revocation_request(
+            signed_work_order,
+            signed_root_grant,
+            child,
+            ephemeral_role_keys,
+            actor_role="Manager",
+            nonce=_grant_id("produced-revocation-parents:revoke-request"),
+        ),
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    receipts, grants, attempts = _grant_replay_inputs(
+        ledger_path,
+        signed_work_order,
+    )
+
+    replay_authorization_causality(signed_work_order, receipts)
+    result = evidence.validate_grant_chain(
+        signed_work_order,
+        tuple(grants.values()),
+        tuple(attempts.values()),
+        receipts,
+        public_keys,
+    )
+
+    assert isinstance(result, evidence.AuthorizationChainResult)
+
+
+def test_validate_grant_chain_accepts_exact_capability_denial(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    _, child, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="false-capability-denial",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+    )
+    assert child is not None
+    base = sidecar_receipt_factory(
+        state_before="running",
+        state_after="running",
+        event_type="tool_call",
+        actor_role="Developer",
+        sequence=3,
+        previous_receipt_digest=receipts[-1].digest,
+        parent_receipt_ids=(receipts[-1].receipt_id,),
+        occurred_at="2026-01-01T00:00:06Z",
+    )
+    factors = base.correlation_factors.model_dump(mode="json")
+    for field_name in (
+        "toolchain_id",
+        "execution_context_id",
+        "container_instance_id_digest",
+        "fixed_test_source_digest",
+    ):
+        factors[field_name] = None
+    denied = _resign_linked_agent_receipt(
+        base,
+        grant_id=child.grant_id,
+        tool_name="owp.run_tests",
+        arguments=base.request_arguments.model_dump(mode="json"),
+        actor_role="Developer",
+        label="false-capability-denial:receipt",
+        role_keys=ephemeral_role_keys,
+        updates={
+            "sequence": 3,
+            "previous_receipt_digest": receipts[-1].digest,
+            "parent_receipt_ids": [receipts[-1].receipt_id],
+            "policy_decision": "deny",
+            "policy_error_code": "CAPABILITY_DENIED",
+            "execution_status": "denied",
+            "execution_error_code": None,
+            "quota_charge": None,
+            "output_digest": None,
+            "evidence_refs": [],
+            "correlation_factors": factors,
+        },
+    )
+    raw = denied.model_dump(mode="json")
+    quota_result = next(
+        result
+        for result in raw["predicate_results"]
+        if result["name"] == "quota_remaining"
+    )
+    quota_result["input"].update(
+        {
+            "grant_id": child.grant_id,
+            "grant_remaining_before": child.quota.tool_calls,
+            "ledger_prefix_digest": receipts[-1].digest,
+        }
+    )
+    quota_result["input_digest"] = _jcs_digest(
+        {
+            "domain": "openworkproof/predicate-input/v0.1",
+            "predicate_id": quota_result["predicate_id"],
+            "input": quota_result["input"],
+        }
+    )
+    denied = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            raw,
+            ephemeral_role_keys["Sidecar"][0],
+        )
+    )
+
+    result = evidence.validate_grant_chain(
+        signed_work_order,
+        tuple(grants.values()),
+        tuple(attempts.values()),
+        (*receipts, denied),
+        public_keys,
+    )
+    assert isinstance(result, evidence.AuthorizationChainResult)
+
+
+def test_validate_grant_chain_accepts_attenuated_child_history(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+) -> None:
+    _, child, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="valid-child-chain",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+    )
+
+    assert child is not None
+    assert isinstance(
+        evidence.validate_grant_chain(
+            signed_work_order,
+            tuple(grants.values()),
+            tuple(attempts.values()),
+            receipts,
+            public_keys,
+        ),
+        evidence.AuthorizationChainResult,
+    )
+
+
+def test_validate_grant_chain_rejects_same_state_verifier_success(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    _, child, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="same-state-verifier",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+        child_subject_role="Verifier",
+        child_updates={
+            "allowed_tools": ["owp.run_tests"],
+            "allowed_write_roots": [],
+        },
+    )
+    assert child is not None
+    base = sidecar_receipt_factory(
+        state_before="running",
+        state_after="running",
+        event_type="tool_call",
+        actor_role="Verifier",
+        sequence=3,
+        previous_receipt_digest=receipts[-1].digest,
+        parent_receipt_ids=(receipts[-1].receipt_id,),
+    )
+    receipt = _resign_linked_agent_receipt(
+        base,
+        grant_id=child.grant_id,
+        tool_name="owp.run_tests",
+        arguments=base.request_arguments.model_dump(mode="json"),
+        actor_role="Verifier",
+        label="same-state-verifier:receipt",
+        role_keys=ephemeral_role_keys,
+        updates={
+            "sequence": 3,
+            "previous_receipt_digest": receipts[-1].digest,
+            "parent_receipt_ids": [receipts[-1].receipt_id],
+            "occurred_at": "2026-01-01T00:00:06Z",
+            "quota_charge": {
+                "grant_id": child.grant_id,
+                "metric": "tool_calls",
+                "amount": 1,
+                "remaining_after": 1,
+            },
+        },
+    )
+    raw = receipt.model_dump(mode="json")
+    quota_result = next(
+        result
+        for result in raw["predicate_results"]
+        if result["name"] == "quota_remaining"
+    )
+    quota_result["input"].update(
+        {
+            "grant_id": child.grant_id,
+            "grant_remaining_before": 2,
+            "ledger_prefix_digest": receipts[-1].digest,
+        }
+    )
+    quota_result["input_digest"] = _jcs_digest(
+        {
+            "domain": "openworkproof/predicate-input/v0.1",
+            "predicate_id": quota_result["predicate_id"],
+            "input": quota_result["input"],
+        }
+    )
+    forged = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            raw,
+            ephemeral_role_keys["Sidecar"][0],
+        )
+    )
+
+    with pytest.raises(evidence.ChildGrantIssuanceError):
+        evidence.validate_grant_chain(
+            signed_work_order,
+            tuple(grants.values()),
+            tuple(attempts.values()),
+            (*receipts, forged),
+            public_keys,
+        )
+
+
+def test_validate_grant_chain_rejects_retry_without_rollback(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label="retry-without-rollback",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    receipts, grants, attempts = _grant_replay_inputs(
+        episode["ledger_path"],
+        signed_work_order,
+    )
+    assert receipts[-1] == episode["rollback"]
+    replay_authorization_causality(signed_work_order, receipts)
+    without_rollback = receipts[:-1]
+    failure = without_rollback[-1]
+    retry = _linked_grant_consumed_receipt(
+        grant=signed_root_grant,
+        sequence=6,
+        previous_receipt=failure,
+        remaining_after=0,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="retry-without-rollback:retry",
+        occurred_at="2026-01-01T00:00:06Z",
+    )
+    retry_raw = retry.model_dump(mode="json")
+    retry_raw["parent_receipt_ids"] = [
+        episode["root_issuance"].receipt_id,
+        failure.receipt_id,
+    ]
+    retry = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            retry_raw,
+            ephemeral_role_keys["Sidecar"][0],
+        )
+    )
+
+    with pytest.raises(AuthorizationCausalityError):
+        replay_authorization_causality(
+            signed_work_order,
+            (*without_rollback, retry),
+        )
+    with pytest.raises(
+        evidence.ChildGrantIssuanceError,
+        match="frozen state machine",
+    ):
+        evidence.validate_grant_chain(
+            signed_work_order,
+            tuple(grants.values()),
+            tuple(attempts.values()),
+            (*without_rollback, retry),
+            public_keys,
+        )
+
+
+def test_validate_grant_chain_rejects_late_non_frozen_termination(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    from test_state import _termination_receipt_at
+
+    _, _, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="late-termination",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+    )
+    termination = _termination_receipt_at(
+        state_before="running",
+        decided_at="2026-01-02T00:00:01Z",
+        occurred_at="2026-01-02T00:00:02Z",
+        sequence=2,
+        previous_receipt_digest=receipts[-1].digest,
+        parent_receipt_ids=(receipts[-1].receipt_id,),
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        ephemeral_role_keys=ephemeral_role_keys,
+    )
+
+    with pytest.raises(
+        evidence.ChildGrantIssuanceError,
+        match="frozen state machine",
+    ):
+        evidence.validate_grant_chain(
+            signed_work_order,
+            tuple(grants.values()),
+            tuple(attempts.values()),
+            (*receipts, termination),
+            public_keys,
+        )
+
+
+def test_validate_grant_chain_accepts_termination_by_deadline(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    from test_state import _termination_receipt_at
+
+    _, _, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="on-time-termination",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+    )
+    termination = _termination_receipt_at(
+        state_before="running",
+        decided_at="2026-01-01T23:59:58Z",
+        occurred_at="2026-01-01T23:59:59Z",
+        sequence=2,
+        previous_receipt_digest=receipts[-1].digest,
+        parent_receipt_ids=(receipts[-1].receipt_id,),
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        ephemeral_role_keys=ephemeral_role_keys,
+    )
+
+    replay_authorization_causality(
+        signed_work_order,
+        (*receipts, termination),
+    )
+    result = evidence.validate_grant_chain(
+        signed_work_order,
+        tuple(grants.values()),
+        tuple(attempts.values()),
+        (*receipts, termination),
+        public_keys,
+    )
+
+    assert isinstance(result, evidence.AuthorizationChainResult)
+
+
+def test_validate_grant_chain_accepts_frozen_termination_after_deadline(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    from test_state import _termination_receipt_at
+
+    _, _, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="frozen-termination",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+    )
+    expiry = sidecar_receipt_factory(
+        state_before="running",
+        state_after="frozen",
+        event_type="system_event",
+        event_name="contract_expired",
+        sequence=2,
+        previous_receipt_digest=receipts[-1].digest,
+        parent_receipt_ids=(receipts[-1].receipt_id,),
+        occurred_at="2026-01-02T00:00:01Z",
+    )
+    expiry_raw = expiry.model_dump(mode="json")
+    expiry_raw["receipt_id"] = _grant_id(
+        "frozen-termination:expiry-receipt"
+    )
+    expiry_raw["nonce"] = _grant_id("frozen-termination:expiry-nonce")
+    expiry = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            expiry_raw,
+            ephemeral_role_keys["Sidecar"][0],
+        )
+    )
+    termination = _termination_receipt_at(
+        state_before="frozen",
+        decided_at="2026-01-02T00:00:02Z",
+        occurred_at="2026-01-02T00:00:03Z",
+        sequence=3,
+        previous_receipt_digest=expiry.digest,
+        parent_receipt_ids=(expiry.receipt_id,),
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        ephemeral_role_keys=ephemeral_role_keys,
+    )
+
+    replay_authorization_causality(
+        signed_work_order,
+        (*receipts, expiry, termination),
+    )
+    result = evidence.validate_grant_chain(
+        signed_work_order,
+        tuple(grants.values()),
+        tuple(attempts.values()),
+        (*receipts, expiry, termination),
+        public_keys,
+    )
+
+    assert isinstance(result, evidence.AuthorizationChainResult)
+
+
+def test_validate_grant_chain_recomputes_exact_tool_predicates(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    _, child, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="predicate-semantic-mismatch",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+        child_updates={
+            "allowed_tools": ["owp.run_tests"],
+            "allowed_write_roots": [],
+        },
+    )
+    assert child is not None
+    base = sidecar_receipt_factory(
+        state_before="running",
+        state_after="running",
+        event_type="tool_call",
+        actor_role="Developer",
+        sequence=3,
+        previous_receipt_digest=receipts[-1].digest,
+        parent_receipt_ids=(receipts[-1].receipt_id,),
+    )
+    receipt = _resign_linked_agent_receipt(
+        base,
+        grant_id=child.grant_id,
+        tool_name="owp.run_tests",
+        arguments=base.request_arguments.model_dump(mode="json"),
+        actor_role="Developer",
+        label="predicate-semantic-mismatch:receipt",
+        role_keys=ephemeral_role_keys,
+        updates={
+            "sequence": 3,
+            "previous_receipt_digest": receipts[-1].digest,
+            "parent_receipt_ids": [receipts[-1].receipt_id],
+            "quota_charge": {
+                "grant_id": child.grant_id,
+                "metric": "tool_calls",
+                "amount": 1,
+                "remaining_after": 1,
+            },
+        },
+    )
+    raw = receipt.model_dump(mode="json")
+    quota_result = next(
+        result
+        for result in raw["predicate_results"]
+        if result["name"] == "quota_remaining"
+    )
+    quota_result["input"].update(
+        {
+            "grant_id": child.grant_id,
+            "grant_remaining_before": 2,
+            "ledger_prefix_digest": receipts[-1].digest,
+        }
+    )
+    quota_result["input_digest"] = _jcs_digest(
+        {
+            "domain": "openworkproof/predicate-input/v0.1",
+            "predicate_id": quota_result["predicate_id"],
+            "input": quota_result["input"],
+        }
+    )
+    tool_result = next(
+        result
+        for result in raw["predicate_results"]
+        if result["name"] == "tool_allowed"
+    )
+    tool_result["input"]["actual_tool_name"] = "owp.repo_read"
+    tool_result["input_digest"] = _jcs_digest(
+        {
+            "domain": "openworkproof/predicate-input/v0.1",
+            "predicate_id": tool_result["predicate_id"],
+            "input": tool_result["input"],
+        }
+    )
+    mismatched = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            raw,
+            ephemeral_role_keys["Sidecar"][0],
+        )
+    )
+
+    with pytest.raises(evidence.ChildGrantIssuanceError):
+        evidence.validate_grant_chain(
+            signed_work_order,
+            tuple(grants.values()),
+            tuple(attempts.values()),
+            (*receipts, mismatched),
+            public_keys,
+        )
+
+
+def test_validate_grant_chain_rejects_allowed_false_precondition(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    _, child, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="allowed-false-precondition",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+    )
+    assert child is not None
+    receipt = _linked_tool_receipt(
+        tool_name="owp.repo_read",
+        state_before="running",
+        state_after="running",
+        sequence=3,
+        previous_receipt=receipts[-1],
+        root=child,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="allowed-false-precondition:receipt",
+        actor_role="Developer",
+        remaining_after=1,
+    )
+    raw = receipt.model_dump(mode="json")
+    result = next(
+        item
+        for item in raw["predicate_results"]
+        if item["name"] == "tool_allowed"
+    )
+    result["passed"] = False
+    result["error_code"] = "PREDICATE_FALSE"
+    forged = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            raw,
+            ephemeral_role_keys["Sidecar"][0],
+        )
+    )
+
+    with pytest.raises(evidence.ChildGrantIssuanceError):
+        evidence.validate_grant_chain(
+            signed_work_order,
+            tuple(grants.values()),
+            tuple(attempts.values()),
+            (*receipts, forged),
+            public_keys,
+        )
+
+
+def test_validate_grant_chain_enforces_child_write_roots(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    work_order = _work_order_with_tool_predicate(
+        signed_work_order,
+        ephemeral_role_keys["Maintainer"][0],
+        "owp.apply_patch",
+    )
+    root_raw = work_order.root_grant_template.model_dump(mode="json")
+    root_raw["work_order_digest"] = work_order.digest
+    root = CapabilityGrant.model_validate(
+        sign_payload(
+            "capability-grant",
+            root_raw,
+            ephemeral_role_keys["Maintainer"][0],
+        )
+    )
+    _, child, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="child-write-roots",
+        work_order=work_order,
+        root=root,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+        child_updates={
+            "allowed_write_roots": ["src/narrow"],
+        },
+    )
+    assert child is not None
+    forged = _linked_tool_receipt(
+        tool_name="owp.apply_patch",
+        state_before="running",
+        state_after="running",
+        sequence=3,
+        previous_receipt=receipts[-1],
+        root=child,
+        signed_work_order=work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="child-write-roots:receipt",
+        actor_role="Developer",
+        remaining_after=1,
+    )
+
+    with pytest.raises(evidence.ChildGrantIssuanceError):
+        evidence.validate_grant_chain(
+            work_order,
+            tuple(grants.values()),
+            tuple(attempts.values()),
+            (*receipts, forged),
+            public_keys,
+        )
+
+
 def _resign_linked_agent_receipt(
     receipt,
     *,
@@ -5379,6 +7011,7 @@ def _resign_linked_agent_receipt(
         str, tuple[Ed25519PrivateKey, dict[str, str]]
     ],
     updates: dict[str, object],
+    work_order_digest: str | None = None,
 ):
     raw = receipt.model_dump(mode="json")
     raw.update(
@@ -5390,9 +7023,16 @@ def _resign_linked_agent_receipt(
     )
     if "grant_id" in raw:
         raw["grant_id"] = grant_id
+    if work_order_digest is not None:
+        raw["work_order_digest"] = work_order_digest
     claim = raw["nested_claim"]
     claim.update(
         {
+            **(
+                {"work_order_digest": work_order_digest}
+                if work_order_digest is not None
+                else {}
+            ),
             "grant_id": grant_id,
             "arguments_digest": evidence.request_arguments_digest(
                 tool_name,
@@ -5418,6 +7058,635 @@ def _resign_linked_agent_receipt(
     )
 
 
+def _approval_request_for_patch(
+    *,
+    root: CapabilityGrant,
+    root_issuance,
+    patch,
+    signed_work_order: WorkOrder,
+    sidecar_receipt_factory,
+    role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    label: str,
+    remaining_after: int = 49,
+):
+    scope = {
+        "work_order_digest": signed_work_order.digest,
+        "operation": "create_local_pr_proposal",
+        "target_patch_digest": patch.digest,
+    }
+    target_action_digest = _jcs_digest(
+        {
+            "domain": "openworkproof/high-risk-action/v0.1",
+            "tool_name": "owp.create_pr_proposal",
+            "requested_scope": scope,
+        }
+    )
+    expires_at = "2026-01-01T00:05:00Z"
+    base = sidecar_receipt_factory(
+        state_before="running",
+        state_after="running",
+        event_type="approval_requested",
+        actor_role="Manager",
+        sequence=patch.sequence + 1,
+        previous_receipt_digest=patch.digest,
+        parent_receipt_ids=(
+            root_issuance.receipt_id,
+            patch.receipt_id,
+        ),
+        occurred_at="2026-01-01T00:00:06Z",
+    )
+    arguments = {
+        "request_kind": "high_risk_action",
+        "target_action_digest": target_action_digest,
+        "required_role": "Maintainer",
+        "requested_scope": scope,
+        "expires_at": expires_at,
+    }
+    return _resign_linked_agent_receipt(
+        base,
+        grant_id=root.grant_id,
+        tool_name="owp.request_pr_proposal",
+        arguments=arguments,
+        actor_role="Manager",
+        label=label,
+        role_keys=role_keys,
+        updates={
+            "request_kind": "high_risk_action",
+            "target_action_digest": target_action_digest,
+            "requested_scope": scope,
+            "expires_at": expires_at,
+            "quota_charge": {
+                "grant_id": root.grant_id,
+                "metric": "tool_calls",
+                "amount": 1,
+                "remaining_after": remaining_after,
+            },
+        },
+        work_order_digest=signed_work_order.digest,
+    )
+
+
+def _approval_decision_for_request(
+    *,
+    request,
+    previous_receipt,
+    sequence: int,
+    approved: bool,
+    parent_receipt_ids: tuple[str, ...],
+    signed_work_order: WorkOrder,
+    sidecar_receipt_factory,
+    role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    label: str,
+):
+    decision = "approved" if approved else "denied"
+    reason = "APPROVAL_GRANTED" if approved else "APPROVAL_DENIED"
+    decided_at = f"2026-01-01T00:00:{sequence + 4:02d}Z"
+    base = sidecar_receipt_factory(
+        state_before="running",
+        state_after="running",
+        event_type="approval_decision",
+        actor_role="Maintainer",
+        policy_decision="allow" if approved else "deny",
+        execution_status="succeeded" if approved else "denied",
+        sequence=sequence,
+        previous_receipt_digest=previous_receipt.digest,
+        parent_receipt_ids=parent_receipt_ids,
+        occurred_at=decided_at,
+    )
+    raw = base.model_dump(mode="json")
+    raw.update(
+        {
+            "work_order_digest": signed_work_order.digest,
+            "receipt_id": _grant_id(f"{label}:receipt"),
+            "nonce": _grant_id(f"{label}:nonce"),
+            "request_receipt_id": request.receipt_id,
+            "request_receipt_digest": request.digest,
+            "decision": decision,
+            "approved_scope": request.model_dump(mode="json")[
+                "requested_scope"
+            ],
+            "expires_at": request.model_dump(mode="json")["expires_at"],
+            "decision_reason": reason,
+            "decided_at": decided_at,
+        }
+    )
+    claim = raw["nested_claim"]
+    claim.update(
+        {
+            "work_order_digest": signed_work_order.digest,
+            "request_receipt_id": request.receipt_id,
+            "request_receipt_digest": request.digest,
+            "decision": decision,
+            "approved_scope": raw["approved_scope"],
+            "expires_at": raw["expires_at"],
+            "reason": reason,
+            "decided_at": decided_at,
+        }
+    )
+    claim = sign_payload(
+        "human-decision",
+        claim,
+        role_keys["Maintainer"][0],
+    )
+    raw["nested_claim"] = claim
+    raw["nested_claim_digest"] = claim["digest"]
+    return evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            raw,
+            role_keys["Sidecar"][0],
+        )
+    )
+
+
+def _pr_proposal_call(
+    *,
+    root: CapabilityGrant,
+    approval_id: str,
+    approval_digest: str,
+    previous_receipt,
+    parent_receipt_ids: tuple[str, ...],
+    target_patch_digest: str,
+    occurred_at: str,
+    signed_work_order: WorkOrder,
+    sidecar_receipt_factory,
+    role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    label: str,
+    remaining_before: int | None = None,
+    remaining_after: int = 48,
+):
+    from test_state import _tool_receipt
+
+    base = _tool_receipt(
+        tool_name="owp.create_pr_proposal",
+        actor_role="Manager",
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        ephemeral_role_keys=role_keys,
+    )
+    arguments = {
+        "target_patch_digest": target_patch_digest,
+        "approval_receipt_id": approval_id,
+        "approval_receipt_digest": approval_digest,
+    }
+    call = _resign_linked_agent_receipt(
+        base,
+        grant_id=root.grant_id,
+        tool_name="owp.create_pr_proposal",
+        arguments=arguments,
+        actor_role="Manager",
+        label=label,
+        role_keys=role_keys,
+        updates={
+            "tool_name": "owp.create_pr_proposal",
+            "request_arguments": arguments,
+            "arguments_digest": evidence.request_arguments_digest(
+                "owp.create_pr_proposal",
+                arguments,
+            ),
+            "approval_receipt_id": approval_id,
+            "approval_receipt_digest": approval_digest,
+            "output_digest": _jcs_digest(
+                {
+                    "status": "local_pr_proposal_created",
+                    "target_patch_digest": target_patch_digest,
+                }
+            ),
+            "state_before": "running",
+            "state_after": "running",
+            "parent_receipt_ids": list(parent_receipt_ids),
+            "sequence": previous_receipt.sequence + 1,
+            "previous_receipt_digest": previous_receipt.digest,
+            "occurred_at": occurred_at,
+            "quota_charge": {
+                "grant_id": root.grant_id,
+                "metric": "tool_calls",
+                "amount": 1,
+                "remaining_after": remaining_after,
+            },
+        },
+        work_order_digest=signed_work_order.digest,
+    )
+    if remaining_before is None:
+        return call
+    raw = call.model_dump(mode="json")
+    selected = evidence.select_required_predicates(
+        work_order=signed_work_order,
+        tool_name="owp.create_pr_proposal",
+        policy_decision="allow",
+        execution_status="succeeded",
+        test_mode="developer",
+    )
+    inputs = {}
+    for spec in selected:
+        if spec.name == "tool_allowed":
+            value = {
+                "actual_tool_name": "owp.create_pr_proposal"
+            }
+        elif spec.name == "quota_remaining":
+            value = {
+                "grant_id": root.grant_id,
+                "metric": "tool_calls",
+                "amount": 1,
+                "grant_remaining_before": remaining_before,
+                "ledger_prefix_digest": previous_receipt.digest,
+            }
+        else:
+            raise AssertionError(
+                "unexpected PR proposal predicate in test fixture"
+            )
+        inputs[spec.predicate_id] = value
+    raw["predicate_results"] = [
+        result.model_dump(mode="json")
+        for result in evidence.evaluate_required_predicates(
+            selected,
+            evidence.EvaluationContext(
+                inputs=inputs,
+                authoritative_inputs=inputs,
+                authoritative_ledger_prefix_digests={
+                    root.grant_id: previous_receipt.digest
+                },
+            ),
+        )
+    ]
+    return evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            raw,
+            role_keys["Sidecar"][0],
+        )
+    )
+
+
+def _full_pr_authorization_history(
+    *,
+    case: str,
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+):
+    work_order = _work_order_with_pr_chain_predicates(
+        signed_work_order,
+        ephemeral_role_keys["Maintainer"][0],
+    )
+    root_raw = work_order.root_grant_template.model_dump(mode="json")
+    root_raw["work_order_digest"] = work_order.digest
+    root = CapabilityGrant.model_validate(
+        sign_payload(
+            "capability-grant",
+            root_raw,
+            ephemeral_role_keys["Maintainer"][0],
+        )
+    )
+    _, child, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label=f"full-pr-{case}",
+        work_order=work_order,
+        root=root,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+    )
+    assert child is not None
+    root_issuance, child_issuance = receipts
+    patch = _linked_tool_receipt(
+        tool_name="owp.apply_patch",
+        state_before="running",
+        state_after="running",
+        sequence=3,
+        previous_receipt=child_issuance,
+        root=child,
+        signed_work_order=work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label=f"full-pr-{case}:patch",
+        actor_role="Developer",
+        remaining_after=1,
+        occurred_at="2026-01-01T00:00:06Z",
+    )
+    request = _approval_request_for_patch(
+        root=root,
+        root_issuance=root_issuance,
+        patch=patch,
+        signed_work_order=work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label=f"full-pr-{case}:request",
+        remaining_after=47,
+    )
+    decision = _approval_decision_for_request(
+        request=request,
+        previous_receipt=request,
+        sequence=5,
+        approved=case != "denied",
+        parent_receipt_ids=(request.receipt_id,),
+        signed_work_order=work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label=f"full-pr-{case}:decision",
+    )
+    call = _pr_proposal_call(
+        root=root,
+        approval_id=decision.receipt_id,
+        approval_digest=decision.digest,
+        previous_receipt=decision,
+        parent_receipt_ids=(
+            root_issuance.receipt_id,
+            patch.receipt_id,
+            decision.receipt_id,
+        ),
+        target_patch_digest=patch.digest,
+        occurred_at=(
+            "2026-01-01T00:05:01Z"
+            if case == "expired"
+            else "2026-01-01T00:00:10Z"
+        ),
+        signed_work_order=work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label=f"full-pr-{case}:call",
+        remaining_before=47,
+        remaining_after=46,
+    )
+    return (
+        work_order,
+        (*receipts, patch, request, decision, call),
+        grants,
+        attempts,
+    )
+
+
+@pytest.mark.parametrize("case", ("denied", "expired"))
+def test_validate_grant_chain_rejects_allowed_pr_with_unusable_approval(
+    case: str,
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    work_order, receipts, grants, attempts = (
+        _full_pr_authorization_history(
+            case=case,
+            tmp_path=tmp_path,
+            signed_work_order=signed_work_order,
+            ephemeral_role_keys=ephemeral_role_keys,
+            fixed_now=fixed_now,
+            sidecar_receipt_factory=sidecar_receipt_factory,
+        )
+    )
+    replay_authorization_causality(work_order, receipts)
+
+    with pytest.raises(
+        evidence.ChildGrantIssuanceError,
+        match="PR approval failed historical replay",
+    ):
+        evidence.validate_grant_chain(
+            work_order,
+            tuple(grants.values()),
+            tuple(attempts.values()),
+            receipts,
+            public_keys,
+        )
+
+
+def test_validate_grant_chain_accepts_approved_pr(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    work_order, receipts, grants, attempts = (
+        _full_pr_authorization_history(
+            case="approved",
+            tmp_path=tmp_path,
+            signed_work_order=signed_work_order,
+            ephemeral_role_keys=ephemeral_role_keys,
+            fixed_now=fixed_now,
+            sidecar_receipt_factory=sidecar_receipt_factory,
+        )
+    )
+
+    evidence.validate_grant_chain(
+        work_order,
+        tuple(grants.values()),
+        tuple(attempts.values()),
+        receipts,
+        public_keys,
+    )
+
+
+@pytest.mark.parametrize("case", ("wrong_parent", "duplicate"))
+def test_authorization_history_rejects_invalid_approval_decision_closure(
+    case: str,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    sidecar_receipt_factory,
+) -> None:
+    root = sidecar_receipt_factory(
+        state_before="issued",
+        state_after="running",
+        event_type="grant_issued",
+        sequence=1,
+    )
+    patch = _linked_tool_receipt(
+        tool_name="owp.apply_patch",
+        state_before="running",
+        state_after="running",
+        sequence=2,
+        previous_receipt=root,
+        root=signed_root_grant,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label=f"approval-decision-{case}:patch",
+        remaining_after=49,
+    )
+    request = _approval_request_for_patch(
+        root=signed_root_grant,
+        root_issuance=root,
+        patch=patch,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label=f"approval-decision-{case}:request",
+    )
+    first = _approval_decision_for_request(
+        request=request,
+        previous_receipt=request,
+        sequence=4,
+        approved=True,
+        parent_receipt_ids=(
+            (root.receipt_id,)
+            if case == "wrong_parent"
+            else (request.receipt_id,)
+        ),
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label=f"approval-decision-{case}:first",
+    )
+    history = (root, patch, request, first)
+    if case == "duplicate":
+        second = _approval_decision_for_request(
+            request=request,
+            previous_receipt=first,
+            sequence=5,
+            approved=False,
+            parent_receipt_ids=(request.receipt_id,),
+            signed_work_order=signed_work_order,
+            sidecar_receipt_factory=sidecar_receipt_factory,
+            role_keys=ephemeral_role_keys,
+            label="approval-decision-duplicate:second",
+        )
+        history = (*history, second)
+
+    with pytest.raises(AuthorizationCausalityError):
+        replay_authorization_causality(
+            signed_work_order,
+            history,
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "missing_decision",
+        "wrong_digest",
+        "scope",
+        "expiry",
+        "denied",
+        "parent",
+    ),
+)
+def test_authorization_history_replays_pr_approval_binding(
+    case: str,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    sidecar_receipt_factory,
+) -> None:
+    root = sidecar_receipt_factory(
+        state_before="issued",
+        state_after="running",
+        event_type="grant_issued",
+        sequence=1,
+    )
+    patch = _linked_tool_receipt(
+        tool_name="owp.apply_patch",
+        state_before="running",
+        state_after="running",
+        sequence=2,
+        previous_receipt=root,
+        root=signed_root_grant,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label=f"pr-approval-{case}:patch",
+        remaining_after=49,
+    )
+    request = _approval_request_for_patch(
+        root=signed_root_grant,
+        root_issuance=root,
+        patch=patch,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label=f"pr-approval-{case}:request",
+    )
+    decision = None
+    history = (root, patch, request)
+    if case != "missing_decision":
+        decision = _approval_decision_for_request(
+            request=request,
+            previous_receipt=request,
+            sequence=4,
+            approved=case != "denied",
+            parent_receipt_ids=(request.receipt_id,),
+            signed_work_order=signed_work_order,
+            sidecar_receipt_factory=sidecar_receipt_factory,
+            role_keys=ephemeral_role_keys,
+            label=f"pr-approval-{case}:decision",
+        )
+        history = (*history, decision)
+    previous = decision or request
+    approval_id = (
+        request.receipt_id
+        if decision is None
+        else decision.receipt_id
+    )
+    approval_digest = (
+        request.digest
+        if decision is None
+        else root.digest
+        if case == "wrong_digest"
+        else decision.digest
+    )
+    target_patch_digest = (
+        root.digest if case == "scope" else patch.digest
+    )
+    parent_ids = (
+        (root.receipt_id, patch.receipt_id)
+        if case == "parent"
+        else (
+            root.receipt_id,
+            patch.receipt_id,
+            previous.receipt_id,
+        )
+    )
+    call = _pr_proposal_call(
+        root=signed_root_grant,
+        approval_id=approval_id,
+        approval_digest=approval_digest,
+        previous_receipt=previous,
+        parent_receipt_ids=parent_ids,
+        target_patch_digest=target_patch_digest,
+        occurred_at=(
+            "2026-01-01T00:05:01Z"
+            if case == "expiry"
+            else "2026-01-01T00:00:09Z"
+        ),
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label=f"pr-approval-{case}:call",
+    )
+
+    if case in {"expiry", "denied"}:
+        replay_authorization_causality(
+            signed_work_order,
+            (*history, call),
+        )
+        return
+    with pytest.raises(AuthorizationCausalityError):
+        replay_authorization_causality(
+            signed_work_order,
+            (*history, call),
+        )
+
+
 def _linked_grant_consumed_receipt(
     *,
     grant: CapabilityGrant,
@@ -5431,12 +7700,15 @@ def _linked_grant_consumed_receipt(
     ],
     label: str,
     policy_decision: str = "allow",
+    policy_error_code: str | None = None,
     amount: int = 1,
+    state_before: str = "needs_rework",
+    occurred_at: str = "2026-01-01T00:00:03Z",
 ):
     receipt = sidecar_receipt_factory(
-        state_before="needs_rework",
+        state_before=state_before,
         state_after=(
-            "needs_rework"
+            state_before
             if policy_decision == "deny"
             else "retrying"
         ),
@@ -5449,6 +7721,7 @@ def _linked_grant_consumed_receipt(
         sequence=sequence,
         previous_receipt_digest=previous_receipt.digest,
         parent_receipt_ids=(previous_receipt.receipt_id,),
+        occurred_at=occurred_at,
     )
     arguments = {
         "grant_id": grant.grant_id,
@@ -5466,6 +7739,11 @@ def _linked_grant_consumed_receipt(
         updates={
             "amount": amount,
             "remaining_after": remaining_after,
+            "policy_error_code": (
+                policy_error_code or "STATE_DENIED"
+                if policy_decision == "deny"
+                else None
+            ),
             "quota_charge": (
                 None
                 if policy_decision == "deny"
@@ -5478,6 +7756,181 @@ def _linked_grant_consumed_receipt(
             ),
         },
     )
+
+
+def test_validate_grant_chain_replays_start_retry_denial_priority(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    _, _, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="start-retry-denial-priority",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+    )
+    denied = _linked_grant_consumed_receipt(
+        grant=signed_root_grant,
+        sequence=2,
+        previous_receipt=receipts[-1],
+        remaining_after=None,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="start-retry-denial-priority:receipt",
+        policy_decision="deny",
+        policy_error_code="CAPABILITY_DENIED",
+        state_before="running",
+        occurred_at="2026-01-01T00:00:06Z",
+    )
+
+    with pytest.raises(evidence.ChildGrantIssuanceError):
+        evidence.validate_grant_chain(
+            signed_work_order,
+            tuple(grants.values()),
+            tuple(attempts.values()),
+            (*receipts, denied),
+            public_keys,
+        )
+
+
+def test_validate_grant_chain_replays_approval_request_denial(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    _, _, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="approval-request-denial",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+    )
+    base = sidecar_receipt_factory(
+        state_before="running",
+        state_after="running",
+        event_type="approval_requested",
+        actor_role="Manager",
+        policy_decision="deny",
+        execution_status="denied",
+        sequence=2,
+        previous_receipt_digest=receipts[-1].digest,
+        parent_receipt_ids=(receipts[-1].receipt_id,),
+        occurred_at="2026-01-01T00:00:06Z",
+    )
+    arguments = {
+        "request_kind": base.request_kind,
+        "target_action_digest": base.target_action_digest,
+        "required_role": base.required_role,
+        "requested_scope": base.requested_scope,
+        "expires_at": base.model_dump(mode="json")["expires_at"],
+    }
+    denied = _resign_linked_agent_receipt(
+        base,
+        grant_id=signed_root_grant.grant_id,
+        tool_name="owp.request_pr_proposal",
+        arguments=arguments,
+        actor_role="Manager",
+        label="approval-request-denial:receipt",
+        role_keys=ephemeral_role_keys,
+        updates={
+            "sequence": 2,
+            "previous_receipt_digest": receipts[-1].digest,
+            "parent_receipt_ids": [receipts[-1].receipt_id],
+            "policy_error_code": "CAPABILITY_DENIED",
+        },
+    )
+
+    with pytest.raises(evidence.ChildGrantIssuanceError):
+        evidence.validate_grant_chain(
+            signed_work_order,
+            tuple(grants.values()),
+            tuple(attempts.values()),
+            (*receipts, denied),
+            public_keys,
+        )
+
+
+def test_validate_grant_chain_replays_rollback_denial(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    _, child, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="rollback-denial",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+        child_updates={
+            "allowed_tools": ["owp.rollback_patch"],
+        },
+    )
+    assert child is not None
+    base = sidecar_receipt_factory(
+        state_before="running",
+        state_after="running",
+        event_type="rollback",
+        actor_role="Developer",
+        policy_decision="deny",
+        execution_status="denied",
+        sequence=3,
+        previous_receipt_digest=receipts[-1].digest,
+        parent_receipt_ids=(receipts[-1].receipt_id,),
+        occurred_at="2026-01-01T00:00:06Z",
+    )
+    arguments = {
+        "target_patch_receipt_id": base.target_patch_receipt_id,
+        "target_patch_digest": base.target_patch_digest,
+        "before_commit": base.before_commit,
+    }
+    denied = _resign_linked_agent_receipt(
+        base,
+        grant_id=child.grant_id,
+        tool_name="owp.rollback_patch",
+        arguments=arguments,
+        actor_role="Developer",
+        label="rollback-denial:receipt",
+        role_keys=ephemeral_role_keys,
+        updates={
+            "sequence": 3,
+            "previous_receipt_digest": receipts[-1].digest,
+            "parent_receipt_ids": [receipts[-1].receipt_id],
+            "policy_error_code": "CAPABILITY_DENIED",
+        },
+    )
+
+    with pytest.raises(evidence.ChildGrantIssuanceError):
+        evidence.validate_grant_chain(
+            signed_work_order,
+            tuple(grants.values()),
+            tuple(attempts.values()),
+            (*receipts, denied),
+            public_keys,
+        )
 
 
 def _linked_failed_rollback_receipt(
@@ -5541,6 +7994,8 @@ def _linked_denied_revocation_receipt(
         str, tuple[Ed25519PrivateKey, dict[str, str]]
     ],
     label: str,
+    policy_error_code: str = "CAPABILITY_DENIED",
+    occurred_at: str = "2026-01-01T00:00:03Z",
 ):
     receipt = sidecar_receipt_factory(
         state_before="running",
@@ -5552,6 +8007,7 @@ def _linked_denied_revocation_receipt(
         sequence=sequence,
         previous_receipt_digest=previous_receipt.digest,
         parent_receipt_ids=(previous_receipt.receipt_id,),
+        occurred_at=occurred_at,
     )
     raw = receipt.model_dump(mode="json")
     arguments = {
@@ -5570,8 +8026,52 @@ def _linked_denied_revocation_receipt(
         updates={
             "authorizing_grant_id": authorizer.grant_id,
             "revoked_grant_id": target.grant_id,
+            "policy_error_code": policy_error_code,
         },
     )
+
+
+def test_validate_grant_chain_replays_grant_revocation_denial(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    public_keys: dict,
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    _, child, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="revocation-denial-replay",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+    )
+    assert child is not None
+    denied = _linked_denied_revocation_receipt(
+        authorizer=signed_root_grant,
+        target=child,
+        sequence=3,
+        previous_receipt=receipts[-1],
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="revocation-denial-replay:receipt",
+        occurred_at="2026-01-01T00:00:06Z",
+    )
+
+    with pytest.raises(evidence.ChildGrantIssuanceError):
+        evidence.validate_grant_chain(
+            signed_work_order,
+            tuple(grants.values()),
+            tuple(attempts.values()),
+            (*receipts, denied),
+            public_keys,
+        )
 
 
 def test_grant_quota_replay_allows_last_child_unit_without_double_charging_parent(
@@ -5613,7 +8113,7 @@ def test_grant_quota_replay_allows_last_child_unit_without_double_charging_paren
         evidence.ChildGrantIssuanceError,
         match="quota",
     ):
-        evidence._validate_grant_history_semantics(
+        _validate_grant_history_semantics(
             signed_work_order,
             (*receipts, wrong),
             grants,
@@ -5647,7 +8147,7 @@ def test_grant_quota_replay_allows_last_child_unit_without_double_charging_paren
         label="last-child-unit:parent-charge",
         remaining_after=root_remaining,
     )
-    replay = evidence._validate_grant_history_semantics(
+    replay = _validate_grant_history_semantics(
         signed_work_order,
         (*receipts, charged, parent_charge),
         grants,
@@ -5738,7 +8238,7 @@ def test_grant_quota_replay_rejects_invalid_child_charge(
         replay_receipts = (*replay_receipts, second)
 
     with pytest.raises(evidence.ChildGrantIssuanceError):
-        evidence._validate_grant_history_semantics(
+        _validate_grant_history_semantics(
             signed_work_order,
             replay_receipts,
             grants,
@@ -5781,7 +8281,7 @@ def test_denied_charge_is_free_and_does_not_consume_single_use_grant(
         label="denied-is-free:valid-consumption",
         policy_decision="deny",
     )
-    denied_replay = evidence._validate_grant_history_semantics(
+    denied_replay = _validate_grant_history_semantics(
         signed_work_order,
         (*receipts, valid_consumption_denial),
         grants,
@@ -5801,7 +8301,7 @@ def test_denied_charge_is_free_and_does_not_consume_single_use_grant(
         amount=2,
     )
     with pytest.raises(evidence.ChildGrantIssuanceError):
-        evidence._validate_grant_history_semantics(
+        _validate_grant_history_semantics(
             signed_work_order,
             (*receipts, invalid_amount),
             grants,
@@ -5836,7 +8336,7 @@ def test_denied_charge_is_free_and_does_not_consume_single_use_grant(
         remaining_after=0,
     )
 
-    replay = evidence._validate_grant_history_semantics(
+    replay = _validate_grant_history_semantics(
         signed_work_order,
         (*receipts, denied, charged),
         grants,
@@ -5910,7 +8410,7 @@ def test_started_failures_charge_and_metrics_replay_independently(
         label="started-failures:repair",
     )
 
-    replay = evidence._validate_grant_history_semantics(
+    replay = _validate_grant_history_semantics(
         signed_work_order,
         (*receipts, failed_tool, failed_rollback, repair),
         grants,
@@ -5977,7 +8477,7 @@ def test_manager_root_cannot_charge_developer_direct_calls(
         evidence.ChildGrantIssuanceError,
         match="role",
     ):
-        evidence._validate_grant_history_semantics(
+        _validate_grant_history_semantics(
             signed_work_order,
             (*receipts, charged),
             grants,
@@ -5998,7 +8498,7 @@ def test_manager_root_cannot_charge_developer_direct_calls(
             policy_decision="deny",
             policy_error_code="ROLE_DENIED",
         )
-        replay = evidence._validate_grant_history_semantics(
+        replay = _validate_grant_history_semantics(
             signed_work_order,
             (*receipts, denied),
             grants,
@@ -6070,8 +8570,15 @@ def test_denied_tool_receipt_still_requires_authentic_grant_call_binding(
         ),
     )
 
+    if case == "wrong_role":
+        with pytest.raises(AuthorizationCausalityError):
+            replay_authorization_causality(
+                signed_work_order,
+                (*receipts, denied),
+            )
+        return
     with pytest.raises(evidence.ChildGrantIssuanceError):
-        evidence._validate_grant_history_semantics(
+        _validate_grant_history_semantics(
             signed_work_order,
             (*receipts, denied),
             grants,
@@ -6110,7 +8617,7 @@ def test_denied_revocation_is_authenticated_but_does_not_revoke_or_consume(
         label="denied-revocation",
     )
 
-    replay = evidence._validate_grant_history_semantics(
+    replay = _validate_grant_history_semantics(
         signed_work_order,
         (*receipts, denied),
         grants,
@@ -6179,7 +8686,7 @@ def test_denied_tool_on_revoked_grant_is_free_but_authentic(
         actor_role="Developer",
     )
 
-    replay = evidence._validate_grant_history_semantics(
+    replay = _validate_grant_history_semantics(
         signed_work_order,
         (*receipts, denied),
         grants,

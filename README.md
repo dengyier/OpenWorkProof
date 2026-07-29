@@ -133,27 +133,43 @@ MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent，AgentTeams 组织 Agen
   重哈希最终证据；
 - Phase 2 提交真值未知时停止后续发布；Receipt 已提交后的发布、
   标记、最终读取门或锁清理故障统一保留为需恢复的 committed truth。
+- `validate_grant_chain` 五输入离线验证器：对 Grant、拒绝尝试、
+  ActionReceipt 和五个 WorkOrder 绑定公钥执行有界单次快照，重建
+  确定性索引，并验证完整签名授权历史；
+- 独立的因果回放层：重建每条 Receipt 当时可见的不可变因果快照，
+  校验唯一 genesis、精确父集、active patch、rework/rollback、
+  approval、composition/recomposition 和 independent-result episode；
+- 独立的策略回放层：重算 Grant 衰减、余额、撤销、single-use、
+  角色/能力/审批/谓词/配额拒绝优先级，以及 Sidecar 签名的
+  ResolutionManifest 解析断言；
+- evidence-incomplete 独立验证的新执行上下文、失败封存、
+  compose previous-report 绑定、审批有效期上限和 proactive rollback
+  拒绝审计均已进入真实签名回归。
 
 当前验证快照：
 
-- Receipt-chain 专项：355 passed；
-- 全量测试：1051 passed；
-- 独立规格复核：7B3C_SPEC_PASS；
-- 独立质量复核：7B3C_QUALITY_PASS；
+- Policy、Composition 与 Receipt-chain 专项：496 passed；
+- Receipt-chain 专项：407 passed；
+- 全量测试：1194 passed；
+- 独立规格复核：7B4_SPEC_PASS；
+- 独立质量复核：7B4_QUALITY_PASS；
 - pip check、compileall 和 git diff check：通过。
 
 重要边界：
 
-上述 Task 7B3a、7B3b Phase 2 与 7B3c 协调器稳定切片已经完成本地实现
-与独立复核。
+上述 Task 7B3a、7B3b Phase 2、7B3c 协调器和 Task 7B4 离线授权链
+验证稳定切片已经完成本地实现与独立复核。
 当前实现包含
 `stage_pending_evidence_group`、`publish_group_no_replace`、
 `mark_publication_group_committed`、`recover_evidence_publications`
 和 `require_all_publications_committed` 五个 group-aware 基础原语，
 `commit_receipt_with_publications` 的 Phase 2 提交原语，以及串联
 Phase 1→4 和最终权威读取门的 `complete_receipt_publication`。
-该协调器尚未接入真实 ToolCall handler；deny、rollback、acceptance
-生产事务和完整 validate_grant_chain 也尚未实现。Task 7 仍未完成，
+`validate_grant_chain` 可以验证签名授权链和 Sidecar 签名的
+ResolutionManifest 解析断言，但五输入 API 没有独立读取并重哈希
+ResolutionManifest 原始字节。
+现有协调器仍未接入真实 ToolCall handler；deny、rollback 和
+Acceptance 生产事务尚未完成。Task 7 与完整 Task 9 仍未完成，
 Day 0 执行门仍为 FAIL。
 
 
@@ -182,7 +198,7 @@ Day 0 执行门仍为 FAIL。
 
 说明：
 
-- 当前开发快照对应 Task 7B3c，fresh 全量验证为 1051 passed；
+- 当前开发快照对应 Task 7B4，fresh 全量验证为 1194 passed；
 - pyproject.toml 已预留 owp 命令入口，但 CLI 模块尚未完成，因此本文件
   暂不提供 CLI 使用命令；
 - 不应把测试通过理解为 Day 0、独立验收或赛事提交已经完成。
@@ -231,14 +247,19 @@ Rich 及其源码仍归属于原权利人；OpenWorkProof 只拥有自有协议�
 - Task 7B3c 单锁串联 stage、commit、publish、mark committed 和最终
   权威读取门，并保留各故障阶段的 receipt/publication 真值；
 - Task 7B3c 独立规格和质量复核。
+- Task 7B4 将授权因果回放与策略回放拆为单一职责模块，使
+  `validate_grant_chain` 成为有界五输入编排器，并完成合法重组链、
+  拒绝审计、独立验证新鲜性与失败封存的离线验证；
+- Task 7B4 独立规格和质量复核。
 
 尚未完成：
 
 - Task 7 真实 ToolCall handler 接入现有 Phase 1→4 协调器，以及
   deny/rollback 生产事务和剩余入口的全局 nonce 处理；
-- 完整 policy denial 优先级重算与 validate_grant_chain；
 - evidence publication 与真实 handler 的调用闭包，以及 acceptance
   事务闭包；
+- ResolutionManifest 原始字节的独立读取与重哈希、完整 Task 9
+  composition 和 Acceptance；
 - CLI、MCP Sidecar 和 AgentTeams 接线；
 - Rich #4196 完整演示；
 - Acceptor 独立环境复现；
