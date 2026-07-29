@@ -113,23 +113,31 @@ MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent，AgentTeams 组织 Agen
   rework episode，拒绝错误槽位、篡改字节和证据命名空间置换；
 - `STATE_DENIED`、`ROLE_DENIED`、`CAPABILITY_DENIED` 和
   `QUOTA_EXHAUSTED` 的 start-retry 闭合顺序、零计费审计及并发单胜。
+- group-aware 证据 staging、POSIX no-replace 发布、整组提交标记、
+  崩溃恢复和已提交证据读取门；
+- 证据 authority/journal 精确覆盖、固定 publication ID、锚定目录
+  描述符和提交前后命名根身份校验；
+- SQLite 提交事实三态、COMMIT-ACK 不确定性分类，以及锁、连接和
+  文件描述符的独立清理故障上报。
 
 当前验证快照：
 
-- Start-retry 专项：35 passed；
-- Receipt-chain 专项：234 passed；
-- 全量测试：930 passed；
-- 独立规格复核：7B2C_SPEC_PASS；
-- 独立质量复核：7B2C_QUALITY_PASS；
+- Evidence-publication 专项：38 passed；
+- Receipt-chain 专项：278 passed；
+- 全量测试：974 passed；
+- 独立规格复核：7B3A_SPEC_PASS；
+- 独立质量复核：7B3A_QUALITY_PASS；
 - pip check、compileall 和 git diff check：通过。
 
 重要边界：
 
-上述 Task 7B2c 稳定切片已经完成本地实现与独立复核。它只实现
-Manager `start_retry` 的原子消费事务和已提交证据读取门；尚未实现
-ToolCall/rollback 生产事务、完整证据 staging/recovery、acceptance
-事务和完整 validate_grant_chain。Task 7 仍未完成，Day 0 执行门
-仍为 FAIL。
+上述 Task 7B3a 稳定切片已经完成本地实现与独立复核。它只实现
+`stage_pending_evidence_group`、`publish_group_no_replace`、
+`mark_publication_group_committed`、`recover_evidence_publications`
+和 `require_all_publications_committed` 五个 group-aware 基础原语；
+尚未实现 `commit_receipt_with_publications`、真实 ToolCall/rollback
+生产事务、acceptance 事务和完整 validate_grant_chain。Task 7
+仍未完成，Day 0 执行门仍为 FAIL。
 
 
 六、快速开始
@@ -157,7 +165,7 @@ ToolCall/rollback 生产事务、完整证据 staging/recovery、acceptance
 
 说明：
 
-- 当前公开快照对应 Task 7B2c，fresh 全量验证为 930 passed；
+- 当前公开快照对应 Task 7B3a，fresh 全量验证为 974 passed；
 - pyproject.toml 已预留 owp 命令入口，但 CLI 模块尚未完成，因此本文件
   暂不提供 CLI 使用命令；
 - 不应把测试通过理解为 Day 0、独立验收或赛事提交已经完成。
@@ -197,14 +205,18 @@ Rich 及其源码仍归属于原权利人；OpenWorkProof 只拥有自有协议�
 - Task 7B2b 签名历史额度、single-use、撤销和角色语义回放切片；
 - Task 7B2c Manager `start_retry` 原子消费、rework episode 与 committed
   evidence 读取门；
-- Task 7B2c 独立规格和质量复核。
+- Task 7B3a group-aware staging、no-replace publication、整组提交、
+  崩溃恢复和 committed publication gate；
+- Task 7B3a 独立规格和质量复核。
 
 尚未完成：
 
-- Task 7 其余 ToolCall/rollback 生产事务、完整 evidence publication
-  staging/recovery 和剩余入口的全局 nonce 处理；
+- Task 7 其余 ToolCall/rollback 生产事务、
+  `commit_receipt_with_publications` 接线和剩余入口的全局 nonce
+  处理；
 - 完整 policy denial 优先级重算与 validate_grant_chain；
-- 完整证据发布、崩溃恢复和 acceptance 事务闭包；
+- evidence publication 与真实 Receipt 生产事务的跨阶段闭包，以及
+  acceptance 事务闭包；
 - CLI、MCP Sidecar 和 AgentTeams 接线；
 - Rich #4196 完整演示；
 - Acceptor 独立环境复现；

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import fcntl
@@ -65,6 +65,7 @@ MAX_GRANT_RESERVATIONS = (
 MAX_GRANT_EVENTS = MAX_RECEIPTS
 MAX_RECEIPT_PARENT_EDGES = MAX_RECEIPTS * 16
 MAX_ACCEPTANCE_RECEIPTS = 1
+_MAX_PUBLICATIONS_PER_GROUP = 8
 
 
 class LedgerInitializationError(RuntimeError):
@@ -160,6 +161,39 @@ class RetryEvidenceIntegrityError(RetryConsumptionError):
     code = "REQUEST_INTEGRITY_INVALID"
 
 
+class EvidencePublicationCommittedError(RuntimeError):
+    """Evidence publication committed, but local completion was indeterminate."""
+
+    committed = True
+
+    def __init__(
+        self,
+        group: _PublicationGroup,
+        *,
+        evidence_verified: bool = True,
+    ) -> None:
+        super().__init__(
+            "evidence publication committed but completion was indeterminate"
+        )
+        self.group = group
+        self.receipt_id = group.receipt_id
+        self.evidence_verified = evidence_verified
+
+
+class EvidencePublicationCommitIndeterminateError(RuntimeError):
+    """Evidence publication COMMIT truth could not be confirmed."""
+
+    committed = None
+    truth = "unknown"
+
+    def __init__(self, group: _PublicationGroup) -> None:
+        super().__init__(
+            "evidence publication commit outcome is indeterminate"
+        )
+        self.group = group
+        self.receipt_id = group.receipt_id
+
+
 class RetryConsumptionCommittedError(RuntimeError):
     """Retry consumption committed, but local completion was indeterminate."""
 
@@ -170,6 +204,22 @@ class RetryConsumptionCommittedError(RuntimeError):
             "retry consumption committed but completion was indeterminate"
         )
         self.receipt = receipt
+
+
+@dataclass(frozen=True)
+class _Publication:
+    publication_id: str
+    pending_path: str
+    final_path: str
+    digest: str
+    size_bytes: int
+    media_type: str
+
+
+@dataclass(frozen=True)
+class _PublicationGroup:
+    receipt_id: str
+    publications: tuple[_Publication, ...]
 
 
 _SCHEMA = (
@@ -383,6 +433,40 @@ def _close_with_retries(
     return False, tuple(errors)
 
 
+def _close_descriptors_once(
+    descriptors: tuple[tuple[str, int | None], ...],
+) -> tuple[Exception, ...]:
+    errors: list[Exception] = []
+    for label, descriptor in descriptors:
+        if descriptor is None:
+            continue
+        try:
+            os.close(descriptor)
+        except OSError as error:
+            errors.append(_contextualize_secondary(label, error))
+    return tuple(errors)
+
+
+def _cleanup_publication_resources(
+    *,
+    connection: sqlite3.Connection | None,
+    descriptors: tuple[tuple[str, int | None], ...] = (),
+    lock_descriptor: int | None,
+) -> tuple[Exception, ...]:
+    errors = list(_close_descriptors_once(descriptors))
+    _, close_errors = _close_with_retries(connection)
+    errors.extend(
+        _contextualize_secondary("SQLite close", error)
+        for error in close_errors
+    )
+    _, release_errors = _release_target_lock(lock_descriptor)
+    errors.extend(
+        _contextualize_secondary("target lock release", error)
+        for error in release_errors
+    )
+    return tuple(errors)
+
+
 def _error_cause(
     label: str,
     errors: tuple[Exception, ...] | list[Exception],
@@ -450,6 +534,1695 @@ def _target_lock_path(ledger_path: Path) -> Path:
 
 def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
     return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _directory_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+    )
+
+
+def _safe_evidence_parts(
+    work_order: WorkOrder,
+    final_path: str,
+) -> tuple[str, ...]:
+    prefix = f"{work_order.evidence_policy.evidence_root}/"
+    if not final_path.startswith(prefix):
+        raise ValueError("evidence path is outside the WorkOrder evidence root")
+    relative = final_path[len(prefix) :]
+    parts = tuple(relative.split("/"))
+    if (
+        not parts
+        or any(part in {"", ".", ".."} for part in parts)
+        or relative.startswith("/")
+        or "\\" in relative
+    ):
+        raise ValueError("evidence path is not a safe relative path")
+    return parts
+
+
+def _open_stable_evidence_root(root: Path) -> tuple[int, os.stat_result]:
+    descriptor = os.open(root, _directory_flags())
+    try:
+        metadata = os.fstat(descriptor)
+        named = os.stat(root, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or not stat.S_ISDIR(named.st_mode)
+            or not _same_inode(metadata, named)
+        ):
+            raise OSError("evidence root is not a stable directory")
+        return descriptor, metadata
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _ensure_pending_directory(root_descriptor: int) -> int:
+    created = False
+    try:
+        os.mkdir(".pending", 0o700, dir_fd=root_descriptor)
+        created = True
+    except FileExistsError:
+        pass
+    if created:
+        os.fsync(root_descriptor)
+    descriptor = os.open(
+        ".pending",
+        _directory_flags(),
+        dir_fd=root_descriptor,
+    )
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISDIR(metadata.st_mode):
+        os.close(descriptor)
+        raise OSError("pending evidence namespace is not a directory")
+    return descriptor
+
+
+def _require_stable_pending_directory(
+    root_descriptor: int,
+    pending_descriptor: int,
+    expected: os.stat_result,
+) -> None:
+    opened = os.fstat(pending_descriptor)
+    named = os.stat(
+        ".pending",
+        dir_fd=root_descriptor,
+        follow_symlinks=False,
+    )
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or not stat.S_ISDIR(named.st_mode)
+        or not _same_inode(expected, opened)
+        or not _same_inode(expected, named)
+    ):
+        raise OSError("pending evidence namespace changed during validation")
+
+
+def _require_final_absent(
+    root_descriptor: int,
+    parts: tuple[str, ...],
+) -> None:
+    descriptors: list[int] = []
+    current = root_descriptor
+    try:
+        for part in parts[:-1]:
+            try:
+                current = os.open(
+                    part,
+                    _directory_flags(),
+                    dir_fd=current,
+                )
+            except FileNotFoundError:
+                return
+            descriptors.append(current)
+        try:
+            os.stat(
+                parts[-1],
+                dir_fd=current,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return
+        raise FileExistsError("final evidence path already exists")
+    finally:
+        _close_evidence_descriptors(descriptors)
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        written = os.write(descriptor, payload[offset:])
+        if written <= 0:
+            raise OSError("pending evidence write made no progress")
+        offset += written
+
+
+def _cleanup_owned_pending(
+    pending_descriptor: int | None,
+    owned: Mapping[str, tuple[int, int]],
+) -> None:
+    if pending_descriptor is None:
+        return
+    for name, identity in owned.items():
+        pending_name = _validated_pending_basename(
+            name,
+            f".pending/{name}",
+        )
+        try:
+            metadata = os.stat(
+                pending_name,
+                dir_fd=pending_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                stat.S_ISREG(metadata.st_mode)
+                and (metadata.st_dev, metadata.st_ino) == identity
+            ):
+                os.unlink(pending_name, dir_fd=pending_descriptor)
+        except FileNotFoundError:
+            pass
+    os.fsync(pending_descriptor)
+
+
+def _validate_staged_payloads(
+    receipt: ActionReceiptEnvelope,
+    payloads: Mapping[str, bytes],
+    work_order: WorkOrder,
+) -> None:
+    validator = getattr(receipt, "validate_evidence_payloads", None)
+    if callable(validator):
+        validator(payloads, work_order)
+        return
+    raise ValueError(
+        "receipt type is not a closed evidence publication producer"
+    )
+
+
+def stage_pending_evidence_group(
+    ledger_path: Path,
+    *,
+    evidence_root: Path,
+    receipt: ActionReceiptEnvelope,
+    payloads: Mapping[str, bytes],
+) -> _PublicationGroup:
+    """Durably stage one uncommitted receipt candidate's exact EvidenceRefs."""
+
+    path = Path(ledger_path)
+    root = Path(evidence_root)
+    lock_descriptor: int | None = None
+    connection: sqlite3.Connection | None = None
+    root_descriptor: int | None = None
+    pending_descriptor: int | None = None
+    owned: dict[str, tuple[int, int]] = {}
+    try:
+        exact_payloads = dict(payloads)
+        lock_descriptor = _acquire_target_lock(path)
+        connection = connect_ledger(path)
+        work_order = load_authoritative_work_order(connection)
+        receipts = _validated_receipt_prefix(connection, work_order)
+        try:
+            validated_receipt = ACTION_RECEIPT_ADAPTER.validate_python(
+                receipt.model_dump(mode="json")
+            )
+            validated_receipt.validate_against_work_order(work_order)
+            _validate_receipt_nested_claim(validated_receipt, work_order)
+            sidecar = next(
+                binding
+                for binding in work_order.key_bindings
+                if binding.role == "Sidecar"
+            )
+            sidecar_key = decode_and_verify_key_binding(sidecar)
+        except Exception as error:
+            raise ValueError("receipt candidate is invalid") from error
+        if (
+            validated_receipt != receipt
+            or not verify_payload(
+                "action-receipt",
+                receipt.model_dump(mode="json"),
+                sidecar_key,
+            )
+            or connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM receipts
+                WHERE receipt_id = ? OR nonce = ?
+                """,
+                (receipt.receipt_id, receipt.nonce),
+            ).fetchone()
+            != (0,)
+        ):
+            raise ValueError(
+                "receipt candidate is not authentic, exact, or uncommitted"
+            )
+        if not 1 <= len(receipt.evidence_refs) <= _MAX_PUBLICATIONS_PER_GROUP:
+            raise ValueError("publication group must contain 1..8 artifacts")
+        _validate_staged_payloads(receipt, exact_payloads, work_order)
+
+        root_descriptor, root_identity = _open_stable_evidence_root(root)
+        pending_descriptor = _ensure_pending_directory(root_descriptor)
+        pending_identity = os.fstat(pending_descriptor)
+        publications: list[_Publication] = []
+        for reference in receipt.evidence_refs:
+            parts = _safe_evidence_parts(work_order, reference.path)
+            _require_final_absent(root_descriptor, parts)
+            publication_id = secrets.token_hex(32)
+            pending_name = _validated_pending_basename(
+                publication_id,
+                f".pending/{publication_id}",
+            )
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            descriptor = os.open(
+                pending_name,
+                flags,
+                0o600,
+                dir_fd=pending_descriptor,
+            )
+            try:
+                opened = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_nlink != 1
+                    or opened.st_size != 0
+                    or stat.S_IMODE(opened.st_mode) != 0o600
+                ):
+                    raise OSError(
+                        "new pending evidence is not a regular single-link file"
+                    )
+                owned[pending_name] = (opened.st_dev, opened.st_ino)
+                _write_all(descriptor, exact_payloads[reference.path])
+                metadata = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 1
+                    or metadata.st_size != reference.size_bytes
+                    or not _same_inode(opened, metadata)
+                ):
+                    raise OSError("pending evidence is not a stable regular file")
+                os.fsync(descriptor)
+                durable = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(durable.st_mode)
+                    or durable.st_nlink != 1
+                    or durable.st_size != reference.size_bytes
+                    or stat.S_IMODE(durable.st_mode) != 0o600
+                    or not _same_inode(opened, durable)
+                ):
+                    raise OSError(
+                        "pending evidence is not a stable regular file after fsync"
+                    )
+            finally:
+                os.close(descriptor)
+            publications.append(
+                _Publication(
+                    publication_id=publication_id,
+                    pending_path=f".pending/{pending_name}",
+                    final_path=reference.path,
+                    digest=reference.sha256,
+                    size_bytes=reference.size_bytes,
+                    media_type=reference.media_type,
+                )
+            )
+        os.fsync(pending_descriptor)
+        _require_stable_pending_directory(
+            root_descriptor,
+            pending_descriptor,
+            pending_identity,
+        )
+        root_named = os.stat(root, follow_symlinks=False)
+        root_after = os.fstat(root_descriptor)
+        if (
+            not _same_inode(root_identity, root_named)
+            or not _same_inode(root_identity, root_after)
+        ):
+            raise OSError("evidence root changed while staging")
+        for publication in publications:
+            _require_final_absent(
+                root_descriptor,
+                _safe_evidence_parts(work_order, publication.final_path),
+            )
+        return _PublicationGroup(
+            receipt_id=receipt.receipt_id,
+            publications=tuple(publications),
+        )
+    except Exception as primary_error:
+        secondary_errors: list[Exception] = []
+        rollback_error = _best_effort_rollback(connection)
+        if rollback_error is not None:
+            secondary_errors.append(rollback_error)
+        try:
+            _cleanup_owned_pending(pending_descriptor, owned)
+        except OSError as cleanup_error:
+            secondary_errors.append(cleanup_error)
+        if secondary_errors:
+            raise RuntimeError(
+                "pending evidence staging rollback failed"
+            ) from _error_cause(
+                "pending evidence staging failures",
+                [primary_error, *secondary_errors],
+            )
+        raise
+    finally:
+        cleanup_errors = _cleanup_publication_resources(
+            connection=connection,
+            descriptors=(
+                ("pending directory close", pending_descriptor),
+                ("evidence root close", root_descriptor),
+            ),
+            lock_descriptor=lock_descriptor,
+        )
+        if cleanup_errors:
+            raise RuntimeError(
+                "pending evidence staging cleanup failed"
+            ) from _error_cause(
+                "pending evidence staging cleanup failures",
+                list(cleanup_errors),
+            )
+
+
+def _validated_publication_group(
+    connection: sqlite3.Connection,
+    group: _PublicationGroup,
+    *,
+    required_state: str,
+) -> tuple[WorkOrder, ActionReceiptEnvelope]:
+    if (
+        type(group) is not _PublicationGroup
+        or not 1 <= len(group.publications) <= _MAX_PUBLICATIONS_PER_GROUP
+        or any(type(item) is not _Publication for item in group.publications)
+    ):
+        raise ValueError("publication group descriptor is invalid")
+    work_order = load_authoritative_work_order(connection)
+    receipts = _validated_receipt_prefix(connection, work_order)
+    matches = tuple(
+        receipt for receipt in receipts if receipt.receipt_id == group.receipt_id
+    )
+    if len(matches) != 1:
+        raise ValueError("publication receipt is not authoritative")
+    receipt = matches[0]
+    references = {reference.path: reference for reference in receipt.evidence_refs}
+    rows = connection.execute(
+        """
+        SELECT publication_id, pending_path, final_path, digest,
+               size_bytes, media_type, state
+        FROM evidence_publications
+        WHERE receipt_id = ?
+        ORDER BY final_path
+        LIMIT ?
+        """,
+        (group.receipt_id, _MAX_PUBLICATIONS_PER_GROUP + 1),
+    ).fetchall()
+    by_final = {item.final_path: item for item in group.publications}
+    if (
+        len(rows) != len(group.publications)
+        or len(rows) != len(receipt.evidence_refs)
+        or len(by_final) != len(group.publications)
+        or set(by_final) != set(references)
+    ):
+        raise ValueError("publication group does not exactly match receipt refs")
+    for row in rows:
+        (
+            publication_id,
+            pending_path,
+            final_path,
+            digest,
+            size_bytes,
+            media_type,
+            publication_state,
+        ) = row
+        _validated_pending_basename(
+            publication_id,
+            pending_path,
+        )
+        item = by_final.get(final_path)
+        reference = references.get(final_path)
+        if (
+            item is None
+            or reference is None
+            or publication_state != required_state
+            or pending_path != f".pending/{publication_id}"
+            or item
+            != _Publication(
+                publication_id=publication_id,
+                pending_path=pending_path,
+                final_path=final_path,
+                digest=digest,
+                size_bytes=size_bytes,
+                media_type=media_type,
+            )
+            or (
+                digest,
+                size_bytes,
+                media_type,
+            )
+            != (
+                reference.sha256,
+                reference.size_bytes,
+                reference.media_type,
+            )
+        ):
+            raise ValueError(
+                "publication journal row does not match its EvidenceRef"
+            )
+    return work_order, receipt
+
+
+def _read_exact_descriptor(
+    descriptor: int,
+    *,
+    digest: str,
+    size_bytes: int,
+    allowed_links: tuple[int, ...],
+) -> tuple[bytes, os.stat_result]:
+    before = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_nlink not in allowed_links
+        or before.st_size != size_bytes
+    ):
+        raise OSError("evidence is not a stable regular file")
+    payload = os.pread(descriptor, size_bytes + 1, 0)
+    after = os.fstat(descriptor)
+    if (
+        len(payload) != size_bytes
+        or (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_size,
+        )
+        != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+            after.st_size,
+        )
+        or hashlib.sha256(payload).hexdigest() != digest
+    ):
+        raise OSError("evidence bytes are unavailable, unstable, or mismatched")
+    return payload, after
+
+
+def _validated_pending_basename(
+    publication_id: str,
+    pending_path: str,
+) -> str:
+    if (
+        type(publication_id) is not str
+        or len(publication_id) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in publication_id
+        )
+        or pending_path != f".pending/{publication_id}"
+    ):
+        raise ValueError("pending publication basename is invalid")
+    return publication_id
+
+
+def _open_final_parent(
+    root_descriptor: int,
+    parts: tuple[str, ...],
+    *,
+    create: bool,
+) -> tuple[int, list[int]]:
+    descriptors: list[int] = []
+    current = root_descriptor
+    try:
+        for part in parts[:-1]:
+            try:
+                child = os.open(
+                    part,
+                    _directory_flags(),
+                    dir_fd=current,
+                )
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, 0o700, dir_fd=current)
+                os.fsync(current)
+                child = os.open(
+                    part,
+                    _directory_flags(),
+                    dir_fd=current,
+                )
+            descriptors.append(child)
+            current = child
+        return current, descriptors
+    except Exception:
+        _close_evidence_descriptors(descriptors)
+        raise
+
+
+def _directory_identity(metadata: os.stat_result) -> tuple[int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+    )
+
+
+def _open_final_parent_anchored(
+    root_descriptor: int,
+    parts: tuple[str, ...],
+    *,
+    create: bool = True,
+) -> tuple[int, list[int], tuple[tuple[int, int, int], ...]]:
+    descriptors: list[int] = []
+    identities = [_directory_identity(os.fstat(root_descriptor))]
+    current = root_descriptor
+    try:
+        for part in parts[:-1]:
+            try:
+                child = os.open(
+                    part,
+                    _directory_flags(),
+                    dir_fd=current,
+                )
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, 0o700, dir_fd=current)
+                os.fsync(current)
+                child = os.open(
+                    part,
+                    _directory_flags(),
+                    dir_fd=current,
+                )
+            descriptors.append(child)
+            current = child
+            identities.append(_directory_identity(os.fstat(child)))
+        return current, descriptors, tuple(identities)
+    except Exception:
+        _close_evidence_descriptors(descriptors)
+        raise
+
+
+def _require_stable_final_parent_chain(
+    root_descriptor: int,
+    parts: tuple[str, ...],
+    expected: tuple[tuple[int, int, int], ...],
+) -> None:
+    descriptors: list[int] = []
+    identities = [_directory_identity(os.fstat(root_descriptor))]
+    current = root_descriptor
+    try:
+        for part in parts[:-1]:
+            current = os.open(
+                part,
+                _directory_flags(),
+                dir_fd=current,
+            )
+            descriptors.append(current)
+            identities.append(_directory_identity(os.fstat(current)))
+        if tuple(identities) != expected:
+            raise OSError("final evidence parent namespace changed")
+    finally:
+        _close_evidence_descriptors(descriptors)
+
+
+def _fsync_existing_final_parent(
+    root_descriptor: int,
+    work_order: WorkOrder,
+    publication: _Publication,
+) -> None:
+    parts = _safe_evidence_parts(work_order, publication.final_path)
+    parent_descriptors: list[int] = []
+    try:
+        parent, parent_descriptors, parent_identities = (
+            _open_final_parent_anchored(
+                root_descriptor,
+                parts,
+                create=False,
+            )
+        )
+        os.fsync(parent)
+        _require_stable_final_parent_chain(
+            root_descriptor,
+            parts,
+            parent_identities,
+        )
+    finally:
+        _close_evidence_descriptors(parent_descriptors)
+
+
+def _publish_one_no_replace(
+    *,
+    root_descriptor: int,
+    pending_descriptor: int,
+    work_order: WorkOrder,
+    publication: _Publication,
+) -> None:
+    pending_name = _validated_pending_basename(
+        publication.publication_id,
+        publication.pending_path,
+    )
+    pending_fd = os.open(
+        pending_name,
+        (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        ),
+        dir_fd=pending_descriptor,
+    )
+    parent_descriptors: list[int] = []
+    try:
+        _, pending_metadata = _read_exact_descriptor(
+            pending_fd,
+            digest=publication.digest,
+            size_bytes=publication.size_bytes,
+            allowed_links=(1,),
+        )
+        parts = _safe_evidence_parts(work_order, publication.final_path)
+        parent, parent_descriptors, parent_identities = (
+            _open_final_parent_anchored(
+                root_descriptor,
+                parts,
+            )
+        )
+        created_final = False
+        try:
+            os.link(
+                pending_name,
+                parts[-1],
+                src_dir_fd=pending_descriptor,
+                dst_dir_fd=parent,
+                follow_symlinks=False,
+            )
+            created_final = True
+        except FileExistsError:
+            final_fd = os.open(
+                parts[-1],
+                (
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                ),
+                dir_fd=parent,
+            )
+            try:
+                final_metadata = os.fstat(final_fd)
+            finally:
+                os.close(final_fd)
+            if not _same_inode(pending_metadata, final_metadata):
+                raise
+        linked_pending = os.stat(
+            pending_name,
+            dir_fd=pending_descriptor,
+            follow_symlinks=False,
+        )
+        linked_final = os.stat(
+            parts[-1],
+            dir_fd=parent,
+            follow_symlinks=False,
+        )
+        if (
+            not _same_inode(linked_pending, linked_final)
+            or not stat.S_ISREG(linked_final.st_mode)
+            or linked_final.st_nlink != 2
+        ):
+            raise OSError("published evidence hard-link state is invalid")
+        os.fsync(parent)
+        try:
+            _require_stable_final_parent_chain(
+                root_descriptor,
+                parts,
+                parent_identities,
+            )
+        except Exception as namespace_error:
+            if created_final:
+                old_final = os.stat(
+                    parts[-1],
+                    dir_fd=parent,
+                    follow_symlinks=False,
+                )
+                if not _same_inode(linked_pending, old_final):
+                    raise OSError(
+                        "owned final link changed before withdrawal"
+                    ) from namespace_error
+                os.unlink(parts[-1], dir_fd=parent)
+                os.fsync(parent)
+            raise RetryEvidenceRecoveryError(
+                "final evidence parent namespace changed during publication"
+            ) from namespace_error
+        os.unlink(pending_name, dir_fd=pending_descriptor)
+        os.fsync(pending_descriptor)
+        final_fd = os.open(
+            parts[-1],
+            (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            ),
+            dir_fd=parent,
+        )
+        try:
+            _read_exact_descriptor(
+                final_fd,
+                digest=publication.digest,
+                size_bytes=publication.size_bytes,
+                allowed_links=(1,),
+            )
+        finally:
+            os.close(final_fd)
+    finally:
+        _close_evidence_descriptors(
+            [pending_fd, *parent_descriptors]
+        )
+
+
+def publish_group_no_replace(
+    ledger_path: Path,
+    *,
+    evidence_root: Path,
+    group: _PublicationGroup,
+) -> None:
+    """Publish a journaled COMMITTING group without replacing final paths."""
+
+    path = Path(ledger_path)
+    root = Path(evidence_root)
+    lock_descriptor: int | None = None
+    connection: sqlite3.Connection | None = None
+    root_descriptor: int | None = None
+    pending_descriptor: int | None = None
+    try:
+        lock_descriptor = _acquire_target_lock(path)
+        connection = connect_ledger(path)
+        work_order, _ = _validated_publication_group(
+            connection,
+            group,
+            required_state="COMMITTING",
+        )
+        root_descriptor, root_identity = _open_stable_evidence_root(root)
+        pending_descriptor = _ensure_pending_directory(root_descriptor)
+        pending_identity = os.fstat(pending_descriptor)
+        for publication in group.publications:
+            _publish_one_no_replace(
+                root_descriptor=root_descriptor,
+                pending_descriptor=pending_descriptor,
+                work_order=work_order,
+                publication=publication,
+            )
+            _verify_exact_final(
+                root_descriptor,
+                work_order,
+                publication,
+            )
+        _require_stable_pending_directory(
+            root_descriptor,
+            pending_descriptor,
+            pending_identity,
+        )
+        root_named = os.stat(root, follow_symlinks=False)
+        root_after = os.fstat(root_descriptor)
+        if (
+            not _same_inode(root_identity, root_named)
+            or not _same_inode(root_identity, root_after)
+        ):
+            raise OSError("evidence root changed while publishing")
+    finally:
+        cleanup_errors = _cleanup_publication_resources(
+            connection=connection,
+            descriptors=(
+                ("pending directory close", pending_descriptor),
+                ("evidence root close", root_descriptor),
+            ),
+            lock_descriptor=lock_descriptor,
+        )
+        if cleanup_errors:
+            raise RetryEvidenceRecoveryError(
+                "evidence publication cleanup is required"
+            ) from _error_cause(
+                "evidence publication cleanup failures",
+                list(cleanup_errors),
+            )
+
+
+def _verify_exact_final(
+    root_descriptor: int,
+    work_order: WorkOrder,
+    publication: _Publication,
+) -> None:
+    parts = _safe_evidence_parts(work_order, publication.final_path)
+    descriptors: list[int] = []
+    try:
+        parent, parent_descriptors, parent_identities = (
+            _open_final_parent_anchored(
+                root_descriptor,
+                parts,
+                create=False,
+            )
+        )
+        descriptors.extend(parent_descriptors)
+        final_descriptor = os.open(
+            parts[-1],
+            (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            ),
+            dir_fd=parent,
+        )
+        descriptors.append(final_descriptor)
+        _, final_metadata = _read_exact_descriptor(
+            final_descriptor,
+            digest=publication.digest,
+            size_bytes=publication.size_bytes,
+            allowed_links=(1,),
+        )
+        _require_stable_final_parent_chain(
+            root_descriptor,
+            parts,
+            parent_identities,
+        )
+        recheck_parent, recheck_descriptors, recheck_identities = (
+            _open_final_parent_anchored(
+                root_descriptor,
+                parts,
+                create=False,
+            )
+        )
+        descriptors.extend(recheck_descriptors)
+        if recheck_identities != parent_identities:
+            raise OSError(
+                "final evidence parent namespace changed during validation"
+            )
+        recheck_descriptor = os.open(
+            parts[-1],
+            (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            ),
+            dir_fd=recheck_parent,
+        )
+        descriptors.append(recheck_descriptor)
+        _, recheck_metadata = _read_exact_descriptor(
+            recheck_descriptor,
+            digest=publication.digest,
+            size_bytes=publication.size_bytes,
+            allowed_links=(1,),
+        )
+        if (
+            final_metadata.st_dev,
+            final_metadata.st_ino,
+            final_metadata.st_mode,
+            final_metadata.st_nlink,
+            final_metadata.st_size,
+        ) != (
+            recheck_metadata.st_dev,
+            recheck_metadata.st_ino,
+            recheck_metadata.st_mode,
+            recheck_metadata.st_nlink,
+            recheck_metadata.st_size,
+        ):
+            raise OSError("final evidence namespace changed during validation")
+    finally:
+        _close_evidence_descriptors(descriptors)
+
+
+def mark_publication_group_committed(
+    ledger_path: Path,
+    *,
+    evidence_root: Path,
+    group: _PublicationGroup,
+) -> None:
+    """Atomically mark a fully published COMMITTING receipt group committed."""
+
+    path = Path(ledger_path)
+    root = Path(evidence_root)
+    lock_descriptor: int | None = None
+    connection: sqlite3.Connection | None = None
+    root_descriptor: int | None = None
+    pending_descriptor: int | None = None
+    primary_error: Exception | None = None
+    committed = False
+    try:
+        lock_descriptor = _acquire_target_lock(path)
+        connection = connect_ledger(path)
+        root_descriptor, root_identity = _open_stable_evidence_root(root)
+        pending_descriptor = os.open(
+            ".pending",
+            _directory_flags(),
+            dir_fd=root_descriptor,
+        )
+        pending_identity = os.fstat(pending_descriptor)
+        _mark_group_committed_locked(
+            connection,
+            ledger_path=path,
+            evidence_root=root,
+            root_descriptor=root_descriptor,
+            root_identity=root_identity,
+            pending_descriptor=pending_descriptor,
+            pending_identity=pending_identity,
+            group=group,
+        )
+        committed = True
+    except EvidencePublicationCommittedError as error:
+        primary_error = error
+        committed = True
+    except EvidencePublicationCommitIndeterminateError as error:
+        primary_error = error
+    except Exception as error:
+        primary_error = error
+        rollback_error = _best_effort_rollback(connection)
+        if rollback_error is not None:
+            primary_error = RuntimeError(
+                "evidence publication mark rollback failed"
+            )
+            primary_error.__cause__ = _error_cause(
+                "evidence publication mark failures",
+                [error, rollback_error],
+            )
+
+    cleanup_errors = _cleanup_publication_resources(
+        connection=connection,
+        descriptors=(
+            ("pending directory close", pending_descriptor),
+            ("evidence root close", root_descriptor),
+        ),
+        lock_descriptor=lock_descriptor,
+    )
+    if committed and (primary_error is not None or cleanup_errors):
+        evidence_verified = not (
+            isinstance(primary_error, EvidencePublicationCommittedError)
+            and not primary_error.evidence_verified
+        )
+        error = EvidencePublicationCommittedError(
+            group,
+            evidence_verified=evidence_verified,
+        )
+        causes = (
+            ([] if primary_error is None else [primary_error])
+            + list(cleanup_errors)
+        )
+        raise error from _error_cause(
+            "evidence publication completion failures",
+            causes,
+        )
+    if primary_error is not None:
+        if isinstance(
+            primary_error,
+            EvidencePublicationCommitIndeterminateError,
+        ):
+            if cleanup_errors:
+                error = EvidencePublicationCommitIndeterminateError(group)
+                raise error from _error_cause(
+                    "evidence publication indeterminate completion failures",
+                    [primary_error, *cleanup_errors],
+                )
+            raise primary_error
+        if cleanup_errors:
+            raise RuntimeError(
+                "evidence publication mark failed during cleanup"
+            ) from _error_cause(
+                "evidence publication mark failures",
+                [primary_error, *cleanup_errors],
+            )
+        raise primary_error
+    if cleanup_errors:
+        raise RuntimeError(
+            "evidence publication mark cleanup failed"
+        ) from _error_cause(
+            "evidence publication cleanup failures",
+            list(cleanup_errors),
+        )
+
+
+def _journal_publication_groups(
+    connection: sqlite3.Connection,
+) -> tuple[tuple[_PublicationGroup, str], ...]:
+    rows = connection.execute(
+        """
+        SELECT receipt_id, publication_id, pending_path, final_path,
+               digest, size_bytes, media_type, state
+        FROM evidence_publications
+        ORDER BY receipt_id, final_path
+        LIMIT ?
+        """,
+        (MAX_RECEIPTS * _MAX_PUBLICATIONS_PER_GROUP + 1,),
+    ).fetchall()
+    if len(rows) > MAX_RECEIPTS * _MAX_PUBLICATIONS_PER_GROUP:
+        raise ValueError("evidence publication journal exceeds its bound")
+    grouped: dict[str, list[tuple[_Publication, str]]] = {}
+    for (
+        receipt_id,
+        publication_id,
+        pending_path,
+        final_path,
+        digest,
+        size_bytes,
+        media_type,
+        publication_state,
+    ) in rows:
+        _validated_pending_basename(
+            publication_id,
+            pending_path,
+        )
+        grouped.setdefault(receipt_id, []).append(
+            (
+                _Publication(
+                    publication_id=publication_id,
+                    pending_path=pending_path,
+                    final_path=final_path,
+                    digest=digest,
+                    size_bytes=size_bytes,
+                    media_type=media_type,
+                ),
+                publication_state,
+            )
+        )
+    result: list[tuple[_PublicationGroup, str]] = []
+    for receipt_id, entries in grouped.items():
+        states = {state_value for _, state_value in entries}
+        if len(states) != 1:
+            raise ValueError("one receipt publication group has mixed states")
+        group = _PublicationGroup(
+            receipt_id=receipt_id,
+            publications=tuple(item for item, _ in entries),
+        )
+        state_value = next(iter(states))
+        _validated_publication_group(
+            connection,
+            group,
+            required_state=state_value,
+        )
+        result.append((group, state_value))
+    return tuple(result)
+
+
+def _require_exact_publication_coverage(
+    receipts,
+    groups: tuple[tuple[_PublicationGroup, str], ...],
+) -> None:
+    expected = [
+        (
+            receipt.receipt_id,
+            reference.path,
+            reference.sha256,
+            reference.size_bytes,
+            reference.media_type,
+        )
+        for receipt in receipts
+        for reference in receipt.evidence_refs
+    ]
+    actual = [
+        (
+            group.receipt_id,
+            publication.final_path,
+            publication.digest,
+            publication.size_bytes,
+            publication.media_type,
+        )
+        for group, _ in groups
+        for publication in group.publications
+    ]
+    if (
+        len(expected) != len(set(expected))
+        or len(actual) != len(set(actual))
+        or sorted(expected) != sorted(actual)
+    ):
+        raise ValueError(
+            "publication journal does not exactly cover authoritative refs"
+        )
+
+
+def _inspect_pending_publication(
+    pending_descriptor: int,
+    publication: _Publication,
+) -> os.stat_result | None:
+    name = _validated_pending_basename(
+        publication.publication_id,
+        publication.pending_path,
+    )
+    try:
+        descriptor = os.open(
+            name,
+            (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            ),
+            dir_fd=pending_descriptor,
+        )
+    except FileNotFoundError:
+        return None
+    try:
+        _, metadata = _read_exact_descriptor(
+            descriptor,
+            digest=publication.digest,
+            size_bytes=publication.size_bytes,
+            allowed_links=(1, 2),
+        )
+        return metadata
+    finally:
+        os.close(descriptor)
+
+
+def _inspect_final_publication(
+    root_descriptor: int,
+    work_order: WorkOrder,
+    publication: _Publication,
+) -> os.stat_result | None:
+    parts = _safe_evidence_parts(work_order, publication.final_path)
+    parent_descriptors: list[int] = []
+    try:
+        try:
+            parent, parent_descriptors = _open_final_parent(
+                root_descriptor,
+                parts,
+                create=False,
+            )
+            descriptor = os.open(
+                parts[-1],
+                (
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                ),
+                dir_fd=parent,
+            )
+        except FileNotFoundError:
+            return None
+        try:
+            _, metadata = _read_exact_descriptor(
+                descriptor,
+                digest=publication.digest,
+                size_bytes=publication.size_bytes,
+                allowed_links=(1, 2),
+            )
+            return metadata
+        finally:
+            os.close(descriptor)
+    finally:
+        _close_evidence_descriptors(parent_descriptors)
+
+
+def _confirm_publication_group_committed(
+    ledger_path: Path,
+    group: _PublicationGroup,
+) -> tuple[str, Exception | None]:
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = _connect_ledger_direct(ledger_path)
+    except Exception as error:
+        return "INDETERMINATE", error
+    confirmation = "INDETERMINATE"
+    confirmation_error: Exception | None = None
+    try:
+        try:
+            _validated_publication_group(
+                connection,
+                group,
+                required_state="COMMITTED",
+            )
+            confirmation = "COMMITTED"
+        except Exception as committed_error:
+            try:
+                _validated_publication_group(
+                    connection,
+                    group,
+                    required_state="COMMITTING",
+                )
+                confirmation = "NOT_COMMITTED"
+            except Exception as not_committed_error:
+                confirmation_error = _error_cause(
+                    "publication confirmation read failures",
+                    [committed_error, not_committed_error],
+                )
+    except Exception as error:
+        confirmation_error = error
+    _, close_errors = _close_with_retries(connection)
+    if close_errors:
+        return (
+            "INDETERMINATE",
+            _error_cause(
+                "publication confirmation failures",
+                (
+                    []
+                    if confirmation_error is None
+                    else [confirmation_error]
+                )
+                + list(close_errors),
+            ),
+        )
+    if confirmation_error is not None:
+        return "INDETERMINATE", confirmation_error
+    return confirmation, None
+
+
+def _require_group_finals_on_anchor(
+    *,
+    root_descriptor: int,
+    root_identity: os.stat_result,
+    pending_descriptor: int,
+    pending_identity: os.stat_result,
+    work_order: WorkOrder,
+    group: _PublicationGroup,
+) -> None:
+    _require_stable_pending_directory(
+        root_descriptor,
+        pending_descriptor,
+        pending_identity,
+    )
+    if not _same_inode(root_identity, os.fstat(root_descriptor)):
+        raise OSError("evidence root anchor changed during publication mark")
+    for publication in group.publications:
+        if (
+            _inspect_pending_publication(
+                pending_descriptor,
+                publication,
+            )
+            is not None
+        ):
+            raise OSError(
+                "pending evidence remains for a publication being committed"
+            )
+        _verify_exact_final(
+            root_descriptor,
+            work_order,
+            publication,
+        )
+    _require_stable_pending_directory(
+        root_descriptor,
+        pending_descriptor,
+        pending_identity,
+    )
+    if not _same_inode(root_identity, os.fstat(root_descriptor)):
+        raise OSError("evidence root anchor changed during publication mark")
+
+
+def _require_named_evidence_root(
+    evidence_root: Path,
+    root_descriptor: int,
+    root_identity: os.stat_result,
+) -> None:
+    named = os.stat(evidence_root, follow_symlinks=False)
+    opened = os.fstat(root_descriptor)
+    if (
+        not _same_inode(root_identity, named)
+        or not _same_inode(root_identity, opened)
+    ):
+        raise OSError("named evidence root changed during publication mark")
+
+
+def _mark_group_committed_locked(
+    connection: sqlite3.Connection,
+    *,
+    ledger_path: Path,
+    evidence_root: Path,
+    root_descriptor: int,
+    root_identity: os.stat_result,
+    pending_descriptor: int,
+    pending_identity: os.stat_result,
+    group: _PublicationGroup,
+) -> None:
+    primary_error: Exception | None = None
+    committed = False
+    work_order: WorkOrder | None = None
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        work_order, _ = _validated_publication_group(
+            connection,
+            group,
+            required_state="COMMITTING",
+        )
+        updated = connection.execute(
+            """
+            UPDATE evidence_publications
+            SET state = 'COMMITTED'
+            WHERE receipt_id = ? AND state = 'COMMITTING'
+            """,
+            (group.receipt_id,),
+        )
+        if updated.rowcount != len(group.publications):
+            raise sqlite3.DatabaseError(
+                "publication group state changed before recovery commit"
+            )
+        _require_group_finals_on_anchor(
+            root_descriptor=root_descriptor,
+            root_identity=root_identity,
+            pending_descriptor=pending_descriptor,
+            pending_identity=pending_identity,
+            work_order=work_order,
+            group=group,
+        )
+        _require_named_evidence_root(
+            evidence_root,
+            root_descriptor,
+            root_identity,
+        )
+        try:
+            connection.execute("COMMIT")
+            committed = True
+        except Exception as error:
+            confirmation, confirmation_error = (
+                _confirm_publication_group_committed(ledger_path, group)
+            )
+            if confirmation == "COMMITTED":
+                committed = True
+                committed_error = EvidencePublicationCommittedError(group)
+                committed_error.__cause__ = error
+                primary_error = committed_error
+            elif confirmation == "NOT_COMMITTED":
+                primary_error = error
+            else:
+                indeterminate_error = (
+                    EvidencePublicationCommitIndeterminateError(group)
+                )
+                indeterminate_error.__cause__ = _error_cause(
+                    "publication COMMIT acknowledgement failures",
+                    [error]
+                    + (
+                        []
+                        if confirmation_error is None
+                        else [confirmation_error]
+                    ),
+                )
+                primary_error = indeterminate_error
+    except Exception as error:
+        primary_error = error
+
+    if committed:
+        assert work_order is not None
+        try:
+            _require_group_finals_on_anchor(
+                root_descriptor=root_descriptor,
+                root_identity=root_identity,
+                pending_descriptor=pending_descriptor,
+                pending_identity=pending_identity,
+                work_order=work_order,
+                group=group,
+            )
+            _require_named_evidence_root(
+                evidence_root,
+                root_descriptor,
+                root_identity,
+            )
+        except Exception as post_commit_error:
+            error = EvidencePublicationCommittedError(
+                group,
+                evidence_verified=False,
+            )
+            raise error from _error_cause(
+                "post-commit evidence verification failures",
+                (
+                    []
+                    if primary_error is None
+                    else [primary_error]
+                )
+                + [post_commit_error],
+            )
+
+    if primary_error is not None and not committed:
+        rollback_error = _best_effort_rollback(connection)
+        if rollback_error is not None:
+            operation_error = primary_error
+            combined_error = RuntimeError(
+                "publication group mark rollback failed"
+            )
+            combined_error.__cause__ = _error_cause(
+                "publication group mark failures",
+                [operation_error, rollback_error],
+            )
+            primary_error = combined_error
+    if committed and primary_error is not None:
+        error = EvidencePublicationCommittedError(group)
+        raise error from _error_cause(
+            "evidence publication committed completion failures",
+            [primary_error],
+        )
+    if primary_error is not None:
+        raise primary_error
+
+
+def recover_evidence_publications(
+    ledger_path: Path,
+    *,
+    evidence_root: Path,
+) -> None:
+    """Idempotently finish or validate all journaled evidence publications."""
+
+    path = Path(ledger_path)
+    root = Path(evidence_root)
+    lock_descriptor: int | None = None
+    connection: sqlite3.Connection | None = None
+    root_descriptor: int | None = None
+    pending_descriptor: int | None = None
+    try:
+        lock_descriptor = _acquire_target_lock(path)
+        connection = connect_ledger(path)
+        work_order = load_authoritative_work_order(connection)
+        receipts = _validated_receipt_prefix(connection, work_order)
+        groups = _journal_publication_groups(connection)
+        _require_exact_publication_coverage(receipts, groups)
+        root_descriptor, root_identity = _open_stable_evidence_root(root)
+        pending_descriptor = _ensure_pending_directory(root_descriptor)
+        pending_identity = os.fstat(pending_descriptor)
+
+        referenced_pending = {
+            publication.publication_id
+            for group, _ in groups
+            for publication in group.publications
+        }
+        removed_rowless = False
+        for name in os.listdir(pending_descriptor):
+            if name in referenced_pending:
+                continue
+            metadata = os.stat(
+                name,
+                dir_fd=pending_descriptor,
+                follow_symlinks=False,
+            )
+            if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                os.unlink(name, dir_fd=pending_descriptor)
+                removed_rowless = True
+        if removed_rowless:
+            os.fsync(pending_descriptor)
+
+        for group, publication_state in groups:
+            if publication_state == "COMMITTED":
+                for publication in group.publications:
+                    if (
+                        _inspect_pending_publication(
+                            pending_descriptor,
+                            publication,
+                        )
+                        is not None
+                    ):
+                        raise OSError(
+                            "committed publication still has pending evidence"
+                        )
+                    _verify_exact_final(
+                        root_descriptor,
+                        work_order,
+                        publication,
+                    )
+                continue
+            if publication_state != "COMMITTING":
+                raise ValueError("publication journal state is invalid")
+            for publication in group.publications:
+                pending_metadata = _inspect_pending_publication(
+                    pending_descriptor,
+                    publication,
+                )
+                final_metadata = _inspect_final_publication(
+                    root_descriptor,
+                    work_order,
+                    publication,
+                )
+                if pending_metadata is None and final_metadata is None:
+                    raise FileNotFoundError(
+                        "both pending and final publication are missing"
+                    )
+                if final_metadata is not None:
+                    _fsync_existing_final_parent(
+                        root_descriptor,
+                        work_order,
+                        publication,
+                    )
+                if pending_metadata is not None and final_metadata is None:
+                    if pending_metadata.st_nlink != 1:
+                        raise OSError("pending-only publication has extra links")
+                    _publish_one_no_replace(
+                        root_descriptor=root_descriptor,
+                        pending_descriptor=pending_descriptor,
+                        work_order=work_order,
+                        publication=publication,
+                    )
+                elif pending_metadata is None and final_metadata is not None:
+                    if final_metadata.st_nlink != 1:
+                        raise OSError("final-only publication has extra links")
+                else:
+                    assert pending_metadata is not None
+                    assert final_metadata is not None
+                    same = _same_inode(pending_metadata, final_metadata)
+                    if same and (
+                        pending_metadata.st_nlink != 2
+                        or final_metadata.st_nlink != 2
+                    ):
+                        raise OSError(
+                            "linked pending/final publication is malformed"
+                        )
+                    if not same and (
+                        pending_metadata.st_nlink != 1
+                        or final_metadata.st_nlink != 1
+                    ):
+                        raise OSError(
+                            "duplicate pending/final publication is malformed"
+                        )
+                    os.unlink(
+                        _validated_pending_basename(
+                            publication.publication_id,
+                            publication.pending_path,
+                        ),
+                        dir_fd=pending_descriptor,
+                    )
+                    os.fsync(pending_descriptor)
+                _verify_exact_final(
+                    root_descriptor,
+                    work_order,
+                    publication,
+                )
+            try:
+                _mark_group_committed_locked(
+                    connection,
+                    ledger_path=path,
+                    evidence_root=root,
+                    root_descriptor=root_descriptor,
+                    root_identity=root_identity,
+                    pending_descriptor=pending_descriptor,
+                    pending_identity=pending_identity,
+                    group=group,
+                )
+            except EvidencePublicationCommittedError as error:
+                if not error.evidence_verified:
+                    raise
+
+        _require_stable_pending_directory(
+            root_descriptor,
+            pending_descriptor,
+            pending_identity,
+        )
+        root_named = os.stat(root, follow_symlinks=False)
+        root_after = os.fstat(root_descriptor)
+        if (
+            not _same_inode(root_identity, root_named)
+            or not _same_inode(root_identity, root_after)
+        ):
+            raise OSError("evidence root changed during recovery")
+    except RetryEvidenceRecoveryError:
+        raise
+    except Exception as error:
+        raise RetryEvidenceRecoveryError(
+            "evidence publication recovery is required"
+        ) from error
+    finally:
+        cleanup_errors = _cleanup_publication_resources(
+            connection=connection,
+            descriptors=(
+                ("pending directory close", pending_descriptor),
+                ("evidence root close", root_descriptor),
+            ),
+            lock_descriptor=lock_descriptor,
+        )
+        if cleanup_errors:
+            raise RetryEvidenceRecoveryError(
+                "evidence publication recovery cleanup failed"
+            ) from _error_cause(
+                "evidence publication recovery cleanup failures",
+                list(cleanup_errors),
+            )
+
+
+def require_all_publications_committed(
+    ledger_path: Path,
+    *,
+    evidence_root: Path,
+) -> None:
+    """Read-only gate requiring an exact, rehashed COMMITTED publication set."""
+
+    path = Path(ledger_path)
+    root = Path(evidence_root)
+    lock_descriptor: int | None = None
+    connection: sqlite3.Connection | None = None
+    root_descriptor: int | None = None
+    pending_descriptor: int | None = None
+    try:
+        lock_descriptor = _acquire_target_lock(path)
+        connection = connect_ledger(path)
+        work_order = load_authoritative_work_order(connection)
+        receipts = _validated_receipt_prefix(connection, work_order)
+        groups = _journal_publication_groups(connection)
+        if any(state_value != "COMMITTED" for _, state_value in groups):
+            raise RetryEvidenceRecoveryError(
+                "evidence publication recovery is required"
+            )
+        _require_exact_publication_coverage(receipts, groups)
+
+        root_descriptor, root_identity = _open_stable_evidence_root(root)
+        try:
+            pending_descriptor = os.open(
+                ".pending",
+                _directory_flags(),
+                dir_fd=root_descriptor,
+            )
+        except FileNotFoundError:
+            pending_descriptor = None
+        pending_identity = (
+            None
+            if pending_descriptor is None
+            else os.fstat(pending_descriptor)
+        )
+        for group, _ in groups:
+            for publication in group.publications:
+                pending_metadata = (
+                    None
+                    if pending_descriptor is None
+                    else _inspect_pending_publication(
+                        pending_descriptor,
+                        publication,
+                    )
+                )
+                if pending_metadata is not None:
+                    raise RetryEvidenceRecoveryError(
+                        "committed publication still has pending evidence"
+                    )
+                _verify_exact_final(
+                    root_descriptor,
+                    work_order,
+                    publication,
+                )
+        if pending_descriptor is not None:
+            assert pending_identity is not None
+            _require_stable_pending_directory(
+                root_descriptor,
+                pending_descriptor,
+                pending_identity,
+            )
+        root_named = os.stat(root, follow_symlinks=False)
+        root_after = os.fstat(root_descriptor)
+        if (
+            not _same_inode(root_identity, root_named)
+            or not _same_inode(root_identity, root_after)
+        ):
+            raise RetryEvidenceRecoveryError(
+                "committed evidence namespace changed during validation"
+            )
+    except RetryEvidenceRecoveryError:
+        raise
+    except Exception as error:
+        raise RetryEvidenceRecoveryError(
+            "committed evidence validation requires recovery"
+        ) from error
+    finally:
+        cleanup_errors = _cleanup_publication_resources(
+            connection=connection,
+            descriptors=(
+                ("pending directory close", pending_descriptor),
+                ("evidence root close", root_descriptor),
+            ),
+            lock_descriptor=lock_descriptor,
+        )
+        if cleanup_errors:
+            raise RetryEvidenceRecoveryError(
+                "committed evidence validation cleanup failed"
+            ) from _error_cause(
+                "committed evidence validation cleanup failures",
+                list(cleanup_errors),
+            )
 
 
 def _validate_open_lock(
@@ -3695,11 +5468,17 @@ def _successful_issuance_for(
 
 
 def _close_evidence_descriptors(descriptors: list[int]) -> None:
+    errors: list[Exception] = []
     for descriptor in reversed(descriptors):
         try:
             os.close(descriptor)
-        except OSError:
-            pass
+        except OSError as error:
+            errors.append(error)
+    if errors:
+        raise _error_cause(
+            "evidence descriptor close failures",
+            errors,
+        )
 
 
 def _open_evidence_chain(
