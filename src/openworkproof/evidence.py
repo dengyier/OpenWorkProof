@@ -513,11 +513,12 @@ def _cleanup_publication_resources(
         _contextualize_secondary("SQLite close", error)
         for error in close_errors
     )
-    _, release_errors = _release_target_lock(lock_descriptor)
-    errors.extend(
-        _contextualize_secondary("target lock release", error)
-        for error in release_errors
-    )
+    if lock_descriptor is not None:
+        _, release_errors = _release_target_lock(lock_descriptor)
+        errors.extend(
+            _contextualize_secondary("target lock release", error)
+            for error in release_errors
+        )
     return tuple(errors)
 
 
@@ -780,19 +781,24 @@ def stage_pending_evidence_group(
     evidence_root: Path,
     receipt: ActionReceiptEnvelope,
     payloads: Mapping[str, bytes],
+    _borrowed_lock_descriptor: int | None = None,
 ) -> _PublicationGroup:
     """Durably stage one uncommitted receipt candidate's exact EvidenceRefs."""
 
     path = Path(ledger_path)
     root = Path(evidence_root)
     lock_descriptor: int | None = None
+    owns_lock = False
     connection: sqlite3.Connection | None = None
     root_descriptor: int | None = None
     pending_descriptor: int | None = None
     owned: dict[str, tuple[int, int]] = {}
     try:
         exact_payloads = dict(payloads)
-        lock_descriptor = _acquire_target_lock(path)
+        lock_descriptor, owns_lock = _borrow_or_acquire_target_lock(
+            path,
+            _borrowed_lock_descriptor,
+        )
         connection = connect_ledger(path)
         work_order = load_authoritative_work_order(connection)
         receipts = _validated_receipt_prefix(connection, work_order)
@@ -950,7 +956,7 @@ def stage_pending_evidence_group(
                 ("pending directory close", pending_descriptor),
                 ("evidence root close", root_descriptor),
             ),
-            lock_descriptor=lock_descriptor,
+            lock_descriptor=lock_descriptor if owns_lock else None,
         )
         if cleanup_errors:
             raise RuntimeError(
@@ -1808,6 +1814,7 @@ def commit_receipt_with_publications(
     group: _PublicationGroup,
     clock: Callable[[], datetime],
     trusted_resolution_manifest: ResolutionManifest | None = None,
+    _borrowed_lock_descriptor: int | None = None,
 ) -> None:
     """Commit one signed ToolCall and its COMMITTING publication group."""
 
@@ -1816,6 +1823,7 @@ def commit_receipt_with_publications(
     if not path.is_file():
         raise ValueError("receipt publication ledger is unavailable")
     lock_descriptor: int | None = None
+    owns_lock = False
     ledger_identity: os.stat_result | None = None
     connection: sqlite3.Connection | None = None
     root_descriptor: int | None = None
@@ -1831,7 +1839,10 @@ def commit_receipt_with_publications(
     committed = False
     authority_indeterminate = False
     try:
-        lock_descriptor = _acquire_target_lock(path)
+        lock_descriptor, owns_lock = _borrow_or_acquire_target_lock(
+            path,
+            _borrowed_lock_descriptor,
+        )
         ledger_identity = _ledger_named_identity(path)
         connection = connect_ledger(path)
         _require_named_ledger_identity(path, ledger_identity)
@@ -2007,7 +2018,9 @@ def commit_receipt_with_publications(
             )
         )
     )
-    _, release_errors = _release_target_lock(lock_descriptor)
+    release_errors = ()
+    if owns_lock:
+        _, release_errors = _release_target_lock(lock_descriptor)
     cleanup_errors.extend(
         _contextualize_secondary("target lock release", error)
         for error in release_errors
@@ -2474,17 +2487,22 @@ def publish_group_no_replace(
     *,
     evidence_root: Path,
     group: _PublicationGroup,
+    _borrowed_lock_descriptor: int | None = None,
 ) -> None:
     """Publish a journaled COMMITTING group without replacing final paths."""
 
     path = Path(ledger_path)
     root = Path(evidence_root)
     lock_descriptor: int | None = None
+    owns_lock = False
     connection: sqlite3.Connection | None = None
     root_descriptor: int | None = None
     pending_descriptor: int | None = None
     try:
-        lock_descriptor = _acquire_target_lock(path)
+        lock_descriptor, owns_lock = _borrow_or_acquire_target_lock(
+            path,
+            _borrowed_lock_descriptor,
+        )
         connection = connect_ledger(path)
         work_order, _ = _validated_publication_group(
             connection,
@@ -2525,7 +2543,7 @@ def publish_group_no_replace(
                 ("pending directory close", pending_descriptor),
                 ("evidence root close", root_descriptor),
             ),
-            lock_descriptor=lock_descriptor,
+            lock_descriptor=lock_descriptor if owns_lock else None,
         )
         if cleanup_errors:
             raise RetryEvidenceRecoveryError(
@@ -2624,19 +2642,24 @@ def mark_publication_group_committed(
     *,
     evidence_root: Path,
     group: _PublicationGroup,
+    _borrowed_lock_descriptor: int | None = None,
 ) -> None:
     """Atomically mark a fully published COMMITTING receipt group committed."""
 
     path = Path(ledger_path)
     root = Path(evidence_root)
     lock_descriptor: int | None = None
+    owns_lock = False
     connection: sqlite3.Connection | None = None
     root_descriptor: int | None = None
     pending_descriptor: int | None = None
     primary_error: Exception | None = None
     committed = False
     try:
-        lock_descriptor = _acquire_target_lock(path)
+        lock_descriptor, owns_lock = _borrow_or_acquire_target_lock(
+            path,
+            _borrowed_lock_descriptor,
+        )
         connection = connect_ledger(path)
         root_descriptor, root_identity = _open_stable_evidence_root(root)
         pending_descriptor = os.open(
@@ -2679,7 +2702,7 @@ def mark_publication_group_committed(
             ("pending directory close", pending_descriptor),
             ("evidence root close", root_descriptor),
         ),
-        lock_descriptor=lock_descriptor,
+        lock_descriptor=lock_descriptor if owns_lock else None,
     )
     if committed and (primary_error is not None or cleanup_errors):
         evidence_verified = not (
@@ -2725,6 +2748,109 @@ def mark_publication_group_committed(
             "evidence publication cleanup failures",
             list(cleanup_errors),
         )
+
+
+def complete_receipt_publication(
+    ledger_path: Path,
+    *,
+    evidence_root: Path,
+    receipt: ActionReceiptEnvelope,
+    payloads: Mapping[str, bytes],
+    clock: Callable[[], datetime],
+    trusted_resolution_manifest: ResolutionManifest | None = None,
+) -> _PublicationGroup:
+    """Stage, journal, publish, and commit one receipt evidence group."""
+
+    path = Path(ledger_path)
+    root = Path(evidence_root)
+    lock_descriptor: int | None = None
+    group: _PublicationGroup | None = None
+    receipt_committed = False
+    primary_error: Exception | None = None
+    try:
+        lock_descriptor = _acquire_target_lock(path)
+        group = stage_pending_evidence_group(
+            path,
+            evidence_root=root,
+            receipt=receipt,
+            payloads=payloads,
+            _borrowed_lock_descriptor=lock_descriptor,
+        )
+        try:
+            commit_receipt_with_publications(
+                path,
+                evidence_root=root,
+                receipt=receipt,
+                group=group,
+                clock=clock,
+                trusted_resolution_manifest=trusted_resolution_manifest,
+                _borrowed_lock_descriptor=lock_descriptor,
+            )
+        except ReceiptPublicationCommittedError:
+            receipt_committed = True
+            raise
+        receipt_committed = True
+        publish_group_no_replace(
+            path,
+            evidence_root=root,
+            group=group,
+            _borrowed_lock_descriptor=lock_descriptor,
+        )
+        mark_publication_group_committed(
+            path,
+            evidence_root=root,
+            group=group,
+            _borrowed_lock_descriptor=lock_descriptor,
+        )
+        require_all_publications_committed(
+            path,
+            evidence_root=root,
+            _borrowed_lock_descriptor=lock_descriptor,
+        )
+    except Exception as error:
+        primary_error = error
+
+    _, release_errors = _release_target_lock(lock_descriptor)
+    cleanup_errors = [
+        _contextualize_secondary("target lock release", error)
+        for error in release_errors
+    ]
+    if primary_error is None and not cleanup_errors:
+        assert group is not None
+        return group
+    causes = (
+        ([] if primary_error is None else [primary_error])
+        + cleanup_errors
+    )
+    if isinstance(
+        primary_error,
+        ReceiptPublicationCommitIndeterminateError,
+    ):
+        if cleanup_errors:
+            error = ReceiptPublicationCommitIndeterminateError(
+                receipt,
+                primary_error.group,
+            )
+            raise error from _error_cause(
+                "receipt publication coordinator cleanup failures",
+                causes,
+            )
+        raise primary_error
+    if receipt_committed:
+        assert group is not None
+        error = ReceiptPublicationCommittedError(receipt, group)
+        raise error from _error_cause(
+            "receipt publication coordinator completion failures",
+            causes,
+        )
+    if primary_error is not None and not cleanup_errors:
+        raise primary_error
+    raise RuntimeError(
+        "receipt publication coordinator failed during cleanup"
+    ) from _error_cause(
+        "receipt publication coordinator failures",
+        causes,
+    )
 
 
 def _journal_publication_groups(
@@ -3317,26 +3443,30 @@ def require_all_publications_committed(
     ledger_path: Path,
     *,
     evidence_root: Path,
+    _borrowed_lock_descriptor: int | None = None,
 ) -> None:
     """Read-only gate requiring an exact, rehashed COMMITTED publication set."""
 
     path = Path(ledger_path)
     root = Path(evidence_root)
     lock_descriptor: int | None = None
+    owns_lock = False
     connection: sqlite3.Connection | None = None
     root_descriptor: int | None = None
     pending_descriptor: int | None = None
     try:
-        lock_descriptor = _acquire_target_lock(path)
+        lock_descriptor, owns_lock = _borrow_or_acquire_target_lock(
+            path,
+            _borrowed_lock_descriptor,
+        )
         connection = connect_ledger(path)
-        work_order = load_authoritative_work_order(connection)
-        receipts = _validated_receipt_prefix(connection, work_order)
-        groups = _journal_publication_groups(connection)
+        work_order, _, _, groups = _replay_receipt_publication_ledger(
+            connection
+        )
         if any(state_value != "COMMITTED" for _, state_value in groups):
             raise RetryEvidenceRecoveryError(
                 "evidence publication recovery is required"
             )
-        _require_exact_publication_coverage(receipts, groups)
 
         root_descriptor, root_identity = _open_stable_evidence_root(root)
         try:
@@ -3400,7 +3530,7 @@ def require_all_publications_committed(
                 ("pending directory close", pending_descriptor),
                 ("evidence root close", root_descriptor),
             ),
-            lock_descriptor=lock_descriptor,
+            lock_descriptor=lock_descriptor if owns_lock else None,
         )
         if cleanup_errors:
             raise RetryEvidenceRecoveryError(
@@ -3450,6 +3580,21 @@ def _acquire_target_lock(ledger_path: Path) -> int:
             "target lock acquisition failures",
             errors,
         )
+
+
+def _borrow_or_acquire_target_lock(
+    ledger_path: Path,
+    borrowed_descriptor: int | None,
+) -> tuple[int, bool]:
+    if borrowed_descriptor is None:
+        return _acquire_target_lock(ledger_path), True
+    if type(borrowed_descriptor) is not int:
+        raise TypeError("borrowed target lock descriptor must be an integer")
+    _validate_open_lock(
+        borrowed_descriptor,
+        _target_lock_path(ledger_path),
+    )
+    return borrowed_descriptor, False
 
 
 def _close_lock_descriptor(
