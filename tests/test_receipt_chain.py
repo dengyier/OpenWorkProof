@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -31,6 +32,11 @@ from openworkproof.evidence import (
     load_authoritative_work_order,
 )
 from openworkproof.models import AgentRequest, CapabilityGrant, WorkOrder
+from openworkproof.repo_tools import (
+    ResolutionManifest,
+    ResolutionManifestEntry,
+    resolution_manifest_digest,
+)
 from openworkproof.signing import digest_payload, key_id, sign_payload
 
 
@@ -7002,6 +7008,2338 @@ def _commit_publication_candidate_for_test(
         raise
     finally:
         connection.close()
+
+
+def _staged_retrying_verifier_candidate(
+    *,
+    tmp_path: Path,
+    work_order: WorkOrder,
+    root: CapabilityGrant,
+    role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+    label: str,
+):
+    ledger_path = tmp_path / f"{label}.sqlite3"
+    evidence_root = tmp_path / f"{label}-evidence"
+    evidence_root.mkdir()
+    _activate_ledger_root(
+        ledger_path,
+        work_order,
+        root,
+        role_keys,
+        fixed_now,
+    )
+    verifier = _child_grant(
+        work_order,
+        root,
+        role_keys,
+        label=f"{label}:verifier",
+        subject_role="Verifier",
+        updates={"quota": {"tool_calls": 1, "repair_rounds": 0}},
+    )
+    verifier_issuance = _issue_child(
+        ledger_path,
+        verifier,
+        _delegation_request(
+            work_order,
+            root,
+            verifier,
+            role_keys,
+            actor_role="Manager",
+            nonce=_grant_id(f"{label}:verifier-request"),
+        ),
+        role_keys,
+        fixed_now,
+    )
+    receipt = sidecar_receipt_factory(
+        state_before="running",
+        state_after="needs_rework",
+        event_type="tool_call",
+        actor_role="Verifier",
+        sequence=verifier_issuance.sequence + 1,
+        previous_receipt_digest=verifier_issuance.digest,
+        parent_receipt_ids=(verifier_issuance.receipt_id,),
+        occurred_at="2026-01-01T00:00:05Z",
+        test_passed=False,
+    )
+    raw = receipt.model_dump(mode="json")
+    raw.update(
+        {
+            "receipt_id": _grant_id(f"{label}:receipt"),
+            "grant_id": verifier.grant_id,
+            "nonce": _grant_id(f"{label}:nonce"),
+            "quota_charge": {
+                "grant_id": verifier.grant_id,
+                "metric": "tool_calls",
+                "amount": 1,
+                "remaining_after": 0,
+            },
+        }
+    )
+    for result in raw["predicate_results"]:
+        if result["name"] == "quota_remaining":
+            result["input"].update(
+                {
+                    "grant_id": verifier.grant_id,
+                    "grant_remaining_before": 1,
+                    "ledger_prefix_digest": verifier_issuance.digest,
+                }
+            )
+        elif result["name"] == "tests_passed":
+            expected_payload = rfc8785.dumps(
+                {
+                    "schema_version": "openworkproof-test-result/0.1",
+                    **raw["request_arguments"],
+                    "actual_exit_code": 1,
+                }
+            )
+            result["input"]["test_evidence_digest"] = hashlib.sha256(
+                expected_payload
+            ).hexdigest()
+        else:
+            continue
+        result["input_digest"] = _jcs_digest(
+            {
+                "domain": "openworkproof/predicate-input/v0.1",
+                "predicate_id": result["predicate_id"],
+                "input": result["input"],
+            }
+        )
+    claim = raw["nested_claim"]
+    claim.update(
+        {
+            "grant_id": verifier.grant_id,
+            "nonce": raw["nonce"],
+            "requested_at": "2026-01-01T00:00:05Z",
+        }
+    )
+    claim = sign_payload("agent-request", claim, role_keys["Verifier"][0])
+    raw["nested_claim"] = claim
+    raw["nested_claim_digest"] = claim["digest"]
+    receipt = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload("action-receipt", raw, role_keys["Sidecar"][0])
+    )
+    payload = _verifier_result_payload(receipt)
+    reference = receipt.evidence_refs[0]
+    assert hashlib.sha256(payload).hexdigest() == reference.sha256
+    group = evidence.stage_pending_evidence_group(
+        ledger_path,
+        evidence_root=evidence_root,
+        receipt=receipt,
+        payloads={reference.path: payload},
+    )
+    return (
+        {
+            "ledger_path": ledger_path,
+            "evidence_root": evidence_root,
+            "verifier": verifier,
+            "verifier_issuance": verifier_issuance,
+        },
+        receipt,
+        group,
+        payload,
+    )
+
+
+def _staged_running_patch_candidate(
+    *,
+    tmp_path: Path,
+    work_order: WorkOrder,
+    root: CapabilityGrant,
+    role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+    label: str,
+    execution_status: str = "succeeded",
+):
+    from test_state import _tool_receipt
+
+    work_order_raw = work_order.model_dump(mode="json")
+    for spec in work_order_raw["preconditions"]:
+        if spec["name"] != "tool_allowed":
+            continue
+        spec["arguments"]["tool_name"] = "owp.apply_patch"
+        spec["predicate_id"] = _jcs_digest(
+            {
+                "domain": "openworkproof/predicate-id/v0.1",
+                "name": spec["name"],
+                "version": spec["version"],
+                "applies_to_tools": spec["applies_to_tools"],
+                "arguments": spec["arguments"],
+            }
+        )
+    work_order_raw["preconditions"].sort(
+        key=lambda item: item["predicate_id"]
+    )
+    work_order = WorkOrder.model_validate(
+        sign_payload(
+            "work-order",
+            work_order_raw,
+            role_keys["Maintainer"][0],
+        )
+    )
+    root_raw = root.model_dump(mode="json")
+    root_raw["work_order_digest"] = work_order.digest
+    root = CapabilityGrant.model_validate(
+        sign_payload(
+            "capability-grant",
+            root_raw,
+            role_keys["Maintainer"][0],
+        )
+    )
+    ledger_path = tmp_path / f"{label}.sqlite3"
+    evidence_root = tmp_path / f"{label}-evidence"
+    evidence_root.mkdir()
+    _activate_ledger_root(
+        ledger_path,
+        work_order,
+        root,
+        role_keys,
+        fixed_now,
+    )
+    developer = _child_grant(
+        work_order,
+        root,
+        role_keys,
+        label=f"{label}:developer",
+        updates={
+            "allowed_tools": ["owp.apply_patch"],
+            "quota": {"tool_calls": 1, "repair_rounds": 0},
+        },
+    )
+    issuance = _issue_child(
+        ledger_path,
+        developer,
+        _delegation_request(
+            work_order,
+            root,
+            developer,
+            role_keys,
+            actor_role="Manager",
+            nonce=_grant_id(f"{label}:developer-request"),
+        ),
+        role_keys,
+        fixed_now,
+    )
+    patch_bytes = b"0123456789"
+    patch_digest = hashlib.sha256(patch_bytes).hexdigest()
+    result = {
+        "schema_version": "openworkproof-patch-result/0.1",
+        "parent_commit": work_order.source_commit,
+        "parent_manifest_digest": "b" * 64,
+        "candidate_commit": "2" * 40,
+        "workspace_manifest_digest": "c" * 64,
+        "patch_digest": patch_digest,
+        "patch_size_bytes": len(patch_bytes),
+        "replay_profile_digest": work_order.replay_profile_digest,
+    }
+    result_bytes = rfc8785.dumps(result)
+    result_digest = hashlib.sha256(result_bytes).hexdigest()
+    receipt = _tool_receipt(
+        tool_name="owp.apply_patch",
+        actor_role="Developer",
+        signed_work_order=work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        ephemeral_role_keys=role_keys,
+    )
+    raw = receipt.model_dump(mode="json")
+    arguments = {
+        "target_paths": ["src/x"],
+        "patch_digest": patch_digest,
+        "patch_size_bytes": len(patch_bytes),
+    }
+    trusted_resolution_manifest = ResolutionManifest(
+        schema_version="openworkproof-resolution-manifest/0.1",
+        workspace_manifest_digest=result["parent_manifest_digest"],
+        requested_paths=tuple(arguments["target_paths"]),
+        resolved_entries=tuple(
+            ResolutionManifestEntry(
+                requested_path=path,
+                resolved_relative_path=path,
+            )
+            for path in arguments["target_paths"]
+        ),
+    )
+    expected_resolution_manifest_digest = resolution_manifest_digest(
+        trusted_resolution_manifest
+    )
+    raw.update(
+        {
+            "work_order_digest": work_order.digest,
+            "receipt_id": _grant_id(f"{label}:receipt"),
+            "grant_id": developer.grant_id,
+            "request_arguments": arguments,
+            "arguments_digest": evidence.request_arguments_digest(
+                "owp.apply_patch",
+                arguments,
+            ),
+            "execution_status": execution_status,
+            "execution_error_code": (
+                "HANDLER_ERROR"
+                if execution_status == "failed"
+                else None
+            ),
+            "output_digest": (
+                _jcs_digest(
+                    {
+                        "status": "failed",
+                        "error_code": "HANDLER_ERROR",
+                    }
+                )
+                if execution_status == "failed"
+                else result_digest
+            ),
+            "state_before": "running",
+            "state_after": "running",
+            "parent_receipt_ids": [issuance.receipt_id],
+            "sequence": issuance.sequence + 1,
+            "nonce": _grant_id(f"{label}:nonce"),
+            "previous_receipt_digest": issuance.digest,
+            "occurred_at": "2026-01-01T00:00:05Z",
+            "evidence_refs": [
+                {
+                    "path": "evidence/patch-input/01.diff",
+                    "sha256": patch_digest,
+                    "media_type": "text/x-diff",
+                    "size_bytes": len(patch_bytes),
+                },
+                {
+                    "path": "evidence/patch-result/01.json",
+                    "sha256": result_digest,
+                    "media_type": "application/json",
+                    "size_bytes": len(result_bytes),
+                },
+            ][: 1 if execution_status == "failed" else 2],
+            "quota_charge": {
+                "grant_id": developer.grant_id,
+                "metric": "tool_calls",
+                "amount": 1,
+                "remaining_after": 0,
+            },
+        }
+    )
+    for predicate in raw["predicate_results"]:
+        if predicate["name"] == "path_allowed":
+            predicate["input"]["resolution_manifest_digest"] = (
+                expected_resolution_manifest_digest
+            )
+            predicate["input_digest"] = _jcs_digest(
+                {
+                    "domain": "openworkproof/predicate-input/v0.1",
+                    "predicate_id": predicate["predicate_id"],
+                    "input": predicate["input"],
+                }
+            )
+            continue
+        if predicate["name"] != "quota_remaining":
+            continue
+        predicate["input"].update(
+            {
+                "grant_id": developer.grant_id,
+                "grant_remaining_before": 1,
+                "ledger_prefix_digest": issuance.digest,
+            }
+        )
+        predicate["input_digest"] = _jcs_digest(
+            {
+                "domain": "openworkproof/predicate-input/v0.1",
+                "predicate_id": predicate["predicate_id"],
+                "input": predicate["input"],
+            }
+        )
+    claim = raw["nested_claim"]
+    claim.update(
+        {
+            "work_order_digest": work_order.digest,
+            "grant_id": developer.grant_id,
+            "arguments_digest": raw["arguments_digest"],
+            "nonce": raw["nonce"],
+            "requested_at": "2026-01-01T00:00:05Z",
+        }
+    )
+    claim = sign_payload(
+        "agent-request",
+        claim,
+        role_keys["Developer"][0],
+    )
+    raw["nested_claim"] = claim
+    raw["nested_claim_digest"] = claim["digest"]
+    receipt = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            raw,
+            role_keys["Sidecar"][0],
+        )
+    )
+    payloads = {
+        receipt.evidence_refs[0].path: patch_bytes,
+    }
+    if execution_status == "succeeded":
+        payloads[receipt.evidence_refs[1].path] = result_bytes
+    group = evidence.stage_pending_evidence_group(
+        ledger_path,
+        evidence_root=evidence_root,
+        receipt=receipt,
+        payloads=payloads,
+    )
+    return {
+        "ledger_path": ledger_path,
+        "evidence_root": evidence_root,
+        "developer": developer,
+        "issuance": issuance,
+        "trusted_resolution_manifest": trusted_resolution_manifest,
+    }, receipt, group, payloads
+
+
+def test_commit_receipt_with_publications_atomically_journals_signed_receipt(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode, receipt, group, payload = (
+        _staged_retrying_verifier_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label="publication-commit-success",
+        )
+    )
+
+    evidence.commit_receipt_with_publications(
+        episode["ledger_path"],
+        evidence_root=episode["evidence_root"],
+        receipt=receipt,
+        group=group,
+        clock=lambda: fixed_now,
+    )
+
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        assert evidence._validated_receipt_prefix(
+            connection,
+            signed_work_order,
+        )[-1] == receipt
+        assert tuple(
+            connection.execute(
+                """
+                SELECT parent_receipt_id
+                FROM receipt_parents
+                WHERE child_receipt_id = ?
+                ORDER BY parent_receipt_id
+                """,
+                (receipt.receipt_id,),
+            )
+        ) == tuple((item,) for item in sorted(receipt.parent_receipt_ids))
+        assert connection.execute(
+            """
+            SELECT grant_id, event_type, metric, amount
+            FROM grant_events
+            WHERE receipt_id = ?
+            """,
+            (receipt.receipt_id,),
+        ).fetchone() == (
+            episode["verifier"].grant_id,
+            "tool_call",
+            "tool_calls",
+            1,
+        )
+        assert connection.execute(
+            """
+            SELECT publication_id, receipt_id, pending_path, final_path,
+                   digest, size_bytes, media_type, state
+            FROM evidence_publications
+            WHERE receipt_id = ?
+            """,
+            (receipt.receipt_id,),
+        ).fetchone() == (
+            group.publications[0].publication_id,
+            receipt.receipt_id,
+            group.publications[0].pending_path,
+            group.publications[0].final_path,
+            hashlib.sha256(payload).hexdigest(),
+            len(payload),
+            "application/json",
+            "COMMITTING",
+        )
+        assert connection.execute(
+            "SELECT current_state, version FROM work_order_state"
+        ).fetchone() == ("needs_rework", receipt.sequence)
+        assert connection.execute(
+            "SELECT next_sequence FROM sequence_counter"
+        ).fetchone() == (receipt.sequence + 1,)
+    finally:
+        connection.close()
+    pending = episode["evidence_root"] / group.publications[0].pending_path
+    final = episode["evidence_root"] / receipt.evidence_refs[0].path.removeprefix(
+        "evidence/"
+    )
+    assert pending.read_bytes() == payload
+    assert not final.exists()
+
+
+def test_receipt_publication_replays_authoritative_patch_paths(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payloads = _staged_running_patch_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label="publication-authoritative-patch-path",
+    )
+    raw = receipt.model_dump(mode="json")
+    raw["request_arguments"]["target_paths"] = ["private/escape"]
+    raw["arguments_digest"] = evidence.request_arguments_digest(
+        receipt.tool_name,
+        raw["request_arguments"],
+    )
+    claim = raw["nested_claim"]
+    claim["arguments_digest"] = raw["arguments_digest"]
+    claim = sign_payload(
+        "agent-request",
+        claim,
+        ephemeral_role_keys["Developer"][0],
+    )
+    raw["nested_claim"] = claim
+    raw["nested_claim_digest"] = claim["digest"]
+    candidate = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            raw,
+            ephemeral_role_keys["Sidecar"][0],
+        )
+    )
+    trusted_manifest = ResolutionManifest(
+        schema_version=context["trusted_resolution_manifest"].schema_version,
+        workspace_manifest_digest=(
+            context[
+                "trusted_resolution_manifest"
+            ].workspace_manifest_digest
+        ),
+        requested_paths=("private/escape",),
+        resolved_entries=(
+            ResolutionManifestEntry(
+                requested_path="private/escape",
+                resolved_relative_path="private/escape",
+            ),
+        ),
+    )
+    before = _ledger_publication_snapshot(context["ledger_path"])
+
+    with pytest.raises(ValueError):
+        evidence.commit_receipt_with_publications(
+            context["ledger_path"],
+            evidence_root=context["evidence_root"],
+            receipt=candidate,
+            group=group,
+            clock=lambda: fixed_now,
+            trusted_resolution_manifest=trusted_manifest,
+        )
+
+    assert _ledger_publication_snapshot(context["ledger_path"]) == before
+    for publication in group.publications:
+        pending = context["evidence_root"] / publication.pending_path
+        assert pending.read_bytes() == payloads[publication.final_path]
+
+
+def test_receipt_publication_accepts_authoritative_patch_predicates(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payloads = _staged_running_patch_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label="publication-authoritative-patch-success",
+    )
+
+    evidence.commit_receipt_with_publications(
+        context["ledger_path"],
+        evidence_root=context["evidence_root"],
+        receipt=receipt,
+        group=group,
+        clock=lambda: fixed_now,
+        trusted_resolution_manifest=context["trusted_resolution_manifest"],
+    )
+
+    connection = connect_ledger(context["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE receipt_id = ?",
+            (receipt.receipt_id,),
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM evidence_publications WHERE receipt_id = ?",
+            (receipt.receipt_id,),
+        ).fetchone() == (2,)
+    finally:
+        connection.close()
+    for publication in group.publications:
+        pending = context["evidence_root"] / publication.pending_path
+        assert pending.read_bytes() == payloads[publication.final_path]
+
+
+def test_receipt_publication_preserves_failed_patch_semantics(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payloads = _staged_running_patch_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label="publication-failed-patch",
+        execution_status="failed",
+    )
+
+    evidence.commit_receipt_with_publications(
+        context["ledger_path"],
+        evidence_root=context["evidence_root"],
+        receipt=receipt,
+        group=group,
+        clock=lambda: fixed_now,
+        trusted_resolution_manifest=context["trusted_resolution_manifest"],
+    )
+
+    connection = connect_ledger(context["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE receipt_id = ?",
+            (receipt.receipt_id,),
+        ).fetchone() == (1,)
+        assert connection.execute(
+            """
+            SELECT grant_id, event_type, metric, amount
+            FROM grant_events
+            WHERE receipt_id = ?
+            """,
+            (receipt.receipt_id,),
+        ).fetchone() == (
+            context["developer"].grant_id,
+            "tool_call",
+            "tool_calls",
+            1,
+        )
+        assert connection.execute(
+            """
+            SELECT receipt_id, state
+            FROM evidence_publications
+            WHERE receipt_id = ?
+            """,
+            (receipt.receipt_id,),
+        ).fetchone() == (receipt.receipt_id, "COMMITTING")
+    finally:
+        connection.close()
+    for publication in group.publications:
+        pending = context["evidence_root"] / publication.pending_path
+        final = (
+            context["evidence_root"]
+            / publication.final_path.removeprefix("evidence/")
+        )
+        assert pending.read_bytes() == payloads[publication.final_path]
+        assert not final.exists()
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "missing",
+        "missing_failed",
+        "wrong_type",
+        "requested_paths",
+        "entry_request",
+        "resolved_entry",
+        "unresolved_entry",
+        "workspace_manifest",
+    ),
+)
+def test_receipt_publication_rejects_untrusted_patch_resolution_manifest(
+    case: str,
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payloads = _staged_running_patch_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label=f"publication-untrusted-patch-manifest-{case}",
+        execution_status=(
+            "failed" if case == "missing_failed" else "succeeded"
+        ),
+    )
+    trusted_manifest = context["trusted_resolution_manifest"]
+    trusted_entry = trusted_manifest.resolved_entries[0]
+    candidate_manifest = {
+        "missing": None,
+        "missing_failed": None,
+        "wrong_type": object(),
+        "requested_paths": replace(
+            trusted_manifest,
+            requested_paths=("src/y",),
+            resolved_entries=(
+                replace(
+                    trusted_entry,
+                    requested_path="src/y",
+                    resolved_relative_path="src/y",
+                ),
+            ),
+        ),
+        "resolved_entry": replace(
+            trusted_manifest,
+            resolved_entries=(
+                replace(
+                    trusted_entry,
+                    resolved_relative_path="src/y",
+                ),
+            ),
+        ),
+        "entry_request": replace(
+            trusted_manifest,
+            resolved_entries=(
+                replace(
+                    trusted_entry,
+                    requested_path="src/y",
+                    resolved_relative_path="src/y",
+                ),
+            ),
+        ),
+        "unresolved_entry": replace(
+            trusted_manifest,
+            resolved_entries=(
+                replace(
+                    trusted_entry,
+                    resolved_relative_path=None,
+                ),
+            ),
+        ),
+        "workspace_manifest": replace(
+            trusted_manifest,
+            workspace_manifest_digest="f" * 64,
+        ),
+    }[case]
+    before = _ledger_publication_snapshot(context["ledger_path"])
+
+    with pytest.raises(ValueError):
+        evidence.commit_receipt_with_publications(
+            context["ledger_path"],
+            evidence_root=context["evidence_root"],
+            receipt=receipt,
+            group=group,
+            clock=lambda: fixed_now,
+            trusted_resolution_manifest=candidate_manifest,
+        )
+
+    assert _ledger_publication_snapshot(context["ledger_path"]) == before
+    for publication in group.publications:
+        pending = context["evidence_root"] / publication.pending_path
+        assert pending.read_bytes() == payloads[publication.final_path]
+
+
+def test_receipt_publication_rejects_resolution_manifest_for_non_patch(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payload = (
+        _staged_retrying_verifier_candidate(
+            tmp_path=tmp_path,
+            work_order=signed_work_order,
+            root=signed_root_grant,
+            role_keys=ephemeral_role_keys,
+            fixed_now=fixed_now,
+            sidecar_receipt_factory=sidecar_receipt_factory,
+            label="publication-extra-resolution-manifest",
+        )
+    )
+    manifest = ResolutionManifest(
+        schema_version="openworkproof-resolution-manifest/0.1",
+        workspace_manifest_digest="b" * 64,
+        requested_paths=("src/x",),
+        resolved_entries=(
+            ResolutionManifestEntry(
+                requested_path="src/x",
+                resolved_relative_path="src/x",
+            ),
+        ),
+    )
+    before = _ledger_publication_snapshot(context["ledger_path"])
+
+    with pytest.raises(ValueError):
+        evidence.commit_receipt_with_publications(
+            context["ledger_path"],
+            evidence_root=context["evidence_root"],
+            receipt=receipt,
+            group=group,
+            clock=lambda: fixed_now,
+            trusted_resolution_manifest=manifest,
+        )
+
+    assert _ledger_publication_snapshot(context["ledger_path"]) == before
+    pending = context["evidence_root"] / group.publications[0].pending_path
+    assert pending.read_bytes() == payload
+
+
+@pytest.mark.parametrize(
+    "tampering",
+    ("resolution_manifest_digest", "resolved_entry"),
+)
+def test_receipt_publication_rejects_resigned_patch_path_claim(
+    tampering: str,
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payloads = _staged_running_patch_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label=f"publication-forged-patch-{tampering}",
+    )
+    raw = receipt.model_dump(mode="json")
+    forged_digest = "f" * 64
+    for predicate in raw["predicate_results"]:
+        if predicate["name"] != "path_allowed":
+            continue
+        if tampering == "resolution_manifest_digest":
+            assert (
+                predicate["input"]["resolution_manifest_digest"]
+                != forged_digest
+            )
+            predicate["input"]["resolution_manifest_digest"] = forged_digest
+        else:
+            predicate["input"]["resolved_entries"][0][
+                "resolved_relative_path"
+            ] = "src/y"
+        predicate["input_digest"] = _jcs_digest(
+            {
+                "domain": "openworkproof/predicate-input/v0.1",
+                "predicate_id": predicate["predicate_id"],
+                "input": predicate["input"],
+            }
+        )
+    candidate = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            raw,
+            ephemeral_role_keys["Sidecar"][0],
+        )
+    )
+    before = _ledger_publication_snapshot(context["ledger_path"])
+
+    with pytest.raises(ValueError):
+        evidence.commit_receipt_with_publications(
+            context["ledger_path"],
+            evidence_root=context["evidence_root"],
+            receipt=candidate,
+            group=group,
+            clock=lambda: fixed_now,
+            trusted_resolution_manifest=context[
+                "trusted_resolution_manifest"
+            ],
+        )
+
+    assert _ledger_publication_snapshot(context["ledger_path"]) == before
+    for publication in group.publications:
+        pending = context["evidence_root"] / publication.pending_path
+        assert pending.read_bytes() == payloads[publication.final_path]
+
+
+def test_receipt_publication_binds_pending_name_to_opened_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payload = _staged_retrying_verifier_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label="publication-pending-name-inode",
+    )
+    pending = context["evidence_root"] / group.publications[0].pending_path
+    displaced = pending.with_name(f"{pending.name}.displaced")
+    real_insert = evidence._insert_receipt_and_publication_group
+
+    def swap_pending_name(*args, **kwargs):
+        pending.rename(displaced)
+        pending.write_bytes(payload)
+        pending.chmod(0o600)
+        return real_insert(*args, **kwargs)
+
+    monkeypatch.setattr(
+        evidence,
+        "_insert_receipt_and_publication_group",
+        swap_pending_name,
+    )
+    before = _ledger_publication_snapshot(context["ledger_path"])
+
+    with pytest.raises(Exception) as captured:
+        evidence.commit_receipt_with_publications(
+            context["ledger_path"],
+            evidence_root=context["evidence_root"],
+            receipt=receipt,
+            group=group,
+            clock=lambda: fixed_now,
+        )
+
+    assert not isinstance(
+        captured.value,
+        evidence.ReceiptPublicationCommittedError,
+    )
+    assert _ledger_publication_snapshot(context["ledger_path"]) == before
+    assert pending.read_bytes() == payload
+    assert displaced.read_bytes() == payload
+
+
+def test_receipt_publication_has_final_gate_after_sqlite_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payload = _staged_retrying_verifier_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label="publication-cleanup-final-gate",
+    )
+    final = (
+        context["evidence_root"]
+        / receipt.evidence_refs[0].path.removeprefix("evidence/")
+    )
+    real_connect = evidence.connect_ledger
+
+    class FinalCreatingConnection:
+        def __init__(self, raw):
+            self.raw = raw
+            self.created = False
+
+        def __getattr__(self, name):
+            return getattr(self.raw, name)
+
+        def close(self):
+            if not self.created:
+                self.created = True
+                final.parent.mkdir(parents=True, exist_ok=True)
+                final.write_bytes(payload)
+            return self.raw.close()
+
+    monkeypatch.setattr(
+        evidence,
+        "connect_ledger",
+        lambda path: FinalCreatingConnection(real_connect(path)),
+    )
+
+    with pytest.raises(
+        evidence.ReceiptPublicationCommittedError
+    ) as captured:
+        evidence.commit_receipt_with_publications(
+            context["ledger_path"],
+            evidence_root=context["evidence_root"],
+            receipt=receipt,
+            group=group,
+            clock=lambda: fixed_now,
+        )
+
+    assert captured.value.committed is True
+    assert final.read_bytes() == payload
+
+
+def test_receipt_publication_binds_locked_ledger_name_to_one_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, _ = _staged_retrying_verifier_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label="publication-ledger-name-inode",
+    )
+    ledger_path = context["ledger_path"]
+    connection = connect_ledger(ledger_path)
+    try:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
+    clone_path = tmp_path / "ledger-clone.sqlite3"
+    clone_path.write_bytes(ledger_path.read_bytes())
+    displaced_path = tmp_path / "ledger-displaced.sqlite3"
+    before = _ledger_publication_snapshot(ledger_path)
+    real_connect = evidence.connect_ledger
+    swapped = False
+
+    def swap_before_connect(path: Path):
+        nonlocal swapped
+        if not swapped and Path(path) == ledger_path:
+            swapped = True
+            ledger_path.rename(displaced_path)
+            clone_path.rename(ledger_path)
+        return real_connect(path)
+
+    monkeypatch.setattr(
+        evidence,
+        "connect_ledger",
+        swap_before_connect,
+    )
+
+    with pytest.raises(Exception) as captured:
+        evidence.commit_receipt_with_publications(
+            ledger_path,
+            evidence_root=context["evidence_root"],
+            receipt=receipt,
+            group=group,
+            clock=lambda: fixed_now,
+        )
+
+    assert swapped
+    assert not isinstance(
+        captured.value,
+        evidence.ReceiptPublicationCommittedError,
+    )
+    assert _ledger_publication_snapshot(ledger_path) == before
+    assert _ledger_publication_snapshot(displaced_path) == before
+
+
+def test_receipt_publication_swap_restore_cannot_report_plain_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, _ = _staged_retrying_verifier_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label="publication-ledger-swap-restore",
+    )
+    ledger_path = context["ledger_path"]
+    connection = connect_ledger(ledger_path)
+    try:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
+    clone_path = tmp_path / "swap-restore-clone.sqlite3"
+    clone_path.write_bytes(ledger_path.read_bytes())
+    displaced_path = tmp_path / "swap-restore-displaced.sqlite3"
+    before = _ledger_publication_snapshot(ledger_path)
+    real_connect = evidence.connect_ledger
+    swapped = False
+
+    def bind_clone_then_restore_name(path: Path):
+        nonlocal swapped
+        assert Path(path) == ledger_path
+        clone_connection = real_connect(clone_path)
+        ledger_path.rename(displaced_path)
+        clone_path.rename(ledger_path)
+        ledger_path.rename(clone_path)
+        displaced_path.rename(ledger_path)
+        swapped = True
+        return clone_connection
+
+    monkeypatch.setattr(
+        evidence,
+        "connect_ledger",
+        bind_clone_then_restore_name,
+    )
+
+    with pytest.raises(
+        evidence.ReceiptPublicationCommitIndeterminateError
+    ) as captured:
+        evidence.commit_receipt_with_publications(
+            ledger_path,
+            evidence_root=context["evidence_root"],
+            receipt=receipt,
+            group=group,
+            clock=lambda: fixed_now,
+        )
+
+    assert swapped
+    assert captured.value.committed is None
+    assert captured.value.truth == "unknown"
+    assert _ledger_publication_snapshot(ledger_path) == before
+
+
+@pytest.mark.parametrize(
+    "fault_sql",
+    (
+        "INSERT INTO RECEIPTS",
+        "INSERT INTO RECEIPT_PARENTS",
+        "INSERT INTO GRANT_EVENTS",
+        "INSERT INTO EVIDENCE_PUBLICATIONS",
+        "UPDATE WORK_ORDER_STATE",
+        "UPDATE SEQUENCE_COUNTER",
+        "SELECT COUNT(*) FROM RECEIPTS",
+    ),
+)
+def test_receipt_publication_precommit_faults_roll_back_every_protocol_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault_sql: str,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payload = (
+        _staged_retrying_verifier_candidate(
+            tmp_path=tmp_path,
+            work_order=signed_work_order,
+            root=signed_root_grant,
+            role_keys=ephemeral_role_keys,
+            fixed_now=fixed_now,
+            sidecar_receipt_factory=sidecar_receipt_factory,
+            label=f"publication-rollback-{fault_sql.split()[0].lower()}-"
+            f"{hashlib.sha256(fault_sql.encode()).hexdigest()[:8]}",
+        )
+    )
+    before = _ledger_publication_snapshot(context["ledger_path"])
+    real_connect = evidence.connect_ledger
+    wrapped: list[_FaultingConnection] = []
+
+    def failing_connect(path: Path):
+        connection = _FaultingConnection(
+            real_connect(path),
+            fail_when=lambda sql: fault_sql in sql,
+        )
+        wrapped.append(connection)
+        return connection
+
+    monkeypatch.setattr(evidence, "connect_ledger", failing_connect)
+    with pytest.raises(Exception) as captured:
+        evidence.commit_receipt_with_publications(
+            context["ledger_path"],
+            evidence_root=context["evidence_root"],
+            receipt=receipt,
+            group=group,
+            clock=lambda: fixed_now,
+        )
+    assert not isinstance(
+        captured.value,
+        (
+            evidence.ReceiptPublicationCommittedError,
+            evidence.ReceiptPublicationCommitIndeterminateError,
+        ),
+    )
+    assert wrapped and wrapped[0].closed
+    monkeypatch.setattr(evidence, "connect_ledger", real_connect)
+    assert _ledger_publication_snapshot(context["ledger_path"]) == before
+    pending = context["evidence_root"] / group.publications[0].pending_path
+    final = context["evidence_root"] / receipt.evidence_refs[0].path.removeprefix(
+        "evidence/"
+    )
+    assert pending.read_bytes() == payload
+    assert not final.exists()
+
+
+@pytest.mark.parametrize("failure_ordinal", (1, 2))
+def test_each_publication_journal_insert_failure_rolls_back_the_whole_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_ordinal: int,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payloads = _staged_running_patch_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label=f"publication-journal-fault-{failure_ordinal}",
+    )
+    before = _ledger_publication_snapshot(context["ledger_path"])
+    real_connect = evidence.connect_ledger
+
+    class FailJournalOrdinal:
+        def __init__(self, connection):
+            self._connection = connection
+            self.count = 0
+            self.closed = False
+
+        @property
+        def in_transaction(self):
+            return self._connection.in_transaction
+
+        def execute(self, statement, parameters=()):
+            normalized = " ".join(statement.split()).upper()
+            if normalized.startswith(
+                "INSERT INTO EVIDENCE_PUBLICATIONS"
+            ):
+                self.count += 1
+                if self.count == failure_ordinal:
+                    raise sqlite3.OperationalError(
+                        "injected publication journal failure"
+                    )
+            return self._connection.execute(statement, parameters)
+
+        def close(self):
+            self.closed = True
+            self._connection.close()
+
+    wrapped: list[FailJournalOrdinal] = []
+
+    def failing_connect(path: Path):
+        connection = FailJournalOrdinal(real_connect(path))
+        wrapped.append(connection)
+        return connection
+
+    monkeypatch.setattr(evidence, "connect_ledger", failing_connect)
+    with pytest.raises(sqlite3.OperationalError):
+        evidence.commit_receipt_with_publications(
+            context["ledger_path"],
+            evidence_root=context["evidence_root"],
+            receipt=receipt,
+            group=group,
+            clock=lambda: fixed_now,
+            trusted_resolution_manifest=context[
+                "trusted_resolution_manifest"
+            ],
+        )
+    monkeypatch.setattr(evidence, "connect_ledger", real_connect)
+    assert wrapped[0].count == failure_ordinal
+    assert wrapped[0].closed
+    assert _ledger_publication_snapshot(context["ledger_path"]) == before
+    for publication in group.publications:
+        assert (
+            context["evidence_root"] / publication.pending_path
+        ).read_bytes() == payloads[publication.final_path]
+        assert not (
+            context["evidence_root"]
+            / publication.final_path.removeprefix("evidence/")
+        ).exists()
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "pending_bytes",
+        "pending_mode",
+        "pending_hardlink",
+        "final_occupied",
+        "group_receipt",
+        "group_publication_id",
+        "group_pending_path",
+        "group_digest",
+        "group_size",
+        "group_media",
+        "deny",
+        "stale_sequence",
+        "stale_state",
+    ),
+)
+def test_receipt_publication_rejects_tampered_candidate_without_writes(
+    tmp_path: Path,
+    case: str,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payload = (
+        _staged_retrying_verifier_candidate(
+            tmp_path=tmp_path,
+            work_order=signed_work_order,
+            root=signed_root_grant,
+            role_keys=ephemeral_role_keys,
+            fixed_now=fixed_now,
+            sidecar_receipt_factory=sidecar_receipt_factory,
+            label=f"publication-tamper-{case}",
+        )
+    )
+    pending = context["evidence_root"] / group.publications[0].pending_path
+    final = context["evidence_root"] / receipt.evidence_refs[0].path.removeprefix(
+        "evidence/"
+    )
+    candidate_receipt = receipt
+    candidate_group = group
+    publication = group.publications[0]
+    if case == "pending_bytes":
+        pending.write_bytes(b"x" * len(payload))
+    elif case == "pending_mode":
+        pending.chmod(0o640)
+    elif case == "pending_hardlink":
+        os.link(pending, tmp_path / "pending-second-link")
+    elif case == "final_occupied":
+        final.parent.mkdir(parents=True, exist_ok=True)
+        final.write_bytes(payload)
+    elif case == "group_receipt":
+        candidate_group = evidence._PublicationGroup(
+            receipt_id="f" * 64,
+            publications=group.publications,
+        )
+    elif case.startswith("group_"):
+        updates = {
+            "group_publication_id": {
+                "publication_id": "f" * 64,
+            },
+            "group_pending_path": {
+                "pending_path": ".pending/" + "f" * 64,
+            },
+            "group_digest": {"digest": "f" * 64},
+            "group_size": {"size_bytes": publication.size_bytes + 1},
+            "group_media": {"media_type": "text/x-diff"},
+        }[case]
+        candidate_group = evidence._PublicationGroup(
+            receipt_id=group.receipt_id,
+            publications=(
+                evidence._Publication(
+                    **{
+                        **publication.__dict__,
+                        **updates,
+                    }
+                ),
+            ),
+        )
+    elif case == "deny":
+        candidate_receipt = receipt.model_copy(
+            update={"policy_decision": "deny"}
+        )
+    else:
+        connection = connect_ledger(context["ledger_path"])
+        try:
+            if case == "stale_sequence":
+                connection.execute(
+                    "UPDATE sequence_counter SET next_sequence = next_sequence + 1"
+                )
+            else:
+                connection.execute(
+                    "UPDATE work_order_state SET version = version + 1"
+                )
+        finally:
+            connection.close()
+    before = _ledger_publication_snapshot(context["ledger_path"])
+
+    with pytest.raises(Exception) as captured:
+        evidence.commit_receipt_with_publications(
+            context["ledger_path"],
+            evidence_root=context["evidence_root"],
+            receipt=candidate_receipt,
+            group=candidate_group,
+            clock=lambda: fixed_now,
+        )
+    assert not isinstance(
+        captured.value,
+        evidence.ReceiptPublicationCommittedError,
+    )
+    assert _ledger_publication_snapshot(context["ledger_path"]) == before
+    if case != "final_occupied":
+        assert not final.exists()
+    assert pending.exists()
+
+
+def _synchronize_two_publication_lock_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+    ledger_path: Path,
+):
+    real_acquire = evidence._acquire_target_lock
+    arrivals = threading.Barrier(2)
+    both_at_lock = threading.Event()
+    counter_lock = threading.Lock()
+    arrival_count = 0
+    acquisition_count = 0
+    loser_snapshots = []
+
+    def synchronized_acquire(path: Path):
+        nonlocal arrival_count, acquisition_count
+        with counter_lock:
+            arrival_count += 1
+            if arrival_count == 2:
+                both_at_lock.set()
+        arrivals.wait(timeout=5)
+        descriptor = real_acquire(path)
+        with counter_lock:
+            acquisition_count += 1
+            is_loser = acquisition_count == 2
+        if is_loser:
+            loser_snapshots.append(
+                _ledger_publication_snapshot(ledger_path)
+            )
+        return descriptor
+
+    monkeypatch.setattr(
+        evidence,
+        "_acquire_target_lock",
+        synchronized_acquire,
+    )
+    return both_at_lock, loser_snapshots
+
+
+def test_concurrent_exact_receipt_publication_inserts_once_and_keeps_pending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payload = (
+        _staged_retrying_verifier_candidate(
+            tmp_path=tmp_path,
+            work_order=signed_work_order,
+            root=signed_root_grant,
+            role_keys=ephemeral_role_keys,
+            fixed_now=fixed_now,
+            sidecar_receipt_factory=sidecar_receipt_factory,
+            label="publication-concurrent-exact",
+        )
+    )
+    both_at_lock, loser_snapshots = (
+        _synchronize_two_publication_lock_attempts(
+            monkeypatch,
+            context["ledger_path"],
+        )
+    )
+
+    def commit():
+        try:
+            evidence.commit_receipt_with_publications(
+                context["ledger_path"],
+                evidence_root=context["evidence_root"],
+                receipt=receipt,
+                group=group,
+                clock=lambda: fixed_now,
+            )
+            return None
+        except Exception as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(executor.map(lambda _: commit(), range(2)))
+
+    assert both_at_lock.is_set()
+    losers = tuple(error for error in outcomes if error is not None)
+    assert len(losers) == 1
+    assert type(losers[0]) is ValueError
+    assert str(losers[0]) == (
+        "an existing evidence publication requires recovery"
+    )
+    assert len(loser_snapshots) == 1
+    assert (
+        _ledger_publication_snapshot(context["ledger_path"])
+        == loser_snapshots[0]
+    )
+    connection = connect_ledger(context["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE receipt_id = ?",
+            (receipt.receipt_id,),
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM evidence_publications WHERE receipt_id = ?",
+            (receipt.receipt_id,),
+        ).fetchone() == (len(group.publications),)
+    finally:
+        connection.close()
+    assert (
+        context["evidence_root"] / group.publications[0].pending_path
+    ).read_bytes() == payload
+
+
+def test_concurrent_distinct_candidates_on_one_tip_commit_only_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, first, first_group, payload = (
+        _staged_retrying_verifier_candidate(
+            tmp_path=tmp_path,
+            work_order=signed_work_order,
+            root=signed_root_grant,
+            role_keys=ephemeral_role_keys,
+            fixed_now=fixed_now,
+            sidecar_receipt_factory=sidecar_receipt_factory,
+            label="publication-concurrent-distinct",
+        )
+    )
+    raw = first.model_dump(mode="json")
+    raw["receipt_id"] = _grant_id(
+        "publication-concurrent-distinct:second-receipt"
+    )
+    raw["nonce"] = _grant_id(
+        "publication-concurrent-distinct:second-nonce"
+    )
+    claim = raw["nested_claim"]
+    claim["nonce"] = raw["nonce"]
+    claim = sign_payload(
+        "agent-request",
+        claim,
+        ephemeral_role_keys["Verifier"][0],
+    )
+    raw["nested_claim"] = claim
+    raw["nested_claim_digest"] = claim["digest"]
+    second = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            raw,
+            ephemeral_role_keys["Sidecar"][0],
+        )
+    )
+    second_group = evidence.stage_pending_evidence_group(
+        context["ledger_path"],
+        evidence_root=context["evidence_root"],
+        receipt=second,
+        payloads={second.evidence_refs[0].path: payload},
+    )
+    both_at_lock, loser_snapshots = (
+        _synchronize_two_publication_lock_attempts(
+            monkeypatch,
+            context["ledger_path"],
+        )
+    )
+
+    def commit(candidate):
+        candidate_receipt, candidate_group = candidate
+        try:
+            evidence.commit_receipt_with_publications(
+                context["ledger_path"],
+                evidence_root=context["evidence_root"],
+                receipt=candidate_receipt,
+                group=candidate_group,
+                clock=lambda: fixed_now,
+            )
+            return candidate_receipt.receipt_id, None
+        except Exception as error:
+            return candidate_receipt.receipt_id, error
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(
+            executor.map(
+                commit,
+                ((first, first_group), (second, second_group)),
+            )
+        )
+
+    assert both_at_lock.is_set()
+    winners = tuple(
+        receipt_id
+        for receipt_id, error in outcomes
+        if error is None
+    )
+    losers = tuple(
+        (receipt_id, error)
+        for receipt_id, error in outcomes
+        if error is not None
+    )
+    assert len(winners) == 1
+    assert len(losers) == 1
+    loser_id, loser_error = losers[0]
+    assert type(loser_error) is ValueError
+    assert str(loser_error) == (
+        "an existing evidence publication requires recovery"
+    )
+    assert len(loser_snapshots) == 1
+    assert (
+        _ledger_publication_snapshot(context["ledger_path"])
+        == loser_snapshots[0]
+    )
+    connection = connect_ledger(context["ledger_path"])
+    try:
+        assert connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM receipts
+            WHERE receipt_id IN (?, ?)
+            """,
+            (first.receipt_id, second.receipt_id),
+        ).fetchone() == (1,)
+        assert connection.execute(
+            """
+            SELECT receipt_id
+            FROM evidence_publications
+            WHERE receipt_id IN (?, ?)
+            """,
+            (first.receipt_id, second.receipt_id),
+        ).fetchone() == (winners[0],)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE receipt_id = ?",
+            (loser_id,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipt_parents WHERE child_receipt_id = ?",
+            (loser_id,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM grant_events WHERE receipt_id = ?",
+            (loser_id,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM evidence_publications WHERE receipt_id = ?",
+            (loser_id,),
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+    for group in (first_group, second_group):
+        assert (
+            context["evidence_root"] / group.publications[0].pending_path
+        ).read_bytes() == payload
+
+
+@pytest.mark.parametrize(
+    "confirmation_failure",
+    ("none", "connect", "read", "close"),
+)
+def test_receipt_publication_commit_ack_error_reports_exact_truth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    confirmation_failure: str,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payload = (
+        _staged_retrying_verifier_candidate(
+            tmp_path=tmp_path,
+            work_order=signed_work_order,
+            root=signed_root_grant,
+            role_keys=ephemeral_role_keys,
+            fixed_now=fixed_now,
+            sidecar_receipt_factory=sidecar_receipt_factory,
+            label=f"publication-ack-{confirmation_failure}",
+        )
+    )
+    real_direct = evidence._connect_ledger_direct
+    main_connections: list[_FaultingConnection] = []
+    confirmation_connections: list[object] = []
+
+    def failing_main_connect(path: Path):
+        connection = _FaultingConnection(
+            real_direct(path),
+            fail_when=lambda sql: sql == "COMMIT",
+            fail_after_execute=True,
+        )
+        main_connections.append(connection)
+        return connection
+
+    def confirmation_connect(path: Path):
+        if confirmation_failure == "connect":
+            raise sqlite3.OperationalError(
+                "injected direct confirmation connect failure"
+            )
+        raw = real_direct(path)
+        if confirmation_failure == "read":
+            connection = _FaultingConnection(
+                raw,
+                fail_when=lambda sql: (
+                    "SELECT COUNT(*) FROM RECEIPTS" in sql
+                ),
+            )
+        elif confirmation_failure == "close":
+            connection = _CloseAlwaysFailsConnection(raw)
+        else:
+            connection = raw
+        confirmation_connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(evidence, "connect_ledger", failing_main_connect)
+    monkeypatch.setattr(
+        evidence,
+        "_connect_ledger_direct",
+        confirmation_connect,
+    )
+    expected = (
+        evidence.ReceiptPublicationCommittedError
+        if confirmation_failure == "none"
+        else evidence.ReceiptPublicationCommitIndeterminateError
+    )
+    try:
+        with pytest.raises(expected) as captured:
+            evidence.commit_receipt_with_publications(
+                context["ledger_path"],
+                evidence_root=context["evidence_root"],
+                receipt=receipt,
+                group=group,
+                clock=lambda: fixed_now,
+            )
+        assert captured.value.receipt == receipt
+        assert captured.value.group == group
+        assert captured.value.committed is (
+            True if confirmation_failure == "none" else None
+        )
+        if confirmation_failure != "none":
+            assert captured.value.truth == "unknown"
+    finally:
+        monkeypatch.setattr(
+            evidence,
+            "_connect_ledger_direct",
+            real_direct,
+        )
+        for connection in confirmation_connections:
+            if isinstance(connection, _CloseAlwaysFailsConnection):
+                connection.force_close()
+    assert main_connections and main_connections[0].closed
+    connection = real_direct(context["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE receipt_id = ?",
+            (receipt.receipt_id,),
+        ).fetchone() == (1,)
+    finally:
+        connection.close()
+    assert (
+        context["evidence_root"] / group.publications[0].pending_path
+    ).read_bytes() == payload
+
+
+def test_receipt_publication_unapplied_commit_error_propagates_original(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payload = _staged_retrying_verifier_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label="publication-commit-not-applied",
+    )
+    before = _ledger_publication_snapshot(context["ledger_path"])
+    real_connect = evidence.connect_ledger
+
+    def failing_connect(path: Path):
+        return _FaultingConnection(
+            real_connect(path),
+            fail_when=lambda sql: sql == "COMMIT",
+        )
+
+    monkeypatch.setattr(evidence, "connect_ledger", failing_connect)
+    with pytest.raises(sqlite3.OperationalError) as captured:
+        evidence.commit_receipt_with_publications(
+            context["ledger_path"],
+            evidence_root=context["evidence_root"],
+            receipt=receipt,
+            group=group,
+            clock=lambda: fixed_now,
+        )
+    assert "injected SQLite failure: COMMIT" in str(captured.value)
+    monkeypatch.setattr(evidence, "connect_ledger", real_connect)
+    assert _ledger_publication_snapshot(context["ledger_path"]) == before
+    assert (
+        context["evidence_root"] / group.publications[0].pending_path
+    ).read_bytes() == payload
+
+
+def test_receipt_publication_successful_commit_with_close_failure_is_committed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, _ = _staged_retrying_verifier_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label="publication-close-committed",
+    )
+    real_connect = evidence.connect_ledger
+    wrapped: list[_CloseAlwaysFailsConnection] = []
+
+    def close_failing_connect(path: Path):
+        connection = _CloseAlwaysFailsConnection(real_connect(path))
+        wrapped.append(connection)
+        return connection
+
+    monkeypatch.setattr(evidence, "connect_ledger", close_failing_connect)
+    try:
+        with pytest.raises(
+            evidence.ReceiptPublicationCommittedError
+        ) as captured:
+            evidence.commit_receipt_with_publications(
+                context["ledger_path"],
+                evidence_root=context["evidence_root"],
+                receipt=receipt,
+                group=group,
+                clock=lambda: fixed_now,
+            )
+        assert captured.value.receipt == receipt
+        assert captured.value.group == group
+    finally:
+        monkeypatch.setattr(evidence, "connect_ledger", real_connect)
+        for connection in wrapped:
+            connection.force_close()
+    assert wrapped[0].close_attempts == 3
+
+
+def test_receipt_publication_reads_clock_once_and_freezes_one_utc_second(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    sidecar_receipt_factory,
+) -> None:
+    fixed_now = datetime(
+        2026,
+        1,
+        1,
+        0,
+        0,
+        5,
+        tzinfo=timezone.utc,
+    )
+    context, receipt, group, _ = _staged_retrying_verifier_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label="publication-clock-once",
+    )
+    values = (
+        fixed_now.replace(microsecond=900_000),
+        fixed_now + timedelta(seconds=1),
+    )
+    calls = 0
+
+    def clock() -> datetime:
+        nonlocal calls
+        value = values[min(calls, 1)]
+        calls += 1
+        return value
+
+    evidence.commit_receipt_with_publications(
+        context["ledger_path"],
+        evidence_root=context["evidence_root"],
+        receipt=receipt,
+        group=group,
+        clock=clock,
+    )
+
+    assert calls == 1
+
+
+@pytest.mark.parametrize("failure_kind", ("raw_fd", "unlock", "lock_close"))
+def test_postcommit_raw_resource_cleanup_failure_reports_committed_truth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, _ = _staged_retrying_verifier_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label=f"publication-cleanup-{failure_kind}",
+    )
+    real_connect = evidence.connect_ledger
+    real_close = evidence.os.close
+    real_flock = evidence.fcntl.flock
+    real_acquire = evidence._acquire_target_lock
+    committed = [False]
+    failed = [False]
+    failed_descriptor: list[int] = []
+    lock_descriptor: list[int] = []
+
+    class CommitTrackingConnection(_FaultingConnection):
+        def execute(self, statement, parameters=()):
+            result = super().execute(statement, parameters)
+            if " ".join(statement.split()).upper() == "COMMIT":
+                committed[0] = True
+            return result
+
+    def tracking_connect(path: Path):
+        return CommitTrackingConnection(
+            real_connect(path),
+            fail_when=lambda sql: False,
+        )
+
+    def tracking_acquire(path: Path):
+        descriptor = real_acquire(path)
+        lock_descriptor.append(descriptor)
+        return descriptor
+
+    def failing_close(descriptor: int):
+        target = (
+            failure_kind == "raw_fd"
+            and committed[0]
+            and descriptor not in lock_descriptor
+        ) or (
+            failure_kind == "lock_close"
+            and committed[0]
+            and descriptor in lock_descriptor
+        )
+        if target and not failed[0]:
+            failed[0] = True
+            failed_descriptor.append(descriptor)
+            raise OSError("injected raw descriptor close failure")
+        return real_close(descriptor)
+
+    def failing_flock(descriptor: int, operation: int):
+        if (
+            failure_kind == "unlock"
+            and committed[0]
+            and operation == evidence.fcntl.LOCK_UN
+            and not failed[0]
+        ):
+            failed[0] = True
+            raise OSError("injected target unlock failure")
+        return real_flock(descriptor, operation)
+
+    monkeypatch.setattr(evidence, "connect_ledger", tracking_connect)
+    monkeypatch.setattr(
+        evidence,
+        "_acquire_target_lock",
+        tracking_acquire,
+    )
+    monkeypatch.setattr(evidence.os, "close", failing_close)
+    monkeypatch.setattr(evidence.fcntl, "flock", failing_flock)
+    try:
+        with pytest.raises(
+            evidence.ReceiptPublicationCommittedError
+        ) as captured:
+            evidence.commit_receipt_with_publications(
+                context["ledger_path"],
+                evidence_root=context["evidence_root"],
+                receipt=receipt,
+                group=group,
+                clock=lambda: fixed_now,
+            )
+        assert captured.value.receipt == receipt
+        assert captured.value.group == group
+        assert failed[0]
+    finally:
+        monkeypatch.setattr(evidence.os, "close", real_close)
+        monkeypatch.setattr(evidence.fcntl, "flock", real_flock)
+        for descriptor in failed_descriptor:
+            try:
+                real_close(descriptor)
+            except OSError:
+                pass
+
+    descriptor = real_acquire(context["ledger_path"])
+    closed, errors = evidence._release_target_lock(descriptor)
+    assert closed and not errors
+
+
+def test_precommit_pending_validation_preserves_raw_close_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payload = _staged_retrying_verifier_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label="publication-precommit-raw-close",
+    )
+    pending = context["evidence_root"] / group.publications[0].pending_path
+    pending.write_bytes(b"x" * len(payload))
+    before = _ledger_publication_snapshot(context["ledger_path"])
+    real_close = evidence.os.close
+    failed_descriptor: list[int] = []
+
+    def failing_close(descriptor: int):
+        if not failed_descriptor:
+            failed_descriptor.append(descriptor)
+            raise OSError("injected pending validation close failure")
+        return real_close(descriptor)
+
+    monkeypatch.setattr(evidence.os, "close", failing_close)
+    try:
+        with pytest.raises(RuntimeError) as captured:
+            evidence.commit_receipt_with_publications(
+                context["ledger_path"],
+                evidence_root=context["evidence_root"],
+                receipt=receipt,
+                group=group,
+                clock=lambda: fixed_now,
+            )
+        assert any(
+            "injected pending validation close failure" in str(error)
+            for error in _exception_tree(captured.value)
+        )
+    finally:
+        monkeypatch.setattr(evidence.os, "close", real_close)
+        for descriptor in failed_descriptor:
+            try:
+                real_close(descriptor)
+            except OSError:
+                pass
+    assert _ledger_publication_snapshot(context["ledger_path"]) == before
+
+
+def test_duplicate_signed_nonce_is_rejected_without_journal_writes(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payload = _staged_retrying_verifier_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label="publication-duplicate-nonce",
+    )
+    raw = receipt.model_dump(mode="json")
+    raw["nonce"] = context["verifier_issuance"].nonce
+    claim = raw["nested_claim"]
+    claim["nonce"] = raw["nonce"]
+    claim = sign_payload(
+        "agent-request",
+        claim,
+        ephemeral_role_keys["Verifier"][0],
+    )
+    raw["nested_claim"] = claim
+    raw["nested_claim_digest"] = claim["digest"]
+    duplicate = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            raw,
+            ephemeral_role_keys["Sidecar"][0],
+        )
+    )
+    before = _ledger_publication_snapshot(context["ledger_path"])
+
+    with pytest.raises(ValueError):
+        evidence.commit_receipt_with_publications(
+            context["ledger_path"],
+            evidence_root=context["evidence_root"],
+            receipt=duplicate,
+            group=group,
+            clock=lambda: fixed_now,
+        )
+
+    assert _ledger_publication_snapshot(context["ledger_path"]) == before
+    assert (
+        context["evidence_root"] / group.publications[0].pending_path
+    ).read_bytes() == payload
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "outer_signature",
+        "nested_signature",
+        "previous_digest",
+        "missing_tip_parent",
+        "clock_mismatch",
+        "non_tool_receipt",
+    ),
+)
+def test_receipt_publication_rejects_invalid_signed_tip_bindings(
+    tmp_path: Path,
+    case: str,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payload = _staged_retrying_verifier_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label=f"publication-signed-binding-{case}",
+    )
+    candidate = receipt
+    candidate_group = group
+    clock = lambda: fixed_now
+    if case == "outer_signature":
+        candidate = receipt.model_copy(update={"output_digest": "f" * 64})
+    elif case == "nested_signature":
+        candidate = receipt.model_copy(
+            update={
+                "nested_claim": receipt.nested_claim.model_copy(
+                    update={"model_id": "tampered"}
+                )
+            }
+        )
+    elif case in {"previous_digest", "missing_tip_parent"}:
+        raw = receipt.model_dump(mode="json")
+        if case == "previous_digest":
+            raw["previous_receipt_digest"] = "f" * 64
+        else:
+            raw["parent_receipt_ids"] = [
+                context["verifier_issuance"].parent_receipt_ids[0]
+            ]
+        candidate = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+            sign_payload(
+                "action-receipt",
+                raw,
+                ephemeral_role_keys["Sidecar"][0],
+            )
+        )
+    elif case == "clock_mismatch":
+        clock = lambda: fixed_now + timedelta(seconds=1)
+    else:
+        candidate = context["verifier_issuance"]
+        candidate_group = evidence._PublicationGroup(
+            receipt_id=candidate.receipt_id,
+            publications=group.publications,
+        )
+    before = _ledger_publication_snapshot(context["ledger_path"])
+
+    with pytest.raises(ValueError):
+        evidence.commit_receipt_with_publications(
+            context["ledger_path"],
+            evidence_root=context["evidence_root"],
+            receipt=candidate,
+            group=candidate_group,
+            clock=clock,
+        )
+
+    assert _ledger_publication_snapshot(context["ledger_path"]) == before
+    assert (
+        context["evidence_root"] / group.publications[0].pending_path
+    ).read_bytes() == payload
+
+
+def test_existing_committing_journal_blocks_new_facts_and_keeps_pending(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payload = _staged_retrying_verifier_candidate(
+        tmp_path=tmp_path,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        label="publication-existing-committing",
+    )
+    _commit_publication_candidate_for_test(
+        context["ledger_path"],
+        receipt,
+        group,
+    )
+    before = _ledger_publication_snapshot(context["ledger_path"])
+
+    with pytest.raises(ValueError):
+        evidence.commit_receipt_with_publications(
+            context["ledger_path"],
+            evidence_root=context["evidence_root"],
+            receipt=receipt,
+            group=group,
+            clock=lambda: fixed_now,
+        )
+
+    assert _ledger_publication_snapshot(context["ledger_path"]) == before
+    assert (
+        context["evidence_root"] / group.publications[0].pending_path
+    ).read_bytes() == payload
+
+
+def test_receipt_publication_never_calls_publish_mark_or_deletes_pending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    context, receipt, group, payload = (
+        _staged_retrying_verifier_candidate(
+            tmp_path=tmp_path,
+            work_order=signed_work_order,
+            root=signed_root_grant,
+            role_keys=ephemeral_role_keys,
+            fixed_now=fixed_now,
+            sidecar_receipt_factory=sidecar_receipt_factory,
+            label="publication-no-publish",
+        )
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("publish/mark/unlink must not be called")
+
+    monkeypatch.setattr(evidence, "publish_group_no_replace", forbidden)
+    monkeypatch.setattr(
+        evidence,
+        "mark_publication_group_committed",
+        forbidden,
+    )
+    monkeypatch.setattr(evidence.os, "unlink", forbidden)
+    unrelated = context["evidence_root"] / ".pending" / ("e" * 64)
+    unrelated.write_bytes(b"unrelated rowless pending")
+    unrelated.chmod(0o600)
+
+    evidence.commit_receipt_with_publications(
+        context["ledger_path"],
+        evidence_root=context["evidence_root"],
+        receipt=receipt,
+        group=group,
+        clock=lambda: fixed_now,
+    )
+
+    pending = context["evidence_root"] / group.publications[0].pending_path
+    assert pending.read_bytes() == payload
+    assert unrelated.read_bytes() == b"unrelated rowless pending"
 
 
 def test_stage_pending_evidence_group_writes_one_exact_durable_pending_file(

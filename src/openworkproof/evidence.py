@@ -38,9 +38,21 @@ from openworkproof.models import (
     RunTestsArguments,
     SidecarEvent,
     SystemEventReceipt,
+    TestResultEvidence,
     ToolCallReceipt,
     WorkOrder,
+    _load_canonical_json,
     request_arguments_digest,
+)
+from openworkproof.predicates import (
+    EvaluationContext,
+    evaluate_required_predicates,
+    select_required_predicates,
+)
+from openworkproof.repo_tools import (
+    ResolutionManifest,
+    ResolutionManifestEntry,
+    resolution_manifest_digest,
 )
 from openworkproof.signing import (
     decode_and_verify_key_binding,
@@ -51,7 +63,12 @@ from openworkproof.signing import (
     verify_payload,
     verify_work_order_identity_bindings,
 )
-from openworkproof.state import _agent_direct_call_is_authorized
+from openworkproof.state import (
+    TaskState,
+    _agent_direct_call_is_authorized,
+    append_receipt,
+    apply_state_transition,
+)
 
 
 BUSY_TIMEOUT_MS = 135_000
@@ -192,6 +209,43 @@ class EvidencePublicationCommitIndeterminateError(RuntimeError):
         )
         self.group = group
         self.receipt_id = group.receipt_id
+
+
+class ReceiptPublicationCommittedError(RuntimeError):
+    """The receipt journal committed, but local completion failed."""
+
+    committed = True
+
+    def __init__(
+        self,
+        receipt: ActionReceiptEnvelope,
+        group: _PublicationGroup,
+    ) -> None:
+        super().__init__(
+            "receipt publication journal committed but completion failed"
+        )
+        self.receipt = receipt
+        self.group = group
+        self.receipt_id = receipt.receipt_id
+
+
+class ReceiptPublicationCommitIndeterminateError(RuntimeError):
+    """The receipt publication journal COMMIT truth is unknown."""
+
+    committed = None
+    truth = "unknown"
+
+    def __init__(
+        self,
+        receipt: ActionReceiptEnvelope,
+        group: _PublicationGroup,
+    ) -> None:
+        super().__init__(
+            "receipt publication journal commit outcome is indeterminate"
+        )
+        self.receipt = receipt
+        self.group = group
+        self.receipt_id = receipt.receipt_id
 
 
 class RetryConsumptionCommittedError(RuntimeError):
@@ -534,6 +588,24 @@ def _target_lock_path(ledger_path: Path) -> Path:
 
 def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
     return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _ledger_named_identity(path: Path) -> os.stat_result:
+    metadata = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise OSError("receipt publication ledger is not a regular file")
+    return metadata
+
+
+def _require_named_ledger_identity(
+    path: Path,
+    expected: os.stat_result,
+) -> None:
+    current = _ledger_named_identity(path)
+    if not _same_inode(expected, current):
+        raise OSError(
+            "receipt publication ledger name changed during validation"
+        )
 
 
 def _directory_flags() -> int:
@@ -887,6 +959,1120 @@ def stage_pending_evidence_group(
                 "pending evidence staging cleanup failures",
                 list(cleanup_errors),
             )
+
+
+def _replay_receipt_publication_ledger(
+    connection: sqlite3.Connection,
+):
+    work_order = load_authoritative_work_order(connection)
+    receipts = _validated_receipt_prefix(connection, work_order)
+    grants = _validated_effective_grants(connection, work_order, receipts)
+    attempts = _validated_grant_attempts(
+        connection,
+        work_order,
+        receipts,
+    )
+    _validate_grant_reservation_closure(
+        connection,
+        work_order,
+        grants,
+        attempts,
+    )
+    _validate_grant_history_semantics(
+        work_order,
+        receipts,
+        grants,
+        attempts,
+    )
+    _validate_grant_event_index(connection, receipts, grants)
+    groups = _journal_publication_groups(connection)
+    _require_exact_publication_coverage(receipts, groups)
+    return work_order, receipts, grants, groups
+
+
+def _validate_new_receipt_publication(
+    connection: sqlite3.Connection,
+    *,
+    receipt: ActionReceiptEnvelope,
+    group: _PublicationGroup,
+    now: datetime,
+) -> tuple[WorkOrder, str, int]:
+    work_order, receipts, _, groups = (
+        _replay_receipt_publication_ledger(connection)
+    )
+    if any(state_value == "COMMITTING" for _, state_value in groups):
+        raise ValueError(
+            "an existing evidence publication requires recovery"
+        )
+    if (
+        type(receipt) is not ToolCallReceipt
+        or receipt.policy_decision != "allow"
+        or type(group) is not _PublicationGroup
+        or group.receipt_id != receipt.receipt_id
+        or not 1 <= len(group.publications) <= _MAX_PUBLICATIONS_PER_GROUP
+        or any(type(item) is not _Publication for item in group.publications)
+        or len(group.publications) != len(receipt.evidence_refs)
+        or len(receipts) >= MAX_ROUTINE_ACTION_RECEIPTS
+    ):
+        raise ValueError(
+            "receipt publication is outside the closed routine slice"
+        )
+    try:
+        parsed = ACTION_RECEIPT_ADAPTER.validate_python(
+            receipt.model_dump(mode="json")
+        )
+        parsed.validate_against_work_order(work_order)
+        parsed.validate_predicates_against(work_order)
+        _validate_receipt_nested_claim(parsed, work_order)
+        sidecar = next(
+            binding
+            for binding in work_order.key_bindings
+            if binding.role == "Sidecar"
+        )
+        sidecar_key = decode_and_verify_key_binding(sidecar)
+    except Exception as error:
+        raise ValueError(
+            "receipt publication candidate is malformed"
+        ) from error
+    if (
+        parsed != receipt
+        or type(parsed) is not ToolCallReceipt
+        or receipt.work_order_digest != work_order.digest
+        or not verify_payload(
+            "action-receipt",
+            receipt.model_dump(mode="json"),
+            sidecar_key,
+        )
+        or any(
+            item.receipt_id == receipt.receipt_id
+            or item.nonce == receipt.nonce
+            for item in receipts
+        )
+    ):
+        raise ValueError(
+            "receipt publication candidate is not exact or uncommitted"
+        )
+    tip = _tip_receipt(receipts)
+    receipt_ids = {item.receipt_id for item in receipts}
+    expected_sequence = len(receipts) + 1
+    if (
+        receipt.sequence != expected_sequence
+        or receipt.previous_receipt_digest != tip.digest
+        or receipt.state_before != tip.state_after
+        or tip.receipt_id not in receipt.parent_receipt_ids
+        or any(
+            parent_id not in receipt_ids
+            for parent_id in receipt.parent_receipt_ids
+        )
+        or receipt.occurred_at != now
+        or not work_order.issued_at
+        <= receipt.occurred_at
+        <= work_order.deadline
+        or receipt.occurred_at < tip.occurred_at
+    ):
+        raise ValueError(
+            "receipt publication candidate does not extend the authority tip"
+        )
+    state_row = connection.execute(
+        """
+        SELECT current_state, version
+        FROM work_order_state
+        WHERE singleton = 1 AND work_order_digest = ?
+        """,
+        (work_order.digest,),
+    ).fetchone()
+    sequence_row = connection.execute(
+        """
+        SELECT next_sequence
+        FROM sequence_counter
+        WHERE singleton = 1
+        """
+    ).fetchone()
+    if (
+        state_row is None
+        or state_row[0] != tip.state_after
+        or sequence_row != (expected_sequence,)
+    ):
+        raise ValueError(
+            "receipt publication state or sequence authority is stale"
+        )
+    try:
+        state_before = TaskState(receipt.state_before)
+        state_after = TaskState(receipt.state_after)
+        public_keys = {
+            binding.key_id: decode_and_verify_key_binding(binding)
+            for binding in work_order.key_bindings
+        }
+        decision = (
+            append_receipt(
+                work_order=work_order,
+                state=state_before,
+                receipt=receipt,
+                public_keys=public_keys,
+                now=now,
+            )
+            if state_before is state_after
+            else apply_state_transition(
+                work_order=work_order,
+                state_before=state_before,
+                state_after=state_after,
+                trigger_receipt=receipt,
+                acceptance_receipt=None,
+                public_keys=public_keys,
+                now=now,
+            )
+        )
+    except Exception as error:
+        raise ValueError(
+            "receipt publication state validation failed"
+        ) from error
+    if not decision.allowed:
+        raise ValueError(
+            "receipt publication is denied by the frozen state machine"
+        )
+    return work_order, state_row[0], state_row[1]
+
+
+def _validate_authoritative_receipt_predicates(
+    connection: sqlite3.Connection,
+    *,
+    work_order: WorkOrder,
+    receipt: ToolCallReceipt,
+    payloads: Mapping[str, bytes],
+    trusted_resolution_manifest: ResolutionManifest | None,
+) -> None:
+    replayed_work_order, receipts, grants, _ = (
+        _replay_receipt_publication_ledger(connection)
+    )
+    if replayed_work_order != work_order or not receipts:
+        raise ValueError("predicate authority replay is incomplete")
+    tip = receipts[-1]
+    grant = grants.get(receipt.grant_id)
+    quota_states = _replay_grant_quota_history(
+        work_order,
+        receipts,
+        grants,
+    )
+    quota_state = quota_states.get(receipt.grant_id)
+    request = receipt.nested_claim
+    if (
+        grant is None
+        or quota_state is None
+        or quota_state.revoked
+        or receipt.tool_name not in grant.allowed_tools
+        or receipt.tool_name not in work_order.allowed_tools
+        or receipt.actor_id != grant.subject_agent_id
+        or receipt.actor_key_id != grant.subject_key_id
+        or request.grant_id != grant.grant_id
+    ):
+        raise ValueError("predicate authority Grant is unavailable")
+    arguments = receipt.request_arguments
+    if isinstance(arguments, ApplyPatchArguments):
+        if (
+            receipt.execution_status in {"succeeded", "failed"}
+            and type(trusted_resolution_manifest) is not ResolutionManifest
+        ):
+            raise ValueError(
+                "trusted patch resolution manifest is unavailable or malformed"
+            )
+    elif trusted_resolution_manifest is not None:
+        raise ValueError(
+            "trusted resolution manifest is forbidden for this tool"
+        )
+
+    test_mode = (
+        receipt.request_arguments.test_mode
+        if isinstance(receipt.request_arguments, RunTestsArguments)
+        else "developer"
+    )
+    selected = select_required_predicates(
+        work_order=work_order,
+        tool_name=receipt.tool_name,
+        policy_decision=receipt.policy_decision,
+        execution_status=receipt.execution_status,
+        test_mode=test_mode,
+    )
+    supplied = {
+        result.predicate_id: result
+        for result in receipt.predicate_results
+    }
+    if tuple(supplied) != tuple(
+        spec.predicate_id for spec in selected
+    ):
+        raise ValueError("predicate authority selection is not exact")
+
+    authoritative: dict[str, object] = {}
+    for spec in selected:
+        result = supplied[spec.predicate_id]
+        if spec.name == "tool_allowed":
+            authoritative[spec.predicate_id] = {
+                "actual_tool_name": receipt.tool_name,
+            }
+            continue
+        if spec.name == "quota_remaining":
+            charge = receipt.quota_charge
+            if charge is None or charge.grant_id != grant.grant_id:
+                raise ValueError("predicate quota authority is unavailable")
+            remaining_before = (
+                quota_state.remaining_tool_calls
+                if charge.metric == "tool_calls"
+                else quota_state.remaining_repair_rounds
+            )
+            if (
+                charge.amount > remaining_before
+                or charge.remaining_after
+                != remaining_before - charge.amount
+            ):
+                raise ValueError("predicate quota authority is inconsistent")
+            authoritative[spec.predicate_id] = {
+                "grant_id": grant.grant_id,
+                "metric": charge.metric,
+                "amount": charge.amount,
+                "grant_remaining_before": remaining_before,
+                "ledger_prefix_digest": tip.digest,
+            }
+            continue
+        if spec.name == "path_allowed":
+            if (
+                not isinstance(arguments, ApplyPatchArguments)
+                or receipt.execution_status not in {"succeeded", "failed"}
+                or trusted_resolution_manifest is None
+            ):
+                raise ValueError(
+                    "predicate path authority is unavailable for this tool"
+                )
+            requested_paths = arguments.target_paths
+            grant_roots = grant.allowed_write_roots
+            work_order_roots = work_order.allowed_write_roots
+            if not all(
+                any(_root_contains(root, path) for root in grant_roots)
+                and any(
+                    _root_contains(root, path)
+                    for root in work_order_roots
+                )
+                for path in requested_paths
+            ):
+                raise ValueError(
+                    "predicate requested path is outside active authority"
+                )
+            manifest = trusted_resolution_manifest
+            resolved_entries = manifest.resolved_entries
+            if (
+                manifest.requested_paths != tuple(requested_paths)
+                or len(resolved_entries) != len(requested_paths)
+                or any(
+                    not isinstance(entry, ResolutionManifestEntry)
+                    or entry.requested_path != path
+                    or entry.resolved_relative_path is None
+                    for path, entry in zip(
+                        requested_paths,
+                        resolved_entries,
+                        strict=True,
+                    )
+                )
+            ):
+                raise ValueError(
+                    "trusted patch resolution vectors are inconsistent"
+                )
+            manifest_digest = resolution_manifest_digest(manifest)
+            if receipt.execution_status == "succeeded":
+                result_refs = tuple(
+                    reference
+                    for reference in receipt.evidence_refs
+                    if reference.media_type == "application/json"
+                )
+                if len(result_refs) != 1:
+                    raise ValueError(
+                        "predicate path result evidence is unavailable"
+                    )
+                payload = payloads.get(result_refs[0].path)
+                if payload is None:
+                    raise ValueError(
+                        "predicate path result payload is unavailable"
+                    )
+                patch_result = PatchResultEvidence.model_validate(
+                    _load_canonical_json(payload)
+                )
+                if (
+                    manifest.workspace_manifest_digest
+                    != patch_result.parent_manifest_digest
+                ):
+                    raise ValueError(
+                        "trusted resolution manifest is not bound "
+                        "to the patch parent"
+                    )
+            authoritative[spec.predicate_id] = {
+                "requested_paths": list(requested_paths),
+                "resolved_entries": [
+                    {
+                        "requested_path": entry.requested_path,
+                        "resolved_relative_path": entry.resolved_relative_path,
+                    }
+                    for entry in resolved_entries
+                ],
+                "resolution_manifest_digest": manifest_digest,
+            }
+            continue
+        if spec.name == "tests_passed":
+            arguments = receipt.request_arguments
+            if (
+                not isinstance(arguments, RunTestsArguments)
+                or arguments.test_mode != "verifier"
+                or len(receipt.evidence_refs) != 1
+            ):
+                raise ValueError(
+                    "predicate test authority is unavailable for this tool"
+                )
+            reference = receipt.evidence_refs[0]
+            payload = payloads.get(reference.path)
+            if payload is None:
+                raise ValueError("predicate test evidence is unavailable")
+            test_result = TestResultEvidence.model_validate(
+                _load_canonical_json(payload)
+            )
+            profile = next(
+                (
+                    candidate
+                    for candidate in work_order.test_profiles
+                    if candidate.test_mode == "verifier"
+                ),
+                None,
+            )
+            if (
+                profile is None
+                or test_result.test_mode != "verifier"
+                or test_result.command_digest != arguments.command_digest
+                or test_result.source_commit != arguments.source_commit
+                or test_result.candidate_commit
+                != arguments.candidate_commit
+                or test_result.workspace_manifest_digest
+                != arguments.workspace_manifest_digest
+                or test_result.container_image_digest
+                != arguments.container_image_digest
+                or test_result.fixed_test_source_digest
+                != arguments.fixed_test_source_digest
+            ):
+                raise ValueError("predicate test evidence is inconsistent")
+            authoritative[spec.predicate_id] = {
+                "test_mode": "verifier",
+                "command_digest": profile.command_digest,
+                "expected_exit_code": profile.expected_exit_code,
+                "actual_exit_code": test_result.actual_exit_code,
+                "test_evidence_digest": hashlib.sha256(payload).hexdigest(),
+                "source_commit": test_result.source_commit,
+                "candidate_commit": test_result.candidate_commit,
+                "workspace_manifest_digest": (
+                    test_result.workspace_manifest_digest
+                ),
+                "container_image_digest": (
+                    test_result.container_image_digest
+                ),
+                "fixed_test_source_digest": (
+                    test_result.fixed_test_source_digest
+                ),
+            }
+            continue
+        raise ValueError(
+            "predicate authority is unavailable for this predicate"
+        )
+
+    context = EvaluationContext(
+        inputs={
+            result.predicate_id: result.input
+            for result in receipt.predicate_results
+        },
+        authoritative_inputs=authoritative,
+        authoritative_ledger_prefix_digests={
+            grant.grant_id: tip.digest,
+        },
+    )
+    evaluated = evaluate_required_predicates(selected, context)
+    if evaluated != receipt.predicate_results:
+        raise ValueError(
+            "signed predicate results do not match authoritative replay"
+        )
+
+
+def _open_pending_receipt_publications(
+    *,
+    evidence_root: Path,
+    work_order: WorkOrder,
+    receipt: ToolCallReceipt,
+    group: _PublicationGroup,
+):
+    publications = tuple(group.publications)
+    references = tuple(receipt.evidence_refs)
+    if (
+        tuple(item.final_path for item in publications)
+        != tuple(item.path for item in references)
+        or len({item.publication_id for item in publications})
+        != len(publications)
+        or len({item.pending_path for item in publications})
+        != len(publications)
+        or len({item.final_path for item in publications})
+        != len(publications)
+    ):
+        raise ValueError(
+            "publication descriptor does not exactly match EvidenceRef order"
+        )
+    root_descriptor, root_identity = _open_stable_evidence_root(
+        evidence_root
+    )
+    pending_descriptor: int | None = None
+    files: list[tuple[str, int]] = []
+    pending_anchors: list[tuple[str, os.stat_result]] = []
+    try:
+        pending_descriptor = os.open(
+            ".pending",
+            _directory_flags(),
+            dir_fd=root_descriptor,
+        )
+        pending_identity = os.fstat(pending_descriptor)
+        payloads: dict[str, bytes] = {}
+        for publication, reference in zip(
+            publications,
+            references,
+            strict=True,
+        ):
+            name = _validated_pending_basename(
+                publication.publication_id,
+                publication.pending_path,
+            )
+            if (
+                publication.final_path != reference.path
+                or publication.digest != reference.sha256
+                or publication.size_bytes != reference.size_bytes
+                or publication.media_type != reference.media_type
+            ):
+                raise ValueError(
+                    "publication descriptor disagrees with its EvidenceRef"
+                )
+            _require_final_absent(
+                root_descriptor,
+                _safe_evidence_parts(
+                    work_order,
+                    publication.final_path,
+                ),
+            )
+            descriptor = os.open(
+                name,
+                (
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                ),
+                dir_fd=pending_descriptor,
+            )
+            files.append(
+                (
+                    f"pending evidence {publication.publication_id} close",
+                    descriptor,
+                )
+            )
+            payload, metadata = _read_exact_descriptor(
+                descriptor,
+                digest=publication.digest,
+                size_bytes=publication.size_bytes,
+                allowed_links=(1,),
+            )
+            named_metadata = os.stat(
+                name,
+                dir_fd=pending_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(named_metadata.st_mode)
+                or not _same_inode(metadata, named_metadata)
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+            ):
+                raise OSError("pending evidence mode is not 0600")
+            pending_anchors.append((name, metadata))
+            payloads[publication.final_path] = payload
+        _validate_staged_payloads(receipt, payloads, work_order)
+        _require_stable_pending_directory(
+            root_descriptor,
+            pending_descriptor,
+            pending_identity,
+        )
+        if (
+            not _same_inode(
+                root_identity,
+                os.stat(evidence_root, follow_symlinks=False),
+            )
+            or not _same_inode(
+                root_identity,
+                os.fstat(root_descriptor),
+            )
+        ):
+            raise OSError(
+                "evidence root changed while validating pending evidence"
+            )
+        return (
+            root_descriptor,
+            root_identity,
+            pending_descriptor,
+            pending_identity,
+            tuple(files),
+            tuple(pending_anchors),
+            payloads,
+        )
+    except Exception as primary_error:
+        cleanup_errors = list(
+            _close_descriptors_once(tuple(files))
+        )
+        cleanup_errors.extend(
+            _close_descriptors_once(
+                (
+                    ("pending directory close", pending_descriptor),
+                    ("evidence root close", root_descriptor),
+                )
+            )
+        )
+        if cleanup_errors:
+            raise RuntimeError(
+                "pending receipt publication cleanup failed"
+            ) from _error_cause(
+                "pending receipt publication failures",
+                [primary_error, *cleanup_errors],
+            )
+        raise
+
+
+def _recheck_pending_receipt_publications(
+    *,
+    evidence_root: Path,
+    root_descriptor: int,
+    root_identity: os.stat_result,
+    pending_descriptor: int,
+    pending_identity: os.stat_result,
+    pending_files: tuple[tuple[str, int], ...],
+    pending_anchors: tuple[tuple[str, os.stat_result], ...],
+    work_order: WorkOrder,
+    receipt: ToolCallReceipt,
+    group: _PublicationGroup,
+    payloads: Mapping[str, bytes],
+) -> None:
+    _require_stable_pending_directory(
+        root_descriptor,
+        pending_descriptor,
+        pending_identity,
+    )
+    if (
+        not _same_inode(
+            root_identity,
+            os.stat(evidence_root, follow_symlinks=False),
+        )
+        or not _same_inode(root_identity, os.fstat(root_descriptor))
+    ):
+        raise OSError(
+            "evidence root changed during receipt publication"
+        )
+    for (_, descriptor), (name, expected), publication in zip(
+        pending_files,
+        pending_anchors,
+        group.publications,
+        strict=True,
+    ):
+        payload, metadata = _read_exact_descriptor(
+            descriptor,
+            digest=publication.digest,
+            size_bytes=publication.size_bytes,
+            allowed_links=(1,),
+        )
+        named_metadata = os.stat(
+            name,
+            dir_fd=pending_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            name
+            != _validated_pending_basename(
+                publication.publication_id,
+                publication.pending_path,
+            )
+            or not stat.S_ISREG(named_metadata.st_mode)
+            or not _same_inode(expected, metadata)
+            or not _same_inode(expected, named_metadata)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or payload != payloads[publication.final_path]
+        ):
+            raise OSError(
+                "pending evidence changed during receipt publication"
+            )
+        _require_final_absent(
+            root_descriptor,
+            _safe_evidence_parts(
+                work_order,
+                publication.final_path,
+            ),
+        )
+    _validate_staged_payloads(receipt, dict(payloads), work_order)
+
+
+def _insert_receipt_and_publication_group(
+    connection: sqlite3.Connection,
+    *,
+    work_order: WorkOrder,
+    receipt: ToolCallReceipt,
+    group: _PublicationGroup,
+    current_state: str,
+    current_version: int,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO receipts (
+            receipt_id, work_order_digest, nonce, sequence,
+            previous_digest, receipt_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            receipt.receipt_id,
+            work_order.digest,
+            receipt.nonce,
+            receipt.sequence,
+            receipt.previous_receipt_digest,
+            _canonical_json(receipt.model_dump(mode="json")),
+        ),
+    )
+    for parent_id in receipt.parent_receipt_ids:
+        connection.execute(
+            """
+            INSERT INTO receipt_parents (
+                child_receipt_id, parent_receipt_id
+            )
+            VALUES (?, ?)
+            """,
+            (receipt.receipt_id, parent_id),
+        )
+    if receipt.quota_charge is not None:
+        charge = receipt.quota_charge
+        connection.execute(
+            """
+            INSERT INTO grant_events (
+                event_id, receipt_id, grant_id, event_type, metric, amount
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                hashlib.sha256(
+                    f"grant-event:{receipt.receipt_id}".encode("ascii")
+                ).hexdigest(),
+                receipt.receipt_id,
+                charge.grant_id,
+                receipt.event_type,
+                charge.metric,
+                charge.amount,
+            ),
+        )
+    for publication in group.publications:
+        connection.execute(
+            """
+            INSERT INTO evidence_publications (
+                publication_id, receipt_id, pending_path, final_path,
+                digest, size_bytes, media_type, state
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'COMMITTING')
+            """,
+            (
+                publication.publication_id,
+                receipt.receipt_id,
+                publication.pending_path,
+                publication.final_path,
+                publication.digest,
+                publication.size_bytes,
+                publication.media_type,
+            ),
+        )
+    state_update = connection.execute(
+        """
+        UPDATE work_order_state
+        SET current_state = ?, version = version + 1
+        WHERE singleton = 1
+          AND work_order_digest = ?
+          AND current_state = ?
+          AND version = ?
+        """,
+        (
+            receipt.state_after,
+            work_order.digest,
+            current_state,
+            current_version,
+        ),
+    )
+    sequence_update = connection.execute(
+        """
+        UPDATE sequence_counter
+        SET next_sequence = next_sequence + 1
+        WHERE singleton = 1 AND next_sequence = ?
+        """,
+        (receipt.sequence,),
+    )
+    if state_update.rowcount != 1 or sequence_update.rowcount != 1:
+        raise ValueError(
+            "receipt publication counters could not be advanced"
+        )
+
+
+def _confirm_receipt_publication_commit(
+    ledger_path: Path,
+    *,
+    ledger_identity: os.stat_result,
+    receipt: ToolCallReceipt,
+    group: _PublicationGroup,
+) -> tuple[str, Exception | None]:
+    connection: sqlite3.Connection | None = None
+    status = "INDETERMINATE"
+    read_error: Exception | None = None
+    try:
+        _require_named_ledger_identity(
+            ledger_path,
+            ledger_identity,
+        )
+        connection = _connect_ledger_direct(ledger_path)
+        _require_named_ledger_identity(
+            ledger_path,
+            ledger_identity,
+        )
+        connection.execute("BEGIN")
+        _require_named_ledger_identity(
+            ledger_path,
+            ledger_identity,
+        )
+        _, receipts, _, groups = _replay_receipt_publication_ledger(
+            connection
+        )
+        _require_named_ledger_identity(
+            ledger_path,
+            ledger_identity,
+        )
+        matches = tuple(
+            item
+            for item in receipts
+            if item.receipt_id == receipt.receipt_id
+            or item.nonce == receipt.nonce
+        )
+        publication_ids = {
+            item.publication_id for item in group.publications
+        }
+        group_matches = tuple(
+            (candidate, state_value)
+            for candidate, state_value in groups
+            if candidate.receipt_id == receipt.receipt_id
+            or any(
+                item.publication_id in publication_ids
+                for item in candidate.publications
+            )
+        )
+        if (
+            matches == (receipt,)
+            and group_matches == ((group, "COMMITTING"),)
+        ):
+            status = "COMMITTED"
+        elif not matches and not group_matches:
+            status = "NOT_COMMITTED"
+        else:
+            raise ValueError(
+                "receipt publication confirmation found a partial commit"
+            )
+    except Exception as error:
+        read_error = error
+    rollback_error = _best_effort_rollback(connection)
+    closed, close_errors = _close_with_retries(connection)
+    if (
+        read_error is not None
+        or rollback_error is not None
+        or not closed
+        or close_errors
+    ):
+        errors = (
+            ([] if read_error is None else [read_error])
+            + ([] if rollback_error is None else [rollback_error])
+            + list(close_errors)
+        )
+        return (
+            "INDETERMINATE",
+            _error_cause(
+                "receipt publication confirmation failures",
+                errors,
+            ),
+        )
+    return status, None
+
+
+def commit_receipt_with_publications(
+    ledger_path: Path,
+    *,
+    evidence_root: Path,
+    receipt: ActionReceiptEnvelope,
+    group: _PublicationGroup,
+    clock: Callable[[], datetime],
+    trusted_resolution_manifest: ResolutionManifest | None = None,
+) -> None:
+    """Commit one signed ToolCall and its COMMITTING publication group."""
+
+    path = Path(ledger_path)
+    root = Path(evidence_root)
+    if not path.is_file():
+        raise ValueError("receipt publication ledger is unavailable")
+    lock_descriptor: int | None = None
+    ledger_identity: os.stat_result | None = None
+    connection: sqlite3.Connection | None = None
+    root_descriptor: int | None = None
+    root_identity: os.stat_result | None = None
+    pending_descriptor: int | None = None
+    pending_identity: os.stat_result | None = None
+    pending_files: tuple[tuple[str, int], ...] = ()
+    pending_anchors: tuple[tuple[str, os.stat_result], ...] = ()
+    work_order: WorkOrder | None = None
+    payloads: Mapping[str, bytes] = {}
+    primary_error: Exception | None = None
+    commit_attempted = False
+    committed = False
+    authority_indeterminate = False
+    try:
+        lock_descriptor = _acquire_target_lock(path)
+        ledger_identity = _ledger_named_identity(path)
+        connection = connect_ledger(path)
+        _require_named_ledger_identity(path, ledger_identity)
+        connection.execute("BEGIN IMMEDIATE")
+        _require_named_ledger_identity(path, ledger_identity)
+        try:
+            now = _freeze_trusted_utc_second(clock())
+        except Exception as error:
+            raise ValueError(
+                "receipt publication trusted clock is invalid"
+            ) from error
+        work_order, current_state, current_version = (
+            _validate_new_receipt_publication(
+                connection,
+                receipt=receipt,
+                group=group,
+                now=now,
+            )
+        )
+        assert type(receipt) is ToolCallReceipt
+        (
+            root_descriptor,
+            root_identity,
+            pending_descriptor,
+            pending_identity,
+            pending_files,
+            pending_anchors,
+            payloads,
+        ) = _open_pending_receipt_publications(
+            evidence_root=root,
+            work_order=work_order,
+            receipt=receipt,
+            group=group,
+        )
+        _validate_authoritative_receipt_predicates(
+            connection,
+            work_order=work_order,
+            receipt=receipt,
+            payloads=payloads,
+            trusted_resolution_manifest=trusted_resolution_manifest,
+        )
+        _insert_receipt_and_publication_group(
+            connection,
+            work_order=work_order,
+            receipt=receipt,
+            group=group,
+            current_state=current_state,
+            current_version=current_version,
+        )
+        prospective_work_order, receipts, _, groups = (
+            _replay_receipt_publication_ledger(connection)
+        )
+        candidate_groups = tuple(
+            candidate
+            for candidate, state_value in groups
+            if candidate.receipt_id == receipt.receipt_id
+            and state_value == "COMMITTING"
+        )
+        if (
+            prospective_work_order != work_order
+            or receipts[-1] != receipt
+            or candidate_groups != (group,)
+        ):
+            raise ValueError(
+                "prospective receipt publication replay is incomplete"
+            )
+        _recheck_pending_receipt_publications(
+            evidence_root=root,
+            root_descriptor=root_descriptor,
+            root_identity=root_identity,
+            pending_descriptor=pending_descriptor,
+            pending_identity=pending_identity,
+            pending_files=pending_files,
+            pending_anchors=pending_anchors,
+            work_order=work_order,
+            receipt=receipt,
+            group=group,
+            payloads=payloads,
+        )
+        _require_named_ledger_identity(path, ledger_identity)
+        commit_attempted = True
+        connection.execute("COMMIT")
+        committed = True
+        _require_named_ledger_identity(path, ledger_identity)
+        _recheck_pending_receipt_publications(
+            evidence_root=root,
+            root_descriptor=root_descriptor,
+            root_identity=root_identity,
+            pending_descriptor=pending_descriptor,
+            pending_identity=pending_identity,
+            pending_files=pending_files,
+            pending_anchors=pending_anchors,
+            work_order=work_order,
+            receipt=receipt,
+            group=group,
+            payloads=payloads,
+        )
+    except Exception as error:
+        primary_error = error
+        rollback_error = _best_effort_rollback(connection)
+        if rollback_error is not None:
+            primary_error = RuntimeError(
+                "receipt publication rollback failed"
+            )
+            primary_error.__cause__ = _error_cause(
+                "receipt publication rollback failures",
+                [error, rollback_error],
+            )
+
+    cleanup_errors: list[Exception] = []
+    _, sqlite_close_errors = _close_with_retries(connection)
+    cleanup_errors.extend(
+        _contextualize_secondary("SQLite close", error)
+        for error in sqlite_close_errors
+    )
+    if commit_attempted and ledger_identity is not None:
+        authority_status, authority_error = (
+            _confirm_receipt_publication_commit(
+                path,
+                ledger_identity=ledger_identity,
+                receipt=receipt,
+                group=group,
+            )
+        )
+        if authority_status == "INDETERMINATE" or (
+            committed and authority_status != "COMMITTED"
+        ):
+            authority_indeterminate = True
+            cleanup_errors.append(
+                authority_error
+                if authority_error is not None
+                else RuntimeError(
+                    "named ledger did not confirm the main connection commit"
+                )
+            )
+    if (
+        commit_attempted
+        and ledger_identity is not None
+        and work_order is not None
+        and root_descriptor is not None
+        and root_identity is not None
+        and pending_descriptor is not None
+        and pending_identity is not None
+    ):
+        try:
+            _require_named_ledger_identity(path, ledger_identity)
+            _recheck_pending_receipt_publications(
+                evidence_root=root,
+                root_descriptor=root_descriptor,
+                root_identity=root_identity,
+                pending_descriptor=pending_descriptor,
+                pending_identity=pending_identity,
+                pending_files=pending_files,
+                pending_anchors=pending_anchors,
+                work_order=work_order,
+                receipt=receipt,
+                group=group,
+                payloads=payloads,
+            )
+        except Exception as error:
+            cleanup_errors.append(
+                _contextualize_secondary(
+                    "final receipt publication gate",
+                    error,
+                )
+            )
+    cleanup_errors.extend(
+        _close_descriptors_once(
+            (
+                *pending_files,
+                ("pending directory close", pending_descriptor),
+                ("evidence root close", root_descriptor),
+            )
+        )
+    )
+    _, release_errors = _release_target_lock(lock_descriptor)
+    cleanup_errors.extend(
+        _contextualize_secondary("target lock release", error)
+        for error in release_errors
+    )
+    if (
+        primary_error is None
+        and not cleanup_errors
+        and not authority_indeterminate
+    ):
+        return
+    errors = (
+        ([] if primary_error is None else [primary_error])
+        + list(cleanup_errors)
+    )
+    if commit_attempted or committed:
+        if authority_indeterminate:
+            raise ReceiptPublicationCommitIndeterminateError(
+                receipt,
+                group,
+            ) from _error_cause(
+                "receipt publication authority is indeterminate",
+                errors,
+            )
+        if ledger_identity is None:
+            raise ReceiptPublicationCommitIndeterminateError(
+                receipt,
+                group,
+            ) from _error_cause(
+                "receipt publication identity is unavailable",
+                errors,
+            )
+        status, confirmation_error = (
+            _confirm_receipt_publication_commit(
+                path,
+                ledger_identity=ledger_identity,
+                receipt=receipt,
+                group=group,
+            )
+        )
+        if status == "COMMITTED":
+            raise ReceiptPublicationCommittedError(
+                receipt,
+                group,
+            ) from _error_cause(
+                "receipt publication committed completion failures",
+                errors,
+            )
+        if status == "INDETERMINATE":
+            if confirmation_error is not None:
+                errors.append(confirmation_error)
+            raise ReceiptPublicationCommitIndeterminateError(
+                receipt,
+                group,
+            ) from _error_cause(
+                "receipt publication indeterminate completion failures",
+                errors,
+            )
+    if primary_error is not None and not cleanup_errors:
+        raise primary_error
+    raise RuntimeError(
+        "receipt publication failed during cleanup"
+    ) from _error_cause(
+        "receipt publication failures",
+        errors,
+    )
 
 
 def _validated_publication_group(

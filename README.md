@@ -119,25 +119,34 @@ MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent，AgentTeams 组织 Agen
   描述符和提交前后命名根身份校验；
 - SQLite 提交事实三态、COMMIT-ACK 不确定性分类，以及锁、连接和
   文件描述符的独立清理故障上报。
+- `commit_receipt_with_publications` Phase 2 原子提交原语：在同一
+  `BEGIN IMMEDIATE` 中写入 signed ToolCall Receipt、父边、配额事件、
+  `COMMITTING` publication journal、状态版本和全局序号；
+- 从当前 ledger、Grant、请求参数、pending evidence 和 Sidecar 提供的
+  trusted ResolutionManifest 重算谓词事实；支持成功与已启动但失败的
+  `apply_patch` 收据，并对成功结果追加 PatchResult 交叉校验；
+- pending 文件名/打开 inode、evidence root 和 ledger 命名身份的
+  多阶段锚定，以及 SQLite 清理后的最终文件门和权威账本复核。
 
 当前验证快照：
 
-- Evidence-publication 专项：38 passed；
-- Receipt-chain 专项：278 passed；
-- 全量测试：974 passed；
-- 独立规格复核：7B3A_SPEC_PASS；
-- 独立质量复核：7B3A_QUALITY_PASS；
+- Receipt-chain 专项：341 passed；
+- 全量测试：1037 passed；
+- 独立规格复核：7B3B_SPEC_PASS；
+- 独立质量复核：7B3B_QUALITY_PASS；
 - pip check、compileall 和 git diff check：通过。
 
 重要边界：
 
-上述 Task 7B3a 稳定切片已经完成本地实现与独立复核。它只实现
+上述 Task 7B3a 与 7B3b Phase 2 稳定切片已经完成本地实现与独立复核。
+当前实现包含
 `stage_pending_evidence_group`、`publish_group_no_replace`、
 `mark_publication_group_committed`、`recover_evidence_publications`
-和 `require_all_publications_committed` 五个 group-aware 基础原语；
-尚未实现 `commit_receipt_with_publications`、真实 ToolCall/rollback
-生产事务、acceptance 事务和完整 validate_grant_chain。Task 7
-仍未完成，Day 0 执行门仍为 FAIL。
+和 `require_all_publications_committed` 五个 group-aware 基础原语，
+以及 `commit_receipt_with_publications` 的独立 Phase 2 提交原语。
+它尚未接入真实 ToolCall handler 的 Phase 1→4 完整协调流程，也未实现
+deny、rollback、acceptance 生产事务和完整 validate_grant_chain。
+Task 7 仍未完成，Day 0 执行门仍为 FAIL。
 
 
 六、快速开始
@@ -165,7 +174,7 @@ MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent，AgentTeams 组织 Agen
 
 说明：
 
-- 当前公开快照对应 Task 7B3a，fresh 全量验证为 974 passed；
+- 当前开发快照对应 Task 7B3b Phase 2，fresh 全量验证为 1037 passed；
 - pyproject.toml 已预留 owp 命令入口，但 CLI 模块尚未完成，因此本文件
   暂不提供 CLI 使用命令；
 - 不应把测试通过理解为 Day 0、独立验收或赛事提交已经完成。
@@ -208,15 +217,17 @@ Rich 及其源码仍归属于原权利人；OpenWorkProof 只拥有自有协议�
 - Task 7B3a group-aware staging、no-replace publication、整组提交、
   崩溃恢复和 committed publication gate；
 - Task 7B3a 独立规格和质量复核。
+- Task 7B3b Phase 2 Receipt/quota/state/sequence 与 COMMITTING journal
+  原子提交，以及权威谓词、文件身份和 commit-truth 复核；
+- Task 7B3b 独立规格和质量复核。
 
 尚未完成：
 
-- Task 7 其余 ToolCall/rollback 生产事务、
-  `commit_receipt_with_publications` 接线和剩余入口的全局 nonce
-  处理；
+- Task 7 真实 ToolCall handler 的 Phase 1→4 协调、deny/rollback
+  生产事务和剩余入口的全局 nonce 处理；
 - 完整 policy denial 优先级重算与 validate_grant_chain；
-- evidence publication 与真实 Receipt 生产事务的跨阶段闭包，以及
-  acceptance 事务闭包；
+- evidence publication 与真实 handler 的跨阶段闭包，以及 acceptance
+  事务闭包；
 - CLI、MCP Sidecar 和 AgentTeams 接线；
 - Rich #4196 完整演示；
 - Acceptor 独立环境复现；
