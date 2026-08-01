@@ -149,12 +149,18 @@ MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent，AgentTeams 组织 Agen
   Grant/Receipt 前缀、可信 UTC 事务秒、逐字节 committed evidence 与
   ReplayCheckpoint，复用既有因果/策略 reducer 推导一次实时决策所需的
   不可变上下文；它不执行工具，也不写入账本。
+- Task 8B1 `authorize_tool_call` 纯函数：对签名 AgentRequest、
+  精确类型化参数和 Sidecar 分配的测试执行事实进行事前授权；
+  按固定顺序检查状态、角色、Grant 能力、人工批准、静态谓词和
+  配额，仅返回 `PolicyDecision`，不启动 handler、不扣减配额、
+  不签发 Receipt，也不写入账本。
 
 当前验证快照：
 
-- Policy、Composition 与 Receipt-chain 专项：506 passed；
+- Policy 专项：78 passed；
+- Policy、Composition 与 Receipt-chain 专项：517 passed；
 - Receipt-chain 专项：407 passed；
-- 全量测试：1204 passed；
+- 全量测试：1215 passed；
 - 独立规格复核：7B4_SPEC_PASS；
 - 独立质量复核：7B4_QUALITY_PASS；
 - pip check、compileall 和 git diff check：通过。
@@ -163,7 +169,8 @@ MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent，AgentTeams 组织 Agen
 
 上述 Task 7B3a、7B3b Phase 2、7B3c 协调器和 Task 7B4 离线授权链
 验证稳定切片已经完成本地实现与独立复核。Task 8A 已新增实时授权
-上下文的纯推导与证据/检查点绑定，但尚未进行独立 Acceptor 复核。
+上下文的纯推导与证据/检查点绑定；Task 8B1 已新增纯事前
+工具授权。Task 8A/8B1 均尚未进行独立 Acceptor 复核。
 当前实现包含
 `stage_pending_evidence_group`、`publish_group_no_replace`、
 `mark_publication_group_committed`、`recover_evidence_publications`
@@ -173,7 +180,7 @@ Phase 1→4 和最终权威读取门的 `complete_receipt_publication`。
 `validate_grant_chain` 可以验证签名授权链和 Sidecar 签名的
 ResolutionManifest 解析断言，但五输入 API 没有独立读取并重哈希
 ResolutionManifest 原始字节。
-现有协调器仍未接入真实 ToolCall handler；`authorize_tool_call`、
+现有协调器仍未接入真实 ToolCall handler；
 `validate_human_decision`、`validate_rollback`、deny/rollback 和
 Acceptance 生产事务尚未完成。Task 7 与完整 Task 9 仍未完成，Day 0
 执行门仍为 FAIL。
@@ -204,8 +211,8 @@ Acceptance 生产事务尚未完成。Task 7 与完整 Task 9 仍未完成，Day
 
 说明：
 
-- 当前开发快照包含 Task 8A 实时授权上下文，fresh 全量验证为
-  1204 passed；
+- 当前开发快照包含 Task 8A 实时授权上下文与 Task 8B1 纯事前
+  工具授权，fresh 全量验证为 1215 passed；
 - pyproject.toml 已预留 owp 命令入口，但 CLI 模块尚未完成，因此本文件
   暂不提供 CLI 使用命令；
 - 不应把测试通过理解为 Day 0、独立验收或赛事提交已经完成。
@@ -261,13 +268,15 @@ Rich 及其源码仍归属于原权利人；OpenWorkProof 只拥有自有协议�
 - Task 8A 不可变实时授权上下文：规范化有界 Grant/Receipt 前缀，重放
   既有因果与策略，逐字节验证 committed evidence，并将 active patch
   结果绑定到 ReplayCheckpoint 的 candidate commit 与 manifest digest。
+- Task 8B1 纯事前工具授权：校验请求签名、参数摘要、300 秒新鲜度、
+  角色/工具矩阵、Grant 能力与配额、路径根、人工批准、测试 Profile、
+  ReplayCheckpoint、独立执行标识和组合版本；只判定 handler 资格。
 
 尚未完成：
 
 - Task 7 真实 ToolCall handler 接入现有 Phase 1→4 协调器，以及
   deny/rollback 生产事务和剩余入口的全局 nonce 处理；
-- Task 8 `authorize_tool_call`、`validate_human_decision`、
-  `validate_rollback` 三个实时决策 API；
+- Task 8 `validate_human_decision` 和 `validate_rollback` 两个实时决策 API；
 - evidence publication 与真实 handler 的调用闭包，以及 acceptance
   事务闭包；
 - ResolutionManifest 原始字节的独立读取与重哈希、完整 Task 9
@@ -287,9 +296,9 @@ Rich 及其源码仍归属于原权利人；OpenWorkProof 只拥有自有协议�
 九、路线图
 ----------
 
-1. 将 Task 8A 授权上下文接入真实 ToolCall handler 与 Phase 1→4
-   协调器；
-2. 完成实时工具授权、人工决策、回滚和终止策略 API；
+1. 将 Task 8A/8B1 授权上下文与事前决策接入真实 ToolCall handler
+   与 Phase 1→4 协调器；
+2. 完成人工决策、回滚和终止策略 API；
 3. 完成多尺度证据合成与 AcceptanceReceipt 成功路径；
 4. 完成 CLI、MCP Sidecar 和 AgentTeams 集成；
 5. 完成 Rich #4196 自包含演示及独立验收；

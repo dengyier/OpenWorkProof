@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 from itertools import islice
 import json
+import re
 
 import rfc8785
 
@@ -20,6 +21,7 @@ from openworkproof.composition import (
 )
 from openworkproof.models import (
     ActionReceiptEnvelope,
+    AgentRequest,
     ApplyPatchArguments,
     ApprovalDecisionReceipt,
     ApprovalRequestedReceipt,
@@ -28,14 +30,20 @@ from openworkproof.models import (
     GrantConsumedReceipt,
     GrantIssuedReceipt,
     GrantRevokedReceipt,
+    KeyBinding,
     PatchResultEvidence,
+    PolicyDecision,
     RepoReadArguments,
     RollbackReceipt,
     RunTestsArguments,
     SystemEventReceipt,
     TerminationDecisionReceipt,
     ToolCallReceipt,
+    ToolRequestArguments,
     WorkOrder,
+    ComposeProofArguments,
+    CreatePrProposalArguments,
+    request_arguments_digest,
 )
 from openworkproof.repo_tools import (
     ReplayCheckpoint,
@@ -179,6 +187,30 @@ class AuthorizationContext:
         return self.causal_state.active_patch_receipt_id
 
 
+@dataclass(frozen=True, slots=True)
+class ProspectiveExecutionFacts:
+    """Sidecar-observed execution identity for a prospective test call."""
+
+    execution_context_id: str
+    container_instance_id_digest: str
+    controller_id: str
+
+    def __post_init__(self) -> None:
+        digest = re.compile(r"^[0-9a-f]{64}$")
+        key = re.compile(r"^ed25519:[0-9a-f]{64}$")
+        if (
+            type(self.execution_context_id) is not str
+            or digest.fullmatch(self.execution_context_id) is None
+            or type(self.container_instance_id_digest) is not str
+            or digest.fullmatch(self.container_instance_id_digest) is None
+            or type(self.controller_id) is not str
+            or key.fullmatch(self.controller_id) is None
+        ):
+            raise AuthorizationPolicyError(
+                "prospective execution facts are malformed"
+            )
+
+
 @dataclass(frozen=True)
 class _GrantReplayState:
     remaining_tool_calls: int
@@ -214,6 +246,89 @@ def _fail(message: str) -> AuthorizationPolicyError:
     return AuthorizationPolicyError(message)
 
 
+def _validate_tool_authorization_inputs(
+    context: AuthorizationContext,
+    request: AgentRequest,
+    request_arguments: ToolRequestArguments,
+    execution_facts: ProspectiveExecutionFacts | None,
+) -> tuple[CapabilityGrant, KeyBinding]:
+    """Verify signed prospective inputs before any policy decision."""
+
+    argument_tools = {
+        RepoReadArguments: "owp.repo_read",
+        ApplyPatchArguments: "owp.apply_patch",
+        RunTestsArguments: "owp.run_tests",
+        CreatePrProposalArguments: "owp.create_pr_proposal",
+        ComposeProofArguments: "owp.compose_proof",
+    }
+    if type(context) is not AuthorizationContext:
+        raise _fail("authorization context is malformed")
+    if type(request) is not AgentRequest:
+        raise _fail("Agent request is malformed")
+    tool_name = argument_tools.get(type(request_arguments))
+    if tool_name is None:
+        raise _fail("tool request arguments are malformed")
+    if execution_facts is not None and type(
+        execution_facts
+    ) is not ProspectiveExecutionFacts:
+        raise _fail("prospective execution facts are malformed")
+    if isinstance(request_arguments, RunTestsArguments):
+        if execution_facts is None:
+            raise _fail("test execution facts are required")
+    elif execution_facts is not None:
+        raise _fail("execution facts are forbidden for this tool")
+    if (
+        request.work_order_digest != context.work_order.digest
+        or request.tool_name != tool_name
+        or request.arguments_digest
+        != request_arguments_digest(tool_name, request_arguments)
+    ):
+        raise _fail("Agent request integrity binding is invalid")
+
+    grants = {
+        grant.grant_id: grant
+        for grant in context.ledger_prefix.effective_grants
+    }
+    grant = grants.get(request.grant_id)
+    bindings = {
+        binding.key_id: binding
+        for binding in context.work_order.key_bindings
+    }
+    binding = bindings.get(request.actor_key_id)
+    if (
+        grant is None
+        or binding is None
+        or request.actor_id != binding.subject_id
+        or grant.subject_key_id != binding.key_id
+        or grant.subject_agent_id != binding.subject_id
+    ):
+        raise _fail("Agent request Grant or actor binding is invalid")
+    try:
+        public_key = decode_and_verify_key_binding(binding)
+    except Exception as error:
+        raise _fail("Agent request key binding is invalid") from error
+    if not verify_payload(
+        "agent-request",
+        request.model_dump(mode="json"),
+        public_key,
+    ):
+        raise _fail("Agent request signature is invalid")
+
+    request_age = context.transaction_time - request.requested_at
+    if request_age < timedelta(0) or request_age > timedelta(seconds=300):
+        raise _fail("Agent request is outside the freshness window")
+
+    if execution_facts is not None:
+        sidecar_key_ids = {
+            candidate.key_id
+            for candidate in context.work_order.key_bindings
+            if candidate.role == "Sidecar"
+        }
+        if execution_facts.controller_id not in sidecar_key_ids:
+            raise _fail("prospective execution controller is not the Sidecar")
+    return grant, binding
+
+
 def _denial_code(
     *,
     state_allowed: bool,
@@ -243,6 +358,298 @@ def _denial_code(
         ),
         None,
     )
+
+
+def _remaining_tool_calls(
+    context: AuthorizationContext,
+    grant_id: str,
+) -> int:
+    balances = {
+        (candidate_id, metric): remaining
+        for candidate_id, metric, remaining in context.replay_state.balances
+    }
+    try:
+        return balances[(grant_id, "tool_calls")]
+    except KeyError as error:
+        raise _fail("effective Grant balance is unavailable") from error
+
+
+def _policy_decision(error_code: str | None) -> PolicyDecision:
+    return PolicyDecision(
+        allowed=error_code is None,
+        decision="allow" if error_code is None else "deny",
+        error_code=error_code,
+        reason=(
+            "TOOL_CALL_AUTHORIZED"
+            if error_code is None
+            else "TOOL_CALL_DENIED"
+        ),
+    )
+
+
+def _prospective_state_allowed(
+    context: AuthorizationContext,
+    tool_name: str,
+    arguments: ToolRequestArguments,
+) -> bool:
+    if tool_name == "owp.repo_read":
+        return context.current_state in {"running", "retrying"}
+    if tool_name == "owp.apply_patch":
+        return (
+            context.current_state in {"running", "retrying"}
+            and context.active_patch_receipt_id is None
+        )
+    if tool_name == "owp.run_tests":
+        return context.current_state in {"running", "retrying"} or (
+            context.current_state == "evidence_incomplete"
+            and isinstance(arguments, RunTestsArguments)
+            and arguments.test_mode == "verifier"
+        )
+    if tool_name == "owp.create_pr_proposal":
+        return (
+            context.current_state in {"running", "retrying"}
+            and context.active_patch_receipt_id is not None
+        )
+    if tool_name == "owp.compose_proof":
+        return (
+            context.current_state
+            in {"locally_verified", "evidence_incomplete"}
+            and context.active_patch_receipt_id is not None
+        )
+    return False
+
+
+def _prospective_role_allowed(
+    role: str,
+    tool_name: str,
+    arguments: ToolRequestArguments,
+) -> bool:
+    if role == "Manager":
+        return tool_name in {
+            "owp.compose_proof",
+            "owp.create_pr_proposal",
+        }
+    if role == "Developer":
+        return tool_name in {"owp.apply_patch", "owp.repo_read"} or (
+            tool_name == "owp.run_tests"
+            and isinstance(arguments, RunTestsArguments)
+            and arguments.test_mode == "developer"
+        )
+    if role == "Verifier":
+        return (
+            tool_name == "owp.run_tests"
+            and isinstance(arguments, RunTestsArguments)
+            and arguments.test_mode == "verifier"
+        )
+    return False
+
+
+def _static_predicates_allowed(
+    context: AuthorizationContext,
+    grant: CapabilityGrant,
+    arguments: ToolRequestArguments,
+    execution_facts: ProspectiveExecutionFacts | None,
+) -> bool:
+    if isinstance(arguments, RepoReadArguments):
+        return _roots_within((arguments.path,), grant.allowed_read_roots)
+    if isinstance(arguments, ApplyPatchArguments):
+        return _roots_within(
+            arguments.target_paths,
+            grant.allowed_write_roots,
+        )
+    if not isinstance(arguments, RunTestsArguments):
+        return True
+    if execution_facts is None or context.active_patch_receipt_id is None:
+        return False
+    profiles = tuple(
+        profile
+        for profile in context.work_order.test_profiles
+        if profile.test_mode == arguments.test_mode
+    )
+    if len(profiles) != 1:
+        return False
+    profile = profiles[0]
+    if (
+        arguments.command_digest != profile.command_digest
+        or arguments.source_commit != context.work_order.source_commit
+        or arguments.candidate_commit
+        != context.replay_checkpoint.head_commit
+        or arguments.workspace_manifest_digest
+        != context.replay_checkpoint.workspace_manifest_digest
+        or arguments.container_image_digest
+        != profile.container_image_digest
+        or arguments.fixed_test_source_digest
+        != profile.fixed_test_source_digest
+    ):
+        return False
+    used_execution_contexts: set[str] = set()
+    used_container_instances: set[str] = set()
+    for receipt in context.ledger_prefix.receipts:
+        if not isinstance(receipt, ToolCallReceipt):
+            continue
+        if receipt.tool_name != "owp.run_tests":
+            continue
+        factors = receipt.correlation_factors
+        if factors.execution_context_id is not None:
+            used_execution_contexts.add(factors.execution_context_id)
+        if factors.container_instance_id_digest is not None:
+            used_container_instances.add(
+                factors.container_instance_id_digest
+            )
+    if (
+        execution_facts.execution_context_id in used_execution_contexts
+        or execution_facts.container_instance_id_digest
+        in used_container_instances
+    ):
+        return False
+    return not (
+        arguments.test_mode == "verifier"
+        and context.causal_state.independent_result_receipt_id is not None
+    )
+
+
+def _prospective_approval_allowed(
+    context: AuthorizationContext,
+    tool_name: str,
+    arguments: ToolRequestArguments,
+) -> bool:
+    if tool_name != "owp.create_pr_proposal":
+        return True
+    if not isinstance(arguments, CreatePrProposalArguments):
+        return False
+    by_id = {
+        receipt.receipt_id: receipt
+        for receipt in context.ledger_prefix.receipts
+    }
+    patch = by_id.get(context.active_patch_receipt_id)
+    decision = by_id.get(arguments.approval_receipt_id)
+    request = (
+        by_id.get(decision.request_receipt_id)
+        if isinstance(decision, ApprovalDecisionReceipt)
+        else None
+    )
+    decisions = dict(context.replay_state.approval_decision_by_request)
+    return (
+        isinstance(patch, ToolCallReceipt)
+        and patch.tool_name == "owp.apply_patch"
+        and isinstance(decision, ApprovalDecisionReceipt)
+        and isinstance(request, ApprovalRequestedReceipt)
+        and decisions.get(request.receipt_id) == decision.receipt_id
+        and arguments.target_patch_digest == patch.digest
+        and arguments.approval_receipt_digest == decision.digest
+        and decision.request_receipt_digest == request.digest
+        and decision.decision == "approved"
+        and decision.policy_decision == "allow"
+        and decision.execution_status == "succeeded"
+        and request.request_kind == "high_risk_action"
+        and request.requested_scope["work_order_digest"]
+        == context.work_order.digest
+        and request.requested_scope["target_patch_digest"]
+        == patch.digest
+        and decision.approved_scope == request.requested_scope
+        and context.transaction_time <= request.expires_at
+        and context.transaction_time <= decision.expires_at
+    )
+
+
+def _compose_arguments_allowed(
+    context: AuthorizationContext,
+    tool_name: str,
+    arguments: ToolRequestArguments,
+) -> bool:
+    if tool_name != "owp.compose_proof":
+        return True
+    if not isinstance(arguments, ComposeProofArguments) or (
+        arguments.expected_state_version
+        != len(context.ledger_prefix.receipts)
+    ):
+        return False
+    if context.current_state == "locally_verified":
+        return arguments.previous_report_digest is None
+    if context.current_state != "evidence_incomplete":
+        return False
+    by_id = {
+        receipt.receipt_id: receipt
+        for receipt in context.ledger_prefix.receipts
+    }
+    trigger = by_id.get(
+        context.causal_state.latest_composition_trigger_id
+    )
+    independent = by_id.get(
+        context.causal_state.independent_result_receipt_id
+    )
+    return (
+        isinstance(trigger, SystemEventReceipt)
+        and trigger.system_event_name == "proof_composed"
+        and isinstance(independent, ToolCallReceipt)
+        and independent.tool_name == "owp.run_tests"
+        and arguments.previous_report_digest
+        == trigger.cause.composition_report_digest
+    )
+
+
+def authorize_tool_call(
+    context: AuthorizationContext,
+    request: AgentRequest,
+    request_arguments: ToolRequestArguments,
+    execution_facts: ProspectiveExecutionFacts | None = None,
+) -> PolicyDecision:
+    """Decide prospective handler eligibility without mutating authority."""
+
+    grant, binding = _validate_tool_authorization_inputs(
+        context,
+        request,
+        request_arguments,
+        execution_facts,
+    )
+    if context.transaction_time > context.work_order.deadline:
+        raise _fail("contract expired before tool authorization")
+    if context.routine_capacity_remaining <= 0:
+        raise _fail("routine Receipt capacity is exhausted")
+    if context.independent_failure_terminal:
+        raise _fail("EVIDENCE_FAILURE_SEALED")
+
+    capability_allowed = (
+        request.tool_name in context.work_order.allowed_tools
+        and request.tool_name in grant.allowed_tools
+        and grant.grant_id not in context.replay_state.revoked_grant_ids
+        and grant.valid_from
+        <= context.transaction_time
+        <= min(grant.expires_at, context.work_order.deadline)
+    )
+    error_code = _denial_code(
+        state_allowed=_prospective_state_allowed(
+            context,
+            request.tool_name,
+            request_arguments,
+        ),
+        role_allowed=_prospective_role_allowed(
+            binding.role,
+            request.tool_name,
+            request_arguments,
+        ),
+        capability_allowed=capability_allowed,
+        approval_allowed=_prospective_approval_allowed(
+            context,
+            request.tool_name,
+            request_arguments,
+        ),
+        predicate_allowed=(
+            _static_predicates_allowed(
+                context,
+                grant,
+                request_arguments,
+                execution_facts,
+            )
+            and _compose_arguments_allowed(
+                context,
+                request.tool_name,
+                request_arguments,
+            )
+        ),
+        quota_allowed=_remaining_tool_calls(context, grant.grant_id) > 0,
+    )
+    return _policy_decision(error_code)
 
 
 def _bounded_mapping(
@@ -1873,6 +2280,8 @@ __all__ = [
     "AuthorizationPolicyError",
     "AuthorizationReplayState",
     "CommittedEvidence",
+    "ProspectiveExecutionFacts",
+    "authorize_tool_call",
     "derive_authorization_context",
     "replay_authorization_policy",
 ]

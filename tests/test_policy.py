@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, is_dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
+import inspect
 import json
 
 import pytest
@@ -17,20 +18,30 @@ from openworkproof.composition import (
 )
 from openworkproof.models import (
     ACTION_RECEIPT_ADAPTER,
+    AgentRequest,
+    ApplyPatchArguments,
     CapabilityGrant,
+    ComposeProofArguments,
+    CreatePrProposalArguments,
+    RepoReadArguments,
+    RunTestsArguments,
     WorkOrder,
+    request_arguments_digest,
 )
 from openworkproof.policy import (
     AuthorizationContext,
     AuthorizationLedgerPrefix,
     AuthorizationPolicyError,
     CommittedEvidence,
+    ProspectiveExecutionFacts,
     _GrantReplayState,
     _denial_code,
     _grant_history_replay_context,
     _tool_predicates,
+    _validate_tool_authorization_inputs,
     _validate_grant_history_semantics,
     _validate_policy_history,
+    authorize_tool_call,
     derive_authorization_context,
     replay_authorization_policy,
 )
@@ -48,6 +59,8 @@ from openworkproof.repo_tools import (
 
 from test_receipt_chain import (
     _activate_ledger_root,
+    _approval_decision_for_request,
+    _approval_request_for_patch,
     _child_grant,
     _delegation_request,
     _full_pr_authorization_history,
@@ -97,6 +110,706 @@ def _live_policy_prefix(grants, attempts, receipts):
         ),
         receipts=receipts,
     )
+
+
+def _signed_tool_request(
+    work_order,
+    grant,
+    arguments,
+    role_keys,
+    now,
+):
+    binding = next(
+        item
+        for item in work_order.key_bindings
+        if item.key_id == grant.subject_key_id
+    )
+    tool_name = {
+        RepoReadArguments: "owp.repo_read",
+        ApplyPatchArguments: "owp.apply_patch",
+        RunTestsArguments: "owp.run_tests",
+        CreatePrProposalArguments: "owp.create_pr_proposal",
+        ComposeProofArguments: "owp.compose_proof",
+    }[type(arguments)]
+    return AgentRequest.model_validate(
+        sign_payload(
+            "agent-request",
+            {
+                "claim_type": "agent-request",
+                "work_order_digest": work_order.digest,
+                "grant_id": grant.grant_id,
+                "actor_id": binding.subject_id,
+                "actor_key_id": binding.key_id,
+                "tool_name": tool_name,
+                "arguments_digest": request_arguments_digest(
+                    tool_name,
+                    arguments,
+                ),
+                "nonce": _grant_id(
+                    f"live:{tool_name}:{grant.grant_id}:{now.isoformat()}"
+                ),
+                "requested_at": now.isoformat().replace("+00:00", "Z"),
+                "authentication_method": "agent_signature",
+                "model_id": "model",
+                "model_version": "1",
+                "prompt_template_digest": "a" * 64,
+                "context_source_digest": "b" * 64,
+            },
+            role_keys[binding.role][0],
+        )
+    )
+
+
+def _prospective_context(
+    *,
+    tmp_path,
+    label,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    child_subject_role="Developer",
+    child_updates=None,
+):
+    _, child, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label=label,
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+        child_subject_role=child_subject_role,
+        child_updates=child_updates,
+    )
+    context = derive_authorization_context(
+        signed_work_order,
+        _live_policy_prefix(grants, attempts, receipts),
+        (),
+        _source_checkpoint(signed_work_order),
+        fixed_now,
+    )
+    assert child is not None
+    return context, child
+
+
+def test_prospective_execution_facts_are_frozen_and_canonical(
+    ephemeral_role_keys,
+) -> None:
+    sidecar = ephemeral_role_keys["Sidecar"][1]
+    facts = ProspectiveExecutionFacts(
+        execution_context_id="1" * 64,
+        container_instance_id_digest="2" * 64,
+        controller_id=sidecar["key_id"],
+    )
+
+    with pytest.raises(FrozenInstanceError):
+        facts.execution_context_id = "3" * 64
+    for updates in (
+        {"execution_context_id": "A" * 64},
+        {"container_instance_id_digest": "2" * 63},
+        {"controller_id": "sidecar"},
+    ):
+        with pytest.raises(
+            AuthorizationPolicyError,
+            match="prospective execution facts",
+        ):
+            ProspectiveExecutionFacts(
+                execution_context_id=updates.get(
+                    "execution_context_id",
+                    "1" * 64,
+                ),
+                container_instance_id_digest=updates.get(
+                    "container_instance_id_digest",
+                    "2" * 64,
+                ),
+                controller_id=updates.get(
+                    "controller_id",
+                    sidecar["key_id"],
+                ),
+            )
+
+
+def test_tool_authorization_integrity_accepts_exact_signed_inputs(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    context, grant = _prospective_context(
+        tmp_path=tmp_path,
+        label="prospective-integrity-allowed",
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+    )
+    arguments = RepoReadArguments(path="src")
+    request = _signed_tool_request(
+        signed_work_order,
+        grant,
+        arguments,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+
+    assert list(
+        inspect.signature(_validate_tool_authorization_inputs).parameters
+    ) == ["context", "request", "request_arguments", "execution_facts"]
+    assert _validate_tool_authorization_inputs(
+        context,
+        request,
+        arguments,
+        None,
+    ) == (
+        grant,
+        next(
+            binding
+            for binding in signed_work_order.key_bindings
+            if binding.key_id == grant.subject_key_id
+        ),
+    )
+
+
+def test_tool_authorization_integrity_rejects_untrusted_inputs(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    context, grant = _prospective_context(
+        tmp_path=tmp_path,
+        label="prospective-integrity-denied",
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+    )
+    arguments = RepoReadArguments(path="src")
+    request = _signed_tool_request(
+        signed_work_order,
+        grant,
+        arguments,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    sidecar = ephemeral_role_keys["Sidecar"][1]
+    facts = ProspectiveExecutionFacts(
+        execution_context_id="1" * 64,
+        container_instance_id_digest="2" * 64,
+        controller_id=sidecar["key_id"],
+    )
+    other_arguments = RepoReadArguments(path="tests")
+    invalid_cases = (
+        (object(), request, arguments, None),
+        (context, object(), arguments, None),
+        (context, request, object(), None),
+        (context, request, arguments, facts),
+        (
+            context,
+            request.model_copy(update={"work_order_digest": "f" * 64}),
+            arguments,
+            None,
+        ),
+        (
+            context,
+            request.model_copy(update={"grant_id": "f" * 64}),
+            arguments,
+            None,
+        ),
+        (
+            context,
+            request.model_copy(update={"arguments_digest": "f" * 64}),
+            arguments,
+            None,
+        ),
+        (context, request, other_arguments, None),
+        (
+            context,
+            request.model_copy(
+                update={
+                    "requested_at": fixed_now - timedelta(seconds=301),
+                }
+            ),
+            arguments,
+            None,
+        ),
+        (
+            context,
+            request.model_copy(
+                update={
+                    "requested_at": fixed_now + timedelta(seconds=1),
+                }
+            ),
+            arguments,
+            None,
+        ),
+    )
+    for candidate in invalid_cases:
+        with pytest.raises(AuthorizationPolicyError):
+            _validate_tool_authorization_inputs(*candidate)
+
+
+def test_tool_authorization_integrity_requires_test_execution_facts(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    context, grant = _prospective_context(
+        tmp_path=tmp_path,
+        label="prospective-test-facts",
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+    )
+    verifier = _child_grant(
+        signed_work_order,
+        signed_root_grant,
+        ephemeral_role_keys,
+        label="prospective-test-facts:verifier",
+        subject_role="Verifier",
+    )
+    arguments = RunTestsArguments(
+        test_mode="verifier",
+        command_digest=signed_work_order.test_profiles[-1].command_digest,
+        source_commit=signed_work_order.source_commit,
+        candidate_commit=signed_work_order.source_commit,
+        workspace_manifest_digest=context.replay_checkpoint.workspace_manifest_digest,
+        container_image_digest=signed_work_order.test_profiles[-1].container_image_digest,
+        fixed_test_source_digest=signed_work_order.test_profiles[-1].fixed_test_source_digest,
+    )
+    request = _signed_tool_request(
+        signed_work_order,
+        verifier,
+        arguments,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+
+    with pytest.raises(AuthorizationPolicyError):
+        _validate_tool_authorization_inputs(
+            context,
+            request,
+            arguments,
+            None,
+        )
+
+
+def _decision_request(
+    *,
+    context,
+    grant,
+    arguments,
+    role_keys,
+    facts=None,
+):
+    request = _signed_tool_request(
+        context.work_order,
+        grant,
+        arguments,
+        role_keys,
+        context.transaction_time,
+    )
+    return authorize_tool_call(context, request, arguments, facts)
+
+
+def test_tool_authorization_role_matrix_and_state_denial(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    context, developer = _prospective_context(
+        tmp_path=tmp_path,
+        label="prospective-role-state",
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+    )
+    read_arguments = RepoReadArguments(path="src")
+    assert _decision_request(
+        context=context,
+        grant=developer,
+        arguments=read_arguments,
+        role_keys=ephemeral_role_keys,
+    ).allowed
+
+    closed = replace(context, current_state="accepted")
+    assert _decision_request(
+        context=closed,
+        grant=developer,
+        arguments=read_arguments,
+        role_keys=ephemeral_role_keys,
+    ).error_code == "STATE_DENIED"
+
+    compose_context = replace(
+        context,
+        current_state="locally_verified",
+        causal_state=replace(
+            context.causal_state,
+            active_patch_receipt_id="f" * 64,
+        ),
+    )
+    compose_arguments = ComposeProofArguments(
+        expected_state_version=len(context.ledger_prefix.receipts),
+        previous_report_digest=None,
+    )
+    assert _decision_request(
+        context=compose_context,
+        grant=developer,
+        arguments=compose_arguments,
+        role_keys=ephemeral_role_keys,
+    ).error_code == "ROLE_DENIED"
+
+
+def test_tool_authorization_capability_quota_and_precedence(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    capability_context, capability_grant = _prospective_context(
+        tmp_path=tmp_path,
+        label="prospective-capability",
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        child_updates={"allowed_tools": ["owp.apply_patch"]},
+    )
+    read_arguments = RepoReadArguments(path="src")
+    assert _decision_request(
+        context=capability_context,
+        grant=capability_grant,
+        arguments=read_arguments,
+        role_keys=ephemeral_role_keys,
+    ).error_code == "CAPABILITY_DENIED"
+
+    quota_context, quota_grant = _prospective_context(
+        tmp_path=tmp_path,
+        label="prospective-quota",
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+    )
+    quota_context = replace(
+        quota_context,
+        replay_state=replace(
+            quota_context.replay_state,
+            balances=tuple(
+                (
+                    grant_id,
+                    metric,
+                    0
+                    if grant_id == quota_grant.grant_id
+                    and metric == "tool_calls"
+                    else remaining,
+                )
+                for grant_id, metric, remaining
+                in quota_context.replay_state.balances
+            ),
+        ),
+    )
+    assert _decision_request(
+        context=quota_context,
+        grant=quota_grant,
+        arguments=read_arguments,
+        role_keys=ephemeral_role_keys,
+    ).error_code == "QUOTA_EXHAUSTED"
+
+    assert _decision_request(
+        context=replace(quota_context, current_state="frozen"),
+        grant=quota_grant,
+        arguments=read_arguments,
+        role_keys=ephemeral_role_keys,
+    ).error_code == "STATE_DENIED"
+
+
+def test_tool_authorization_prepolicy_capacity_and_terminal_guards(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    context, grant = _prospective_context(
+        tmp_path=tmp_path,
+        label="prospective-prepolicy",
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+    )
+    arguments = RepoReadArguments(path="src")
+    for candidate, message in (
+        (replace(context, routine_capacity_remaining=0), "capacity"),
+        (
+            replace(context, independent_failure_terminal=True),
+            "EVIDENCE_FAILURE_SEALED",
+        ),
+        (
+            replace(
+                context,
+                transaction_time=signed_work_order.deadline
+                + timedelta(seconds=1),
+            ),
+            "expired",
+        ),
+    ):
+        with pytest.raises(AuthorizationPolicyError, match=message):
+            _decision_request(
+                context=candidate,
+                grant=grant,
+                arguments=arguments,
+                role_keys=ephemeral_role_keys,
+            )
+
+
+def _approved_pr_context(
+    *,
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+):
+    work_order, prefix, committed, checkpoint = _active_patch_context_inputs(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    root = next(
+        grant
+        for grant in prefix.effective_grants
+        if grant.parent_grant_id is None
+    )
+    patch = prefix.receipts[-1]
+    request = _approval_request_for_patch(
+        root=root,
+        root_issuance=prefix.receipts[0],
+        patch=patch,
+        signed_work_order=work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="prospective-pr:request",
+        remaining_after=47,
+    )
+    decision = _approval_decision_for_request(
+        request=request,
+        previous_receipt=request,
+        sequence=request.sequence + 1,
+        approved=True,
+        parent_receipt_ids=(request.receipt_id,),
+        signed_work_order=work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="prospective-pr:decision",
+    )
+    approved_prefix = replace(
+        prefix,
+        receipts=(*prefix.receipts, request, decision),
+    )
+    context = derive_authorization_context(
+        work_order,
+        approved_prefix,
+        committed,
+        checkpoint,
+        datetime.fromisoformat("2026-01-01T00:00:10+00:00"),
+    )
+    return context, root, patch, request, decision
+
+
+def test_tool_authorization_arguments_enforce_grant_roots(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    context, developer = _prospective_context(
+        tmp_path=tmp_path,
+        label="prospective-arguments-roots",
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+    )
+
+    assert _decision_request(
+        context=context,
+        grant=developer,
+        arguments=RepoReadArguments(path="src/openworkproof"),
+        role_keys=ephemeral_role_keys,
+    ).allowed
+    assert _decision_request(
+        context=context,
+        grant=developer,
+        arguments=RepoReadArguments(path="docs"),
+        role_keys=ephemeral_role_keys,
+    ).error_code == "PREDICATE_DENIED"
+
+
+def test_tool_authorization_approval_binds_current_patch(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    context, root, patch, _, decision = _approved_pr_context(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    allowed = CreatePrProposalArguments(
+        target_patch_digest=patch.digest,
+        approval_receipt_id=decision.receipt_id,
+        approval_receipt_digest=decision.digest,
+    )
+    assert _decision_request(
+        context=context,
+        grant=root,
+        arguments=allowed,
+        role_keys=ephemeral_role_keys,
+    ).allowed
+
+    wrong_approval = allowed.model_copy(
+        update={"approval_receipt_id": "f" * 64}
+    )
+    assert _decision_request(
+        context=context,
+        grant=root,
+        arguments=wrong_approval,
+        role_keys=ephemeral_role_keys,
+    ).error_code == "APPROVAL_DENIED"
+
+
+def test_tool_authorization_compose_binds_ledger_version(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    work_order, prefix, committed, checkpoint = _active_patch_context_inputs(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    context = replace(
+        derive_authorization_context(
+            work_order,
+            prefix,
+            committed,
+            checkpoint,
+            datetime.fromisoformat("2026-01-01T00:00:10+00:00"),
+        ),
+        current_state="locally_verified",
+    )
+    root = next(
+        grant
+        for grant in prefix.effective_grants
+        if grant.parent_grant_id is None
+    )
+    allowed = ComposeProofArguments(
+        expected_state_version=len(prefix.receipts),
+        previous_report_digest=None,
+    )
+    assert _decision_request(
+        context=context,
+        grant=root,
+        arguments=allowed,
+        role_keys=ephemeral_role_keys,
+    ).allowed
+    assert _decision_request(
+        context=context,
+        grant=root,
+        arguments=allowed.model_copy(
+            update={"expected_state_version": len(prefix.receipts) + 1}
+        ),
+        role_keys=ephemeral_role_keys,
+    ).error_code == "PREDICATE_DENIED"
+
+
+def test_tool_authorization_execution_binds_profile_and_closed_branch(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    context, developer = _developer_test_context(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    profile = next(
+        item
+        for item in context.work_order.test_profiles
+        if item.test_mode == "developer"
+    )
+    arguments = RunTestsArguments(
+        test_mode="developer",
+        command_digest=profile.command_digest,
+        source_commit=context.work_order.source_commit,
+        candidate_commit=context.replay_checkpoint.head_commit,
+        workspace_manifest_digest=(
+            context.replay_checkpoint.workspace_manifest_digest
+        ),
+        container_image_digest=profile.container_image_digest,
+        fixed_test_source_digest=None,
+    )
+    facts = ProspectiveExecutionFacts(
+        execution_context_id="1" * 64,
+        container_instance_id_digest="2" * 64,
+        controller_id=ephemeral_role_keys["Sidecar"][1]["key_id"],
+    )
+    assert _decision_request(
+        context=context,
+        grant=developer,
+        arguments=arguments,
+        role_keys=ephemeral_role_keys,
+        facts=facts,
+    ).allowed
+    assert _decision_request(
+        context=context,
+        grant=developer,
+        arguments=arguments.model_copy(
+            update={"command_digest": "f" * 64}
+        ),
+        role_keys=ephemeral_role_keys,
+        facts=facts,
+    ).error_code == "PREDICATE_DENIED"
+    assert _decision_request(
+        context=replace(context, current_state="evidence_incomplete"),
+        grant=developer,
+        arguments=arguments,
+        role_keys=ephemeral_role_keys,
+        facts=facts,
+    ).error_code == "STATE_DENIED"
 
 
 def _active_patch_context_inputs(
@@ -219,6 +932,159 @@ def _active_patch_context_inputs(
         committed,
         checkpoint,
     )
+
+
+def _developer_test_context(
+    *,
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+):
+    work_order = _work_order_with_pr_chain_predicates(
+        signed_work_order,
+        ephemeral_role_keys["Maintainer"][0],
+    )
+    root_raw = work_order.root_grant_template.model_dump(mode="json")
+    root_raw["work_order_digest"] = work_order.digest
+    root = CapabilityGrant.model_validate(
+        sign_payload(
+            "capability-grant",
+            root_raw,
+            ephemeral_role_keys["Maintainer"][0],
+        )
+    )
+    _, child, history, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="prospective-developer-test",
+        work_order=work_order,
+        root=root,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+        child_updates={
+            "allowed_tools": [
+                "owp.apply_patch",
+                "owp.repo_read",
+                "owp.run_tests",
+            ],
+            "quota": {"tool_calls": 4, "repair_rounds": 0},
+        },
+    )
+    assert child is not None
+    patch = _linked_tool_receipt(
+        tool_name="owp.apply_patch",
+        state_before="running",
+        state_after="running",
+        sequence=3,
+        previous_receipt=history[-1],
+        root=child,
+        signed_work_order=work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="prospective-developer-test:patch",
+        actor_role="Developer",
+        remaining_after=3,
+        occurred_at="2026-01-01T00:00:06Z",
+    )
+    patch_bytes = b"0123456789"
+    patch_digest = hashlib.sha256(patch_bytes).hexdigest()
+    candidate_commit = "2" * 40
+    manifest = build_workspace_manifest(candidate_commit, ())
+    manifest_digest = workspace_manifest_digest(manifest)
+    source_manifest = build_workspace_manifest(work_order.source_commit, ())
+    result_bytes = rfc8785.dumps(
+        {
+            "schema_version": "openworkproof-patch-result/0.1",
+            "parent_commit": work_order.source_commit,
+            "parent_manifest_digest": workspace_manifest_digest(
+                source_manifest
+            ),
+            "candidate_commit": candidate_commit,
+            "workspace_manifest_digest": manifest_digest,
+            "patch_digest": patch_digest,
+            "patch_size_bytes": len(patch_bytes),
+            "replay_profile_digest": work_order.replay_profile_digest,
+        }
+    )
+    result_digest = hashlib.sha256(result_bytes).hexdigest()
+    raw = patch.model_dump(mode="json")
+    raw["request_arguments"].update(
+        {
+            "patch_digest": patch_digest,
+            "patch_size_bytes": len(patch_bytes),
+        }
+    )
+    raw["arguments_digest"] = request_arguments_digest(
+        "owp.apply_patch",
+        raw["request_arguments"],
+    )
+    raw["output_digest"] = result_digest
+    raw["evidence_refs"] = [
+        {
+            "path": "evidence/patch-input/01.diff",
+            "sha256": patch_digest,
+            "media_type": "text/x-diff",
+            "size_bytes": len(patch_bytes),
+        },
+        {
+            "path": "evidence/patch-result/01.json",
+            "sha256": result_digest,
+            "media_type": "application/json",
+            "size_bytes": len(result_bytes),
+        },
+    ]
+    claim = raw["nested_claim"]
+    claim["arguments_digest"] = raw["arguments_digest"]
+    claim = sign_payload(
+        "agent-request",
+        claim,
+        ephemeral_role_keys["Developer"][0],
+    )
+    raw["nested_claim"] = claim
+    raw["nested_claim_digest"] = claim["digest"]
+    patch = ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            raw,
+            ephemeral_role_keys["Sidecar"][0],
+        )
+    )
+    patch = _rebind_tool_predicates(
+        patch,
+        work_order,
+        child,
+        ephemeral_role_keys,
+        remaining_before=4,
+    )
+    receipts = (*history, patch)
+    references = {
+        "evidence/patch-input/01.diff": patch_bytes,
+        "evidence/patch-result/01.json": result_bytes,
+    }
+    committed = tuple(
+        CommittedEvidence(
+            reference=reference,
+            payload=references[reference.path],
+        )
+        for reference in patch.evidence_refs
+    )
+    checkpoint = ReplayCheckpoint(
+        files=(),
+        head_commit=candidate_commit,
+        workspace_manifest=manifest,
+        workspace_manifest_digest=manifest_digest,
+        verified_test_results=(),
+    )
+    context = derive_authorization_context(
+        work_order,
+        _live_policy_prefix(grants, attempts, receipts),
+        committed,
+        checkpoint,
+        datetime.fromisoformat("2026-01-01T00:00:10+00:00"),
+    )
+    return context, child
 
 
 def test_derive_authorization_context_uses_verified_signed_prefix(
