@@ -1034,12 +1034,21 @@ def _validate_new_receipt_publication(
         raise ValueError(
             "an existing evidence publication requires recovery"
         )
+    publication_count_valid = (
+        1 <= len(group.publications) <= _MAX_PUBLICATIONS_PER_GROUP
+    ) or (
+        not group.publications
+        and not receipt.evidence_refs
+        and isinstance(receipt, ToolCallReceipt)
+        and receipt.policy_decision == "allow"
+        and receipt.execution_status == "failed"
+    )
     if (
         type(receipt) is not ToolCallReceipt
         or receipt.policy_decision != "allow"
         or type(group) is not _PublicationGroup
         or group.receipt_id != receipt.receipt_id
-        or not 1 <= len(group.publications) <= _MAX_PUBLICATIONS_PER_GROUP
+        or not publication_count_valid
         or any(type(item) is not _Publication for item in group.publications)
         or len(group.publications) != len(receipt.evidence_refs)
         or len(receipts) >= MAX_ROUTINE_ACTION_RECEIPTS
@@ -1348,8 +1357,43 @@ def _validate_authoritative_receipt_predicates(
             if (
                 not isinstance(arguments, RunTestsArguments)
                 or arguments.test_mode != "verifier"
-                or len(receipt.evidence_refs) != 1
             ):
+                raise ValueError(
+                    "predicate test authority is unavailable for this tool"
+                )
+            profile = next(
+                (
+                    candidate
+                    for candidate in work_order.test_profiles
+                    if candidate.test_mode == "verifier"
+                ),
+                None,
+            )
+            if receipt.execution_status == "failed":
+                if receipt.evidence_refs or profile is None:
+                    raise ValueError(
+                        "failed test predicate authority is inconsistent"
+                    )
+                authoritative[spec.predicate_id] = {
+                    "test_mode": "verifier",
+                    "command_digest": arguments.command_digest,
+                    "expected_exit_code": profile.expected_exit_code,
+                    "actual_exit_code": None,
+                    "test_evidence_digest": None,
+                    "source_commit": arguments.source_commit,
+                    "candidate_commit": arguments.candidate_commit,
+                    "workspace_manifest_digest": (
+                        arguments.workspace_manifest_digest
+                    ),
+                    "container_image_digest": (
+                        arguments.container_image_digest
+                    ),
+                    "fixed_test_source_digest": (
+                        arguments.fixed_test_source_digest
+                    ),
+                }
+                continue
+            if len(receipt.evidence_refs) != 1:
                 raise ValueError(
                     "predicate test authority is unavailable for this tool"
                 )
@@ -1359,14 +1403,6 @@ def _validate_authoritative_receipt_predicates(
                 raise ValueError("predicate test evidence is unavailable")
             test_result = TestResultEvidence.model_validate(
                 _load_canonical_json(payload)
-            )
-            profile = next(
-                (
-                    candidate
-                    for candidate in work_order.test_profiles
-                    if candidate.test_mode == "verifier"
-                ),
-                None,
             )
             if (
                 profile is None
@@ -1794,10 +1830,12 @@ def _confirm_receipt_publication_commit(
                 for item in candidate.publications
             )
         )
-        if (
-            matches == (receipt,)
-            and group_matches == ((group, "COMMITTING"),)
-        ):
+        expected_group_matches = (
+            ((group, "COMMITTING"),)
+            if group.publications
+            else ()
+        )
+        if matches == (receipt,) and group_matches == expected_group_matches:
             status = "COMMITTED"
         elif not matches and not group_matches:
             status = "NOT_COMMITTED"
@@ -1925,10 +1963,13 @@ def commit_receipt_with_publications(
             if candidate.receipt_id == receipt.receipt_id
             and state_value == "COMMITTING"
         )
+        expected_candidate_groups = (
+            (group,) if group.publications else ()
+        )
         if (
             prospective_work_order != work_order
             or receipts[-1] != receipt
-            or candidate_groups != (group,)
+            or candidate_groups != expected_candidate_groups
         ):
             raise ValueError(
                 "prospective receipt publication replay is incomplete"
@@ -2782,24 +2823,39 @@ def complete_receipt_publication(
     payloads: Mapping[str, bytes],
     clock: Callable[[], datetime],
     trusted_resolution_manifest: ResolutionManifest | None = None,
+    _borrowed_lock_descriptor: int | None = None,
 ) -> _PublicationGroup:
     """Stage, journal, publish, and commit one receipt evidence group."""
 
     path = Path(ledger_path)
     root = Path(evidence_root)
     lock_descriptor: int | None = None
+    owns_lock = False
     group: _PublicationGroup | None = None
     receipt_committed = False
     primary_error: Exception | None = None
     try:
-        lock_descriptor = _acquire_target_lock(path)
-        group = stage_pending_evidence_group(
+        lock_descriptor, owns_lock = _borrow_or_acquire_target_lock(
             path,
-            evidence_root=root,
-            receipt=receipt,
-            payloads=payloads,
-            _borrowed_lock_descriptor=lock_descriptor,
+            _borrowed_lock_descriptor,
         )
+        if receipt.evidence_refs:
+            group = stage_pending_evidence_group(
+                path,
+                evidence_root=root,
+                receipt=receipt,
+                payloads=payloads,
+                _borrowed_lock_descriptor=lock_descriptor,
+            )
+        elif not payloads:
+            group = _PublicationGroup(
+                receipt_id=receipt.receipt_id,
+                publications=(),
+            )
+        else:
+            raise ValueError(
+                "evidence-free receipt cannot stage payloads"
+            )
         try:
             commit_receipt_with_publications(
                 path,
@@ -2814,18 +2870,19 @@ def complete_receipt_publication(
             receipt_committed = True
             raise
         receipt_committed = True
-        publish_group_no_replace(
-            path,
-            evidence_root=root,
-            group=group,
-            _borrowed_lock_descriptor=lock_descriptor,
-        )
-        mark_publication_group_committed(
-            path,
-            evidence_root=root,
-            group=group,
-            _borrowed_lock_descriptor=lock_descriptor,
-        )
+        if group.publications:
+            publish_group_no_replace(
+                path,
+                evidence_root=root,
+                group=group,
+                _borrowed_lock_descriptor=lock_descriptor,
+            )
+            mark_publication_group_committed(
+                path,
+                evidence_root=root,
+                group=group,
+                _borrowed_lock_descriptor=lock_descriptor,
+            )
         require_all_publications_committed(
             path,
             evidence_root=root,
@@ -2834,7 +2891,9 @@ def complete_receipt_publication(
     except Exception as error:
         primary_error = error
 
-    _, release_errors = _release_target_lock(lock_descriptor)
+    release_errors = ()
+    if owns_lock:
+        _, release_errors = _release_target_lock(lock_descriptor)
     cleanup_errors = [
         _contextualize_secondary("target lock release", error)
         for error in release_errors

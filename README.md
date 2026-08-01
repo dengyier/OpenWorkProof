@@ -154,13 +154,18 @@ MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent，AgentTeams 组织 Agen
   按固定顺序检查状态、角色、Grant 能力、人工批准、静态谓词和
   配额，仅返回 `PolicyDecision`，不启动 handler、不扣减配额、
   不签发 Receipt，也不写入账本。
+- Task 13 首个 `owp.run_tests` 可信协调切片：在同一目标锁下
+  重放当前授权上下文，事前检查证据槽位与成功/失败 Receipt
+  形态，然后仅启动一次可信 handler；正常结果进入
+  stage→commit→publish→mark committed，handler 异常则提交
+  已扣费、无证据附件的 `allow/failed + HANDLER_ERROR` Receipt。
 
 当前验证快照：
 
 - Policy 专项：78 passed；
 - Policy、Composition 与 Receipt-chain 专项：517 passed；
 - Receipt-chain 专项：407 passed；
-- 全量测试：1215 passed；
+- 全量测试：1220 passed；
 - 独立规格复核：7B4_SPEC_PASS；
 - 独立质量复核：7B4_QUALITY_PASS；
 - pip check、compileall 和 git diff check：通过。
@@ -180,9 +185,13 @@ Phase 1→4 和最终权威读取门的 `complete_receipt_publication`。
 `validate_grant_chain` 可以验证签名授权链和 Sidecar 签名的
 ResolutionManifest 解析断言，但五输入 API 没有独立读取并重哈希
 ResolutionManifest 原始字节。
-现有协调器仍未接入真实 ToolCall handler；
-`validate_human_decision`、`validate_rollback`、deny/rollback 和
-Acceptance 生产事务尚未完成。Task 7 与完整 Task 9 仍未完成，Day 0
+当前只接入了 `owp.run_tests(test_mode=verifier)` 的首个可调用
+handler 协调切片，还没有 MCP 传输服务器、Docker 测试执行器或
+Developer mode 生产入口。当前目标锁能防止合作调用者并发，
+但“handler 已启动、Receipt 尚未提交”窗口的进程级崩溃仍需
+持久化 start reservation/recovery 机制闭合。deny Receipt、
+`validate_human_decision`、`validate_rollback`、rollback 和 Acceptance
+生产事务也尚未完成。Task 7 与完整 Task 9 仍未完成，Day 0
 执行门仍为 FAIL。
 
 
@@ -211,8 +220,9 @@ Acceptance 生产事务尚未完成。Task 7 与完整 Task 9 仍未完成，Day
 
 说明：
 
-- 当前开发快照包含 Task 8A 实时授权上下文与 Task 8B1 纯事前
-  工具授权，fresh 全量验证为 1215 passed；
+- 当前开发快照包含 Task 8A 实时授权上下文、Task 8B1 纯事前
+  工具授权和 Task 13 首个 Verifier `run_tests` 协调切片，
+  fresh 全量验证为 1220 passed；
 - pyproject.toml 已预留 owp 命令入口，但 CLI 模块尚未完成，因此本文件
   暂不提供 CLI 使用命令；
 - 不应把测试通过理解为 Day 0、独立验收或赛事提交已经完成。
@@ -271,14 +281,20 @@ Rich 及其源码仍归属于原权利人；OpenWorkProof 只拥有自有协议�
 - Task 8B1 纯事前工具授权：校验请求签名、参数摘要、300 秒新鲜度、
   角色/工具矩阵、Grant 能力与配额、路径根、人工批准、测试 Profile、
   ReplayCheckpoint、独立执行标识和组合版本；只判定 handler 资格。
+- Task 13 首个 Verifier `run_tests` 协调切片：锁内复核账本/证据
+  快照、事前预留证据槽位、启动单次 handler、Sidecar 签署 Receipt，
+  并对正常结果完成四阶段证据发布；已启动的 handler 异常会
+  扣减 `tool_calls` 并提交无附件失败 Receipt，事前策略拒绝不启动
+  handler。
 
 尚未完成：
 
-- Task 7 真实 ToolCall handler 接入现有 Phase 1→4 协调器，以及
-  deny/rollback 生产事务和剩余入口的全局 nonce 处理；
+- `run_tests` 的持久化 handler-start reservation/崩溃恢复、
+  Developer mode、真实无网沙箱与 MCP 入口；
+- deny/rollback 生产事务和剩余入口的全局 nonce 处理；
 - Task 8 `validate_human_decision` 和 `validate_rollback` 两个实时决策 API；
-- evidence publication 与真实 handler 的调用闭包，以及 acceptance
-  事务闭包；
+- 其他 ToolCall handler 与 evidence publication 的调用闭包，
+  以及 acceptance 事务闭包；
 - ResolutionManifest 原始字节的独立读取与重哈希、完整 Task 9
   composition 和 Acceptance；
 - CLI、MCP Sidecar 和 AgentTeams 接线；
@@ -296,8 +312,8 @@ Rich 及其源码仍归属于原权利人；OpenWorkProof 只拥有自有协议�
 九、路线图
 ----------
 
-1. 将 Task 8A/8B1 授权上下文与事前决策接入真实 ToolCall handler
-   与 Phase 1→4 协调器；
+1. 为 `run_tests` 增加持久化 handler-start reservation 与崩溃恢复，
+   再接入真实无网沙箱和 MCP 传输层；
 2. 完成人工决策、回滚和终止策略 API；
 3. 完成多尺度证据合成与 AcceptanceReceipt 成功路径；
 4. 完成 CLI、MCP Sidecar 和 AgentTeams 集成；
