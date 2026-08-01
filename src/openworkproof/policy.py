@@ -4,13 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+import hashlib
 from itertools import islice
+import json
+
+import rfc8785
 
 from openworkproof.composition import (
     AuthorizationCausalSnapshot,
     AuthorizationCausalState,
     AuthorizationCausalityError,
+    replay_authorization_causality,
     validate_authorization_causal_bindings,
 )
 from openworkproof.models import (
@@ -19,9 +24,11 @@ from openworkproof.models import (
     ApprovalDecisionReceipt,
     ApprovalRequestedReceipt,
     CapabilityGrant,
+    EvidenceRef,
     GrantConsumedReceipt,
     GrantIssuedReceipt,
     GrantRevokedReceipt,
+    PatchResultEvidence,
     RepoReadArguments,
     RollbackReceipt,
     RunTestsArguments,
@@ -29,6 +36,10 @@ from openworkproof.models import (
     TerminationDecisionReceipt,
     ToolCallReceipt,
     WorkOrder,
+)
+from openworkproof.repo_tools import (
+    ReplayCheckpoint,
+    workspace_manifest_digest,
 )
 from openworkproof.predicates import (
     EvaluationContext,
@@ -65,6 +76,77 @@ class AuthorizationPolicyError(RuntimeError):
     """The signed history cannot satisfy the frozen authorization policy."""
 
 
+@dataclass(frozen=True, slots=True)
+class AuthorizationLedgerPrefix:
+    """Canonical bounded inputs for one live authorization transaction."""
+
+    effective_grants: tuple[CapabilityGrant, ...]
+    grant_attempts: tuple[CapabilityGrant, ...]
+    receipts: tuple[ActionReceiptEnvelope, ...]
+
+    def __post_init__(self) -> None:
+        if any(
+            type(value) is not tuple
+            for value in (
+                self.effective_grants,
+                self.grant_attempts,
+                self.receipts,
+            )
+        ):
+            raise AuthorizationPolicyError(
+                "live policy collections must be exact tuples"
+            )
+        if (
+            len(self.effective_grants) > MAX_EFFECTIVE_GRANTS
+            or len(self.grant_attempts) > MAX_GRANT_ATTEMPTS
+            or len(self.receipts) > MAX_AUTHORIZATION_RECEIPTS
+        ):
+            raise AuthorizationPolicyError(
+                "live policy collection exceeds its bounded capacity"
+            )
+        if any(
+            not isinstance(grant, CapabilityGrant)
+            for grant in self.effective_grants + self.grant_attempts
+        ) or any(
+            not isinstance(receipt, ActionReceiptEnvelope)
+            for receipt in self.receipts
+        ):
+            raise AuthorizationPolicyError(
+                "live policy collection contains a malformed entry"
+            )
+        grant_ids = tuple(
+            grant.grant_id for grant in self.effective_grants
+        )
+        attempt_digests = tuple(
+            grant.digest for grant in self.grant_attempts
+        )
+        if (
+            grant_ids != tuple(sorted(grant_ids))
+            or len(set(grant_ids)) != len(grant_ids)
+            or attempt_digests != tuple(sorted(attempt_digests))
+            or len(set(attempt_digests)) != len(attempt_digests)
+        ):
+            raise AuthorizationPolicyError(
+                "live policy Grants are not canonical and unique"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class CommittedEvidence:
+    """Exact committed bytes paired with their signed evidence reference."""
+
+    reference: EvidenceRef
+    payload: bytes
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.reference, EvidenceRef) or type(
+            self.payload
+        ) is not bytes:
+            raise AuthorizationPolicyError(
+                "committed evidence entry is malformed"
+            )
+
+
 @dataclass(frozen=True)
 class AuthorizationReplayState:
     """Immutable policy facts reconstructed from the signed receipt history."""
@@ -74,6 +156,27 @@ class AuthorizationReplayState:
     revoked_grant_ids: tuple[str, ...]
     used_single_use_grant_ids: tuple[str, ...]
     approval_decision_by_request: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorizationContext:
+    """Verified immutable facts used by one live authorization decision."""
+
+    work_order: WorkOrder
+    ledger_prefix: AuthorizationLedgerPrefix
+    committed_evidence: tuple[CommittedEvidence, ...]
+    replay_checkpoint: ReplayCheckpoint
+    transaction_time: datetime
+    causal_state: AuthorizationCausalState
+    replay_state: AuthorizationReplayState
+    current_state: str
+    routine_capacity_remaining: int
+    denial_count: int
+    independent_failure_terminal: bool
+
+    @property
+    def active_patch_receipt_id(self) -> str | None:
+        return self.causal_state.active_patch_receipt_id
 
 
 @dataclass(frozen=True)
@@ -1528,8 +1631,248 @@ def replay_authorization_policy(
     )
 
 
+def _validate_committed_evidence(
+    work_order: WorkOrder,
+    ledger_prefix: AuthorizationLedgerPrefix,
+    committed_evidence: tuple[CommittedEvidence, ...],
+) -> dict[str, CommittedEvidence]:
+    committed_paths = tuple(
+        item.reference.path for item in committed_evidence
+    )
+    if (
+        committed_paths
+        != tuple(sorted(committed_paths, key=lambda value: value.encode()))
+        or len(set(committed_paths)) != len(committed_paths)
+    ):
+        raise _fail("committed evidence is not canonical and unique")
+
+    expected_by_path: dict[str, EvidenceRef] = {}
+    for receipt in ledger_prefix.receipts:
+        for reference in receipt.evidence_refs:
+            if reference.path in expected_by_path:
+                raise _fail("receipt evidence coverage is not one-to-one")
+            expected_by_path[reference.path] = reference
+    committed_by_path = {
+        item.reference.path: item for item in committed_evidence
+    }
+    if set(committed_by_path) != set(expected_by_path):
+        raise _fail("committed evidence coverage is not exact")
+
+    artifacts = {
+        f"{work_order.evidence_policy.evidence_root}/{artifact.path}": artifact
+        for artifact in work_order.evidence_policy.artifacts
+    }
+    for path, expected_reference in expected_by_path.items():
+        item = committed_by_path[path]
+        artifact = artifacts.get(path)
+        if artifact is None:
+            raise _fail("committed evidence path is outside the allowlist")
+        if item.reference != expected_reference:
+            raise _fail("committed evidence reference does not match receipt")
+        if item.reference.media_type != artifact.media_type:
+            raise _fail("committed evidence media type is invalid")
+        if item.reference.size_bytes > artifact.max_size_bytes:
+            raise _fail("committed evidence exceeds its artifact limit")
+        if len(item.payload) != item.reference.size_bytes:
+            raise _fail("committed evidence size does not match reference")
+        if (
+            hashlib.sha256(item.payload).hexdigest()
+            != item.reference.sha256
+        ):
+            raise _fail("committed evidence digest does not match bytes")
+        if item.reference.media_type == "application/json":
+            try:
+                decoded = json.loads(item.payload)
+                canonical = rfc8785.dumps(decoded)
+            except (TypeError, ValueError, UnicodeDecodeError) as error:
+                raise _fail("committed JSON evidence is invalid") from error
+            if canonical != item.payload:
+                raise _fail("committed JSON evidence is not RFC 8785 canonical")
+    return committed_by_path
+
+
+def _validate_replay_checkpoint(
+    work_order: WorkOrder,
+    ledger_prefix: AuthorizationLedgerPrefix,
+    committed_by_path: Mapping[str, CommittedEvidence],
+    replay_checkpoint: ReplayCheckpoint,
+    active_patch_receipt_id: str | None,
+) -> None:
+    try:
+        actual_manifest_digest = workspace_manifest_digest(
+            replay_checkpoint.workspace_manifest
+        )
+    except Exception as error:
+        raise _fail("replay checkpoint manifest is invalid") from error
+    if (
+        replay_checkpoint.workspace_manifest.head_commit
+        != replay_checkpoint.head_commit
+        or replay_checkpoint.workspace_manifest_digest
+        != actual_manifest_digest
+    ):
+        raise _fail("replay checkpoint manifest binding is invalid")
+    if active_patch_receipt_id is None:
+        if replay_checkpoint.head_commit != work_order.source_commit:
+            raise _fail("source replay checkpoint head is invalid")
+        return
+
+    active_patch = next(
+        (
+            receipt
+            for receipt in ledger_prefix.receipts
+            if receipt.receipt_id == active_patch_receipt_id
+        ),
+        None,
+    )
+    if (
+        not isinstance(active_patch, ToolCallReceipt)
+        or active_patch.tool_name != "owp.apply_patch"
+        or active_patch.policy_decision != "allow"
+        or active_patch.execution_status != "succeeded"
+        or not isinstance(active_patch.request_arguments, ApplyPatchArguments)
+    ):
+        raise _fail("active patch checkpoint origin is invalid")
+    artifacts = {
+        f"{work_order.evidence_policy.evidence_root}/{artifact.path}": artifact
+        for artifact in work_order.evidence_policy.artifacts
+    }
+    result_refs = tuple(
+        reference
+        for reference in active_patch.evidence_refs
+        if artifacts.get(reference.path) is not None
+        and artifacts[reference.path].purpose == "patch_result"
+    )
+    if len(result_refs) != 1:
+        raise _fail("active patch evidence has no unique result")
+    result_ref = result_refs[0]
+    committed_result = committed_by_path.get(result_ref.path)
+    if committed_result is None:
+        raise _fail("active patch result evidence is unavailable")
+    try:
+        patch_result = PatchResultEvidence.model_validate_json(
+            committed_result.payload
+        )
+    except (TypeError, ValueError) as error:
+        raise _fail("active patch result evidence is invalid") from error
+    if (
+        active_patch.output_digest != result_ref.sha256
+        or patch_result.patch_digest
+        != active_patch.request_arguments.patch_digest
+        or patch_result.patch_size_bytes
+        != active_patch.request_arguments.patch_size_bytes
+        or patch_result.replay_profile_digest
+        != work_order.replay_profile_digest
+        or patch_result.candidate_commit != replay_checkpoint.head_commit
+        or patch_result.workspace_manifest_digest
+        != replay_checkpoint.workspace_manifest_digest
+    ):
+        raise _fail("active patch checkpoint binding is invalid")
+
+
+def derive_authorization_context(
+    work_order: WorkOrder,
+    ledger_prefix: AuthorizationLedgerPrefix,
+    committed_evidence: tuple[CommittedEvidence, ...],
+    replay_checkpoint: ReplayCheckpoint,
+    transaction_time: datetime,
+) -> AuthorizationContext:
+    """Derive live policy facts from one closed, signed ledger snapshot."""
+
+    if (
+        not isinstance(work_order, WorkOrder)
+        or not isinstance(ledger_prefix, AuthorizationLedgerPrefix)
+        or type(committed_evidence) is not tuple
+        or any(
+            not isinstance(item, CommittedEvidence)
+            for item in committed_evidence
+        )
+        or not isinstance(replay_checkpoint, ReplayCheckpoint)
+    ):
+        raise _fail("live authorization context inputs are unavailable")
+    if (
+        not isinstance(transaction_time, datetime)
+        or transaction_time.tzinfo is None
+        or transaction_time.utcoffset() != timedelta(0)
+        or transaction_time.microsecond != 0
+    ):
+        raise _fail("transaction time must be a trusted UTC second")
+    canonical_time = transaction_time.astimezone(timezone.utc)
+    earliest_time = (
+        ledger_prefix.receipts[-1].occurred_at
+        if ledger_prefix.receipts
+        else work_order.issued_at
+    )
+    if canonical_time < earliest_time:
+        raise _fail("transaction time precedes the signed ledger prefix")
+
+    effective_grants = {
+        grant.grant_id: grant
+        for grant in ledger_prefix.effective_grants
+    }
+    grant_attempts = {
+        grant.digest: grant
+        for grant in ledger_prefix.grant_attempts
+    }
+    try:
+        causal_state = replay_authorization_causality(
+            work_order,
+            ledger_prefix.receipts,
+        )
+    except AuthorizationCausalityError as error:
+        raise _fail(str(error)) from error
+    replay_state = replay_authorization_policy(
+        work_order,
+        effective_grants,
+        grant_attempts,
+        ledger_prefix.receipts,
+        causal_state,
+    )
+    committed_by_path = _validate_committed_evidence(
+        work_order,
+        ledger_prefix,
+        committed_evidence,
+    )
+    _validate_replay_checkpoint(
+        work_order,
+        ledger_prefix,
+        committed_by_path,
+        replay_checkpoint,
+        causal_state.active_patch_receipt_id,
+    )
+    current_state = (
+        ledger_prefix.receipts[-1].state_after
+        if ledger_prefix.receipts
+        else "issued"
+    )
+    return AuthorizationContext(
+        work_order=work_order,
+        ledger_prefix=ledger_prefix,
+        committed_evidence=committed_evidence,
+        replay_checkpoint=replay_checkpoint,
+        transaction_time=canonical_time,
+        causal_state=causal_state,
+        replay_state=replay_state,
+        current_state=current_state,
+        routine_capacity_remaining=max(
+            0,
+            61 - len(ledger_prefix.receipts),
+        ),
+        denial_count=sum(
+            receipt.policy_decision == "deny"
+            for receipt in ledger_prefix.receipts
+        ),
+        independent_failure_terminal=(
+            causal_state.independent_failure_terminal
+        ),
+    )
+
+
 __all__ = [
+    "AuthorizationContext",
+    "AuthorizationLedgerPrefix",
     "AuthorizationPolicyError",
     "AuthorizationReplayState",
+    "CommittedEvidence",
+    "derive_authorization_context",
     "replay_authorization_policy",
 ]

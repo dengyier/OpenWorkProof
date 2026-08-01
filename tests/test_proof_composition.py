@@ -913,6 +913,31 @@ def test_causal_replay_accepts_exact_recomposition_parents(
     assert state.active_patch_receipt_id == history[1].receipt_id
     assert state.latest_composition_trigger_id == history[4].receipt_id
     assert state.independent_result_receipt_id == history[5].receipt_id
+    assert state.independent_failure_terminal is False
+
+
+def test_causal_replay_exposes_terminal_independent_failure(
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    sidecar_receipt_factory,
+) -> None:
+    prefix = _recomposition_history(
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        independent_passed=False,
+    )[:6]
+
+    state = replay_authorization_causality(
+        signed_work_order,
+        prefix,
+    )
+
+    assert state.independent_failure_terminal is True
 
 
 @pytest.mark.parametrize("followup", ("false", "passing", "compose"))

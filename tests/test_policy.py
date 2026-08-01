@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, is_dataclass, replace
 from datetime import datetime
+import hashlib
+import json
 
 import pytest
+import rfc8785
 
 import openworkproof.evidence as evidence
 from openworkproof.composition import (
@@ -18,13 +21,17 @@ from openworkproof.models import (
     WorkOrder,
 )
 from openworkproof.policy import (
+    AuthorizationContext,
+    AuthorizationLedgerPrefix,
     AuthorizationPolicyError,
+    CommittedEvidence,
     _GrantReplayState,
     _denial_code,
     _grant_history_replay_context,
     _tool_predicates,
     _validate_grant_history_semantics,
     _validate_policy_history,
+    derive_authorization_context,
     replay_authorization_policy,
 )
 from openworkproof.predicates import (
@@ -33,6 +40,11 @@ from openworkproof.predicates import (
     select_required_predicates,
 )
 from openworkproof.signing import sign_payload
+from openworkproof.repo_tools import (
+    ReplayCheckpoint,
+    build_workspace_manifest,
+    workspace_manifest_digest,
+)
 
 from test_receipt_chain import (
     _activate_ledger_root,
@@ -62,6 +74,460 @@ from test_proof_composition import (
     _with_correlation_factors,
     _with_parents,
 )
+
+
+def _source_checkpoint(work_order: WorkOrder) -> ReplayCheckpoint:
+    manifest = build_workspace_manifest(work_order.source_commit, ())
+    return ReplayCheckpoint(
+        files=(),
+        head_commit=work_order.source_commit,
+        workspace_manifest=manifest,
+        workspace_manifest_digest=workspace_manifest_digest(manifest),
+        verified_test_results=(),
+    )
+
+
+def _live_policy_prefix(grants, attempts, receipts):
+    return AuthorizationLedgerPrefix(
+        effective_grants=tuple(
+            sorted(grants.values(), key=lambda item: item.grant_id)
+        ),
+        grant_attempts=tuple(
+            sorted(attempts.values(), key=lambda item: item.digest)
+        ),
+        receipts=receipts,
+    )
+
+
+def _active_patch_context_inputs(
+    *,
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+    canonical_result=True,
+):
+    work_order, history, grants, attempts = _full_pr_authorization_history(
+        case="allowed",
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    patch = history[2]
+    grant = grants[patch.grant_id]
+    patch_bytes = b"0123456789"
+    patch_digest = hashlib.sha256(patch_bytes).hexdigest()
+    candidate_commit = "2" * 40
+    manifest = build_workspace_manifest(candidate_commit, ())
+    manifest_digest = workspace_manifest_digest(manifest)
+    source_manifest = build_workspace_manifest(work_order.source_commit, ())
+    patch_result = {
+        "schema_version": "openworkproof-patch-result/0.1",
+        "parent_commit": work_order.source_commit,
+        "parent_manifest_digest": workspace_manifest_digest(source_manifest),
+        "candidate_commit": candidate_commit,
+        "workspace_manifest_digest": manifest_digest,
+        "patch_digest": patch_digest,
+        "patch_size_bytes": len(patch_bytes),
+        "replay_profile_digest": work_order.replay_profile_digest,
+    }
+    result_bytes = (
+        rfc8785.dumps(patch_result)
+        if canonical_result
+        else json.dumps(
+            patch_result,
+            indent=2,
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    result_digest = hashlib.sha256(result_bytes).hexdigest()
+    patch_raw = patch.model_dump(mode="json")
+    patch_raw["request_arguments"].update(
+        {
+            "patch_digest": patch_digest,
+            "patch_size_bytes": len(patch_bytes),
+        }
+    )
+    patch_raw["arguments_digest"] = evidence.request_arguments_digest(
+        "owp.apply_patch",
+        patch_raw["request_arguments"],
+    )
+    patch_raw["output_digest"] = result_digest
+    patch_raw["evidence_refs"] = [
+        {
+            "path": "evidence/patch-input/01.diff",
+            "sha256": patch_digest,
+            "media_type": "text/x-diff",
+            "size_bytes": len(patch_bytes),
+        },
+        {
+            "path": "evidence/patch-result/01.json",
+            "sha256": result_digest,
+            "media_type": "application/json",
+            "size_bytes": len(result_bytes),
+        },
+    ]
+    patch_claim = patch_raw["nested_claim"]
+    patch_claim["arguments_digest"] = patch_raw["arguments_digest"]
+    patch_claim = sign_payload(
+        "agent-request",
+        patch_claim,
+        ephemeral_role_keys["Developer"][0],
+    )
+    patch_raw["nested_claim"] = patch_claim
+    patch_raw["nested_claim_digest"] = patch_claim["digest"]
+    patch = ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            patch_raw,
+            ephemeral_role_keys["Sidecar"][0],
+        )
+    )
+    patch = _rebind_tool_predicates(
+        patch,
+        work_order,
+        grant,
+        ephemeral_role_keys,
+        remaining_before=2,
+    )
+    receipts = (*history[:2], patch)
+    payload_by_path = {
+        "evidence/patch-input/01.diff": patch_bytes,
+        "evidence/patch-result/01.json": result_bytes,
+    }
+    committed = tuple(
+        CommittedEvidence(
+            reference=reference,
+            payload=payload_by_path[reference.path],
+        )
+        for reference in patch.evidence_refs
+    )
+    checkpoint = ReplayCheckpoint(
+        files=(),
+        head_commit=candidate_commit,
+        workspace_manifest=manifest,
+        workspace_manifest_digest=manifest_digest,
+        verified_test_results=(),
+    )
+    return (
+        work_order,
+        _live_policy_prefix(grants, attempts, receipts),
+        committed,
+        checkpoint,
+    )
+
+
+def test_derive_authorization_context_uses_verified_signed_prefix(
+    tmp_path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys,
+    fixed_now: datetime,
+) -> None:
+    _, _, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="live-policy-context",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+    )
+    prefix = _live_policy_prefix(grants, attempts, receipts)
+
+    context = derive_authorization_context(
+        signed_work_order,
+        prefix,
+        (),
+        _source_checkpoint(signed_work_order),
+        fixed_now,
+    )
+
+    assert is_dataclass(AuthorizationContext)
+    assert is_dataclass(AuthorizationLedgerPrefix)
+    assert is_dataclass(CommittedEvidence)
+    assert context.current_state == "running"
+    assert context.active_patch_receipt_id is None
+    assert context.routine_capacity_remaining == 60
+    assert context.denial_count == 0
+    assert context.independent_failure_terminal is False
+    with pytest.raises(FrozenInstanceError):
+        context.current_state = "frozen"
+
+
+def test_authorization_context_binds_active_patch_evidence_and_checkpoint(
+    tmp_path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys,
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    work_order, prefix, committed, checkpoint = _active_patch_context_inputs(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    transaction_time = datetime.fromisoformat(
+        "2026-01-01T00:00:10+00:00"
+    )
+
+    context = derive_authorization_context(
+        work_order,
+        prefix,
+        committed,
+        checkpoint,
+        transaction_time,
+    )
+
+    assert context.active_patch_receipt_id == prefix.receipts[-1].receipt_id
+    assert context.replay_checkpoint.head_commit == "2" * 40
+
+    wrong_reference = committed[0].reference.model_copy(
+        update={"sha256": "f" * 64}
+    )
+    wrong_path = committed[0].reference.model_copy(
+        update={"path": "evidence/not-allowed/01.diff"}
+    )
+    wrong_media = committed[0].reference.model_copy(
+        update={"media_type": "application/json"}
+    )
+    wrong_size = committed[0].reference.model_copy(
+        update={"size_bytes": committed[0].reference.size_bytes + 1}
+    )
+    invalid_evidence = (
+        committed[:-1],
+        committed + (committed[0],),
+        (
+            replace(committed[0], payload=b"tampered"),
+            committed[1],
+        ),
+        (
+            replace(committed[0], reference=wrong_reference),
+            committed[1],
+        ),
+        (
+            replace(committed[0], reference=wrong_path),
+            committed[1],
+        ),
+        (
+            replace(committed[0], reference=wrong_media),
+            committed[1],
+        ),
+        (
+            replace(committed[0], reference=wrong_size),
+            committed[1],
+        ),
+    )
+    for candidate in invalid_evidence:
+        with pytest.raises(AuthorizationPolicyError, match="evidence"):
+            derive_authorization_context(
+                work_order,
+                prefix,
+                candidate,
+                checkpoint,
+                transaction_time,
+            )
+
+    with pytest.raises(AuthorizationPolicyError, match="checkpoint"):
+        derive_authorization_context(
+            work_order,
+            prefix,
+            committed,
+            replace(
+                checkpoint,
+                head_commit=work_order.source_commit,
+            ),
+            transaction_time,
+        )
+
+
+def test_authorization_context_rejects_noncanonical_json_evidence(
+    tmp_path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys,
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    work_order, prefix, committed, checkpoint = _active_patch_context_inputs(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        canonical_result=False,
+    )
+
+    with pytest.raises(AuthorizationPolicyError, match="RFC 8785"):
+        derive_authorization_context(
+            work_order,
+            prefix,
+            committed,
+            checkpoint,
+            datetime.fromisoformat("2026-01-01T00:00:10+00:00"),
+        )
+
+
+def test_authorization_context_binds_source_checkpoint_without_patch(
+    tmp_path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys,
+    fixed_now: datetime,
+) -> None:
+    _, _, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="live-policy-source-checkpoint",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+    )
+    checkpoint = _source_checkpoint(signed_work_order)
+    wrong_manifest = build_workspace_manifest("f" * 40, ())
+
+    with pytest.raises(AuthorizationPolicyError, match="checkpoint"):
+        derive_authorization_context(
+            signed_work_order,
+            _live_policy_prefix(grants, attempts, receipts),
+            (),
+            replace(
+                checkpoint,
+                workspace_manifest=wrong_manifest,
+            ),
+            fixed_now,
+        )
+
+
+@pytest.mark.parametrize(
+    "transaction_time",
+    (
+        datetime(2026, 1, 1, 0, 0, 1),
+        datetime.fromisoformat("2026-01-01T00:00:01.000001+00:00"),
+        datetime.fromisoformat("1970-01-01T00:00:00+00:00"),
+    ),
+)
+def test_authorization_context_rejects_invalid_transaction_time(
+    transaction_time,
+    tmp_path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys,
+    fixed_now: datetime,
+) -> None:
+    _, _, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label=f"live-policy-time-{transaction_time.microsecond}",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+    )
+
+    with pytest.raises(
+        AuthorizationPolicyError,
+        match="transaction time",
+    ):
+        derive_authorization_context(
+            signed_work_order,
+            _live_policy_prefix(grants, attempts, receipts),
+            (),
+            _source_checkpoint(signed_work_order),
+            transaction_time,
+        )
+
+
+def test_live_policy_prefix_rejects_noncanonical_collections(
+    tmp_path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys,
+    fixed_now: datetime,
+) -> None:
+    _, _, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="live-policy-bounds",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+    )
+    root = tuple(grants.values())[0]
+    later_root = root.model_copy(update={"grant_id": "f" * 64})
+
+    invalid_values = (
+        {
+            "effective_grants": [root],
+            "grant_attempts": (),
+            "receipts": receipts,
+        },
+        {
+            "effective_grants": tuple(
+                sorted(
+                    (root, later_root),
+                    key=lambda item: item.grant_id,
+                    reverse=True,
+                )
+            ),
+            "grant_attempts": (),
+            "receipts": receipts,
+        },
+        {
+            "effective_grants": (root,) * 9,
+            "grant_attempts": (),
+            "receipts": receipts,
+        },
+        {
+            "effective_grants": (root,),
+            "grant_attempts": (root,) * 9,
+            "receipts": receipts,
+        },
+        {
+            "effective_grants": (root,),
+            "grant_attempts": (),
+            "receipts": receipts * 65,
+        },
+    )
+    for value in invalid_values:
+        with pytest.raises(AuthorizationPolicyError):
+            AuthorizationLedgerPrefix(**value)
+
+
+def test_authorization_context_rejects_work_order_mismatch(
+    tmp_path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys,
+    fixed_now: datetime,
+) -> None:
+    _, _, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label="live-policy-work-order-mismatch",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+    )
+    other_work_order = signed_work_order.model_copy(
+        update={"work_order_id": "f" * 64}
+    )
+
+    with pytest.raises(AuthorizationPolicyError):
+        derive_authorization_context(
+            other_work_order,
+            _live_policy_prefix(grants, attempts, receipts),
+            (),
+            _source_checkpoint(other_work_order),
+            fixed_now,
+        )
 
 
 def _denied_pr_call(call, work_order, grant, role_keys):

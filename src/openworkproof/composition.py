@@ -46,6 +46,7 @@ class AuthorizationCausalSnapshot:
 class AuthorizationCausalState(AuthorizationCausalSnapshot):
     """Immutable final facts and bounded per-receipt causal snapshots."""
 
+    independent_failure_terminal: bool
     snapshots_by_receipt: tuple[
         tuple[str, AuthorizationCausalSnapshot],
         ...,
@@ -783,6 +784,7 @@ def replay_authorization_causality(
             (request_id, decision.receipt_id)
             for request_id, decision in decision_by_request.items()
         ),
+        independent_failure_terminal=independent_failure_terminal,
         snapshots_by_receipt=tuple(snapshots_by_receipt),
     )
 
