@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 import re
+import stat
 import struct
 from typing import Any, Mapping, Sequence
 import zlib
@@ -1254,6 +1256,181 @@ def build_workspace_manifest(
         head_commit=head_commit,
         entries=entries,
     )
+
+
+def _workspace_read_token(metadata: os.stat_result) -> str:
+    return ":".join(
+        str(value)
+        for value in (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mode,
+            metadata.st_nlink,
+            metadata.st_uid,
+            metadata.st_gid,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+    )
+
+
+def _read_workspace_file(descriptor: int, expected_size: int) -> bytes:
+    if expected_size > _MAX_SOURCE_FILE_BYTES:
+        raise ManifestError("workspace regular file exceeds 1 MiB")
+    chunks: list[bytes] = []
+    remaining = expected_size
+    while remaining:
+        chunk = os.read(descriptor, min(remaining, 65_536))
+        if not chunk:
+            raise ManifestError("workspace regular file changed during read")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    if os.read(descriptor, 1):
+        raise ManifestError("workspace regular file changed during read")
+    return b"".join(chunks)
+
+
+def scan_workspace_manifest(
+    root_fd: int,
+    head_commit: str,
+) -> WorkspaceManifest:
+    """Scan every descendant from one anchored directory without following links."""
+
+    if type(root_fd) is not int or root_fd < 0:
+        raise ManifestError("workspace root descriptor is invalid")
+    try:
+        root_metadata = os.fstat(root_fd)
+    except OSError as error:
+        raise ManifestError("workspace root descriptor is unavailable") from error
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        raise ManifestError("workspace root descriptor is not a directory")
+    root_token = _workspace_read_token(root_metadata)
+    records: list[WorkspaceScanRecord] = []
+    entries_seen = 0
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if type(nofollow) is not int or nofollow <= 0:
+        raise ManifestError("workspace scan requires O_NOFOLLOW support")
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
+
+    def scan(directory_fd: int, prefix: bytes) -> None:
+        nonlocal entries_seen
+        try:
+            names = tuple(
+                sorted(
+                    os.listdir(directory_fd),
+                    key=os.fsencode,
+                )
+            )
+        except OSError as error:
+            raise ManifestError("workspace directory cannot be listed") from error
+        for name in names:
+            name_bytes = os.fsencode(name)
+            path_bytes = prefix + name_bytes if prefix else name_bytes
+            if entries_seen >= _MAX_WORKSPACE_MANIFEST_ENTRIES:
+                raise ManifestError("workspace manifest exceeds 512 entries")
+            entries_seen += 1
+            try:
+                before = os.stat(
+                    name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except OSError as error:
+                raise ManifestError("workspace entry cannot be inspected") from error
+            token_before = _workspace_read_token(before)
+            content: bytes | None = None
+            target: bytes | None = None
+            size: int | None
+            if stat.S_ISDIR(before.st_mode):
+                entry_type = "directory"
+                size = None
+                try:
+                    child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+                except OSError as error:
+                    raise ManifestError(
+                        "workspace directory cannot be opened safely"
+                    ) from error
+                try:
+                    if not os.path.samestat(before, os.fstat(child_fd)):
+                        raise ManifestError(
+                            "workspace directory changed before traversal"
+                        )
+                    scan(child_fd, path_bytes + b"/")
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(before.st_mode):
+                entry_type = "regular"
+                size = before.st_size
+                try:
+                    descriptor = os.open(
+                        name,
+                        os.O_RDONLY | nofollow,
+                        dir_fd=directory_fd,
+                    )
+                except OSError as error:
+                    raise ManifestError(
+                        "workspace regular file cannot be opened safely"
+                    ) from error
+                try:
+                    opened = os.fstat(descriptor)
+                    if not os.path.samestat(before, opened):
+                        raise ManifestError(
+                            "workspace regular file changed before read"
+                        )
+                    content = _read_workspace_file(descriptor, size)
+                    if _workspace_read_token(os.fstat(descriptor)) != token_before:
+                        raise ManifestError(
+                            "workspace regular file changed during read"
+                        )
+                finally:
+                    os.close(descriptor)
+            elif stat.S_ISLNK(before.st_mode):
+                entry_type = "symlink"
+                try:
+                    target = os.fsencode(os.readlink(name, dir_fd=directory_fd))
+                except OSError as error:
+                    raise ManifestError(
+                        "workspace symlink cannot be read safely"
+                    ) from error
+                size = len(target)
+            else:
+                entry_type = "other"
+                size = before.st_size
+            try:
+                after = os.stat(
+                    name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except OSError as error:
+                raise ManifestError("workspace entry changed during scan") from error
+            records.append(
+                WorkspaceScanRecord(
+                    path_bytes=path_bytes,
+                    entry_type=entry_type,
+                    posix_mode=before.st_mode,
+                    size_bytes=size,
+                    content=content,
+                    symlink_target=target,
+                    link_count=before.st_nlink,
+                    read_token_before=token_before,
+                    read_token_after=_workspace_read_token(after),
+                )
+            )
+
+    duplicate = os.dup(root_fd)
+    try:
+        scan(duplicate, b"")
+        if _workspace_read_token(os.fstat(root_fd)) != root_token:
+            raise ManifestError("workspace root changed during scan")
+    except OSError as error:
+        raise ManifestError("workspace scan failed") from error
+    finally:
+        os.close(duplicate)
+    manifest = build_workspace_manifest(head_commit, records)
+    _workspace_manifest_json(manifest)
+    return manifest
 
 
 def _workspace_manifest_json(
