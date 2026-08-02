@@ -300,6 +300,27 @@ class _PublicationGroup:
     publications: tuple[_Publication, ...]
 
 
+_HANDLER_EXECUTION_SCHEMA = """
+CREATE TABLE handler_executions (
+    execution_id TEXT PRIMARY KEY,
+    work_order_digest TEXT NOT NULL
+        REFERENCES work_orders(work_order_digest),
+    request_digest TEXT NOT NULL UNIQUE,
+    nonce TEXT NOT NULL UNIQUE,
+    grant_id TEXT NOT NULL REFERENCES grants(grant_id),
+    tool_name TEXT NOT NULL CHECK (tool_name = 'owp.run_tests'),
+    arguments_digest TEXT NOT NULL,
+    execution_context_id TEXT NOT NULL UNIQUE,
+    container_instance_id_digest TEXT NOT NULL UNIQUE,
+    controller_id TEXT NOT NULL,
+    reserved_at TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (
+        state IN ('RESERVED', 'STARTED_UNCONFIRMED')
+    )
+)
+"""
+
+
 _SCHEMA = (
     """
     CREATE TABLE sequence_counter (
@@ -397,6 +418,7 @@ _SCHEMA = (
         UNIQUE (receipt_id, final_path)
     )
     """,
+    _HANDLER_EXECUTION_SCHEMA,
     """
     CREATE TABLE acceptance_receipts (
         acceptance_id TEXT PRIMARY KEY,
@@ -3748,6 +3770,7 @@ def _verify_initialized_snapshot(
         "receipt_parents",
         "grant_events",
         "evidence_publications",
+        "handler_executions",
         "acceptance_receipts",
     )
     counts = tuple(

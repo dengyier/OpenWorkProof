@@ -156,7 +156,9 @@ MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent，AgentTeams 组织 Agen
   不签发 Receipt，也不写入账本。
 - Task 13 首个 `owp.run_tests` 可信协调切片：在同一目标锁下
   重放当前授权上下文，事前检查证据槽位与成功/失败 Receipt
-  形态，然后仅启动一次可信 handler；正常结果进入
+  形态，通过内部 `handler_executions` journal 持久化
+  `RESERVED → STARTED_UNCONFIRMED` 启动边界，然后仅启动一次
+  可信 handler；正常结果进入
   stage→commit→publish→mark committed，handler 异常则提交
   已扣费、无证据附件的 `allow/failed + HANDLER_ERROR` Receipt。
 
@@ -165,7 +167,7 @@ MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent，AgentTeams 组织 Agen
 - Policy 专项：78 passed；
 - Policy、Composition 与 Receipt-chain 专项：517 passed；
 - Receipt-chain 专项：407 passed；
-- 全量测试：1220 passed；
+- 全量测试：1224 passed；
 - 独立规格复核：7B4_SPEC_PASS；
 - 独立质量复核：7B4_QUALITY_PASS；
 - pip check、compileall 和 git diff check：通过。
@@ -187,9 +189,14 @@ ResolutionManifest 解析断言，但五输入 API 没有独立读取并重哈�
 ResolutionManifest 原始字节。
 当前只接入了 `owp.run_tests(test_mode=verifier)` 的首个可调用
 handler 协调切片，还没有 MCP 传输服务器、Docker 测试执行器或
-Developer mode 生产入口。当前目标锁能防止合作调用者并发，
-但“handler 已启动、Receipt 尚未提交”窗口的进程级崩溃仍需
-持久化 start reservation/recovery 机制闭合。deny Receipt、
+Developer mode 生产入口。当前目标锁与内部 journal 能区分：
+只有 `RESERVED` 的崩溃可清理并安全重试；Receipt 已提交但 journal
+未清理时可按已提交事实收敛；`STARTED_UNCONFIRMED` 且无 Receipt
+时只返回 `RECOVERY_REQUIRED`，不重跑、不补造 Receipt 或扣费事实。
+从旧开发快照打开的 ledger 会在目标锁内仅新增这张内部表，
+不改变 Receipt、sequence、配额、协议状态或状态版本。
+要自动收敛该不确定分支，仍需真实无网执行器提供稳定
+execution ID 和可验证启动/结果回执。deny Receipt、
 `validate_human_decision`、`validate_rollback`、rollback 和 Acceptance
 生产事务也尚未完成。Task 7 与完整 Task 9 仍未完成，Day 0
 执行门仍为 FAIL。
@@ -222,7 +229,7 @@ Developer mode 生产入口。当前目标锁能防止合作调用者并发，
 
 - 当前开发快照包含 Task 8A 实时授权上下文、Task 8B1 纯事前
   工具授权和 Task 13 首个 Verifier `run_tests` 协调切片，
-  fresh 全量验证为 1220 passed；
+  fresh 全量验证为 1224 passed；
 - pyproject.toml 已预留 owp 命令入口，但 CLI 模块尚未完成，因此本文件
   暂不提供 CLI 使用命令；
 - 不应把测试通过理解为 Day 0、独立验收或赛事提交已经完成。
@@ -285,12 +292,14 @@ Rich 及其源码仍归属于原权利人；OpenWorkProof 只拥有自有协议�
   快照、事前预留证据槽位、启动单次 handler、Sidecar 签署 Receipt，
   并对正常结果完成四阶段证据发布；已启动的 handler 异常会
   扣减 `tool_calls` 并提交无附件失败 Receipt，事前策略拒绝不启动
-  handler。
+  handler；内部执行 journal 已用真实子进程崩溃注入验证
+  RESERVED 安全重试、未确认启动阻断与已提交 Receipt 自动收敛；
+  旧 ledger 可受锁迁移内部 journal schema，不伪造协议版本步。
 
 尚未完成：
 
-- `run_tests` 的持久化 handler-start reservation/崩溃恢复、
-  Developer mode、真实无网沙箱与 MCP 入口；
+- `run_tests` 的真实无网执行器、稳定 execution ID、启动/结果
+  回执与 `STARTED_UNCONFIRMED` 自动恢复，以及 Developer mode 与 MCP 入口；
 - deny/rollback 生产事务和剩余入口的全局 nonce 处理；
 - Task 8 `validate_human_decision` 和 `validate_rollback` 两个实时决策 API；
 - 其他 ToolCall handler 与 evidence publication 的调用闭包，
@@ -312,8 +321,8 @@ Rich 及其源码仍归属于原权利人；OpenWorkProof 只拥有自有协议�
 九、路线图
 ----------
 
-1. 为 `run_tests` 增加持久化 handler-start reservation 与崩溃恢复，
-   再接入真实无网沙箱和 MCP 传输层；
+1. 接入真实无网执行器的稳定 execution ID 与启动/结果回执，
+   闭合 `STARTED_UNCONFIRMED` 恢复后再接入 MCP 传输层；
 2. 完成人工决策、回滚和终止策略 API；
 3. 完成多尺度证据合成与 AcceptanceReceipt 成功路径；
 4. 完成 CLI、MCP Sidecar 和 AgentTeams 集成；

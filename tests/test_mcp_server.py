@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 import openworkproof.evidence as evidence
+import openworkproof.mcp_server as mcp_server
 from openworkproof.mcp_server import (
     HandlerCoordinationError,
     ToolCallDenied,
@@ -643,3 +645,309 @@ def test_execute_run_tests_rejects_missing_evidence_capacity_before_handler(
             handler=lambda _: pytest.fail("unreserved handler started"),
             clock=lambda: fixed_now,
         )
+
+
+def test_execute_run_tests_blocks_after_started_handler_process_crash(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    child = os.fork()
+    if child == 0:
+        execute_run_tests(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=case["request"],
+            request_arguments=case["arguments"],
+            execution_facts=case["facts"],
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            handler=lambda _: os._exit(73),
+            clock=lambda: fixed_now,
+        )
+        os._exit(74)
+
+    _, status = os.waitpid(child, 0)
+    assert os.WIFEXITED(status)
+    assert os.WEXITSTATUS(status) == 73
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        before = connection.execute(
+            "SELECT COUNT(*), MAX(sequence) FROM receipts"
+        ).fetchone()
+        assert connection.execute(
+            """
+            SELECT request_digest, nonce, state
+            FROM handler_executions
+            """
+        ).fetchone() == (
+            case["request"].digest,
+            case["request"].nonce,
+            "STARTED_UNCONFIRMED",
+        )
+    finally:
+        connection.close()
+
+    with pytest.raises(HandlerCoordinationError, match="RECOVERY_REQUIRED"):
+        execute_run_tests(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=case["request"],
+            request_arguments=case["arguments"],
+            execution_facts=case["facts"],
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            handler=lambda _: pytest.fail("uncertain handler restarted"),
+            clock=lambda: fixed_now,
+        )
+
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*), MAX(sequence) FROM receipts"
+        ).fetchone() == before
+        assert connection.execute(
+            "SELECT state FROM handler_executions"
+        ).fetchone() == ("STARTED_UNCONFIRMED",)
+    finally:
+        connection.close()
+
+
+def test_execute_run_tests_retries_after_reserved_only_process_crash(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    real_mark_started = mcp_server._mark_handler_started
+    monkeypatch.setattr(
+        mcp_server,
+        "_mark_handler_started",
+        lambda *_: os._exit(75),
+    )
+    child = os.fork()
+    if child == 0:
+        execute_run_tests(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=case["request"],
+            request_arguments=case["arguments"],
+            execution_facts=case["facts"],
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            handler=lambda _: os._exit(76),
+            clock=lambda: fixed_now,
+        )
+        os._exit(77)
+
+    _, status = os.waitpid(child, 0)
+    assert os.WIFEXITED(status)
+    assert os.WEXITSTATUS(status) == 75
+    monkeypatch.setattr(
+        mcp_server,
+        "_mark_handler_started",
+        real_mark_started,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        before = connection.execute(
+            "SELECT COUNT(*), MAX(sequence) FROM receipts"
+        ).fetchone()
+        assert connection.execute(
+            "SELECT state FROM handler_executions"
+        ).fetchone() == ("RESERVED",)
+    finally:
+        connection.close()
+
+    receipt = execute_run_tests(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=case["context"],
+        request=case["request"],
+        request_arguments=case["arguments"],
+        execution_facts=case["facts"],
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        handler=lambda _: 0,
+        clock=lambda: fixed_now,
+    )
+
+    assert receipt.execution_status == "succeeded"
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
+        after = connection.execute(
+            "SELECT COUNT(*), MAX(sequence) FROM receipts"
+        ).fetchone()
+        assert after == (before[0] + 1, before[1] + 1)
+    finally:
+        connection.close()
+
+
+def test_execute_run_tests_recovers_committed_receipt_after_cleanup_crash(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        before = connection.execute(
+            "SELECT COUNT(*), MAX(sequence) FROM receipts"
+        ).fetchone()
+    finally:
+        connection.close()
+    real_finalize = mcp_server._finalize_handler_execution
+    monkeypatch.setattr(
+        mcp_server,
+        "_finalize_handler_execution",
+        lambda *_: os._exit(78),
+    )
+    child = os.fork()
+    if child == 0:
+        execute_run_tests(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=case["request"],
+            request_arguments=case["arguments"],
+            execution_facts=case["facts"],
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            handler=lambda _: 0,
+            clock=lambda: fixed_now,
+        )
+        os._exit(79)
+
+    _, status = os.waitpid(child, 0)
+    assert os.WIFEXITED(status)
+    assert os.WEXITSTATUS(status) == 78
+    monkeypatch.setattr(
+        mcp_server,
+        "_finalize_handler_execution",
+        real_finalize,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        committed = connection.execute(
+            "SELECT COUNT(*), MAX(sequence) FROM receipts"
+        ).fetchone()
+        assert committed == (before[0] + 1, before[1] + 1)
+        assert connection.execute(
+            "SELECT state FROM handler_executions"
+        ).fetchone() == ("STARTED_UNCONFIRMED",)
+        assert connection.execute(
+            """
+            SELECT state
+            FROM evidence_publications
+            WHERE receipt_id = (
+                SELECT receipt_id FROM receipts WHERE nonce = ?
+            )
+            """,
+            (case["request"].nonce,),
+        ).fetchone() == ("COMMITTED",)
+    finally:
+        connection.close()
+
+    with pytest.raises(
+        HandlerCoordinationError,
+        match="current ledger snapshot",
+    ):
+        execute_run_tests(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=case["request"],
+            request_arguments=case["arguments"],
+            execution_facts=case["facts"],
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            handler=lambda _: pytest.fail("committed handler restarted"),
+            clock=lambda: fixed_now,
+        )
+
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*), MAX(sequence) FROM receipts"
+        ).fetchone() == committed
+    finally:
+        connection.close()
+
+
+def test_execute_run_tests_migrates_ledger_without_handler_journal(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        connection.execute("DROP TABLE handler_executions")
+    finally:
+        connection.close()
+
+    receipt = execute_run_tests(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=case["context"],
+        request=case["request"],
+        request_arguments=case["arguments"],
+        execution_facts=case["facts"],
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        handler=lambda _: 0,
+        clock=lambda: fixed_now,
+    )
+
+    assert receipt.execution_status == "succeeded"
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'handler_executions'
+            """
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()

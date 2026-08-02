@@ -13,6 +13,7 @@ import hashlib
 import os
 from pathlib import Path
 import secrets
+import sqlite3
 import stat
 
 import rfc8785
@@ -63,6 +64,262 @@ _MAX_RECEIPT_BYTES = 64 * 1024
 
 def _digest(value: object) -> str:
     return hashlib.sha256(rfc8785.dumps(value)).hexdigest()
+
+
+def _journal_transaction(
+    ledger_path: Path,
+    lock_descriptor: int,
+    operation: Callable[[sqlite3.Connection], object],
+) -> object:
+    evidence._borrow_or_acquire_target_lock(
+        ledger_path,
+        lock_descriptor,
+    )
+    connection = evidence.connect_ledger(ledger_path)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        result = operation(connection)
+        connection.execute("COMMIT")
+    except Exception as error:
+        rollback_error = evidence._best_effort_rollback(connection)
+        close_error = evidence._best_effort_close(connection)
+        causes = [error]
+        if rollback_error is not None:
+            causes.append(rollback_error)
+        if close_error is not None:
+            causes.append(close_error)
+        raise HandlerCoordinationError("RECOVERY_REQUIRED") from (
+            evidence._error_cause(
+                "handler execution journal transaction failed",
+                causes,
+            )
+        )
+    close_error = evidence._best_effort_close(connection)
+    if close_error is not None:
+        raise HandlerCoordinationError("RECOVERY_REQUIRED") from close_error
+    return result
+
+
+def _handler_execution_id(
+    request: AgentRequest,
+    execution_facts: ProspectiveExecutionFacts,
+) -> str:
+    return _digest(
+        {
+            "domain": "openworkproof/handler-execution/v0.1",
+            "request_digest": request.digest,
+            "execution_context_id": execution_facts.execution_context_id,
+            "container_instance_id_digest": (
+                execution_facts.container_instance_id_digest
+            ),
+            "controller_id": execution_facts.controller_id,
+        }
+    )
+
+
+def _normalized_sql(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
+def _ensure_handler_execution_schema(
+    ledger_path: Path,
+    lock_descriptor: int,
+) -> None:
+    expected = evidence._HANDLER_EXECUTION_SCHEMA
+
+    def ensure(connection: sqlite3.Connection) -> None:
+        row = connection.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'handler_executions'
+            """
+        ).fetchone()
+        if row is None:
+            connection.execute(expected)
+            return
+        if (
+            len(row) != 1
+            or type(row[0]) is not str
+            or _normalized_sql(row[0]) != _normalized_sql(expected)
+        ):
+            raise ValueError("handler execution journal schema is invalid")
+
+    _journal_transaction(ledger_path, lock_descriptor, ensure)
+
+
+def _receipt_matches_handler_execution(
+    stored_json: str,
+    row: tuple[object, ...],
+) -> bool:
+    try:
+        receipt = ACTION_RECEIPT_ADAPTER.validate_json(stored_json)
+    except Exception:
+        return False
+    (
+        _,
+        work_order_digest,
+        request_digest,
+        nonce,
+        grant_id,
+        tool_name,
+        arguments_digest,
+        execution_context_id,
+        container_instance_id_digest,
+        controller_id,
+        _,
+        _,
+    ) = row
+    factors = receipt.correlation_factors
+    return (
+        isinstance(receipt, ToolCallReceipt)
+        and receipt.work_order_digest == work_order_digest
+        and receipt.nested_claim_digest == request_digest
+        and receipt.nonce == nonce
+        and receipt.grant_id == grant_id
+        and receipt.tool_name == tool_name
+        and receipt.arguments_digest == arguments_digest
+        and receipt.policy_decision == "allow"
+        and receipt.execution_status in {"succeeded", "failed"}
+        and factors is not None
+        and factors.execution_context_id == execution_context_id
+        and factors.container_instance_id_digest
+        == container_instance_id_digest
+        and factors.controller_id == controller_id
+    )
+
+
+def _recover_handler_executions(
+    ledger_path: Path,
+    lock_descriptor: int,
+) -> None:
+    def recover(connection: sqlite3.Connection) -> None:
+        rows = tuple(
+            connection.execute(
+                """
+                SELECT
+                    execution_id,
+                    work_order_digest,
+                    request_digest,
+                    nonce,
+                    grant_id,
+                    tool_name,
+                    arguments_digest,
+                    execution_context_id,
+                    container_instance_id_digest,
+                    controller_id,
+                    reserved_at,
+                    state
+                FROM handler_executions
+                ORDER BY execution_id
+                """
+            ).fetchall()
+        )
+        if len(rows) > 1:
+            raise ValueError("multiple handler executions are unresolved")
+        if not rows:
+            return
+        row = tuple(rows[0])
+        state = row[-1]
+        stored = connection.execute(
+            "SELECT receipt_json FROM receipts WHERE nonce = ?",
+            (row[3],),
+        ).fetchone()
+        if state == "RESERVED" and stored is None:
+            connection.execute(
+                "DELETE FROM handler_executions WHERE execution_id = ?",
+                (row[0],),
+            )
+            return
+        if (
+            state == "STARTED_UNCONFIRMED"
+            and stored is not None
+            and _receipt_matches_handler_execution(stored[0], row)
+        ):
+            connection.execute(
+                "DELETE FROM handler_executions WHERE execution_id = ?",
+                (row[0],),
+            )
+            return
+        raise ValueError("handler execution truth is unresolved")
+
+    _journal_transaction(ledger_path, lock_descriptor, recover)
+
+
+def _reserve_handler_execution(
+    ledger_path: Path,
+    lock_descriptor: int,
+    context: AuthorizationContext,
+    request: AgentRequest,
+    execution_facts: ProspectiveExecutionFacts,
+) -> str:
+    execution_id = _handler_execution_id(request, execution_facts)
+
+    def reserve(connection: sqlite3.Connection) -> None:
+        if connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() != (0,):
+            raise ValueError("a handler execution is already unresolved")
+        connection.execute(
+            """
+            INSERT INTO handler_executions (
+                execution_id,
+                work_order_digest,
+                request_digest,
+                nonce,
+                grant_id,
+                tool_name,
+                arguments_digest,
+                execution_context_id,
+                container_instance_id_digest,
+                controller_id,
+                reserved_at,
+                state
+            ) VALUES (?, ?, ?, ?, ?, 'owp.run_tests', ?, ?, ?, ?, ?, 'RESERVED')
+            """,
+            (
+                execution_id,
+                context.work_order.digest,
+                request.digest,
+                request.nonce,
+                request.grant_id,
+                request.arguments_digest,
+                execution_facts.execution_context_id,
+                execution_facts.container_instance_id_digest,
+                execution_facts.controller_id,
+                context.transaction_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            ),
+        )
+
+    _journal_transaction(ledger_path, lock_descriptor, reserve)
+    return execution_id
+
+
+def _mark_handler_started(
+    ledger_path: Path,
+    lock_descriptor: int,
+    execution_id: str,
+) -> None:
+    def mark(connection: sqlite3.Connection) -> None:
+        cursor = connection.execute(
+            """
+            UPDATE handler_executions
+            SET state = 'STARTED_UNCONFIRMED'
+            WHERE execution_id = ? AND state = 'RESERVED'
+            """,
+            (execution_id,),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("handler execution reservation is unavailable")
+
+    _journal_transaction(ledger_path, lock_descriptor, mark)
+
+
+def _finalize_handler_execution(
+    ledger_path: Path,
+    lock_descriptor: int,
+) -> None:
+    _recover_handler_executions(ledger_path, lock_descriptor)
 
 
 def _remaining_tool_calls(context: AuthorizationContext, grant_id: str) -> int:
@@ -581,6 +838,8 @@ def execute_run_tests(
     primary_error: Exception | None = None
     receipt: ToolCallReceipt | None = None
     try:
+        _ensure_handler_execution_schema(path, lock_descriptor)
+        _recover_handler_executions(path, lock_descriptor)
         now = evidence._freeze_trusted_utc_second(clock())
         if (
             key_id(sidecar_private_key.public_key())
@@ -610,6 +869,18 @@ def execute_run_tests(
             request_arguments,
             execution_facts,
             sidecar_private_key,
+        )
+        execution_id = _reserve_handler_execution(
+            path,
+            lock_descriptor,
+            context,
+            request,
+            execution_facts,
+        )
+        _mark_handler_started(
+            path,
+            lock_descriptor,
+            execution_id,
         )
         try:
             actual_exit_code = handler(request_arguments)
@@ -651,6 +922,7 @@ def execute_run_tests(
             clock=lambda: now,
             _borrowed_lock_descriptor=lock_descriptor,
         )
+        _finalize_handler_execution(path, lock_descriptor)
     except Exception as error:
         primary_error = error
     _, release_errors = evidence._release_target_lock(lock_descriptor)
