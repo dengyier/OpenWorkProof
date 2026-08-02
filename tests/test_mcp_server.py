@@ -1,4 +1,4 @@
-"""Trusted handler coordination tests for the first Task 13 slice."""
+"""Trusted handler coordination tests."""
 
 from __future__ import annotations
 
@@ -24,7 +24,9 @@ from openworkproof.mcp_server import (
 from openworkproof.models import (
     AgentRequest,
     CapabilityGrant,
+    RollbackReceipt,
     RunTestsArguments,
+    TestResultEvidence as ResultEvidence,
     ToolCallReceipt,
     WorkOrder,
     request_arguments_digest,
@@ -258,6 +260,10 @@ def _run_tests_case(
         root,
         role_keys,
         label="handler-loop:developer",
+        updates={
+            "allowed_tools": ["owp.apply_patch", "owp.rollback_patch"],
+            "quota": {"tool_calls": 2, "repair_rounds": 0},
+        },
     )
     developer_issuance = _issue_child(
         ledger_path,
@@ -949,5 +955,497 @@ def test_execute_run_tests_migrates_ledger_without_handler_journal(
         assert connection.execute(
             "SELECT COUNT(*) FROM handler_executions"
         ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+def _rollback_case(
+    *,
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    role_keys,
+    sidecar_receipt_factory,
+    now: datetime,
+):
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=now,
+    )
+    failure = execute_run_tests(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=case["context"],
+        request=case["request"],
+        request_arguments=case["arguments"],
+        execution_facts=case["facts"],
+        sidecar_private_key=role_keys["Sidecar"][0],
+        handler=lambda _: 1,
+        clock=lambda: now,
+    )
+    receipts, grants, attempts = _grant_replay_inputs(
+        case["ledger_path"],
+        case["work_order"],
+    )
+    committed = []
+    for receipt in receipts:
+        for reference in receipt.evidence_refs:
+            path = (
+                case["evidence_root"]
+                / reference.path.removeprefix("evidence/")
+            )
+            committed.append(
+                CommittedEvidence(
+                    reference=reference,
+                    payload=path.read_bytes(),
+                )
+            )
+    failure_payload = next(
+        item.payload
+        for item in committed
+        if item.reference in failure.evidence_refs
+    )
+    checkpoint = ReplayCheckpoint(
+        files=case["context"].replay_checkpoint.files,
+        head_commit=case["context"].replay_checkpoint.head_commit,
+        workspace_manifest=(
+            case["context"].replay_checkpoint.workspace_manifest
+        ),
+        workspace_manifest_digest=(
+            case["context"].replay_checkpoint.workspace_manifest_digest
+        ),
+        verified_test_results=(
+            ResultEvidence.model_validate_json(failure_payload),
+        ),
+    )
+    context = derive_authorization_context(
+        case["work_order"],
+        AuthorizationLedgerPrefix(
+            effective_grants=tuple(
+                sorted(grants.values(), key=lambda item: item.grant_id)
+            ),
+            grant_attempts=tuple(
+                sorted(attempts.values(), key=lambda item: item.digest)
+            ),
+            receipts=receipts,
+        ),
+        tuple(committed),
+        checkpoint,
+        now,
+    )
+    arguments = {
+        "target_patch_receipt_id": case["patch"].receipt_id,
+        "target_patch_digest": case["patch"].digest,
+        "before_commit": checkpoint.head_commit,
+    }
+    binding = role_keys["Developer"][1]
+    request = AgentRequest.model_validate(
+        sign_payload(
+            "agent-request",
+            {
+                "claim_type": "agent-request",
+                "work_order_digest": case["work_order"].digest,
+                "grant_id": case["developer"].grant_id,
+                "actor_id": binding["subject_id"],
+                "actor_key_id": binding["key_id"],
+                "tool_name": "owp.rollback_patch",
+                "arguments_digest": request_arguments_digest(
+                    "owp.rollback_patch",
+                    arguments,
+                ),
+                "nonce": _grant_id("handler-loop:rollback-request"),
+                "requested_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "authentication_method": "agent_signature",
+                "model_id": "model",
+                "model_version": "1",
+                "prompt_template_digest": "a" * 64,
+                "context_source_digest": "b" * 64,
+            },
+            role_keys["Developer"][0],
+        )
+    )
+    case.update(
+        {
+            "context": context,
+            "request": request,
+            "rollback_arguments": arguments,
+            "failure": failure,
+            "facts": ProspectiveExecutionFacts(
+                execution_context_id="3" * 64,
+                container_instance_id_digest="4" * 64,
+                controller_id=role_keys["Sidecar"][1]["key_id"],
+            ),
+        }
+    )
+    return case
+
+
+def test_execute_rollback_commits_success_and_clears_handler_journal(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    execute_rollback = getattr(mcp_server, "execute_rollback", None)
+    result_type = getattr(mcp_server, "RollbackHandlerResult", None)
+    assert callable(execute_rollback)
+    assert result_type is not None
+    case = _rollback_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    parent_manifest = build_workspace_manifest(
+        case["work_order"].source_commit,
+        (),
+    )
+    calls = []
+
+    def handler(arguments):
+        calls.append(arguments)
+        return result_type(
+            execution_status="succeeded",
+            before_commit=case["context"].replay_checkpoint.head_commit,
+            after_commit=case["work_order"].source_commit,
+            after_manifest_digest=workspace_manifest_digest(parent_manifest),
+        )
+
+    receipt = execute_rollback(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=case["context"],
+        request=case["request"],
+        execution_facts=case["facts"],
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        handler=handler,
+        clock=lambda: fixed_now,
+    )
+
+    assert len(calls) == 1
+    assert calls[0].target_patch_receipt_id == case["patch"].receipt_id
+    assert isinstance(receipt, RollbackReceipt)
+    assert receipt.execution_status == "succeeded"
+    assert receipt.after_commit == case["work_order"].source_commit
+    assert receipt.state_before == receipt.state_after == "needs_rework"
+    assert receipt.quota_charge.remaining_after == 0
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT current_state, version FROM work_order_state"
+        ).fetchone() == ("needs_rework", receipt.sequence)
+    finally:
+        connection.close()
+
+
+def test_execute_rollback_commits_verified_failed_result(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _rollback_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    before = case["context"].replay_checkpoint.head_commit
+    manifest = case["context"].replay_checkpoint.workspace_manifest_digest
+
+    receipt = mcp_server.execute_rollback(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=case["context"],
+        request=case["request"],
+        execution_facts=case["facts"],
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        handler=lambda _: mcp_server.RollbackHandlerResult(
+            execution_status="failed",
+            before_commit=before,
+            after_commit=before,
+            after_manifest_digest=manifest,
+        ),
+        clock=lambda: fixed_now,
+    )
+
+    assert receipt.execution_status == "failed"
+    assert receipt.execution_error_code == "HANDLER_ERROR"
+    assert receipt.after_commit == before
+    assert receipt.after_manifest_digest == manifest
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM grant_events WHERE receipt_id = ?",
+            (receipt.receipt_id,),
+        ).fetchone() == (1,)
+    finally:
+        connection.close()
+
+
+def test_execute_rollback_handler_exception_requires_recovery(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _rollback_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        before = connection.execute(
+            "SELECT COUNT(*), MAX(sequence) FROM receipts"
+        ).fetchone()
+    finally:
+        connection.close()
+
+    def handler(_):
+        raise RuntimeError("unknown workspace state")
+
+    with pytest.raises(HandlerCoordinationError, match="RECOVERY_REQUIRED"):
+        mcp_server.execute_rollback(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=case["request"],
+            execution_facts=case["facts"],
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            handler=handler,
+            clock=lambda: fixed_now,
+        )
+
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*), MAX(sequence) FROM receipts"
+        ).fetchone() == before
+        assert connection.execute(
+            "SELECT tool_name, state FROM handler_executions"
+        ).fetchone() == (
+            "owp.rollback_patch",
+            "STARTED_UNCONFIRMED",
+        )
+    finally:
+        connection.close()
+
+
+def test_execute_rollback_denial_never_starts_handler(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _rollback_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    denied_request = _request_for_grant(
+        case,
+        case["verifier"],
+        ephemeral_role_keys,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        before = connection.execute(
+            "SELECT COUNT(*), MAX(sequence) FROM receipts"
+        ).fetchone()
+    finally:
+        connection.close()
+
+    with pytest.raises(ToolCallDenied) as captured:
+        mcp_server.execute_rollback(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=denied_request,
+            execution_facts=case["facts"],
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            handler=lambda _: pytest.fail("denied rollback handler started"),
+            clock=lambda: fixed_now,
+        )
+
+    assert captured.value.decision.error_code == "ROLE_DENIED"
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*), MAX(sequence) FROM receipts"
+        ).fetchone() == before
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+def test_execute_rollback_migrates_empty_legacy_handler_journal(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _rollback_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        connection.execute("DROP TABLE handler_executions")
+        connection.execute(evidence._LEGACY_HANDLER_EXECUTION_SCHEMA)
+    finally:
+        connection.close()
+    before = case["context"].replay_checkpoint.head_commit
+
+    receipt = mcp_server.execute_rollback(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=case["context"],
+        request=case["request"],
+        execution_facts=case["facts"],
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        handler=lambda _: mcp_server.RollbackHandlerResult(
+            execution_status="failed",
+            before_commit=before,
+            after_commit=before,
+            after_manifest_digest=(
+                case["context"].replay_checkpoint.workspace_manifest_digest
+            ),
+        ),
+        clock=lambda: fixed_now,
+    )
+
+    assert receipt.execution_status == "failed"
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        schema = connection.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'table' AND name = 'handler_executions'
+            """
+        ).fetchone()
+        assert schema is not None
+        assert mcp_server._normalized_sql(schema[0]) == (
+            mcp_server._normalized_sql(evidence._HANDLER_EXECUTION_SCHEMA)
+        )
+    finally:
+        connection.close()
+
+
+def test_execute_rollback_recovers_committed_receipt_after_cleanup_failure(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _rollback_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    parent_manifest = build_workspace_manifest(
+        case["work_order"].source_commit,
+        (),
+    )
+    result = mcp_server.RollbackHandlerResult(
+        execution_status="succeeded",
+        before_commit=case["context"].replay_checkpoint.head_commit,
+        after_commit=case["work_order"].source_commit,
+        after_manifest_digest=workspace_manifest_digest(parent_manifest),
+    )
+    real_finalize = mcp_server._finalize_handler_execution
+
+    def fail_cleanup(*_) -> None:
+        raise HandlerCoordinationError("injected cleanup failure")
+
+    monkeypatch.setattr(
+        mcp_server,
+        "_finalize_handler_execution",
+        fail_cleanup,
+    )
+    with pytest.raises(
+        HandlerCoordinationError,
+        match="injected cleanup failure",
+    ):
+        mcp_server.execute_rollback(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=case["request"],
+            execution_facts=case["facts"],
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            handler=lambda _: result,
+            clock=lambda: fixed_now,
+        )
+    monkeypatch.setattr(
+        mcp_server,
+        "_finalize_handler_execution",
+        real_finalize,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        committed = connection.execute(
+            "SELECT COUNT(*), MAX(sequence) FROM receipts"
+        ).fetchone()
+        assert connection.execute(
+            "SELECT tool_name, state FROM handler_executions"
+        ).fetchone() == (
+            "owp.rollback_patch",
+            "STARTED_UNCONFIRMED",
+        )
+    finally:
+        connection.close()
+
+    with pytest.raises(
+        HandlerCoordinationError,
+        match="current ledger snapshot",
+    ):
+        mcp_server.execute_rollback(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=case["request"],
+            execution_facts=case["facts"],
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            handler=lambda _: pytest.fail("committed rollback restarted"),
+            clock=lambda: fixed_now,
+        )
+
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*), MAX(sequence) FROM receipts"
+        ).fetchone() == committed
     finally:
         connection.close()

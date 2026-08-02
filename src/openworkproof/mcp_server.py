@@ -1,20 +1,23 @@
 """Trusted MCP handler coordination primitives.
 
-The transport server is intentionally deferred.  This module first closes the
-authoritative run-tests path so an adapter cannot return before its receipt and
-evidence are committed.
+The transport server is intentionally deferred.  This module closes trusted
+handler paths so an adapter cannot return before its receipt and evidence are
+committed.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import os
 from pathlib import Path
+import re
 import secrets
 import sqlite3
 import stat
+from typing import Literal
 
 import rfc8785
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -28,6 +31,7 @@ from openworkproof.models import (
     EvidenceRef,
     GrantIssuedReceipt,
     PolicyDecision,
+    RollbackReceipt,
     RunTestsArguments,
     TestResultEvidence,
     ToolCallReceipt,
@@ -38,6 +42,7 @@ from openworkproof.policy import (
     ProspectiveExecutionFacts,
     authorize_tool_call,
     derive_authorization_context,
+    validate_rollback,
 )
 from openworkproof.predicates import (
     EvaluationContext,
@@ -57,6 +62,56 @@ class ToolCallDenied(RuntimeError):
 
 class HandlerCoordinationError(RuntimeError):
     """The trusted handler coordinator could not preserve its boundary."""
+
+
+@dataclass(frozen=True, slots=True)
+class RollbackCommand:
+    target_patch_receipt_id: str
+    target_patch_digest: str
+    before_commit: str
+
+    def __post_init__(self) -> None:
+        digest = re.compile(r"^[0-9a-f]{64}$")
+        commit = re.compile(r"^[0-9a-f]{40}$")
+        if (
+            type(self.target_patch_receipt_id) is not str
+            or digest.fullmatch(self.target_patch_receipt_id) is None
+            or type(self.target_patch_digest) is not str
+            or digest.fullmatch(self.target_patch_digest) is None
+            or type(self.before_commit) is not str
+            or commit.fullmatch(self.before_commit) is None
+        ):
+            raise HandlerCoordinationError("rollback command is malformed")
+
+
+@dataclass(frozen=True, slots=True)
+class RollbackHandlerResult:
+    execution_status: Literal["succeeded", "failed"]
+    before_commit: str
+    after_commit: str
+    after_manifest_digest: str
+
+    def __post_init__(self) -> None:
+        commit = re.compile(r"^[0-9a-f]{40}$")
+        digest = re.compile(r"^[0-9a-f]{64}$")
+        if (
+            self.execution_status not in {"succeeded", "failed"}
+            or type(self.before_commit) is not str
+            or commit.fullmatch(self.before_commit) is None
+            or type(self.after_commit) is not str
+            or commit.fullmatch(self.after_commit) is None
+            or type(self.after_manifest_digest) is not str
+            or digest.fullmatch(self.after_manifest_digest) is None
+            or (
+                self.execution_status == "succeeded"
+                and self.after_commit == self.before_commit
+            )
+            or (
+                self.execution_status == "failed"
+                and self.after_commit != self.before_commit
+            )
+        ):
+            raise HandlerCoordinationError("rollback handler result is malformed")
 
 
 _MAX_RECEIPT_BYTES = 64 * 1024
@@ -138,12 +193,24 @@ def _ensure_handler_execution_schema(
         if row is None:
             connection.execute(expected)
             return
-        if (
-            len(row) != 1
-            or type(row[0]) is not str
-            or _normalized_sql(row[0]) != _normalized_sql(expected)
-        ):
+        if len(row) != 1 or type(row[0]) is not str:
             raise ValueError("handler execution journal schema is invalid")
+        actual = _normalized_sql(row[0])
+        if actual == _normalized_sql(expected):
+            return
+        if actual == _normalized_sql(
+            evidence._LEGACY_HANDLER_EXECUTION_SCHEMA
+        ):
+            if connection.execute(
+                "SELECT COUNT(*) FROM handler_executions"
+            ).fetchone() != (0,):
+                raise ValueError(
+                    "legacy handler execution journal is unresolved"
+                )
+            connection.execute("DROP TABLE handler_executions")
+            connection.execute(expected)
+            return
+        raise ValueError("handler execution journal schema is invalid")
 
     _journal_transaction(ledger_path, lock_descriptor, ensure)
 
@@ -170,17 +237,28 @@ def _receipt_matches_handler_execution(
         _,
         _,
     ) = row
+    common = (
+        receipt.work_order_digest == work_order_digest
+        and receipt.nested_claim_digest == request_digest
+        and receipt.nonce == nonce
+        and getattr(receipt, "grant_id", None) == grant_id
+        and receipt.nested_claim.tool_name == tool_name
+        and receipt.nested_claim.arguments_digest == arguments_digest
+        and receipt.policy_decision == "allow"
+        and receipt.execution_status in {"succeeded", "failed"}
+    )
+    if not common:
+        return False
+    if isinstance(receipt, RollbackReceipt):
+        return (
+            tool_name == "owp.rollback_patch"
+            and receipt.gateway_signer_key_id == controller_id
+        )
     factors = receipt.correlation_factors
     return (
         isinstance(receipt, ToolCallReceipt)
-        and receipt.work_order_digest == work_order_digest
-        and receipt.nested_claim_digest == request_digest
-        and receipt.nonce == nonce
-        and receipt.grant_id == grant_id
         and receipt.tool_name == tool_name
         and receipt.arguments_digest == arguments_digest
-        and receipt.policy_decision == "allow"
-        and receipt.execution_status in {"succeeded", "failed"}
         and factors is not None
         and factors.execution_context_id == execution_context_id
         and factors.container_instance_id_digest
@@ -275,7 +353,7 @@ def _reserve_handler_execution(
                 controller_id,
                 reserved_at,
                 state
-            ) VALUES (?, ?, ?, ?, ?, 'owp.run_tests', ?, ?, ?, ?, ?, 'RESERVED')
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED')
             """,
             (
                 execution_id,
@@ -283,6 +361,7 @@ def _reserve_handler_execution(
                 request.digest,
                 request.nonce,
                 request.grant_id,
+                request.tool_name,
                 request.arguments_digest,
                 execution_facts.execution_context_id,
                 execution_facts.container_instance_id_digest,
@@ -940,8 +1019,272 @@ def execute_run_tests(
     return receipt
 
 
+def _rollback_parents(
+    context: AuthorizationContext,
+    request: AgentRequest,
+) -> tuple[GrantIssuedReceipt, ToolCallReceipt, ToolCallReceipt]:
+    receipts = context.ledger_prefix.receipts
+    issuance = next(
+        (
+            receipt
+            for receipt in receipts
+            if isinstance(receipt, GrantIssuedReceipt)
+            and receipt.policy_decision == "allow"
+            and receipt.issued_grant_id == request.grant_id
+        ),
+        None,
+    )
+    target = next(
+        (
+            receipt
+            for receipt in receipts
+            if receipt.receipt_id == context.active_patch_receipt_id
+        ),
+        None,
+    )
+    failure = next(
+        (
+            receipt
+            for receipt in receipts
+            if receipt.receipt_id == context.causal_state.failure_receipt_id
+        ),
+        None,
+    )
+    if (
+        not isinstance(issuance, GrantIssuedReceipt)
+        or not isinstance(target, ToolCallReceipt)
+        or not isinstance(failure, ToolCallReceipt)
+    ):
+        raise HandlerCoordinationError(
+            "rollback causal parents are unavailable"
+        )
+    return issuance, target, failure
+
+
+def _rollback_command(
+    context: AuthorizationContext,
+    request: AgentRequest,
+) -> RollbackCommand:
+    _, target, _ = _rollback_parents(context, request)
+    return RollbackCommand(
+        target_patch_receipt_id=target.receipt_id,
+        target_patch_digest=target.digest,
+        before_commit=context.replay_checkpoint.head_commit,
+    )
+
+
+def _build_rollback_receipt(
+    context: AuthorizationContext,
+    request: AgentRequest,
+    sidecar_private_key: Ed25519PrivateKey,
+    result: RollbackHandlerResult,
+) -> RollbackReceipt:
+    issuance, target, failure = _rollback_parents(context, request)
+    remaining_before = _remaining_tool_calls(context, request.grant_id)
+    sidecar_key_id = key_id(sidecar_private_key.public_key())
+    raw = {
+        "protocol_version": "0.1",
+        "receipt_id": _digest(
+            {
+                "domain": "openworkproof/receipt-id/v0.1",
+                "request_digest": request.digest,
+                "entropy": secrets.token_hex(32),
+            }
+        ),
+        "work_order_digest": context.work_order.digest,
+        "actor_type": "agent",
+        "actor_id": request.actor_id,
+        "actor_key_id": request.actor_key_id,
+        "nested_claim_type": "agent-request",
+        "nested_claim_digest": request.digest,
+        "nested_claim": request.model_dump(mode="json"),
+        "gateway_signer_key_id": sidecar_key_id,
+        "event_type": "rollback",
+        "policy_decision": "allow",
+        "policy_error_code": None,
+        "execution_status": result.execution_status,
+        "execution_error_code": (
+            None
+            if result.execution_status == "succeeded"
+            else "HANDLER_ERROR"
+        ),
+        "quota_charge": {
+            "grant_id": request.grant_id,
+            "metric": "tool_calls",
+            "amount": 1,
+            "remaining_after": remaining_before - 1,
+        },
+        "state_before": "needs_rework",
+        "state_after": "needs_rework",
+        "parent_receipt_ids": [
+            issuance.receipt_id,
+            target.receipt_id,
+            failure.receipt_id,
+        ],
+        "correlation_factors": None,
+        "evidence_refs": [],
+        "occurred_at": context.transaction_time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "sequence": len(context.ledger_prefix.receipts) + 1,
+        "nonce": request.nonce,
+        "previous_receipt_digest": (
+            context.ledger_prefix.receipts[-1].digest
+        ),
+        "grant_id": request.grant_id,
+        "target_patch_receipt_id": target.receipt_id,
+        "target_patch_digest": target.digest,
+        "before_commit": result.before_commit,
+        "after_commit": result.after_commit,
+        "after_manifest_digest": result.after_manifest_digest,
+        "rollback_result": result.execution_status,
+    }
+    return ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload("action-receipt", raw, sidecar_private_key)
+    )
+
+
+def _preflight_rollback_receipts(
+    context: AuthorizationContext,
+    request: AgentRequest,
+    sidecar_private_key: Ed25519PrivateKey,
+) -> None:
+    before = context.replay_checkpoint.head_commit
+    alternate = context.work_order.source_commit
+    if alternate == before:
+        alternate = "0" * 40 if before != "0" * 40 else "1" * 40
+    representatives = (
+        RollbackHandlerResult(
+            execution_status="succeeded",
+            before_commit=before,
+            after_commit=alternate,
+            after_manifest_digest="0" * 64,
+        ),
+        RollbackHandlerResult(
+            execution_status="failed",
+            before_commit=before,
+            after_commit=before,
+            after_manifest_digest=(
+                context.replay_checkpoint.workspace_manifest_digest
+            ),
+        ),
+    )
+    if any(
+        len(
+            rfc8785.dumps(
+                _build_rollback_receipt(
+                    context,
+                    request,
+                    sidecar_private_key,
+                    result,
+                ).model_dump(mode="json")
+            )
+        )
+        > _MAX_RECEIPT_BYTES
+        for result in representatives
+    ):
+        raise HandlerCoordinationError("BUNDLE_CAPACITY_EXCEEDED")
+
+
+def execute_rollback(
+    ledger_path: Path,
+    *,
+    evidence_root: Path,
+    context: AuthorizationContext,
+    request: AgentRequest,
+    execution_facts: ProspectiveExecutionFacts,
+    sidecar_private_key: Ed25519PrivateKey,
+    handler: Callable[[RollbackCommand], RollbackHandlerResult],
+    clock: Callable[[], datetime],
+) -> RollbackReceipt:
+    """Authorize, execute, sign, and commit one rollback attempt."""
+
+    path = Path(ledger_path)
+    root = Path(evidence_root)
+    if not callable(handler):
+        raise HandlerCoordinationError("HANDLER_UNAVAILABLE")
+    evidence.recover_evidence_publications(path, evidence_root=root)
+    lock_descriptor = evidence._acquire_target_lock(path)
+    primary_error: Exception | None = None
+    receipt: RollbackReceipt | None = None
+    try:
+        _ensure_handler_execution_schema(path, lock_descriptor)
+        _recover_handler_executions(path, lock_descriptor)
+        now = evidence._freeze_trusted_utc_second(clock())
+        if (
+            key_id(sidecar_private_key.public_key())
+            != execution_facts.controller_id
+        ):
+            raise HandlerCoordinationError(
+                "Sidecar signing key does not match execution controller"
+            )
+        _require_current_context(
+            path,
+            root,
+            context,
+            now,
+            lock_descriptor,
+        )
+        decision = validate_rollback(context, request)
+        if not decision.allowed:
+            raise ToolCallDenied(decision)
+        _preflight_rollback_receipts(
+            context,
+            request,
+            sidecar_private_key,
+        )
+        command = _rollback_command(context, request)
+        execution_id = _reserve_handler_execution(
+            path,
+            lock_descriptor,
+            context,
+            request,
+            execution_facts,
+        )
+        _mark_handler_started(path, lock_descriptor, execution_id)
+        try:
+            result = handler(command)
+        except Exception as error:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+        if type(result) is not RollbackHandlerResult:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        receipt = _build_rollback_receipt(
+            context,
+            request,
+            sidecar_private_key,
+            result,
+        )
+        evidence.complete_receipt_publication(
+            path,
+            evidence_root=root,
+            receipt=receipt,
+            payloads={},
+            clock=lambda: now,
+            _borrowed_lock_descriptor=lock_descriptor,
+        )
+        _finalize_handler_execution(path, lock_descriptor)
+    except Exception as error:
+        primary_error = error
+    _, release_errors = evidence._release_target_lock(lock_descriptor)
+    if primary_error is not None:
+        if release_errors:
+            raise HandlerCoordinationError(
+                "handler coordination and lock release both failed"
+            ) from primary_error
+        raise primary_error
+    if release_errors:
+        raise HandlerCoordinationError(
+            "handler coordination lock release failed"
+        ) from release_errors[0]
+    assert receipt is not None
+    return receipt
+
+
 __all__ = [
     "HandlerCoordinationError",
+    "RollbackCommand",
+    "RollbackHandlerResult",
     "ToolCallDenied",
+    "execute_rollback",
     "execute_run_tests",
 ]
