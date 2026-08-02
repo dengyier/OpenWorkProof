@@ -994,6 +994,626 @@ def test_human_decision_policy_enforces_termination_state_and_role(
     ).error_code == "ROLE_DENIED"
 
 
+def _signed_rollback_request(
+    context,
+    grant,
+    role_keys,
+    *,
+    target_receipt_id=None,
+    target_digest=None,
+    before_commit=None,
+):
+    binding = next(
+        item
+        for item in context.work_order.key_bindings
+        if item.key_id == grant.subject_key_id
+    )
+    patch = next(
+        receipt
+        for receipt in context.ledger_prefix.receipts
+        if receipt.receipt_id == context.active_patch_receipt_id
+    )
+    arguments = {
+        "target_patch_receipt_id": target_receipt_id or patch.receipt_id,
+        "target_patch_digest": target_digest or patch.digest,
+        "before_commit": before_commit or context.replay_checkpoint.head_commit,
+    }
+    now = context.transaction_time
+    return AgentRequest.model_validate(
+        sign_payload(
+            "agent-request",
+            {
+                "claim_type": "agent-request",
+                "work_order_digest": context.work_order.digest,
+                "grant_id": grant.grant_id,
+                "actor_id": binding.subject_id,
+                "actor_key_id": binding.key_id,
+                "tool_name": "owp.rollback_patch",
+                "arguments_digest": request_arguments_digest(
+                    "owp.rollback_patch",
+                    arguments,
+                ),
+                "nonce": _grant_id(
+                    f"live:rollback:{grant.grant_id}:{now.isoformat()}"
+                ),
+                "requested_at": now.isoformat().replace("+00:00", "Z"),
+                "authentication_method": "agent_signature",
+                "model_id": "model",
+                "model_version": "1",
+                "prompt_template_digest": "a" * 64,
+                "context_source_digest": "b" * 64,
+            },
+            role_keys[binding.role][0],
+        )
+    )
+
+
+def _with_rollback_developer(
+    context,
+    role_keys,
+    *,
+    label,
+    usage_mode="metered",
+):
+    root = next(
+        grant
+        for grant in context.ledger_prefix.effective_grants
+        if grant.parent_grant_id is None
+    )
+    developer = _child_grant(
+        context.work_order,
+        root,
+        role_keys,
+        label=label,
+        updates={
+            "allowed_tools": ["owp.rollback_patch"],
+            "usage_mode": usage_mode,
+            "quota": {"tool_calls": 2, "repair_rounds": 0},
+        },
+    )
+    prefix = replace(
+        context.ledger_prefix,
+        effective_grants=tuple(
+            sorted(
+                (*context.ledger_prefix.effective_grants, developer),
+                key=lambda item: item.grant_id,
+            )
+        ),
+    )
+    replay_state = replace(
+        context.replay_state,
+        balances=tuple(
+            sorted(
+                (
+                    *context.replay_state.balances,
+                    (developer.grant_id, "repair_rounds", 0),
+                    (developer.grant_id, "tool_calls", 2),
+                )
+            )
+        ),
+    )
+    return replace(
+        context,
+        ledger_prefix=prefix,
+        replay_state=replay_state,
+    ), developer
+
+
+def test_rollback_policy_denies_proactive_rollback_before_failure(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    work_order, prefix, committed, checkpoint = _active_patch_context_inputs(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    context = derive_authorization_context(
+        work_order,
+        prefix,
+        committed,
+        checkpoint,
+        datetime.fromisoformat("2026-01-01T00:00:10+00:00"),
+    )
+    context, developer = _with_rollback_developer(
+        context,
+        ephemeral_role_keys,
+        label="live-rollback-proactive",
+    )
+    request = _signed_rollback_request(
+        context,
+        developer,
+        ephemeral_role_keys,
+    )
+
+    decision = policy_module.validate_rollback(context, request)
+
+    assert decision.allowed is False
+    assert decision.error_code == "STATE_DENIED"
+
+
+def test_rollback_policy_rejects_bad_request_signature(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    work_order, prefix, committed, checkpoint = _active_patch_context_inputs(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    context = derive_authorization_context(
+        work_order,
+        prefix,
+        committed,
+        checkpoint,
+        datetime.fromisoformat("2026-01-01T00:00:10+00:00"),
+    )
+    context, developer = _with_rollback_developer(
+        context,
+        ephemeral_role_keys,
+        label="live-rollback-signature",
+    )
+    request = _signed_rollback_request(
+        context,
+        developer,
+        ephemeral_role_keys,
+    ).model_copy(update={"signature": "A" * 86})
+
+    with pytest.raises(AuthorizationPolicyError, match="signature"):
+        policy_module.validate_rollback(context, request)
+
+
+def test_rollback_policy_rejects_different_signed_target(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    work_order, prefix, committed, checkpoint = _active_patch_context_inputs(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    context = derive_authorization_context(
+        work_order,
+        prefix,
+        committed,
+        checkpoint,
+        datetime.fromisoformat("2026-01-01T00:00:10+00:00"),
+    )
+    developer = next(
+        grant
+        for grant in prefix.effective_grants
+        if grant.grant_id == prefix.receipts[-1].grant_id
+    )
+    request = _signed_rollback_request(
+        context,
+        developer,
+        ephemeral_role_keys,
+        target_digest="f" * 64,
+    )
+
+    with pytest.raises(AuthorizationPolicyError, match="target"):
+        policy_module.validate_rollback(context, request)
+
+
+def test_rollback_policy_denies_non_developer_role(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    work_order, prefix, committed, checkpoint = _active_patch_context_inputs(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    context = derive_authorization_context(
+        work_order,
+        prefix,
+        committed,
+        checkpoint,
+        datetime.fromisoformat("2026-01-01T00:00:10+00:00"),
+    )
+    context = replace(
+        context,
+        current_state="needs_rework",
+        causal_state=replace(
+            context.causal_state,
+            failure_receipt_id="f" * 64,
+        ),
+    )
+    manager = next(
+        grant
+        for grant in prefix.effective_grants
+        if grant.parent_grant_id is None
+    )
+    request = _signed_rollback_request(
+        context,
+        manager,
+        ephemeral_role_keys,
+    )
+
+    decision = policy_module.validate_rollback(context, request)
+
+    assert decision.allowed is False
+    assert decision.error_code == "ROLE_DENIED"
+
+
+def test_rollback_policy_requires_open_failure_episode(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    work_order, prefix, committed, checkpoint = _active_patch_context_inputs(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    context = derive_authorization_context(
+        work_order,
+        prefix,
+        committed,
+        checkpoint,
+        datetime.fromisoformat("2026-01-01T00:00:10+00:00"),
+    )
+    context = replace(context, current_state="needs_rework")
+    developer = next(
+        grant
+        for grant in prefix.effective_grants
+        if grant.grant_id == prefix.receipts[-1].grant_id
+    )
+    request = _signed_rollback_request(
+        context,
+        developer,
+        ephemeral_role_keys,
+    )
+
+    decision = policy_module.validate_rollback(context, request)
+
+    assert decision.allowed is False
+    assert decision.error_code == "STATE_DENIED"
+
+
+def test_rollback_policy_denies_revoked_grant(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    work_order, prefix, committed, checkpoint = _active_patch_context_inputs(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    context = derive_authorization_context(
+        work_order,
+        prefix,
+        committed,
+        checkpoint,
+        datetime.fromisoformat("2026-01-01T00:00:10+00:00"),
+    )
+    context, developer = _with_rollback_developer(
+        context,
+        ephemeral_role_keys,
+        label="live-rollback-revoked",
+    )
+    context = replace(
+        context,
+        current_state="needs_rework",
+        causal_state=replace(
+            context.causal_state,
+            failure_receipt_id="f" * 64,
+        ),
+        replay_state=replace(
+            context.replay_state,
+            revoked_grant_ids=(developer.grant_id,),
+        ),
+    )
+    request = _signed_rollback_request(
+        context,
+        developer,
+        ephemeral_role_keys,
+    )
+
+    decision = policy_module.validate_rollback(context, request)
+
+    assert decision.allowed is False
+    assert decision.error_code == "CAPABILITY_DENIED"
+
+
+def test_rollback_policy_denies_consumed_single_use_grant(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    work_order, prefix, committed, checkpoint = _active_patch_context_inputs(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    context = derive_authorization_context(
+        work_order,
+        prefix,
+        committed,
+        checkpoint,
+        datetime.fromisoformat("2026-01-01T00:00:10+00:00"),
+    )
+    context, developer = _with_rollback_developer(
+        context,
+        ephemeral_role_keys,
+        label="live-rollback-single-use",
+        usage_mode="single_use",
+    )
+    context = replace(
+        context,
+        current_state="needs_rework",
+        causal_state=replace(
+            context.causal_state,
+            failure_receipt_id="f" * 64,
+        ),
+        replay_state=replace(
+            context.replay_state,
+            used_single_use_grant_ids=(developer.grant_id,),
+        ),
+    )
+    request = _signed_rollback_request(
+        context,
+        developer,
+        ephemeral_role_keys,
+    )
+
+    decision = policy_module.validate_rollback(context, request)
+
+    assert decision.allowed is False
+    assert decision.error_code == "CAPABILITY_DENIED"
+
+
+def test_rollback_policy_denies_exhausted_tool_quota(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    work_order, prefix, committed, checkpoint = _active_patch_context_inputs(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    context = derive_authorization_context(
+        work_order,
+        prefix,
+        committed,
+        checkpoint,
+        datetime.fromisoformat("2026-01-01T00:00:10+00:00"),
+    )
+    context, developer = _with_rollback_developer(
+        context,
+        ephemeral_role_keys,
+        label="live-rollback-quota",
+    )
+    balances = tuple(
+        (
+            grant_id,
+            metric,
+            (
+                0
+                if grant_id == developer.grant_id
+                and metric == "tool_calls"
+                else remaining
+            ),
+        )
+        for grant_id, metric, remaining in context.replay_state.balances
+    )
+    context = replace(
+        context,
+        current_state="needs_rework",
+        causal_state=replace(
+            context.causal_state,
+            failure_receipt_id="f" * 64,
+        ),
+        replay_state=replace(context.replay_state, balances=balances),
+    )
+    request = _signed_rollback_request(
+        context,
+        developer,
+        ephemeral_role_keys,
+    )
+
+    decision = policy_module.validate_rollback(context, request)
+
+    assert decision.allowed is False
+    assert decision.error_code == "QUOTA_EXHAUSTED"
+
+
+def test_rollback_policy_fails_before_handler_without_receipt_capacity(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    work_order, prefix, committed, checkpoint = _active_patch_context_inputs(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    context = derive_authorization_context(
+        work_order,
+        prefix,
+        committed,
+        checkpoint,
+        datetime.fromisoformat("2026-01-01T00:00:10+00:00"),
+    )
+    context, developer = _with_rollback_developer(
+        context,
+        ephemeral_role_keys,
+        label="live-rollback-capacity",
+    )
+    context = replace(
+        context,
+        current_state="needs_rework",
+        routine_capacity_remaining=0,
+        causal_state=replace(
+            context.causal_state,
+            failure_receipt_id="f" * 64,
+        ),
+    )
+    request = _signed_rollback_request(
+        context,
+        developer,
+        ephemeral_role_keys,
+    )
+
+    with pytest.raises(AuthorizationPolicyError, match="capacity"):
+        policy_module.validate_rollback(context, request)
+
+
+def test_rollback_policy_rejects_expired_contract_before_handler(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    work_order, prefix, committed, checkpoint = _active_patch_context_inputs(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    context = derive_authorization_context(
+        work_order,
+        prefix,
+        committed,
+        checkpoint,
+        datetime.fromisoformat("2026-01-01T00:00:10+00:00"),
+    )
+    context, developer = _with_rollback_developer(
+        context,
+        ephemeral_role_keys,
+        label="live-rollback-expired",
+    )
+    context = replace(
+        context,
+        current_state="needs_rework",
+        transaction_time=context.work_order.deadline + timedelta(seconds=1),
+        causal_state=replace(
+            context.causal_state,
+            failure_receipt_id="f" * 64,
+        ),
+    )
+    request = _signed_rollback_request(
+        context,
+        developer,
+        ephemeral_role_keys,
+    )
+
+    with pytest.raises(AuthorizationPolicyError, match="expired"):
+        policy_module.validate_rollback(context, request)
+
+
+def test_rollback_policy_allows_bound_developer_failure_target(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    work_order, prefix, committed, checkpoint = _active_patch_context_inputs(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    context = derive_authorization_context(
+        work_order,
+        prefix,
+        committed,
+        checkpoint,
+        datetime.fromisoformat("2026-01-01T00:00:10+00:00"),
+    )
+    context, developer = _with_rollback_developer(
+        context,
+        ephemeral_role_keys,
+        label="live-rollback-allowed",
+    )
+    context = replace(
+        context,
+        current_state="needs_rework",
+        causal_state=replace(
+            context.causal_state,
+            failure_receipt_id="f" * 64,
+        ),
+    )
+    request = _signed_rollback_request(
+        context,
+        developer,
+        ephemeral_role_keys,
+    )
+
+    decision = policy_module.validate_rollback(context, request)
+
+    assert decision.allowed
+    assert decision.error_code is None
+
+
 def test_tool_authorization_arguments_enforce_grant_roots(
     tmp_path,
     signed_work_order,

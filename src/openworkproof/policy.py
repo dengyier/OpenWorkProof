@@ -746,6 +746,111 @@ def validate_human_decision(
     return _policy_decision(error_code)
 
 
+def validate_rollback(
+    context: AuthorizationContext,
+    request: AgentRequest,
+) -> PolicyDecision:
+    """Decide prospective rollback eligibility without mutating authority."""
+
+    if (
+        type(context) is not AuthorizationContext
+        or type(request) is not AgentRequest
+    ):
+        raise _fail("rollback authorization inputs are malformed")
+    grants = {
+        grant.grant_id: grant
+        for grant in context.ledger_prefix.effective_grants
+    }
+    bindings = {
+        binding.key_id: binding
+        for binding in context.work_order.key_bindings
+    }
+    grant = grants.get(request.grant_id)
+    binding = bindings.get(request.actor_key_id)
+    if (
+        request.tool_name != "owp.rollback_patch"
+        or request.work_order_digest != context.work_order.digest
+        or grant is None
+        or binding is None
+        or request.actor_id != binding.subject_id
+        or request.signer_key_id != binding.key_id
+        or grant.subject_agent_id != binding.subject_id
+        or grant.subject_key_id != binding.key_id
+    ):
+        raise _fail("rollback request Grant or actor binding is invalid")
+    try:
+        public_key = decode_and_verify_key_binding(binding)
+    except Exception as error:
+        raise _fail("rollback request key binding is invalid") from error
+    if not verify_payload(
+        "agent-request",
+        request.model_dump(mode="json"),
+        public_key,
+    ):
+        raise _fail("rollback request signature is invalid")
+    request_age = context.transaction_time - request.requested_at
+    if request_age < timedelta(0) or request_age > timedelta(seconds=300):
+        raise _fail("rollback request is outside the freshness window")
+    target = next(
+        (
+            receipt
+            for receipt in context.ledger_prefix.receipts
+            if receipt.receipt_id == context.active_patch_receipt_id
+        ),
+        None,
+    )
+    if (
+        not isinstance(target, ToolCallReceipt)
+        or target.tool_name != "owp.apply_patch"
+        or target.policy_decision != "allow"
+        or target.execution_status != "succeeded"
+    ):
+        raise _fail("rollback target patch is unavailable")
+    expected_arguments = {
+        "target_patch_receipt_id": target.receipt_id,
+        "target_patch_digest": target.digest,
+        "before_commit": context.replay_checkpoint.head_commit,
+    }
+    if request.arguments_digest != request_arguments_digest(
+        "owp.rollback_patch",
+        expected_arguments,
+    ):
+        raise _fail("rollback target binding is invalid")
+    if context.transaction_time > context.work_order.deadline:
+        raise _fail("contract expired before rollback authorization")
+    if context.routine_capacity_remaining <= 0:
+        raise _fail("routine Receipt capacity is exhausted")
+    capability_allowed = (
+        request.tool_name in context.work_order.allowed_tools
+        and request.tool_name in grant.allowed_tools
+        and grant.grant_id not in context.replay_state.revoked_grant_ids
+        and (
+            grant.usage_mode != "single_use"
+            or grant.grant_id
+            not in context.replay_state.used_single_use_grant_ids
+        )
+        and grant.valid_from
+        <= context.transaction_time
+        <= min(grant.expires_at, context.work_order.deadline)
+    )
+    return _policy_decision(
+        _denial_code(
+            state_allowed=(
+                context.current_state == "needs_rework"
+                and context.causal_state.failure_receipt_id is not None
+                and context.causal_state.rollback_receipt_id is None
+            ),
+            role_allowed=binding.role == "Developer",
+            capability_allowed=capability_allowed,
+            quota_allowed=_remaining_tool_calls(
+                context,
+                grant.grant_id,
+            )
+            > 0,
+        )
+    )
+
+
 def _bounded_mapping(
     value: Mapping[str, CapabilityGrant],
     *,
@@ -2379,4 +2484,5 @@ __all__ = [
     "derive_authorization_context",
     "replay_authorization_policy",
     "validate_human_decision",
+    "validate_rollback",
 ]
