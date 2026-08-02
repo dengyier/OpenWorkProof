@@ -8871,12 +8871,15 @@ def _retry_episode(
     now: datetime,
     sidecar_receipt_factory,
     failure_test_passed: bool = False,
+    commit_rollback: bool = True,
 ):
     from test_state import _tool_receipt
 
     ledger_path = tmp_path / f"{label}.sqlite3"
     evidence_root = tmp_path / f"{label}-evidence"
     evidence_root.mkdir()
+    if not commit_rollback:
+        (evidence_root / ".pending").mkdir()
     _activate_ledger_root(
         ledger_path,
         work_order,
@@ -8954,6 +8957,10 @@ def _retry_episode(
     final_path = evidence_root / "patch-result/01.json"
     final_path.parent.mkdir()
     final_path.write_bytes(result_bytes)
+    if not commit_rollback:
+        patch_input_path = evidence_root / "patch-input/01.diff"
+        patch_input_path.parent.mkdir()
+        patch_input_path.write_bytes(patch_bytes)
 
     patch = _tool_receipt(
         tool_name="owp.apply_patch",
@@ -9070,6 +9077,34 @@ def _retry_episode(
             },
         }
     )
+    failure_payload = None
+    if not commit_rollback:
+        failure_payload = rfc8785.dumps(
+            {
+                "schema_version": "openworkproof-test-result/0.1",
+                **failure_arguments,
+                "actual_exit_code": 1,
+            }
+        )
+        failure_digest = hashlib.sha256(failure_payload).hexdigest()
+        failure_raw["output_digest"] = failure_digest
+        failure_raw["evidence_refs"][0].update(
+            {
+                "sha256": failure_digest,
+                "size_bytes": len(failure_payload),
+            }
+        )
+        for predicate in failure_raw["predicate_results"]:
+            if predicate["name"] != "tests_passed":
+                continue
+            predicate["input"]["test_evidence_digest"] = failure_digest
+            predicate["input_digest"] = _jcs_digest(
+                {
+                    "domain": "openworkproof/predicate-input/v0.1",
+                    "predicate_id": predicate["predicate_id"],
+                    "input": predicate["input"],
+                }
+            )
     failure_claim = failure_raw["nested_claim"]
     failure_claim.update(
         {
@@ -9093,6 +9128,12 @@ def _retry_episode(
             role_keys["Sidecar"][0],
         )
     )
+    if failure_payload is not None:
+        failure_path = evidence_root / failure.evidence_refs[0].path.removeprefix(
+            "evidence/"
+        )
+        failure_path.parent.mkdir(parents=True, exist_ok=True)
+        failure_path.write_bytes(failure_payload)
 
     rollback = sidecar_receipt_factory(
         state_before="needs_rework",
@@ -9163,16 +9204,23 @@ def _retry_episode(
 
     connection = connect_ledger(ledger_path)
     try:
-        for receipt in (patch, failure, rollback):
+        committed_receipts = (
+            (patch, failure, rollback)
+            if commit_rollback
+            else (patch, failure)
+        )
+        for receipt in committed_receipts:
             _append_action_receipt(connection, receipt)
         connection.execute(
-            "UPDATE sequence_counter SET next_sequence = 7"
+            "UPDATE sequence_counter SET next_sequence = ?",
+            (7 if commit_rollback else 6,),
         )
         connection.execute(
             """
             UPDATE work_order_state
-            SET current_state = 'needs_rework', version = 6
-            """
+            SET current_state = 'needs_rework', version = ?
+            """,
+            (6 if commit_rollback else 5,),
         )
         connection.execute(
             """
@@ -9197,6 +9245,55 @@ def _retry_episode(
                 len(result_bytes),
             ),
         )
+        if not commit_rollback:
+            connection.execute(
+                """
+                INSERT INTO evidence_publications (
+                    publication_id,
+                    receipt_id,
+                    pending_path,
+                    final_path,
+                    digest,
+                    media_type,
+                    size_bytes,
+                    state
+                )
+                VALUES (?, ?, ?, ?, ?, 'text/x-diff', ?, 'COMMITTED')
+                """,
+                (
+                    _grant_id(f"{label}:patch-input-publication"),
+                    patch.receipt_id,
+                    f".pending/{_grant_id(f'{label}:patch-input-publication')}",
+                    "evidence/patch-input/01.diff",
+                    patch_digest,
+                    len(patch_bytes),
+                ),
+            )
+            failure_reference = failure.evidence_refs[0]
+            connection.execute(
+                """
+                INSERT INTO evidence_publications (
+                    publication_id,
+                    receipt_id,
+                    pending_path,
+                    final_path,
+                    digest,
+                    media_type,
+                    size_bytes,
+                    state
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'COMMITTED')
+                """,
+                (
+                    _grant_id(f"{label}:failure-publication"),
+                    failure.receipt_id,
+                    f".pending/{_grant_id(f'{label}:failure-publication')}",
+                    failure_reference.path,
+                    failure_reference.sha256,
+                    failure_reference.media_type,
+                    failure_reference.size_bytes,
+                ),
+            )
     finally:
         connection.close()
     return {
@@ -10019,6 +10116,227 @@ def test_commit_receipt_with_publications_atomically_journals_signed_receipt(
     )
     assert pending.read_bytes() == payload
     assert not final.exists()
+
+
+def test_complete_receipt_publication_atomically_commits_rollback_receipt(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label="publication-rollback-success",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        commit_rollback=False,
+    )
+    rollback = episode["rollback"]
+
+    group = evidence.complete_receipt_publication(
+        episode["ledger_path"],
+        evidence_root=episode["evidence_root"],
+        receipt=rollback,
+        payloads={},
+        clock=lambda: fixed_now,
+    )
+
+    assert group.publications == ()
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        assert evidence._validated_receipt_prefix(
+            connection,
+            signed_work_order,
+        )[-1] == rollback
+        assert connection.execute(
+            """
+            SELECT grant_id, event_type, metric, amount
+            FROM grant_events
+            WHERE receipt_id = ?
+            """,
+            (rollback.receipt_id,),
+        ).fetchone() == (
+            episode["developer"].grant_id,
+            "rollback",
+            "tool_calls",
+            1,
+        )
+        assert connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM evidence_publications
+            WHERE receipt_id = ?
+            """,
+            (rollback.receipt_id,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT current_state, version FROM work_order_state"
+        ).fetchone() == ("needs_rework", rollback.sequence)
+        assert connection.execute(
+            "SELECT next_sequence FROM sequence_counter"
+        ).fetchone() == (rollback.sequence + 1,)
+    finally:
+        connection.close()
+
+
+def test_complete_receipt_publication_commits_failed_rollback_charge(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label="publication-rollback-failed",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        commit_rollback=False,
+    )
+    raw = episode["rollback"].model_dump(mode="json")
+    raw.update(
+        {
+            "execution_status": "failed",
+            "execution_error_code": "HANDLER_ERROR",
+            "after_commit": raw["before_commit"],
+            "after_manifest_digest": episode["patch_result"][
+                "workspace_manifest_digest"
+            ],
+            "rollback_result": "failed",
+        }
+    )
+    failed = evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload(
+            "action-receipt",
+            raw,
+            ephemeral_role_keys["Sidecar"][0],
+        )
+    )
+
+    group = evidence.complete_receipt_publication(
+        episode["ledger_path"],
+        evidence_root=episode["evidence_root"],
+        receipt=failed,
+        payloads={},
+        clock=lambda: fixed_now,
+    )
+
+    assert group.publications == ()
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        assert evidence._validated_receipt_prefix(
+            connection,
+            signed_work_order,
+        )[-1] == failed
+        assert connection.execute(
+            """
+            SELECT event_type, metric, amount
+            FROM grant_events
+            WHERE receipt_id = ?
+            """,
+            (failed.receipt_id,),
+        ).fetchone() == ("rollback", "tool_calls", 1)
+        assert connection.execute(
+            "SELECT current_state, version FROM work_order_state"
+        ).fetchone() == ("needs_rework", failed.sequence)
+        assert connection.execute(
+            "SELECT next_sequence FROM sequence_counter"
+        ).fetchone() == (failed.sequence + 1,)
+    finally:
+        connection.close()
+
+
+def test_rollback_receipt_insert_failure_rolls_back_all_authority_writes(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    episode = _retry_episode(
+        tmp_path=tmp_path,
+        label="publication-rollback-insert-failure",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        commit_rollback=False,
+    )
+    rollback = episode["rollback"]
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        before = (
+            connection.execute("SELECT COUNT(*) FROM receipts").fetchone(),
+            connection.execute("SELECT COUNT(*) FROM receipt_parents").fetchone(),
+            connection.execute("SELECT COUNT(*) FROM grant_events").fetchone(),
+            connection.execute(
+                "SELECT current_state, version FROM work_order_state"
+            ).fetchone(),
+            connection.execute(
+                "SELECT next_sequence FROM sequence_counter"
+            ).fetchone(),
+        )
+    finally:
+        connection.close()
+
+    real_insert = evidence._insert_receipt_and_publication_group
+
+    def fail_after_insert(*args, **kwargs) -> None:
+        real_insert(*args, **kwargs)
+        raise sqlite3.OperationalError("injected rollback insert failure")
+
+    monkeypatch.setattr(
+        evidence,
+        "_insert_receipt_and_publication_group",
+        fail_after_insert,
+    )
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="injected rollback insert failure",
+    ):
+        evidence.complete_receipt_publication(
+            episode["ledger_path"],
+            evidence_root=episode["evidence_root"],
+            receipt=rollback,
+            payloads={},
+            clock=lambda: fixed_now,
+        )
+
+    connection = connect_ledger(episode["ledger_path"])
+    try:
+        after = (
+            connection.execute("SELECT COUNT(*) FROM receipts").fetchone(),
+            connection.execute("SELECT COUNT(*) FROM receipt_parents").fetchone(),
+            connection.execute("SELECT COUNT(*) FROM grant_events").fetchone(),
+            connection.execute(
+                "SELECT current_state, version FROM work_order_state"
+            ).fetchone(),
+            connection.execute(
+                "SELECT next_sequence FROM sequence_counter"
+            ).fetchone(),
+        )
+    finally:
+        connection.close()
+    assert after == before
 
 
 def test_receipt_publication_replays_authoritative_patch_paths(

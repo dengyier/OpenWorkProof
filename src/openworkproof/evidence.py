@@ -812,6 +812,12 @@ def _validate_staged_payloads(
     payloads: Mapping[str, bytes],
     work_order: WorkOrder,
 ) -> None:
+    if (
+        isinstance(receipt, RollbackReceipt)
+        and not receipt.evidence_refs
+        and not payloads
+    ):
+        return
     validator = getattr(receipt, "validate_evidence_payloads", None)
     if callable(validator):
         validator(payloads, work_order)
@@ -1056,17 +1062,27 @@ def _validate_new_receipt_publication(
         raise ValueError(
             "an existing evidence publication requires recovery"
         )
+    is_started_rollback = (
+        type(receipt) is RollbackReceipt
+        and receipt.policy_decision == "allow"
+        and receipt.execution_status in {"succeeded", "failed"}
+    )
     publication_count_valid = (
         1 <= len(group.publications) <= _MAX_PUBLICATIONS_PER_GROUP
     ) or (
         not group.publications
         and not receipt.evidence_refs
-        and isinstance(receipt, ToolCallReceipt)
-        and receipt.policy_decision == "allow"
-        and receipt.execution_status == "failed"
+        and (
+            (
+                type(receipt) is ToolCallReceipt
+                and receipt.policy_decision == "allow"
+                and receipt.execution_status == "failed"
+            )
+            or is_started_rollback
+        )
     )
     if (
-        type(receipt) is not ToolCallReceipt
+        type(receipt) not in {ToolCallReceipt, RollbackReceipt}
         or receipt.policy_decision != "allow"
         or type(group) is not _PublicationGroup
         or group.receipt_id != receipt.receipt_id
@@ -1083,7 +1099,8 @@ def _validate_new_receipt_publication(
             receipt.model_dump(mode="json")
         )
         parsed.validate_against_work_order(work_order)
-        parsed.validate_predicates_against(work_order)
+        if isinstance(parsed, ToolCallReceipt):
+            parsed.validate_predicates_against(work_order)
         _validate_receipt_nested_claim(parsed, work_order)
         sidecar = next(
             binding
@@ -1097,7 +1114,7 @@ def _validate_new_receipt_publication(
         ) from error
     if (
         parsed != receipt
-        or type(parsed) is not ToolCallReceipt
+        or type(parsed) is not type(receipt)
         or receipt.work_order_digest != work_order.digest
         or not verify_payload(
             "action-receipt",
@@ -1164,7 +1181,7 @@ def _validate_new_receipt_publication(
             binding.key_id: decode_and_verify_key_binding(binding)
             for binding in work_order.key_bindings
         }
-        decision = (
+        decision = None if isinstance(receipt, RollbackReceipt) else (
             append_receipt(
                 work_order=work_order,
                 state=state_before,
@@ -1187,7 +1204,7 @@ def _validate_new_receipt_publication(
         raise ValueError(
             "receipt publication state validation failed"
         ) from error
-    if not decision.allowed:
+    if decision is not None and not decision.allowed:
         raise ValueError(
             "receipt publication is denied by the frozen state machine"
         )
@@ -1485,7 +1502,7 @@ def _open_pending_receipt_publications(
     *,
     evidence_root: Path,
     work_order: WorkOrder,
-    receipt: ToolCallReceipt,
+    receipt: ToolCallReceipt | RollbackReceipt,
     group: _PublicationGroup,
 ):
     publications = tuple(group.publications)
@@ -1636,7 +1653,7 @@ def _recheck_pending_receipt_publications(
     pending_files: tuple[tuple[str, int], ...],
     pending_anchors: tuple[tuple[str, os.stat_result], ...],
     work_order: WorkOrder,
-    receipt: ToolCallReceipt,
+    receipt: ToolCallReceipt | RollbackReceipt,
     group: _PublicationGroup,
     payloads: Mapping[str, bytes],
 ) -> None:
@@ -1701,7 +1718,7 @@ def _insert_receipt_and_publication_group(
     connection: sqlite3.Connection,
     *,
     work_order: WorkOrder,
-    receipt: ToolCallReceipt,
+    receipt: ToolCallReceipt | RollbackReceipt,
     group: _PublicationGroup,
     current_state: str,
     current_version: int,
@@ -1890,6 +1907,37 @@ def _confirm_receipt_publication_commit(
     return status, None
 
 
+def _validate_authoritative_rollback_result(
+    connection: sqlite3.Connection,
+    *,
+    work_order: WorkOrder,
+    receipt: RollbackReceipt,
+    evidence_root: Path,
+    current_state: str,
+) -> None:
+    replayed_work_order, receipts, grants, _ = (
+        _replay_receipt_publication_ledger(connection)
+    )
+    if replayed_work_order != work_order:
+        raise ValueError("rollback authority replay is incomplete")
+    try:
+        episode = _validated_retry_episode(
+            connection,
+            work_order=work_order,
+            receipts=(*receipts, receipt),
+            grants=grants,
+            evidence_root=evidence_root,
+            current_state=current_state,
+            rollback_candidate=receipt,
+        )
+    except RetryConsumptionError as error:
+        raise ValueError(
+            "rollback result does not match the authoritative rework episode"
+        ) from error
+    if episode.rollback != receipt:
+        raise ValueError("rollback result is not the prospective episode rollback")
+
+
 def commit_receipt_with_publications(
     ledger_path: Path,
     *,
@@ -1900,7 +1948,7 @@ def commit_receipt_with_publications(
     trusted_resolution_manifest: ResolutionManifest | None = None,
     _borrowed_lock_descriptor: int | None = None,
 ) -> None:
-    """Commit one signed ToolCall and its COMMITTING publication group."""
+    """Commit one signed routine receipt and its publication group."""
 
     path = Path(ledger_path)
     root = Path(evidence_root)
@@ -1946,7 +1994,6 @@ def commit_receipt_with_publications(
                 now=now,
             )
         )
-        assert type(receipt) is ToolCallReceipt
         (
             root_descriptor,
             root_identity,
@@ -1961,13 +2008,27 @@ def commit_receipt_with_publications(
             receipt=receipt,
             group=group,
         )
-        _validate_authoritative_receipt_predicates(
-            connection,
-            work_order=work_order,
-            receipt=receipt,
-            payloads=payloads,
-            trusted_resolution_manifest=trusted_resolution_manifest,
-        )
+        if type(receipt) is ToolCallReceipt:
+            _validate_authoritative_receipt_predicates(
+                connection,
+                work_order=work_order,
+                receipt=receipt,
+                payloads=payloads,
+                trusted_resolution_manifest=trusted_resolution_manifest,
+            )
+        else:
+            assert type(receipt) is RollbackReceipt
+            if trusted_resolution_manifest is not None:
+                raise ValueError(
+                    "trusted resolution manifest is forbidden for rollback"
+                )
+            _validate_authoritative_rollback_result(
+                connection,
+                work_order=work_order,
+                receipt=receipt,
+                evidence_root=root,
+                current_state=current_state,
+            )
         _insert_receipt_and_publication_group(
             connection,
             work_order=work_order,
@@ -6718,6 +6779,7 @@ def _reconstruct_rework_episode(
     grants: dict[str, CapabilityGrant],
     current_state: str,
     retry_receipt: GrantConsumedReceipt | None = None,
+    rollback_candidate: RollbackReceipt | None = None,
 ) -> _ReworkEpisode:
     by_id = _receipt_by_id(receipts)
     root_matches = tuple(
@@ -6807,9 +6869,17 @@ def _reconstruct_rework_episode(
     episode_end = (
         retry_receipt.sequence if retry_receipt is not None else None
     )
+    rollback_source = (
+        receipts if rollback_candidate is None else (rollback_candidate,)
+    )
+    permitted_results = (
+        {"succeeded"}
+        if rollback_candidate is None
+        else {"succeeded", "failed"}
+    )
     rollbacks = tuple(
         receipt
-        for receipt in receipts
+        for receipt in rollback_source
         if (
             isinstance(receipt, RollbackReceipt)
             and receipt.sequence > failure.sequence
@@ -6818,7 +6888,7 @@ def _reconstruct_rework_episode(
                 or receipt.sequence < episode_end
             )
             and receipt.policy_decision == "allow"
-            and receipt.execution_status == "succeeded"
+            and receipt.execution_status in permitted_results
             and receipt.target_patch_receipt_id
             == target_patch.receipt_id
             and receipt.target_patch_digest == target_patch.digest
@@ -7196,12 +7266,14 @@ def _validated_retry_episode(
     grants: dict[str, CapabilityGrant],
     evidence_root: Path,
     current_state: str,
+    rollback_candidate: RollbackReceipt | None = None,
 ) -> _RetryEpisode:
     episode = _reconstruct_rework_episode(
         work_order=work_order,
         receipts=receipts,
         grants=grants,
         current_state=current_state,
+        rollback_candidate=rollback_candidate,
     )
     patch_result = _read_committed_patch_result(
         connection,
