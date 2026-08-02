@@ -154,6 +154,10 @@ MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent，AgentTeams 组织 Agen
   按固定顺序检查状态、角色、Grant 能力、人工批准、静态谓词和
   配额，仅返回 `PolicyDecision`，不启动 handler、不扣减配额、
   不签发 Receipt，也不写入账本。
+- Task 8B2 `validate_human_decision` 纯函数：验证 HumanDecision 的
+  WorkOrder、签名人与角色、300 秒摄入窗口；审批必须精确绑定一张
+  尚未决策的高风险请求及其 scope、digest 和 expiry，终止决策无需
+  预先请求；仅返回 `PolicyDecision`，不签发 Receipt、不改变状态。
 - Task 13 首个 `owp.run_tests` 可信协调切片：在同一目标锁下
   重放当前授权上下文，事前检查证据槽位与成功/失败 Receipt
   形态，通过内部 `handler_executions` journal 持久化
@@ -164,10 +168,10 @@ MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent，AgentTeams 组织 Agen
 
 当前验证快照：
 
-- Policy 专项：78 passed；
-- Policy、Composition 与 Receipt-chain 专项：517 passed；
+- Policy 专项：90 passed；
+- Policy、Composition 与 Receipt-chain 专项：529 passed；
 - Receipt-chain 专项：407 passed；
-- 全量测试：1224 passed；
+- 全量测试：1236 passed；
 - 独立规格复核：7B4_SPEC_PASS；
 - 独立质量复核：7B4_QUALITY_PASS；
 - pip check、compileall 和 git diff check：通过。
@@ -177,7 +181,8 @@ MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent，AgentTeams 组织 Agen
 上述 Task 7B3a、7B3b Phase 2、7B3c 协调器和 Task 7B4 离线授权链
 验证稳定切片已经完成本地实现与独立复核。Task 8A 已新增实时授权
 上下文的纯推导与证据/检查点绑定；Task 8B1 已新增纯事前
-工具授权。Task 8A/8B1 均尚未进行独立 Acceptor 复核。
+工具授权；Task 8B2 已新增纯 HumanDecision 授权。Task 8A/8B1/8B2
+均尚未进行独立 Acceptor 复核。
 当前实现包含
 `stage_pending_evidence_group`、`publish_group_no_replace`、
 `mark_publication_group_committed`、`recover_evidence_publications`
@@ -197,7 +202,7 @@ Developer mode 生产入口。当前目标锁与内部 journal 能区分：
 不改变 Receipt、sequence、配额、协议状态或状态版本。
 要自动收敛该不确定分支，仍需真实无网执行器提供稳定
 execution ID 和可验证启动/结果回执。deny Receipt、
-`validate_human_decision`、`validate_rollback`、rollback 和 Acceptance
+`validate_rollback`、rollback 和 Acceptance
 生产事务也尚未完成。Task 7 与完整 Task 9 仍未完成，Day 0
 执行门仍为 FAIL。
 
@@ -228,8 +233,8 @@ execution ID 和可验证启动/结果回执。deny Receipt、
 说明：
 
 - 当前开发快照包含 Task 8A 实时授权上下文、Task 8B1 纯事前
-  工具授权和 Task 13 首个 Verifier `run_tests` 协调切片，
-  fresh 全量验证为 1224 passed；
+  工具授权、Task 8B2 纯 HumanDecision 授权和 Task 13 首个 Verifier
+  `run_tests` 协调切片，fresh 全量验证为 1236 passed；
 - pyproject.toml 已预留 owp 命令入口，但 CLI 模块尚未完成，因此本文件
   暂不提供 CLI 使用命令；
 - 不应把测试通过理解为 Day 0、独立验收或赛事提交已经完成。
@@ -288,6 +293,9 @@ Rich 及其源码仍归属于原权利人；OpenWorkProof 只拥有自有协议�
 - Task 8B1 纯事前工具授权：校验请求签名、参数摘要、300 秒新鲜度、
   角色/工具矩阵、Grant 能力与配额、路径根、人工批准、测试 Profile、
   ReplayCheckpoint、独立执行标识和组合版本；只判定 handler 资格。
+- Task 8B2 纯 HumanDecision 授权：验证签名、WorkOrder 与 Maintainer
+  身份，精确绑定审批请求、范围、有效期和唯一决策，并允许无需预先
+  请求的 Maintainer 终止；只判定决策资格，不落账、不改变状态。
 - Task 13 首个 Verifier `run_tests` 协调切片：锁内复核账本/证据
   快照、事前预留证据槽位、启动单次 handler、Sidecar 签署 Receipt，
   并对正常结果完成四阶段证据发布；已启动的 handler 异常会
@@ -301,7 +309,7 @@ Rich 及其源码仍归属于原权利人；OpenWorkProof 只拥有自有协议�
 - `run_tests` 的真实无网执行器、稳定 execution ID、启动/结果
   回执与 `STARTED_UNCONFIRMED` 自动恢复，以及 Developer mode 与 MCP 入口；
 - deny/rollback 生产事务和剩余入口的全局 nonce 处理；
-- Task 8 `validate_human_decision` 和 `validate_rollback` 两个实时决策 API；
+- Task 8 `validate_rollback` 实时决策 API；
 - 其他 ToolCall handler 与 evidence publication 的调用闭包，
   以及 acceptance 事务闭包；
 - ResolutionManifest 原始字节的独立读取与重哈希、完整 Task 9

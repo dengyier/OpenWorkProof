@@ -23,6 +23,7 @@ from openworkproof.models import (
     ActionReceiptEnvelope,
     AgentRequest,
     ApplyPatchArguments,
+    ApprovalHumanDecision,
     ApprovalDecisionReceipt,
     ApprovalRequestedReceipt,
     CapabilityGrant,
@@ -37,6 +38,7 @@ from openworkproof.models import (
     RollbackReceipt,
     RunTestsArguments,
     SystemEventReceipt,
+    TerminationHumanDecision,
     TerminationDecisionReceipt,
     ToolCallReceipt,
     ToolRequestArguments,
@@ -648,6 +650,98 @@ def authorize_tool_call(
             )
         ),
         quota_allowed=_remaining_tool_calls(context, grant.grant_id) > 0,
+    )
+    return _policy_decision(error_code)
+
+
+def validate_human_decision(
+    context: AuthorizationContext,
+    claim: ApprovalHumanDecision | TerminationHumanDecision,
+) -> PolicyDecision:
+    """Decide a signed human claim without mutating authority."""
+
+    if type(context) is not AuthorizationContext or type(claim) not in {
+        ApprovalHumanDecision,
+        TerminationHumanDecision,
+    }:
+        raise _fail("human decision inputs are malformed")
+    if claim.work_order_digest != context.work_order.digest:
+        raise _fail("human decision WorkOrder binding is invalid")
+
+    bindings = tuple(
+        binding
+        for binding in context.work_order.key_bindings
+        if binding.key_id == claim.actor_key_id
+    )
+    if (
+        len(bindings) != 1
+        or claim.actor_id != bindings[0].subject_id
+        or claim.signer_key_id != bindings[0].key_id
+    ):
+        raise _fail("human decision actor binding is invalid")
+    binding = bindings[0]
+    try:
+        public_key = decode_and_verify_key_binding(binding)
+    except Exception as error:
+        raise _fail("human decision key binding is invalid") from error
+    if not verify_payload(
+        "human-decision",
+        claim.model_dump(mode="json"),
+        public_key,
+    ):
+        raise _fail("human decision signature is invalid")
+
+    ingestion_age = context.transaction_time - claim.decided_at
+    if ingestion_age < timedelta(0) or ingestion_age > timedelta(seconds=300):
+        raise _fail("human decision freshness window is invalid")
+
+    if isinstance(claim, TerminationHumanDecision):
+        if (
+            claim.target_work_order_digest != context.work_order.digest
+            or claim.decided_at < context.work_order.issued_at
+        ):
+            raise _fail("human termination binding is invalid")
+        error_code = _denial_code(
+            state_allowed=context.current_state
+            not in {"accepted", "rejected"},
+            role_allowed=binding.role == "Maintainer",
+            capability_allowed=True,
+        )
+        return _policy_decision(error_code)
+
+    request = next(
+        (
+            receipt
+            for receipt in context.ledger_prefix.receipts
+            if receipt.receipt_id == claim.request_receipt_id
+        ),
+        None,
+    )
+    if (
+        not isinstance(request, ApprovalRequestedReceipt)
+        or request.policy_decision != "allow"
+        or request.execution_status != "succeeded"
+        or request.request_kind != "high_risk_action"
+        or request.digest != claim.request_receipt_digest
+        or request.requested_scope != claim.approved_scope
+        or request.expires_at != claim.expires_at
+        or claim.decided_at < request.occurred_at
+        or claim.decided_at > request.expires_at
+    ):
+        raise _fail("human approval binding is invalid")
+    if claim.request_receipt_id in dict(
+        context.replay_state.approval_decision_by_request
+    ):
+        raise _fail("human approval request already has a decision")
+
+    error_code = _denial_code(
+        state_allowed=context.current_state in {"running", "retrying"},
+        role_allowed=binding.role == request.required_role,
+        capability_allowed=True,
+        approval_allowed=(
+            claim.decision == "approved"
+            and context.transaction_time <= claim.expires_at
+        ),
     )
     return _policy_decision(error_code)
 
@@ -2284,4 +2378,5 @@ __all__ = [
     "authorize_tool_call",
     "derive_authorization_context",
     "replay_authorization_policy",
+    "validate_human_decision",
 ]

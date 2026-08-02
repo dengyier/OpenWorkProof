@@ -12,6 +12,7 @@ import pytest
 import rfc8785
 
 import openworkproof.evidence as evidence
+import openworkproof.policy as policy_module
 from openworkproof.composition import (
     AuthorizationCausalityError,
     replay_authorization_causality,
@@ -25,6 +26,7 @@ from openworkproof.models import (
     CreatePrProposalArguments,
     RepoReadArguments,
     RunTestsArguments,
+    TerminationHumanDecision,
     WorkOrder,
     request_arguments_digest,
 )
@@ -630,6 +632,366 @@ def _approved_pr_context(
         datetime.fromisoformat("2026-01-01T00:00:10+00:00"),
     )
     return context, root, patch, request, decision
+
+
+def _pending_approval_context(
+    *,
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+    approved=True,
+):
+    work_order, prefix, committed, checkpoint = _active_patch_context_inputs(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    root = next(
+        grant
+        for grant in prefix.effective_grants
+        if grant.parent_grant_id is None
+    )
+    patch = prefix.receipts[-1]
+    request = _approval_request_for_patch(
+        root=root,
+        root_issuance=prefix.receipts[0],
+        patch=patch,
+        signed_work_order=work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label="pending-approval:request",
+        remaining_after=47,
+    )
+    decision = _approval_decision_for_request(
+        request=request,
+        previous_receipt=request,
+        sequence=request.sequence + 1,
+        approved=approved,
+        parent_receipt_ids=(request.receipt_id,),
+        signed_work_order=work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label=f"pending-approval:decision:{approved}",
+    )
+    context = derive_authorization_context(
+        work_order,
+        replace(prefix, receipts=(*prefix.receipts, request)),
+        committed,
+        checkpoint,
+        datetime.fromisoformat("2026-01-01T00:00:10+00:00"),
+    )
+    return context, request, decision.nested_claim
+
+
+def test_human_decision_policy_allows_bound_maintainer_approval(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    context, _, claim = _pending_approval_context(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+
+    decision = policy_module.validate_human_decision(context, claim)
+
+    assert decision.allowed
+    assert decision.error_code is None
+
+
+def _resign_human_decision(
+    claim,
+    role_keys,
+    *,
+    role="Maintainer",
+    updates=None,
+):
+    raw = claim.model_dump(mode="json")
+    binding = role_keys[role][1]
+    raw.update(
+        {
+            "actor_id": binding["subject_id"],
+            "actor_key_id": binding["key_id"],
+            **(updates or {}),
+        }
+    )
+    return type(claim).model_validate(
+        sign_payload("human-decision", raw, role_keys[role][0])
+    )
+
+
+def _termination_claim(work_order, role_keys, *, role="Maintainer", decided_at):
+    binding = role_keys[role][1]
+    return TerminationHumanDecision.model_validate(
+        sign_payload(
+            "human-decision",
+            {
+                "claim_type": "human-decision",
+                "decision_type": "termination_decision",
+                "work_order_digest": work_order.digest,
+                "decision": "rejected",
+                "reason": "MAINTAINER_REJECTED",
+                "decided_at": decided_at,
+                "actor_id": binding["subject_id"],
+                "actor_key_id": binding["key_id"],
+                "target_work_order_digest": work_order.digest,
+            },
+            role_keys[role][0],
+        )
+    )
+
+
+def test_human_decision_policy_preserves_explicit_approval_denial(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    context, _, claim = _pending_approval_context(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        approved=False,
+    )
+
+    decision = policy_module.validate_human_decision(context, claim)
+
+    assert decision.allowed is False
+    assert decision.error_code == "APPROVAL_DENIED"
+
+
+def test_human_decision_policy_denies_non_maintainer_role(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    context, _, claim = _pending_approval_context(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    wrong_role = _resign_human_decision(
+        claim,
+        ephemeral_role_keys,
+        role="Developer",
+    )
+
+    decision = policy_module.validate_human_decision(context, wrong_role)
+
+    assert decision.allowed is False
+    assert decision.error_code == "ROLE_DENIED"
+
+
+@pytest.mark.parametrize(
+    "updates",
+    (
+        {"request_receipt_digest": "f" * 64},
+        {"approved_scope": {"operation": "different_action"}},
+        {"expires_at": "2026-01-01T00:04:59Z"},
+        {"decided_at": "2026-01-01T00:00:05Z"},
+    ),
+)
+def test_human_decision_policy_rejects_approval_binding_mismatch(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+    updates,
+) -> None:
+    context, _, claim = _pending_approval_context(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    mismatched = _resign_human_decision(
+        claim,
+        ephemeral_role_keys,
+        updates=updates,
+    )
+
+    with pytest.raises(AuthorizationPolicyError, match="approval"):
+        policy_module.validate_human_decision(context, mismatched)
+
+
+def test_human_decision_policy_rejects_bad_signature_and_duplicate_decision(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    context, request, claim = _pending_approval_context(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    bad_signature = claim.model_copy(update={"signature": "A" * 86})
+    duplicate_context = replace(
+        context,
+        replay_state=replace(
+            context.replay_state,
+            approval_decision_by_request=((request.receipt_id, "d" * 64),),
+        ),
+    )
+
+    with pytest.raises(AuthorizationPolicyError, match="signature"):
+        policy_module.validate_human_decision(context, bad_signature)
+    with pytest.raises(AuthorizationPolicyError, match="already"):
+        policy_module.validate_human_decision(duplicate_context, claim)
+
+
+def test_human_decision_policy_rejects_stale_ingestion(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    context, _, claim = _pending_approval_context(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+    stale = replace(
+        context,
+        transaction_time=claim.decided_at + timedelta(seconds=301),
+    )
+
+    with pytest.raises(AuthorizationPolicyError, match="freshness"):
+        policy_module.validate_human_decision(stale, claim)
+
+
+def test_human_decision_policy_denies_expired_approval_at_ingestion(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+    sidecar_receipt_factory,
+) -> None:
+    context, _, claim = _pending_approval_context(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+    )
+
+    decision = policy_module.validate_human_decision(
+        replace(
+            context,
+            transaction_time=claim.expires_at + timedelta(seconds=1),
+        ),
+        claim,
+    )
+
+    assert decision.allowed is False
+    assert decision.error_code == "APPROVAL_DENIED"
+
+
+def test_human_decision_policy_allows_maintainer_termination_without_request(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    context, _ = _prospective_context(
+        tmp_path=tmp_path,
+        label="human-termination",
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+    )
+    claim = _termination_claim(
+        signed_work_order,
+        ephemeral_role_keys,
+        decided_at="2026-01-01T00:00:05Z",
+    )
+
+    decision = policy_module.validate_human_decision(
+        replace(context, independent_failure_terminal=True),
+        claim,
+    )
+
+    assert decision.allowed
+    assert decision.error_code is None
+
+
+def test_human_decision_policy_enforces_termination_state_and_role(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    context, _ = _prospective_context(
+        tmp_path=tmp_path,
+        label="human-termination-denied",
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+    )
+    maintainer = _termination_claim(
+        signed_work_order,
+        ephemeral_role_keys,
+        decided_at="2026-01-01T00:00:05Z",
+    )
+    developer = _termination_claim(
+        signed_work_order,
+        ephemeral_role_keys,
+        role="Developer",
+        decided_at="2026-01-01T00:00:05Z",
+    )
+
+    assert policy_module.validate_human_decision(
+        replace(context, current_state="accepted"),
+        maintainer,
+    ).error_code == "STATE_DENIED"
+    assert policy_module.validate_human_decision(
+        context,
+        developer,
+    ).error_code == "ROLE_DENIED"
 
 
 def test_tool_authorization_arguments_enforce_grant_roots(
