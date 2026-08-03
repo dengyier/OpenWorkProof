@@ -1313,6 +1313,15 @@ def test_derive_docker_execution_plan_is_exact_and_deterministic() -> None:
         "-c",
         "printf containment-ok",
     )
+    mount_specs = tuple(
+        first.create_container_argv[index + 1]
+        for index, argument in enumerate(first.create_container_argv)
+        if argument == "--mount"
+    )
+    assert mount_specs == (
+        "type=volume,source=owp-workspace-01,target=/workspace,readonly",
+        "type=volume,source=owp-output-01,target=/output",
+    )
     assert first.start_container_argv == (
         "/usr/local/bin/docker",
         "start",
@@ -1536,6 +1545,7 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
             "/tmp": "rw,noexec,nosuid,size=256m"
         }
         mounts = {item["Destination"]: item for item in inspected["Mounts"]}
+        assert set(mounts) == {"/workspace", "/output"}
         assert mounts["/workspace"]["Type"] == "volume"
         assert mounts["/workspace"]["Name"] == plan.workspace_volume.name
         assert mounts["/workspace"]["RW"] is False
