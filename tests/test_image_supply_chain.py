@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,16 +19,19 @@ SOURCE_REVISION = "33a485eacf4ab97b2507f00e5a824ba4a5c8c29c"
 INVENTORY_PATH = (
     IMAGE_ROOT / "candidates" / f"{SOURCE_REVISION}.json"
 )
-FULL_WHEELHOUSE_SUMS = Path(
-    "/Users/molin/Project/openWorkProof-day0/wheelhouse/"
-    "linux-arm64-cp312-full/SHA256SUMS"
-)
-
-
 def _read(relative_path: str) -> str:
     path = IMAGE_ROOT / relative_path
     assert path.is_file(), f"missing supply-chain input: {path}"
     return path.read_text(encoding="utf-8")
+
+
+def _git_bytes(revision: str, relative_path: str) -> bytes:
+    return subprocess.run(
+        ["git", "show", f"{revision}:{relative_path}"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+    ).stdout
 
 
 def _locked_packages(lock_text: str) -> tuple[str, ...]:
@@ -39,6 +43,17 @@ def _locked_packages(lock_text: str) -> tuple[str, ...]:
             flags=re.MULTILINE,
         )
     )
+
+
+def test_supplychain_test_contract_is_portable_and_registered() -> None:
+    test_source = Path(__file__).read_text(encoding="utf-8")
+    forbidden_home = "/Users" + "/molin/"
+    project_config = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    record = _read("README.md")
+
+    assert forbidden_home not in test_source
+    assert '"supplychain:' in project_config
+    assert "OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT" in record
 
 
 def test_execution_image_contract_is_minimal_and_offline() -> None:
@@ -177,15 +192,31 @@ def test_candidate_inventory_is_closed_and_claims_only_local_evidence() -> None:
         "execution",
         "trusted_helper",
     }
-    assert FULL_WHEELHOUSE_SUMS.is_file()
-    assert inventory["build_inputs"]["global"] == {
-        "project_requirements_lock_sha256": hashlib.sha256(
-            (ROOT / "requirements-lock.txt").read_bytes()
-        ).hexdigest(),
-        "full_wheelhouse_sha256sums_sha256": hashlib.sha256(
-            FULL_WHEELHOUSE_SUMS.read_bytes()
-        ).hexdigest(),
+    tracked_inputs = {
+        ("global", "project_requirements_lock_sha256"): "requirements-lock.txt",
+        ("execution", "dockerfile_sha256"): (
+            "supply-chain/images/execution/Dockerfile"
+        ),
+        ("execution", "requirements_lock_sha256"): (
+            "supply-chain/images/execution/requirements.lock"
+        ),
+        ("trusted_helper", "dockerfile_sha256"): (
+            "supply-chain/images/trusted-helper/Dockerfile"
+        ),
+        ("trusted_helper", "requirements_lock_sha256"): (
+            "supply-chain/images/trusted-helper/requirements.lock"
+        ),
+        ("trusted_helper", "debian_packages_lock_sha256"): (
+            "supply-chain/images/trusted-helper/debian-packages.lock"
+        ),
+        ("trusted_helper", "source_allowlist_sha256"): (
+            "supply-chain/images/trusted-helper/SOURCE_ALLOWLIST"
+        ),
     }
+    for (group, key), relative_path in tracked_inputs.items():
+        assert inventory["build_inputs"][group][key] == hashlib.sha256(
+            _git_bytes(inventory["source_revision"], relative_path)
+        ).hexdigest()
     for inputs in inventory["build_inputs"].values():
         assert all(
             re.fullmatch(r"[0-9a-f]{64}", digest)
@@ -220,16 +251,21 @@ def test_candidate_inventory_is_closed_and_claims_only_local_evidence() -> None:
             "oci-image-layout-archive"
         )
 
-    assert inventory["external_layout"] == {
-        "local_root": "/Users/molin/Project/openWorkProof-day0",
-        "path_rule": "join-local-root-with-relative-path-no-parent-traversal",
-        "relative_paths": {
-            "wheelhouse": "wheelhouse/linux-arm64-cp312-full",
-            "git_deb_closure": "debs/linux-arm64-trixie-git",
-            "execution_build_context": "build-contexts/execution",
-            "trusted_helper_build_context": "build-contexts/trusted-helper",
-            "archives": "oci",
-        },
+    assert set(inventory["external_layout"]) == {
+        "local_root",
+        "path_rule",
+        "relative_paths",
+    }
+    assert Path(inventory["external_layout"]["local_root"]).is_absolute()
+    assert inventory["external_layout"]["path_rule"] == (
+        "join-local-root-with-relative-path-no-parent-traversal"
+    )
+    assert inventory["external_layout"]["relative_paths"] == {
+        "wheelhouse": "wheelhouse/linux-arm64-cp312-full",
+        "git_deb_closure": "debs/linux-arm64-trixie-git",
+        "execution_build_context": "build-contexts/execution",
+        "trusted_helper_build_context": "build-contexts/trusted-helper",
+        "archives": "oci",
     }
     assert inventory["license"] == {
         "status": "PENDING",

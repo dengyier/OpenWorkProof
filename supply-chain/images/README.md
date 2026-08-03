@@ -46,9 +46,26 @@ Git closure 由固定基础镜像中的 Debian 13 trixie sources 解析；实际
 仓库外目录。每个上下文包含其 Dockerfile、`requirements.lock`、`wheels/`；
 helper 另含 `debs/` 和 `helper-src/`。`wheels/SHA256SUMS` 只列上下文内 wheel，
 `debs/SHA256SUMS` 只列上下文内 `.deb`。helper 源文件按 `SOURCE_ALLOWLIST`
-逐一复制，禁止复制整个 `src/openworkproof`；`helper-src/SHA256SUMS` 必须按
-构建 revision 的三份精确 bytes 生成，Dockerfile 在 COPY 后再次校验并删除
-该清单。
+从指定 Git revision 的 blob 提取，禁止从 working tree 复制，也禁止复制整个
+`src/openworkproof`；`helper-src/SHA256SUMS` 必须按构建 revision 的三份精确
+bytes 生成，Dockerfile 在 COPY 后再次校验并删除该清单。
+
+`prepare_context.py` 是生成这两个 context 的唯一标准入口；不得手工拼装或使用
+其他脚本替代。它要求精确 40 位小写 commit SHA，先核验完整 wheelhouse 和 Deb
+closure，再在同一临时根中生成并复核两个 context，最后原子发布。目标目录必须
+尚不存在：
+
+```bash
+export OWP_REPO=/path/to/openWorkProof
+export OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/path/to/openWorkProof-day0
+export OWP_SOURCE_REVISION=0123456789abcdef0123456789abcdef01234567
+python "$OWP_REPO/supply-chain/images/prepare_context.py" \
+  --repo "$OWP_REPO" \
+  --source-revision "$OWP_SOURCE_REVISION" \
+  --wheelhouse "$OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT/wheelhouse/linux-arm64-cp312-full" \
+  --deb-closure "$OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT/debs/linux-arm64-trixie-git" \
+  --output-root "$OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT/build-contexts"
+```
 
 构建时固定 `--platform linux/arm64 --network none --pull=false`，并传入当前
 仓库提交作为 `OWP_SOURCE_REVISION`。网络只允许出现在仓库外输入的独立获取
@@ -75,3 +92,21 @@ OCI label。
 本地构建、断网 smoke、`docker save` 和 archive SHA-256 只证明本机 candidate
 产物可复核；它们不构成 Acceptor access，不构成 clean-cache reacquisition，
 不构成 Day 0 PASS，也不证明外部验收、推送、发布或比赛交付。
+
+## 验证命令
+
+普通测试不依赖仓库外个人路径；未设置 artifact root 时，`supplychain` 集成测试
+精确 skip：
+
+```bash
+pytest
+```
+
+控制端必须显式提供 artifact root，并要求 live Docker。此模式下缺 root、Docker
+daemon 或本地 candidate image 都是失败，不能降级为 skip：
+
+```bash
+OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/path/to/openWorkProof-day0 \
+OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 \
+pytest -m supplychain tests/test_candidate_supplychain_integration.py
+```
