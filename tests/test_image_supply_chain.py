@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
 
@@ -11,6 +12,10 @@ IMAGE_ROOT = ROOT / "supply-chain" / "images"
 BASE_IMAGE = (
     "docker.io/library/python@sha256:"
     "57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de"
+)
+SOURCE_REVISION = "33a485eacf4ab97b2507f00e5a824ba4a5c8c29c"
+INVENTORY_PATH = (
+    IMAGE_ROOT / "candidates" / f"{SOURCE_REVISION}.json"
 )
 
 
@@ -137,3 +142,87 @@ def test_supply_chain_record_keeps_day0_and_acceptor_claims_closed() -> None:
     assert "不构成 Acceptor access" in record
     assert "不构成 clean-cache reacquisition" in record
     assert "不构成 Day 0 PASS" in record
+
+
+def test_candidate_inventory_is_closed_and_claims_only_local_evidence() -> None:
+    assert INVENTORY_PATH.is_file(), f"missing candidate inventory: {INVENTORY_PATH}"
+    inventory = json.loads(INVENTORY_PATH.read_text(encoding="utf-8"))
+
+    assert set(inventory) == {
+        "schema_version",
+        "source_revision",
+        "base_image",
+        "build_inputs",
+        "images",
+        "external_layout",
+        "license",
+        "claims",
+    }
+    assert inventory["schema_version"] == (
+        "openworkproof-image-candidate-inventory/0.1"
+    )
+    assert inventory["source_revision"] == SOURCE_REVISION
+    assert inventory["base_image"] == {
+        "reference": BASE_IMAGE,
+        "platform": "linux/arm64",
+        "python_version": "3.12.13",
+    }
+    assert set(inventory["build_inputs"]) == {"execution", "trusted_helper"}
+    for inputs in inventory["build_inputs"].values():
+        assert all(
+            re.fullmatch(r"[0-9a-f]{64}", digest)
+            for digest in inputs.values()
+        )
+
+    assert set(inventory["images"]) == {"execution", "trusted_helper"}
+    for image in inventory["images"].values():
+        assert set(image) == {
+            "candidate_name",
+            "local_image_id",
+            "local_repo_digests",
+            "platform",
+            "user",
+            "entrypoint",
+            "cmd",
+            "labels",
+            "oci_manifest_digest",
+            "archives",
+        }
+        assert re.fullmatch(r"sha256:[0-9a-f]{64}", image["local_image_id"])
+        assert type(image["local_repo_digests"]) is list
+        assert image["platform"] == "linux/arm64"
+        assert image["user"] == "65532:65532"
+        assert image["labels"]["org.opencontainers.image.revision"] == SOURCE_REVISION
+        assert re.fullmatch(
+            r"sha256:[0-9a-f]{64}", image["oci_manifest_digest"]
+        )
+        assert set(image["archives"]) == {"docker", "oci"}
+        assert image["archives"]["docker"]["format"] == "docker-archive"
+        assert image["archives"]["oci"]["format"] == (
+            "oci-image-layout-archive"
+        )
+
+    assert inventory["external_layout"] == {
+        "local_root": "/Users/molin/Project/openWorkProof-day0",
+        "path_rule": "join-local-root-with-relative-path-no-parent-traversal",
+        "relative_paths": {
+            "wheelhouse": "wheelhouse/linux-arm64-cp312-full",
+            "git_deb_closure": "debs/linux-arm64-trixie-git",
+            "execution_build_context": "build-contexts/execution",
+            "trusted_helper_build_context": "build-contexts/trusted-helper",
+            "archives": "oci",
+        },
+    }
+    assert inventory["license"] == {
+        "status": "PENDING",
+        "spdx": "NOASSERTION",
+        "oci_label_present": False,
+    }
+    assert inventory["claims"] == {
+        "registry_pushed": False,
+        "acceptor_access": False,
+        "clean_cache_reacquisition": False,
+        "final_trusted_helper": False,
+        "day0_pass": False,
+        "acceptor_acquisition_path": None,
+    }

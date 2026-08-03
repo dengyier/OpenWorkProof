@@ -3,6 +3,14 @@
 本目录保存可审计、可复建的镜像定义和最小 hash-lock；wheel、Debian
 `.deb`、外部构建上下文和 OCI archive 不进入 Git。
 
+当前本地 candidate 的闭合机器清单为
+`candidates/33a485eacf4ab97b2507f00e5a824ba4a5c8c29c.json`。它绑定构建
+revision、基础镜像、全部 build-context 清单哈希、本地 image ID、原样
+`.RepoDigests`、运行配置、OCI manifest 和 archive 哈希。当前外部本地根为
+`/Users/molin/Project/openWorkProof-day0`；清单中的外部路径必须按
+`local_root + relative_path` 解析，拒绝父目录穿越，不能把这个本机路径写成
+Acceptor 获取路径。
+
 ## 冻结输入
 
 - 基础镜像：`docker.io/library/python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de`，`linux/arm64`，Python 3.12.13，Debian 13 trixie。
@@ -52,6 +60,13 @@ helper 另含 `debs/` 和 `helper-src/`。`wheels/SHA256SUMS` 只列上下文内
   退出 64；不得把它描述为最终 trusted helper。
 - 两者运行身份均为 `65532:65532`，并记录 source、revision、role 和基础
   digest OCI labels。
+
+`*.docker-archive.tar` 是 `docker save` 产生的 Docker archive；
+`*.oci-archive.tar` 是 `docker buildx --output type=oci` 产生、包含
+`oci-layout` 与 `index.json` 的真实 OCI image-layout archive。两者格式和哈希
+在 candidate 清单中分开记录，不能互称。项目代码/文档许可证仍待权利人确认：
+清单固定记录 `status=PENDING`、`spdx=NOASSERTION`，镜像中不添加 license
+OCI label。
 
 本地构建、断网 smoke、`docker save` 和 archive SHA-256 只证明本机 candidate
 产物可复核；它们不构成 Acceptor access，不构成 clean-cache reacquisition，

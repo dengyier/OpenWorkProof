@@ -1,0 +1,129 @@
+{
+  "schema_version": "openworkproof-image-candidate-inventory/0.1",
+  "source_revision": "33a485eacf4ab97b2507f00e5a824ba4a5c8c29c",
+  "base_image": {
+    "reference": "docker.io/library/python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de",
+    "platform": "linux/arm64",
+    "python_version": "3.12.13"
+  },
+  "build_inputs": {
+    "execution": {
+      "dockerfile_sha256": "9aa0f14acd630b5277988a3af6838821bbf5f7b198a37d9e03f657edc596448f",
+      "requirements_lock_sha256": "f60a9bd1cc239a5c2eab11e92665d1af10f457ee06381398350d9ddf0b8d4c70",
+      "wheel_sha256sums_sha256": "d34350069473b90a356fc24f41362bd457c87112ac82ad5f3468ebc97b5df5b2"
+    },
+    "trusted_helper": {
+      "dockerfile_sha256": "76adc95424020b87fbd53d2b4507b6694340394b5140c79c1ab63153391662ab",
+      "requirements_lock_sha256": "a6fc946cbfb709962f85a38d5c3c5d605dc0885a363bf25045a9e5c4dd783435",
+      "debian_packages_lock_sha256": "d19818e666e1e62644a264d5ef28a8779e04b549e402351f9b1c1cbd90a470b1",
+      "source_allowlist_sha256": "dbb1684f2c045636da8dd341d189269467ed4f995ac0fb3e16b182c631184697",
+      "wheel_sha256sums_sha256": "1e75f54377e6fe7e303b60c6ad3c07bbaa886986a938b2b4f00ff5cf76e45dcf",
+      "deb_sha256sums_sha256": "79095383da9e8413666d9d8e78c04b57197adcd616358fdea87e5d0a98c8460e",
+      "helper_src_sha256sums_sha256": "d9008a90fc0610e69c1ade16bb85ba3d6a0419958bc7f8528af10b97766cb66a"
+    }
+  },
+  "images": {
+    "execution": {
+      "candidate_name": "openworkproof/execution-test:candidate",
+      "local_image_id": "sha256:ae4b1086f0ef00b745892fa1a5160d1e7454c879e304c400f734d32ea2c13fd7",
+      "local_repo_digests": [
+        "openworkproof/execution-test@sha256:ae4b1086f0ef00b745892fa1a5160d1e7454c879e304c400f734d32ea2c13fd7"
+      ],
+      "platform": "linux/arm64",
+      "user": "65532:65532",
+      "entrypoint": [
+        "/usr/bin/env",
+        "--"
+      ],
+      "cmd": [
+        "/opt/venv/bin/python",
+        "-I",
+        "-m",
+        "pytest"
+      ],
+      "labels": {
+        "org.opencontainers.image.title": "OpenWorkProof Rich execution/test candidate",
+        "org.opencontainers.image.description": "Offline Python 3.12 pytest runtime for the fixed Rich 15 source test",
+        "org.opencontainers.image.source": "https://github.com/dengyier/OpenWorkProof",
+        "org.opencontainers.image.revision": "33a485eacf4ab97b2507f00e5a824ba4a5c8c29c",
+        "org.openworkproof.image.role": "execution-test",
+        "org.openworkproof.base.digest": "sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de"
+      },
+      "oci_manifest_digest": "sha256:ad72188f6e9f9905caedb10edd5328a6951ce54e81f24f0e6c1ae0a42e373197",
+      "archives": {
+        "docker": {
+          "format": "docker-archive",
+          "filename": "openworkproof-execution-test-candidate.docker-archive.tar",
+          "sha256": "c0b147675dbdde10308733ea8d48d82e8fac0aedf6a557abe20179fb95f5172b"
+        },
+        "oci": {
+          "format": "oci-image-layout-archive",
+          "filename": "openworkproof-execution-test-candidate.oci-archive.tar",
+          "sha256": "c449ab6034fef3bfdb8a3b81c69668d0986d4b31da53d97ee6c359001d572500"
+        }
+      }
+    },
+    "trusted_helper": {
+      "candidate_name": "openworkproof/trusted-helper-candidate:candidate",
+      "local_image_id": "sha256:4ccfcde65f95410116c279bff3c884b426835e8390f03562f7cb3b4902322b86",
+      "local_repo_digests": [
+        "openworkproof/trusted-helper-candidate@sha256:4ccfcde65f95410116c279bff3c884b426835e8390f03562f7cb3b4902322b86"
+      ],
+      "platform": "linux/arm64",
+      "user": "65532:65532",
+      "entrypoint": [
+        "/opt/venv/bin/python",
+        "-I"
+      ],
+      "cmd": [
+        "-c",
+        "import sys; sys.exit(64)"
+      ],
+      "labels": {
+        "org.opencontainers.image.title": "OpenWorkProof trusted-helper candidate",
+        "org.opencontainers.image.description": "Offline candidate containing Git and the frozen OpenWorkProof helper subset",
+        "org.opencontainers.image.source": "https://github.com/dengyier/OpenWorkProof",
+        "org.opencontainers.image.revision": "33a485eacf4ab97b2507f00e5a824ba4a5c8c29c",
+        "org.openworkproof.image.role": "trusted-helper-candidate",
+        "org.openworkproof.base.digest": "sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de"
+      },
+      "oci_manifest_digest": "sha256:16ba3fc95d257f2ecc4ab6259e4691dcba46c1e15ffe1c95b762c786c4517921",
+      "archives": {
+        "docker": {
+          "format": "docker-archive",
+          "filename": "openworkproof-trusted-helper-candidate.docker-archive.tar",
+          "sha256": "832a06d4c68c2c5de49883e3392263bfa19d938d37445a284af709c757872783"
+        },
+        "oci": {
+          "format": "oci-image-layout-archive",
+          "filename": "openworkproof-trusted-helper-candidate.oci-archive.tar",
+          "sha256": "022577ae078b798932c88ca7d13fbe657933586cbf0877d628412e603b42d34b"
+        }
+      }
+    }
+  },
+  "external_layout": {
+    "local_root": "/Users/molin/Project/openWorkProof-day0",
+    "path_rule": "join-local-root-with-relative-path-no-parent-traversal",
+    "relative_paths": {
+      "wheelhouse": "wheelhouse/linux-arm64-cp312-full",
+      "git_deb_closure": "debs/linux-arm64-trixie-git",
+      "execution_build_context": "build-contexts/execution",
+      "trusted_helper_build_context": "build-contexts/trusted-helper",
+      "archives": "oci"
+    }
+  },
+  "license": {
+    "status": "PENDING",
+    "spdx": "NOASSERTION",
+    "oci_label_present": false
+  },
+  "claims": {
+    "registry_pushed": false,
+    "acceptor_access": false,
+    "clean_cache_reacquisition": false,
+    "final_trusted_helper": false,
+    "day0_pass": false,
+    "acceptor_acquisition_path": null
+  }
+}
