@@ -84,6 +84,38 @@ def _file_tree(root: Path) -> dict[str, tuple[str, bytes]]:
     return tree
 
 
+def _verify_context_manifest_bindings(
+    execution_context: Path,
+    helper_context: Path,
+    inventory: dict[str, object],
+) -> None:
+    build_inputs = inventory["build_inputs"]
+    assert isinstance(build_inputs, dict)
+    execution_inputs = build_inputs["execution"]
+    helper_inputs = build_inputs["trusted_helper"]
+    assert isinstance(execution_inputs, dict) and isinstance(helper_inputs, dict)
+    bindings = (
+        (
+            execution_context / "wheels/SHA256SUMS",
+            execution_inputs["wheel_sha256sums_sha256"],
+        ),
+        (
+            helper_context / "wheels/SHA256SUMS",
+            helper_inputs["wheel_sha256sums_sha256"],
+        ),
+        (
+            helper_context / "debs/SHA256SUMS",
+            helper_inputs["deb_sha256sums_sha256"],
+        ),
+        (
+            helper_context / "helper-src/SHA256SUMS",
+            helper_inputs["helper_src_sha256sums_sha256"],
+        ),
+    )
+    for manifest, expected_digest in bindings:
+        assert _sha256_file(manifest) == expected_digest
+
+
 def _git_bytes(revision: str, relative_path: str) -> bytes:
     return subprocess.run(
         ["git", "show", f"{revision}:{relative_path}"],
@@ -158,6 +190,47 @@ def test_sha256_directory_verifier_rejects_non_regular_entries(
 
     with pytest.raises(AssertionError):
         _verify_sums(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("group", "key"),
+    [
+        ("execution", "wheel_sha256sums_sha256"),
+        ("trusted_helper", "wheel_sha256sums_sha256"),
+        ("trusted_helper", "deb_sha256sums_sha256"),
+        ("trusted_helper", "helper_src_sha256sums_sha256"),
+    ],
+)
+def test_context_manifest_binding_rejects_an_arbitrary_inventory_digest(
+    tmp_path: Path, group: str, key: str
+) -> None:
+    execution = tmp_path / "execution"
+    helper = tmp_path / "trusted-helper"
+    manifest_paths = {
+        ("execution", "wheel_sha256sums_sha256"): (
+            execution / "wheels/SHA256SUMS"
+        ),
+        ("trusted_helper", "wheel_sha256sums_sha256"): (
+            helper / "wheels/SHA256SUMS"
+        ),
+        ("trusted_helper", "deb_sha256sums_sha256"): (
+            helper / "debs/SHA256SUMS"
+        ),
+        ("trusted_helper", "helper_src_sha256sums_sha256"): (
+            helper / "helper-src/SHA256SUMS"
+        ),
+    }
+    inventory = {"build_inputs": {"execution": {}, "trusted_helper": {}}}
+    for (input_group, input_key), path in manifest_paths.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(path.as_posix(), encoding="utf-8")
+        inventory["build_inputs"][input_group][input_key] = _sha256_file(path)
+
+    _verify_context_manifest_bindings(execution, helper, inventory)
+    inventory["build_inputs"][group][key] = _sha256_bytes(b"arbitrary digest")
+
+    with pytest.raises(AssertionError):
+        _verify_context_manifest_bindings(execution, helper, inventory)
 
 
 def _docker(
@@ -344,6 +417,7 @@ def test_candidate_artifact_chain(tmp_path: Path) -> None:
     _verify_sums(helper_context / "wheels")
     _verify_sums(helper_context / "debs")
     _verify_sums(helper_context / "helper-src")
+    _verify_context_manifest_bindings(execution_context, helper_context, inventory)
     allowlist = _git_bytes(
         revision, "supply-chain/images/trusted-helper/SOURCE_ALLOWLIST"
     ).decode().splitlines()
