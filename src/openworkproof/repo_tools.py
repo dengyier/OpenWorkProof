@@ -2476,6 +2476,10 @@ def _scan_candidate_workspace_identity(
                 names.append(item.name)
         names.sort(key=os.fsencode)
         for name in names:
+            if entries_seen >= _MAX_WORKSPACE_MANIFEST_ENTRIES:
+                raise CandidateWorkspaceError(
+                    "candidate workspace identity exceeds entry limit"
+                )
             name_bytes = os.fsencode(name)
             path_bytes = prefix + name_bytes if prefix else name_bytes
             if len(path_bytes) > _MAX_WORKSPACE_IDENTITY_PATH_BYTES:

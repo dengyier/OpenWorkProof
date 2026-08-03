@@ -2071,6 +2071,83 @@ def test_workspace_identity_snapshot_rejects_limit(
         os.close(descriptor)
 
 
+def test_workspace_identity_snapshot_enforces_global_limit_after_recursion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"base\n",
+        additional_files=(
+            repo_tools.SourceFile("a/x", "100644", b"x\n"),
+            repo_tools.SourceFile("z", "100644", b"z\n"),
+        ),
+    )
+    descriptors_before = len(os.listdir("/dev/fd"))
+    descriptor = os.open(
+        candidate.worktree,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    monkeypatch.setattr(repo_tools, "_MAX_WORKSPACE_MANIFEST_ENTRIES", 3)
+
+    try:
+        with pytest.raises(repo_tools.CandidateWorkspaceError):
+            repo_tools._scan_candidate_workspace_identity(descriptor)
+    finally:
+        os.close(descriptor)
+
+    assert len(os.listdir("/dev/fd")) == descriptors_before
+
+
+def test_workspace_identity_snapshot_rejects_513th_before_stat_or_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    (candidate.worktree / "README.md").unlink()
+    nested = candidate.worktree / "0"
+    nested.mkdir()
+    (nested / "x").write_bytes(b"x\n")
+    for index in range(511):
+        (candidate.worktree / f"s{index:03d}").write_bytes(b"s\n")
+    real_open = repo_tools.os.open
+    real_stat = repo_tools.os.stat
+    observed_513th = False
+
+    def observe_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal observed_513th
+        if path == "s510":
+            observed_513th = True
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    def observe_stat(path, *, dir_fd=None, follow_symlinks=True):
+        nonlocal observed_513th
+        if path == "s510":
+            observed_513th = True
+        return real_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    descriptors_before = len(os.listdir("/dev/fd"))
+    descriptor = os.open(
+        candidate.worktree,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    monkeypatch.setattr(repo_tools.os, "open", observe_open)
+    monkeypatch.setattr(repo_tools.os, "stat", observe_stat)
+
+    try:
+        with pytest.raises(repo_tools.CandidateWorkspaceError):
+            repo_tools._scan_candidate_workspace_identity(descriptor)
+    finally:
+        os.close(descriptor)
+
+    assert observed_513th is False
+    assert len(os.listdir("/dev/fd")) == descriptors_before
+
+
 def test_read_candidate_file_never_returns_prefix_during_truncation_race(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
