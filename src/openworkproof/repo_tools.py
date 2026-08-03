@@ -91,6 +91,8 @@ _MAX_PATCH_PATH_BYTES = 512
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _MAX_WORKSPACE_MANIFEST_ENTRIES = 512
 _WORKSPACE_TYPES = frozenset({"regular", "directory", "symlink", "other"})
+_MAX_PURGE_ENTRIES = 1_024
+_MAX_PURGE_DEPTH = 64
 
 OPENAT2_RESOLVE_FLAGS = (
     "RESOLVE_BENEATH",
@@ -133,6 +135,10 @@ class CandidateWorkspaceError(RuntimeError):
 
 class ProcessExecutionError(RuntimeError):
     """A bounded child process cannot be launched or cleaned up safely."""
+
+
+class EvidencePurgeError(RuntimeError):
+    """An evidence root cannot be safely purged."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,6 +411,12 @@ class BoundedProcessResult:
     stdout_prefix: bytes
     stderr_prefix: bytes
     combined_bytes_captured: int
+
+
+@dataclass(frozen=True, slots=True)
+class PurgeResult:
+    eligible: bool
+    removed_entries: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -2853,6 +2865,202 @@ def run_bounded_process(
         stderr_prefix=bytes(buffers["stderr"]),
         combined_bytes_captured=captured,
     )
+
+
+def _validated_purge_time(value: datetime, field_name: str) -> datetime:
+    if (
+        type(value) is not datetime
+        or value.tzinfo is None
+        or value.utcoffset() != timezone.utc.utcoffset(value)
+        or value.microsecond != 0
+    ):
+        raise EvidencePurgeError(
+            f"{field_name} must be a UTC datetime at whole-second precision"
+        )
+    return value
+
+
+def _open_private_evidence_root(evidence_root: Path) -> tuple[int, os.stat_result]:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    if (
+        type(nofollow) is not int
+        or nofollow <= 0
+        or type(directory) is not int
+        or directory <= 0
+    ):
+        raise EvidencePurgeError(
+            "evidence purge requires directory no-follow support"
+        )
+    if (
+        not isinstance(evidence_root, Path)
+        or not evidence_root.is_absolute()
+        or evidence_root != Path(os.path.abspath(evidence_root))
+    ):
+        raise EvidencePurgeError("evidence root must be an absolute canonical path")
+    try:
+        named = os.stat(evidence_root, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(named.st_mode)
+            or stat.S_IMODE(named.st_mode) != 0o700
+            or named.st_uid != os.geteuid()
+        ):
+            raise EvidencePurgeError(
+                "evidence root must be a private directory owned by this process"
+            )
+        descriptor = os.open(
+            evidence_root,
+            os.O_RDONLY | directory | nofollow | cloexec,
+        )
+    except EvidencePurgeError:
+        raise
+    except OSError as error:
+        raise EvidencePurgeError("evidence root cannot be opened safely") from error
+    try:
+        opened = os.fstat(descriptor)
+        if not os.path.samestat(named, opened):
+            raise EvidencePurgeError("evidence root identity changed while opening")
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor, opened
+
+
+def _purge_entry_count(
+    directory_fd: int,
+    *,
+    root_device: int,
+    depth: int,
+    count: list[int],
+) -> None:
+    if depth > _MAX_PURGE_DEPTH:
+        raise EvidencePurgeError("evidence tree exceeds the purge depth limit")
+    nofollow = os.O_NOFOLLOW
+    directory = os.O_DIRECTORY
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    try:
+        names = sorted(os.listdir(directory_fd), key=os.fsencode)
+        for name in names:
+            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            count[0] += 1
+            if count[0] > _MAX_PURGE_ENTRIES:
+                raise EvidencePurgeError(
+                    "evidence tree exceeds the purge entry limit"
+                )
+            if not stat.S_ISDIR(metadata.st_mode):
+                continue
+            if metadata.st_dev != root_device:
+                raise EvidencePurgeError(
+                    "evidence tree crosses a filesystem boundary"
+                )
+            child_fd = os.open(
+                name,
+                os.O_RDONLY | directory | nofollow | cloexec,
+                dir_fd=directory_fd,
+            )
+            try:
+                if not os.path.samestat(metadata, os.fstat(child_fd)):
+                    raise EvidencePurgeError(
+                        "evidence directory identity changed while scanning"
+                    )
+                _purge_entry_count(
+                    child_fd,
+                    root_device=root_device,
+                    depth=depth + 1,
+                    count=count,
+                )
+            finally:
+                os.close(child_fd)
+    except EvidencePurgeError:
+        raise
+    except OSError as error:
+        raise EvidencePurgeError("evidence tree cannot be scanned safely") from error
+
+
+def _purge_directory(directory_fd: int, *, root_device: int) -> int:
+    nofollow = os.O_NOFOLLOW
+    directory = os.O_DIRECTORY
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    removed = 0
+    try:
+        names = sorted(os.listdir(directory_fd), key=os.fsencode)
+        for name in names:
+            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISDIR(metadata.st_mode):
+                if metadata.st_dev != root_device:
+                    raise EvidencePurgeError(
+                        "evidence tree crosses a filesystem boundary"
+                    )
+                child_fd = os.open(
+                    name,
+                    os.O_RDONLY | directory | nofollow | cloexec,
+                    dir_fd=directory_fd,
+                )
+                try:
+                    if not os.path.samestat(metadata, os.fstat(child_fd)):
+                        raise EvidencePurgeError(
+                            "evidence directory identity changed while purging"
+                        )
+                    removed += _purge_directory(
+                        child_fd,
+                        root_device=root_device,
+                    )
+                finally:
+                    os.close(child_fd)
+                os.rmdir(name, dir_fd=directory_fd)
+            else:
+                os.unlink(name, dir_fd=directory_fd)
+            removed += 1
+        if names:
+            os.fsync(directory_fd)
+        return removed
+    except EvidencePurgeError:
+        raise
+    except OSError as error:
+        raise EvidencePurgeError("evidence tree cannot be purged safely") from error
+
+
+def purge_expired_evidence(
+    evidence_root: Path,
+    retention_until: datetime,
+    now: datetime,
+) -> PurgeResult:
+    """Delete an expired evidence root's descendants without following links."""
+
+    retention = _validated_purge_time(retention_until, "retention_until")
+    current_time = _validated_purge_time(now, "now")
+    root_fd, root_metadata = _open_private_evidence_root(evidence_root)
+    try:
+        if current_time < retention:
+            return PurgeResult(eligible=False, removed_entries=0)
+        count = [0]
+        _purge_entry_count(
+            root_fd,
+            root_device=root_metadata.st_dev,
+            depth=0,
+            count=count,
+        )
+        removed = _purge_directory(
+            root_fd,
+            root_device=root_metadata.st_dev,
+        )
+        if removed != count[0]:
+            raise EvidencePurgeError("evidence tree changed while purging")
+        try:
+            named_root = os.stat(evidence_root, follow_symlinks=False)
+        except OSError as error:
+            raise EvidencePurgeError(
+                "evidence root identity changed while purging"
+            ) from error
+        if (
+            not os.path.samestat(root_metadata, os.fstat(root_fd))
+            or not os.path.samestat(root_metadata, named_root)
+        ):
+            raise EvidencePurgeError("evidence root identity changed while purging")
+        return PurgeResult(eligible=True, removed_entries=removed)
+    finally:
+        os.close(root_fd)
 
 
 def _workspace_manifest_json(

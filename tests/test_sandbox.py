@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import copy
+from datetime import datetime, timedelta, timezone
 import hashlib
 import os
 from pathlib import Path
@@ -1218,3 +1219,108 @@ def test_run_bounded_process_output_limit_kills_descendant_process_group(
 
     assert result.failure_code == "OUTPUT_LIMIT"
     assert not marker.exists()
+
+
+def test_purge_expired_evidence_leaves_nonexpired_root_untouched(
+    tmp_path: Path,
+) -> None:
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir(mode=0o700)
+    artifact = evidence_root / "result.json"
+    artifact.write_bytes(b"{}")
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    result = repo_tools.purge_expired_evidence(
+        evidence_root,
+        retention_until=now + timedelta(seconds=1),
+        now=now,
+    )
+
+    assert result.eligible is False
+    assert result.removed_entries == 0
+    assert artifact.read_bytes() == b"{}"
+
+
+def test_purge_expired_evidence_removes_only_descendants_without_following_symlink(
+    tmp_path: Path,
+) -> None:
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir(mode=0o700)
+    nested = evidence_root / "nested"
+    nested.mkdir()
+    (nested / "result.json").write_bytes(b"{}")
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"keep")
+    (evidence_root / "outside-link").symlink_to(outside)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    result = repo_tools.purge_expired_evidence(
+        evidence_root,
+        retention_until=now,
+        now=now,
+    )
+
+    assert result.eligible is True
+    assert result.removed_entries == 3
+    assert evidence_root.is_dir()
+    assert tuple(evidence_root.iterdir()) == ()
+    assert outside.read_bytes() == b"keep"
+
+
+def test_purge_expired_evidence_rejects_symlink_root_without_touching_target(
+    tmp_path: Path,
+) -> None:
+    actual_root = tmp_path / "actual-evidence"
+    actual_root.mkdir(mode=0o700)
+    artifact = actual_root / "result.json"
+    artifact.write_bytes(b"{}")
+    linked_root = tmp_path / "linked-evidence"
+    linked_root.symlink_to(actual_root, target_is_directory=True)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    with pytest.raises(repo_tools.EvidencePurgeError):
+        repo_tools.purge_expired_evidence(linked_root, now, now)
+
+    assert artifact.read_bytes() == b"{}"
+
+
+@pytest.mark.parametrize(
+    "invalid_time",
+    (
+        datetime(2026, 1, 1),
+        datetime(2026, 1, 1, microsecond=1, tzinfo=timezone.utc),
+    ),
+)
+def test_purge_expired_evidence_rejects_noncanonical_time_without_deleting(
+    tmp_path: Path,
+    invalid_time: datetime,
+) -> None:
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir(mode=0o700)
+    artifact = evidence_root / "result.json"
+    artifact.write_bytes(b"{}")
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    with pytest.raises(repo_tools.EvidencePurgeError):
+        repo_tools.purge_expired_evidence(
+            evidence_root,
+            retention_until=invalid_time,
+            now=now,
+        )
+
+    assert artifact.read_bytes() == b"{}"
+
+
+def test_purge_expired_evidence_rejects_oversized_tree_before_deleting(
+    tmp_path: Path,
+) -> None:
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir(mode=0o700)
+    for ordinal in range(1_025):
+        (evidence_root / f"{ordinal:04d}.json").write_bytes(b"{}")
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    with pytest.raises(repo_tools.EvidencePurgeError):
+        repo_tools.purge_expired_evidence(evidence_root, now, now)
+
+    assert len(tuple(evidence_root.iterdir())) == 1_025
