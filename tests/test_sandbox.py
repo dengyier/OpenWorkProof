@@ -6,6 +6,7 @@ import base64
 import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 import os
 from pathlib import Path
 import stat
@@ -1219,6 +1220,345 @@ def test_run_bounded_process_output_limit_kills_descendant_process_group(
 
     assert result.failure_code == "OUTPUT_LIMIT"
     assert not marker.exists()
+
+
+def _docker_plan(
+    *,
+    image_reference: str = (
+        "registry.example/openworkproof/test-runner@sha256:" + "a" * 64
+    ),
+    container_name: str = "owp-container-01",
+    workspace_volume_name: str = "owp-workspace-01",
+    output_volume_name: str = "owp-output-01",
+) -> repo_tools.DockerExecutionPlan:
+    return repo_tools.derive_docker_execution_plan(
+        docker_binary=Path("/usr/local/bin/docker"),
+        image_reference=image_reference,
+        container_name=container_name,
+        workspace_volume_name=workspace_volume_name,
+        output_volume_name=output_volume_name,
+        command=("/bin/sh", "-c", "printf containment-ok"),
+    )
+
+
+def test_derive_docker_execution_plan_is_exact_and_deterministic() -> None:
+    first = _docker_plan()
+    second = _docker_plan()
+
+    assert second == first
+    assert first.workspace_volume.name == "owp-workspace-01"
+    assert first.workspace_volume.size_bytes == 512 * 1024 * 1024
+    assert first.workspace_volume.mount_path == "/workspace"
+    assert first.workspace_volume.read_only is True
+    assert first.workspace_volume.create_argv == (
+        "/usr/local/bin/docker",
+        "volume",
+        "create",
+        "--driver",
+        "local",
+        "--opt",
+        "type=tmpfs",
+        "--opt",
+        "device=tmpfs",
+        "--opt",
+        "o=size=512m",
+        "owp-workspace-01",
+    )
+    assert first.output_volume.name == "owp-output-01"
+    assert first.output_volume.size_bytes == 64 * 1024 * 1024
+    assert first.output_volume.mount_path == "/output"
+    assert first.output_volume.read_only is False
+    assert first.output_volume.create_argv[-2:] == (
+        "o=size=64m",
+        "owp-output-01",
+    )
+    assert first.create_container_argv == (
+        "/usr/local/bin/docker",
+        "create",
+        "--name",
+        "owp-container-01",
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--user",
+        "65532:65532",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "128",
+        "--memory",
+        "1g",
+        "--cpus",
+        "1",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=256m",
+        "--workdir",
+        "/workspace",
+        "--mount",
+        (
+            "type=volume,source=owp-workspace-01,"
+            "target=/workspace,readonly"
+        ),
+        "--mount",
+        "type=volume,source=owp-output-01,target=/output",
+        (
+            "registry.example/openworkproof/test-runner@sha256:"
+            + "a" * 64
+        ),
+        "/bin/sh",
+        "-c",
+        "printf containment-ok",
+    )
+    assert first.start_container_argv == (
+        "/usr/local/bin/docker",
+        "start",
+        "--attach",
+        "owp-container-01",
+    )
+    assert first.cleanup_argv == (
+        (
+            "/usr/local/bin/docker",
+            "rm",
+            "--force",
+            "owp-container-01",
+        ),
+        (
+            "/usr/local/bin/docker",
+            "volume",
+            "rm",
+            "owp-workspace-01",
+        ),
+        (
+            "/usr/local/bin/docker",
+            "volume",
+            "rm",
+            "owp-output-01",
+        ),
+    )
+    joined = "\0".join(first.create_container_argv)
+    for forbidden in (
+        "/var/run/docker.sock",
+        str(Path.home()),
+        ".ssh",
+        ".git",
+        "credential",
+        "type=bind",
+    ):
+        assert forbidden not in joined
+
+
+@pytest.mark.parametrize(
+    "image_reference",
+    (
+        "alpine",
+        "alpine:latest",
+        "sha256:" + "a" * 64,
+        "registry.example/openworkproof/test-runner:latest",
+        (
+            "registry.example/openworkproof/test-runner:latest@sha256:"
+            + "a" * 64
+        ),
+        "registry.example/openworkproof/test-runner@sha256:" + "A" * 64,
+    ),
+)
+def test_derive_docker_execution_plan_rejects_mutable_or_unqualified_image(
+    image_reference: str,
+) -> None:
+    with pytest.raises(ValueError, match="immutable image reference"):
+        _docker_plan(image_reference=image_reference)
+
+
+@pytest.mark.parametrize(
+    ("container_name", "workspace_name", "output_name"),
+    (
+        ("same", "same", "different"),
+        ("same", "different", "same"),
+        ("different", "same", "same"),
+        ("invalid/name", "workspace", "output"),
+        ("container", "UPPERCASE", "output"),
+        ("container", "workspace", ""),
+    ),
+)
+def test_derive_docker_execution_plan_rejects_invalid_or_reused_names(
+    container_name: str,
+    workspace_name: str,
+    output_name: str,
+) -> None:
+    with pytest.raises(ValueError, match="identifier"):
+        _docker_plan(
+            container_name=container_name,
+            workspace_volume_name=workspace_name,
+            output_volume_name=output_name,
+        )
+
+
+def test_classify_docker_execution_failure_preserves_existing_precedence(
+) -> None:
+    observed = repo_tools.DockerObservedResult(
+        exit_code=137,
+        output_limit_exceeded=True,
+        timed_out=True,
+        workspace_volume_exhausted=True,
+        output_volume_exhausted=True,
+    )
+    assert repo_tools.classify_docker_execution_failure(observed) == (
+        "OUTPUT_LIMIT"
+    )
+    assert repo_tools.classify_docker_execution_failure(
+        repo_tools.DockerObservedResult(
+            exit_code=137,
+            output_limit_exceeded=False,
+            timed_out=True,
+            workspace_volume_exhausted=True,
+            output_volume_exhausted=True,
+        )
+    ) == "TIMEOUT"
+
+
+@pytest.mark.parametrize(
+    ("workspace_exhausted", "output_exhausted", "expected"),
+    (
+        (True, False, "DISK_LIMIT"),
+        (False, True, "DISK_LIMIT"),
+        (False, False, None),
+    ),
+)
+def test_classify_docker_execution_failure_uses_structured_volume_observation(
+    workspace_exhausted: bool,
+    output_exhausted: bool,
+    expected: str | None,
+) -> None:
+    observed = repo_tools.DockerObservedResult(
+        exit_code=1 if expected else 0,
+        output_limit_exceeded=False,
+        timed_out=False,
+        workspace_volume_exhausted=workspace_exhausted,
+        output_volume_exhausted=output_exhausted,
+    )
+
+    assert repo_tools.classify_docker_execution_failure(observed) == expected
+    assert not hasattr(observed, "stderr")
+
+
+@pytest.mark.docker
+def test_real_docker_enforces_frozen_containment_profile() -> None:
+    docker_binary = Path("/usr/local/bin/docker")
+    if not docker_binary.is_file() or not os.access(docker_binary, os.X_OK):
+        pytest.skip(f"Docker CLI unavailable at {docker_binary}")
+    daemon = subprocess.run(
+        (str(docker_binary), "info", "--format", "{{.ServerVersion}}"),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if daemon.returncode != 0:
+        details = daemon.stderr.strip().splitlines()
+        detail = details[-1] if details else f"docker info exited {daemon.returncode}"
+        pytest.skip(f"Docker daemon unavailable: {detail}")
+
+    image_reference = os.environ.get("OPENWORKPROOF_DOCKER_TEST_IMAGE")
+    if image_reference is None:
+        pytest.skip(
+            "immutable preloaded image reference unavailable: set "
+            "OPENWORKPROOF_DOCKER_TEST_IMAGE to repository@sha256:digest"
+        )
+    image = subprocess.run(
+        (str(docker_binary), "image", "inspect", image_reference),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if image.returncode != 0:
+        pytest.skip(
+            "immutable Docker test image is not preloaded: "
+            f"{image_reference}"
+        )
+
+    suffix = f"{os.getpid()}-{time.time_ns()}"
+    script = (
+        "set -eu; "
+        "test \"$(id -u):$(id -g)\" = 65532:65532; "
+        "if touch /workspace/forbidden 2>/dev/null; then exit 41; fi; "
+        "if touch /root-forbidden 2>/dev/null; then exit 42; fi; "
+        "touch /output/allowed; touch /tmp/allowed; "
+        "test ! -e /var/run/docker.sock; "
+        "printf containment-ok"
+    )
+    plan = repo_tools.derive_docker_execution_plan(
+        docker_binary=docker_binary,
+        image_reference=image_reference,
+        container_name=f"owp-container-{suffix}",
+        workspace_volume_name=f"owp-workspace-{suffix}",
+        output_volume_name=f"owp-output-{suffix}",
+        command=("/bin/sh", "-c", script),
+    )
+    try:
+        for volume in (plan.workspace_volume, plan.output_volume):
+            subprocess.run(
+                volume.create_argv,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        subprocess.run(
+            plan.create_container_argv,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        inspection = subprocess.run(
+            (str(docker_binary), "inspect", plan.container_name),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        inspected = json.loads(inspection.stdout)[0]
+        host = inspected["HostConfig"]
+        assert inspected["Config"]["User"] == "65532:65532"
+        assert host["NetworkMode"] == "none"
+        assert host["ReadonlyRootfs"] is True
+        assert host["CapDrop"] == ["ALL"]
+        assert host["SecurityOpt"] in (
+            ["no-new-privileges"],
+            ["no-new-privileges:true"],
+        )
+        assert host["PidsLimit"] == 128
+        assert host["Memory"] == 1024 * 1024 * 1024
+        assert host["NanoCpus"] == 1_000_000_000
+        assert host["Tmpfs"] == {
+            "/tmp": "rw,noexec,nosuid,size=256m"
+        }
+        mounts = {item["Destination"]: item for item in inspected["Mounts"]}
+        assert mounts["/workspace"]["Type"] == "volume"
+        assert mounts["/workspace"]["Name"] == plan.workspace_volume.name
+        assert mounts["/workspace"]["RW"] is False
+        assert mounts["/output"]["Type"] == "volume"
+        assert mounts["/output"]["Name"] == plan.output_volume.name
+        assert mounts["/output"]["RW"] is True
+
+        executed = subprocess.run(
+            plan.start_container_argv,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert executed.returncode == 0, executed.stderr
+        assert executed.stdout == "containment-ok"
+    finally:
+        for cleanup in plan.cleanup_argv:
+            subprocess.run(
+                cleanup,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
 
 
 def test_purge_expired_evidence_leaves_nonexpired_root_untouched(

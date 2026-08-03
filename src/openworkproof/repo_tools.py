@@ -59,6 +59,16 @@ _RUNTIME_CHILD_PATTERN = re.compile(
     r"^[0-9a-f]{64}(?:\.(?:rebuild|destroying))?$"
 )
 _IMAGE_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+_IMMUTABLE_IMAGE_REFERENCE_PATTERN = re.compile(
+    r"^(?:localhost|[a-z0-9]+(?:[.-][a-z0-9]+)*)"
+    r"(?::[1-9][0-9]{0,4})?/"
+    r"[a-z0-9]+(?:[._-][a-z0-9]+)*"
+    r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*"
+    r"@sha256:[0-9a-f]{64}$"
+)
+_DOCKER_IDENTIFIER_PATTERN = re.compile(
+    r"^[a-z0-9][a-z0-9_.-]{0,62}$"
+)
 _PATCH_PATH_PATTERN = re.compile(r"^[A-Za-z0-9._/-]+$")
 _PATCH_HEADER_PATTERN = re.compile(
     r"^diff --git a/(.+) b/(.+)\n$"
@@ -411,6 +421,37 @@ class BoundedProcessResult:
     stdout_prefix: bytes
     stderr_prefix: bytes
     combined_bytes_captured: int
+
+
+@dataclass(frozen=True, slots=True)
+class DockerVolumePlan:
+    name: str
+    size_bytes: int
+    mount_path: str
+    read_only: bool
+    create_argv: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DockerExecutionPlan:
+    docker_binary: Path
+    image_reference: str
+    container_name: str
+    command: tuple[str, ...]
+    workspace_volume: DockerVolumePlan
+    output_volume: DockerVolumePlan
+    create_container_argv: tuple[str, ...]
+    start_container_argv: tuple[str, ...]
+    cleanup_argv: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DockerObservedResult:
+    exit_code: int | None
+    output_limit_exceeded: bool
+    timed_out: bool
+    workspace_volume_exhausted: bool
+    output_volume_exhausted: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -2678,6 +2719,191 @@ def destroy_candidate_workspace(
         workspace_id=workspace.workspace_id,
         destroyed=True,
     )
+
+
+def _docker_volume_plan(
+    docker_binary: str,
+    *,
+    name: str,
+    size_mebibytes: int,
+    mount_path: str,
+    read_only: bool,
+) -> DockerVolumePlan:
+    return DockerVolumePlan(
+        name=name,
+        size_bytes=size_mebibytes * 1_024 * 1_024,
+        mount_path=mount_path,
+        read_only=read_only,
+        create_argv=(
+            docker_binary,
+            "volume",
+            "create",
+            "--driver",
+            "local",
+            "--opt",
+            "type=tmpfs",
+            "--opt",
+            "device=tmpfs",
+            "--opt",
+            f"o=size={size_mebibytes}m",
+            name,
+        ),
+    )
+
+
+def derive_docker_execution_plan(
+    *,
+    docker_binary: Path,
+    image_reference: str,
+    container_name: str,
+    workspace_volume_name: str,
+    output_volume_name: str,
+    command: tuple[str, ...],
+) -> DockerExecutionPlan:
+    """Return a deterministic, disposable Docker containment plan."""
+
+    if (
+        not isinstance(docker_binary, Path)
+        or not docker_binary.is_absolute()
+        or docker_binary != Path(os.path.abspath(docker_binary))
+        or "\0" in str(docker_binary)
+    ):
+        raise ValueError("Docker binary path is invalid")
+    if (
+        type(image_reference) is not str
+        or _IMMUTABLE_IMAGE_REFERENCE_PATTERN.fullmatch(image_reference) is None
+    ):
+        raise ValueError("Docker immutable image reference is invalid")
+    identifiers = (
+        container_name,
+        workspace_volume_name,
+        output_volume_name,
+    )
+    if (
+        any(
+            type(identifier) is not str
+            or _DOCKER_IDENTIFIER_PATTERN.fullmatch(identifier) is None
+            for identifier in identifiers
+        )
+        or len(set(identifiers)) != len(identifiers)
+    ):
+        raise ValueError("Docker identifiers must be valid and unique")
+    if type(command) is not tuple or not 1 <= len(command) <= 16:
+        raise ValueError("Docker command is invalid")
+    for argument in command:
+        if (
+            type(argument) is not str
+            or not argument
+            or "\0" in argument
+            or len(argument.encode("utf-8")) > 4_096
+        ):
+            raise ValueError("Docker command is invalid")
+
+    docker = str(docker_binary)
+    workspace = _docker_volume_plan(
+        docker,
+        name=workspace_volume_name,
+        size_mebibytes=512,
+        mount_path="/workspace",
+        read_only=True,
+    )
+    output = _docker_volume_plan(
+        docker,
+        name=output_volume_name,
+        size_mebibytes=64,
+        mount_path="/output",
+        read_only=False,
+    )
+    create_container_argv = (
+        docker,
+        "create",
+        "--name",
+        container_name,
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--user",
+        "65532:65532",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "128",
+        "--memory",
+        "1g",
+        "--cpus",
+        "1",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=256m",
+        "--workdir",
+        "/workspace",
+        "--mount",
+        (
+            f"type=volume,source={workspace.name},"
+            "target=/workspace,readonly"
+        ),
+        "--mount",
+        f"type=volume,source={output.name},target=/output",
+        image_reference,
+        *command,
+    )
+    return DockerExecutionPlan(
+        docker_binary=docker_binary,
+        image_reference=image_reference,
+        container_name=container_name,
+        command=command,
+        workspace_volume=workspace,
+        output_volume=output,
+        create_container_argv=create_container_argv,
+        start_container_argv=(
+            docker,
+            "start",
+            "--attach",
+            container_name,
+        ),
+        cleanup_argv=(
+            (docker, "rm", "--force", container_name),
+            (docker, "volume", "rm", workspace.name),
+            (docker, "volume", "rm", output.name),
+        ),
+    )
+
+
+def classify_docker_execution_failure(
+    observed: DockerObservedResult,
+) -> Literal["OUTPUT_LIMIT", "TIMEOUT", "DISK_LIMIT"] | None:
+    """Classify authoritative runtime observations without stderr parsing."""
+
+    if (
+        type(observed) is not DockerObservedResult
+        or (
+            observed.exit_code is not None
+            and (
+                type(observed.exit_code) is not int
+                or not 0 <= observed.exit_code <= 255
+            )
+        )
+        or any(
+            type(value) is not bool
+            for value in (
+                observed.output_limit_exceeded,
+                observed.timed_out,
+                observed.workspace_volume_exhausted,
+                observed.output_volume_exhausted,
+            )
+        )
+    ):
+        raise ValueError("Docker observed result is invalid")
+    if observed.output_limit_exceeded:
+        return "OUTPUT_LIMIT"
+    if observed.timed_out:
+        return "TIMEOUT"
+    if observed.workspace_volume_exhausted or observed.output_volume_exhausted:
+        return "DISK_LIMIT"
+    return None
 
 
 def _validated_process_request(
