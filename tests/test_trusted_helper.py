@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
+import json
 import os
 from pathlib import Path
 import socket
@@ -11,9 +14,11 @@ import subprocess
 import tempfile
 
 import pytest
+import rfc8785
 
 from openworkproof.models import RepoReadOutput
 import openworkproof.repo_tools as repo_tools
+import openworkproof.trusted_helper as trusted_helper
 
 
 def _candidate(
@@ -79,6 +84,441 @@ def _request(
         ),
         path=path,
     )
+
+
+def _dispatcher_request(
+    candidate: repo_tools.CandidateWorkspace,
+    *,
+    path: str = "README.md",
+) -> dict[str, object]:
+    return {
+        "schema_version": trusted_helper.REQUEST_SCHEMA,
+        "operation": "repo_read",
+        "workspace_id": candidate.workspace_id,
+        "source_artifact_sha256": candidate.source_artifact_sha256,
+        "expected_head_commit": candidate.head_commit,
+        "expected_workspace_manifest_digest": (
+            candidate.workspace_manifest_digest
+        ),
+        "path": path,
+    }
+
+
+def test_dispatcher_returns_exact_canonical_success(tmp_path: Path) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    stdin = io.BytesIO(rfc8785.dumps(_dispatcher_request(candidate)))
+    stdout = io.BytesIO()
+
+    exit_code = trusted_helper.main((), stdin, stdout, candidate.runtime_root)
+
+    assert exit_code == 0
+    assert stdout.getvalue() == rfc8785.dumps(
+        {
+            "schema_version": trusted_helper.RESPONSE_SCHEMA,
+            "status": "ok",
+            "result": {
+                "path": "README.md",
+                "content_sha256": hashlib.sha256(b"base\n").hexdigest(),
+                "size_bytes": 5,
+                "workspace_manifest_digest": (
+                    candidate.workspace_manifest_digest
+                ),
+            },
+            "content_b64url": base64.urlsafe_b64encode(b"base\n")
+            .decode("ascii")
+            .rstrip("="),
+        }
+    )
+
+
+def test_dispatcher_rejects_argv_before_reading_stdin() -> None:
+    class UnreadableInput:
+        def read(self, size: int) -> bytes:
+            raise AssertionError(f"stdin read unexpectedly with size {size}")
+
+    stdout = io.BytesIO()
+
+    exit_code = trusted_helper.main(
+        ("unexpected",), UnreadableInput(), stdout, Path("/runtime")
+    )
+
+    assert exit_code == 64
+    assert stdout.getvalue() == rfc8785.dumps(
+        {
+            "schema_version": trusted_helper.RESPONSE_SCHEMA,
+            "status": "error",
+            "code": "REQUEST_INVALID",
+        }
+    )
+
+
+def _dispatcher_error(code: str) -> bytes:
+    return rfc8785.dumps(
+        {
+            "schema_version": trusted_helper.RESPONSE_SCHEMA,
+            "status": "error",
+            "code": code,
+        }
+    )
+
+
+def _dispatch_raw(
+    raw: bytes,
+    runtime_root: Path,
+    *,
+    argv: object = (),
+) -> tuple[int, bytes]:
+    stdout = io.BytesIO()
+    exit_code = trusted_helper.main(argv, io.BytesIO(raw), stdout, runtime_root)
+    return exit_code, stdout.getvalue()
+
+
+def _assert_dispatch_error(
+    raw: bytes,
+    runtime_root: Path,
+    *,
+    code: str = "REQUEST_INVALID",
+) -> None:
+    exit_code, response = _dispatch_raw(raw, runtime_root)
+    assert exit_code == trusted_helper.EXIT_BY_CODE[code]
+    assert response == _dispatcher_error(code)
+    assert not response.endswith(b"\n")
+    if raw:
+        assert raw not in response
+    for secret in (b"README.md", b"private/secret.txt", b"file-secret"):
+        assert secret not in response
+
+
+def test_dispatcher_constants_are_frozen() -> None:
+    assert trusted_helper.REQUEST_SCHEMA == (
+        "openworkproof-trusted-helper-request/0.1"
+    )
+    assert trusted_helper.RESPONSE_SCHEMA == (
+        "openworkproof-trusted-helper-response/0.1"
+    )
+    assert trusted_helper.MAX_REQUEST_BYTES == 8192
+    assert trusted_helper.RUNTIME_ROOT == Path("/runtime")
+    assert trusted_helper.EXIT_BY_CODE == {
+        "REQUEST_INVALID": 64,
+        "RECOVERY_REQUIRED": 65,
+        "PATH_DENIED": 66,
+        "FILE_CHANGED": 67,
+        "INTERNAL_ERROR": 70,
+    }
+
+
+def test_dispatcher_reads_at_most_8193_bytes_once(tmp_path: Path) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    raw = rfc8785.dumps(_dispatcher_request(candidate))
+
+    class RecordingInput:
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+
+        def read(self, size: int) -> bytes:
+            self.calls.append(size)
+            return raw
+
+    stdin = RecordingInput()
+    stdout = io.BytesIO()
+
+    exit_code = trusted_helper.main((), stdin, stdout, candidate.runtime_root)
+
+    assert exit_code == 0
+    assert stdin.calls == [8193]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    (("unexpected",), [""], (1,), [object()]),
+)
+def test_dispatcher_rejects_every_argv_element_before_stdin(argv: object) -> None:
+    class UnreadableInput:
+        def read(self, size: int) -> bytes:
+            raise AssertionError(f"stdin read unexpectedly with size {size}")
+
+    stdout = io.BytesIO()
+
+    exit_code = trusted_helper.main(
+        argv, UnreadableInput(), stdout, Path("/runtime")
+    )
+
+    assert exit_code == 64
+    assert stdout.getvalue() == _dispatcher_error("REQUEST_INVALID")
+
+
+def _noncanonical_request_bytes(request: dict[str, object]) -> bytes:
+    reverse_order = dict(reversed(tuple(request.items())))
+    raw = json.dumps(
+        reverse_order,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert raw != rfc8785.dumps(request)
+    return raw
+
+
+def _duplicate_operation_bytes(request: dict[str, object]) -> bytes:
+    canonical = rfc8785.dumps(request)
+    prefix = b'{"operation":"repo_read",'
+    assert canonical.startswith(b"{")
+    return prefix + canonical[1:]
+
+
+def test_dispatcher_rejects_duplicate_keys_with_parser_hook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    raw = _duplicate_operation_bytes(_dispatcher_request(candidate))
+    real_loads = json.loads
+    observed_hooks: list[object] = []
+
+    def observe_loads(payload: bytes, **kwargs):
+        observed_hooks.append(kwargs.get("object_pairs_hook"))
+        return real_loads(payload, **kwargs)
+
+    monkeypatch.setattr(trusted_helper.json, "loads", observe_loads)
+
+    _assert_dispatch_error(raw, candidate.runtime_root)
+
+    assert len(observed_hooks) == 1
+    assert observed_hooks[0] is not None
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "empty",
+        "oversize",
+        "two_frames",
+        "bom",
+        "trailing_newline",
+        "trailing_space",
+        "duplicate_key",
+        "noncanonical_order",
+        "nonobject",
+    ),
+)
+def test_dispatcher_rejects_invalid_framing(
+    tmp_path: Path,
+    case: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    request = _dispatcher_request(candidate)
+    canonical = rfc8785.dumps(request)
+    cases = {
+        "empty": b"",
+        "oversize": b"x" * 8193,
+        "two_frames": canonical + canonical,
+        "bom": b"\xef\xbb\xbf" + canonical,
+        "trailing_newline": canonical + b"\n",
+        "trailing_space": canonical + b" ",
+        "duplicate_key": _duplicate_operation_bytes(request),
+        "noncanonical_order": _noncanonical_request_bytes(request),
+        "nonobject": b"[]",
+    }
+    monkeypatch.setattr(
+        trusted_helper.repo_tools,
+        "read_candidate_file",
+        lambda unused: pytest.fail("invalid request reached repository read"),
+    )
+
+    _assert_dispatch_error(cases[case], candidate.runtime_root)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "value"),
+    (
+        ("missing", "path"),
+        ("extra", "runtime_root"),
+        ("extra", "command"),
+        ("extra", "argv"),
+        ("extra", "env"),
+        ("extra", "git_path"),
+        ("replace", ("schema_version", None)),
+        ("replace", ("operation", 1)),
+        ("replace", ("workspace_id", True)),
+        ("replace", ("source_artifact_sha256", [])),
+        ("replace", ("expected_head_commit", 0)),
+        ("replace", ("expected_workspace_manifest_digest", {})),
+        ("replace", ("path", 1)),
+        ("replace", ("schema_version", "wrong-schema")),
+        ("replace", ("operation", "unknown")),
+        ("replace", ("workspace_id", "B" * 64)),
+        ("replace", ("workspace_id", "b" * 63)),
+        ("replace", ("source_artifact_sha256", "A" * 64)),
+        ("replace", ("source_artifact_sha256", "a" * 63)),
+        ("replace", ("expected_head_commit", "A" * 40)),
+        ("replace", ("expected_head_commit", "a" * 39)),
+        ("replace", ("expected_workspace_manifest_digest", "A" * 64)),
+        ("replace", ("expected_workspace_manifest_digest", "a" * 63)),
+        ("replace", ("path", "/README.md")),
+        ("replace", ("path", "../README.md")),
+        ("replace", ("path", "src\\README.md")),
+        ("replace", ("path", "README.md\0hidden")),
+        ("replace", ("path", "x" * 513)),
+        ("replace", ("path", "café.txt")),
+    ),
+)
+def test_dispatcher_rejects_invalid_request_fields_upfront(
+    tmp_path: Path,
+    mutation: str,
+    value: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    request = _dispatcher_request(candidate)
+    if mutation == "missing":
+        del request[value]
+    elif mutation == "extra":
+        request[value] = "request-secret"
+    else:
+        key, replacement = value
+        request[key] = replacement
+    raw = rfc8785.dumps(request)
+    monkeypatch.setattr(
+        trusted_helper.repo_tools,
+        "read_candidate_file",
+        lambda unused: pytest.fail("invalid request reached repository read"),
+    )
+
+    _assert_dispatch_error(raw, candidate.runtime_root)
+
+
+@pytest.mark.parametrize(
+    ("code", "exit_code"),
+    (
+        ("RECOVERY_REQUIRED", 65),
+        ("PATH_DENIED", 66),
+        ("FILE_CHANGED", 67),
+    ),
+)
+def test_dispatcher_maps_only_closed_candidate_read_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    exit_code: int,
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"file-secret",
+        source_path="private/secret.txt",
+    )
+    raw = rfc8785.dumps(
+        _dispatcher_request(candidate, path="private/secret.txt")
+    )
+
+    def reject(unused: object) -> None:
+        raise repo_tools.CandidateReadError(code)
+
+    monkeypatch.setattr(trusted_helper.repo_tools, "read_candidate_file", reject)
+
+    actual_exit, response = _dispatch_raw(raw, candidate.runtime_root)
+
+    assert actual_exit == exit_code
+    assert response == _dispatcher_error(code)
+    assert raw not in response
+    assert b"private/secret.txt" not in response
+    assert b"file-secret" not in response
+    assert b"CandidateReadError" not in response
+
+
+def test_dispatcher_closes_unexpected_exceptions_without_leakage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"file-secret",
+        source_path="private/secret.txt",
+    )
+    raw = rfc8785.dumps(
+        _dispatcher_request(candidate, path="private/secret.txt")
+    )
+
+    class SecretCrash(Exception):
+        pass
+
+    def crash(unused: object) -> None:
+        raise SecretCrash("exception-message-secret")
+
+    monkeypatch.setattr(trusted_helper.repo_tools, "read_candidate_file", crash)
+
+    exit_code, response = _dispatch_raw(raw, candidate.runtime_root)
+
+    assert exit_code == 70
+    assert response == _dispatcher_error("INTERNAL_ERROR")
+    for secret in (
+        raw,
+        b"private/secret.txt",
+        b"file-secret",
+        b"SecretCrash",
+        b"exception-message-secret",
+    ):
+        assert secret not in response
+
+
+def test_dispatcher_returns_strict_unpadded_urlsafe_base64(tmp_path: Path) -> None:
+    candidate = _candidate(tmp_path, b"\xfb\xff")
+    raw = rfc8785.dumps(_dispatcher_request(candidate))
+
+    exit_code, response_raw = _dispatch_raw(raw, candidate.runtime_root)
+    response = json.loads(response_raw)
+
+    assert exit_code == 0
+    assert response["content_b64url"] == "-_8"
+    assert "=" not in response["content_b64url"]
+
+
+def test_dispatcher_does_not_retry_failed_stdout_write() -> None:
+    class SecretWriteError(Exception):
+        pass
+
+    class BrokenOutput:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def write(self, unused: bytes) -> int:
+            self.calls += 1
+            raise SecretWriteError("write-message-secret")
+
+    class UnreadableInput:
+        def read(self, size: int) -> bytes:
+            raise AssertionError(f"stdin read unexpectedly with size {size}")
+
+    stdout = BrokenOutput()
+
+    exit_code = trusted_helper.main(
+        ("unexpected",), UnreadableInput(), stdout, Path("/runtime")
+    )
+
+    assert exit_code == 70
+    assert stdout.calls == 1
+
+
+def test_dispatcher_closes_short_stdout_write_without_retry() -> None:
+    class ShortOutput:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def write(self, payload: bytes) -> int:
+            self.calls += 1
+            return len(payload) - 1
+
+    class UnreadableInput:
+        def read(self, size: int) -> bytes:
+            raise AssertionError(f"stdin read unexpectedly with size {size}")
+
+    stdout = ShortOutput()
+
+    exit_code = trusted_helper.main(
+        ("unexpected",), UnreadableInput(), stdout, Path("/runtime")
+    )
+
+    assert exit_code == 70
+    assert stdout.calls == 1
 
 
 def test_read_candidate_file_returns_exact_closed_result(tmp_path: Path) -> None:
