@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 import subprocess
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE_ROOT = ROOT / "supply-chain" / "images"
@@ -43,6 +45,41 @@ def _locked_packages(lock_text: str) -> tuple[str, ...]:
             flags=re.MULTILINE,
         )
     )
+
+
+def _assert_fixed_helper_process_config(dockerfile: str) -> None:
+    instructions: dict[str, list[object]] = {"ENTRYPOINT": [], "CMD": []}
+    in_continuation = False
+    for raw_line in dockerfile.splitlines():
+        stripped = raw_line.lstrip()
+        if in_continuation:
+            in_continuation = raw_line.rstrip().endswith("\\")
+            continue
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        parts = stripped.split(None, 1)
+        name = parts[0].upper()
+        continues = raw_line.rstrip().endswith("\\")
+        if name in instructions:
+            assert len(parts) == 2, f"missing {name} value"
+            assert not continues, f"continued {name} is not allowed"
+            try:
+                value = json.loads(parts[1])
+            except json.JSONDecodeError as error:
+                raise AssertionError(f"invalid {name} JSON") from error
+            instructions[name].append(value)
+        elif continues:
+            in_continuation = True
+
+    assert not in_continuation, "unterminated Dockerfile continuation"
+    assert instructions["ENTRYPOINT"] == [[
+        "/opt/venv/bin/python",
+        "-I",
+        "-m",
+        "openworkproof.trusted_helper",
+    ]]
+    assert instructions["CMD"] == [[]]
 
 
 def test_supplychain_test_contract_is_portable_and_registered() -> None:
@@ -115,15 +152,33 @@ def test_trusted_helper_candidate_has_a_closed_package_surface() -> None:
 def test_trusted_helper_candidate_has_a_fixed_repo_read_entrypoint() -> None:
     dockerfile = _read("trusted-helper/Dockerfile")
 
-    assert [
-        line for line in dockerfile.splitlines() if line.startswith("ENTRYPOINT ")
-    ] == [
-        'ENTRYPOINT ["/opt/venv/bin/python", "-I", "-m", '
-        '"openworkproof.trusted_helper"]'
-    ]
-    assert [
-        line for line in dockerfile.splitlines() if line.startswith("CMD ")
-    ] == ["CMD []"]
+    _assert_fixed_helper_process_config(dockerfile)
+
+
+@pytest.mark.parametrize(
+    "shadow",
+    (
+        '\n entrypoint ["/bin/false"]\n cmd ["shadow"]\n',
+        "\nentrypoint /bin/false\ncmd shadow\n",
+        '\nENTRYPOINT ["/bin/false"\n',
+        '\nCMD ["shadow", \\\n"continued"]\n',
+    ),
+)
+def test_trusted_helper_candidate_rejects_shadow_process_config(
+    shadow: str,
+) -> None:
+    dockerfile = _read("trusted-helper/Dockerfile")
+
+    with pytest.raises(AssertionError):
+        _assert_fixed_helper_process_config(dockerfile + shadow)
+
+
+def test_helper_process_config_parser_ignores_blank_lines_and_comments() -> None:
+    dockerfile = _read("trusted-helper/Dockerfile")
+
+    _assert_fixed_helper_process_config(
+        dockerfile + '\n  # entrypoint ["/bin/false"]\n\n'
+    )
 
 
 def test_trusted_helper_source_allowlist_is_the_exact_repo_read_closure() -> None:
