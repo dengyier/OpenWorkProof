@@ -248,6 +248,74 @@ def test_dispatcher_rejects_every_argv_element_before_stdin(argv: object) -> Non
     assert stdout.getvalue() == _dispatcher_error("REQUEST_INVALID")
 
 
+def test_dispatcher_closes_system_exit_from_argv_length() -> None:
+    class ExplodingArgv(tuple):
+        def __len__(self) -> int:
+            raise SystemExit("argv-system-exit-secret")
+
+    class UnreadableInput:
+        def read(self, size: int) -> bytes:
+            raise AssertionError(f"stdin read unexpectedly with size {size}")
+
+    stdout = io.BytesIO()
+
+    exit_code = trusted_helper.main(
+        ExplodingArgv(),
+        UnreadableInput(),
+        stdout,
+        Path("/runtime"),
+    )
+
+    assert exit_code == 70
+    assert stdout.getvalue() == _dispatcher_error("INTERNAL_ERROR")
+    assert b"argv-system-exit-secret" not in stdout.getvalue()
+
+
+def test_dispatcher_closes_keyboard_interrupt_from_stdin_read() -> None:
+    class ExplodingInput:
+        def read(self, unused: int) -> bytes:
+            raise KeyboardInterrupt("stdin-keyboard-secret")
+
+    stdout = io.BytesIO()
+
+    exit_code = trusted_helper.main(
+        (),
+        ExplodingInput(),
+        stdout,
+        Path("/runtime"),
+    )
+
+    assert exit_code == 70
+    assert stdout.getvalue() == _dispatcher_error("INTERNAL_ERROR")
+    assert b"stdin-keyboard-secret" not in stdout.getvalue()
+
+
+def test_dispatcher_closes_generator_exit_from_stdout_write() -> None:
+    class ExplodingOutput:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def write(self, unused: bytes) -> int:
+            self.calls += 1
+            raise GeneratorExit("stdout-generator-secret")
+
+    class UnreadableInput:
+        def read(self, size: int) -> bytes:
+            raise AssertionError(f"stdin read unexpectedly with size {size}")
+
+    stdout = ExplodingOutput()
+
+    exit_code = trusted_helper.main(
+        ("unexpected",),
+        UnreadableInput(),
+        stdout,
+        Path("/runtime"),
+    )
+
+    assert exit_code == 70
+    assert stdout.calls == 1
+
+
 def _noncanonical_request_bytes(request: dict[str, object]) -> bytes:
     reverse_order = dict(reversed(tuple(request.items())))
     raw = json.dumps(
@@ -491,14 +559,14 @@ def test_dispatcher_rejects_nested_duplicate_keys(
     candidate = _candidate(tmp_path, b"base\n")
     raw = rfc8785.dumps(_dispatcher_request(candidate)).replace(
         b'"path":"README.md"',
-        b'"path":{"nested":1,"nested":2}',
+        b'"path":{"nested":"one","nested":"two"}',
     )
     observed_nested_duplicate = False
     real_hook = trusted_helper._object_without_duplicate_keys
 
     def observe_hook(pairs: list[tuple[str, object]]) -> dict[str, object]:
         nonlocal observed_nested_duplicate
-        if pairs == [("nested", 1), ("nested", 2)]:
+        if pairs == [("nested", "one"), ("nested", "two")]:
             observed_nested_duplicate = True
         return real_hook(pairs)
 
@@ -680,6 +748,311 @@ def test_dispatcher_closes_unexpected_exceptions_without_leakage(
         b"exception-message-secret",
     ):
         assert secret not in response
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "wrong_result",
+        "wrong_content",
+        "wrong_output",
+        "path_mismatch",
+        "manifest_mismatch",
+        "size_mismatch",
+        "hash_mismatch",
+    ),
+)
+def test_dispatcher_rejects_unclosed_or_inconsistent_success_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    content = b"file-secret"
+    candidate = _candidate(tmp_path, content)
+    raw = rfc8785.dumps(_dispatcher_request(candidate))
+    valid_output = RepoReadOutput(
+        path="README.md",
+        content_sha256=hashlib.sha256(content).hexdigest(),
+        size_bytes=len(content),
+        workspace_manifest_digest=candidate.workspace_manifest_digest,
+    )
+    results = {
+        "wrong_result": "internal-result-secret",
+        "wrong_content": repo_tools.CandidateReadResult(
+            content="content-type-secret",
+            output=valid_output,
+        ),
+        "wrong_output": repo_tools.CandidateReadResult(
+            content=content,
+            output="output-type-secret",
+        ),
+        "path_mismatch": repo_tools.CandidateReadResult(
+            content=content,
+            output=RepoReadOutput(
+                path="other-secret.txt",
+                content_sha256=hashlib.sha256(content).hexdigest(),
+                size_bytes=len(content),
+                workspace_manifest_digest=candidate.workspace_manifest_digest,
+            ),
+        ),
+        "manifest_mismatch": repo_tools.CandidateReadResult(
+            content=content,
+            output=RepoReadOutput(
+                path="README.md",
+                content_sha256=hashlib.sha256(content).hexdigest(),
+                size_bytes=len(content),
+                workspace_manifest_digest="e" * 64,
+            ),
+        ),
+        "size_mismatch": repo_tools.CandidateReadResult(
+            content=content,
+            output=RepoReadOutput(
+                path="README.md",
+                content_sha256=hashlib.sha256(content).hexdigest(),
+                size_bytes=len(content) - 1,
+                workspace_manifest_digest=candidate.workspace_manifest_digest,
+            ),
+        ),
+        "hash_mismatch": repo_tools.CandidateReadResult(
+            content=content,
+            output=RepoReadOutput(
+                path="README.md",
+                content_sha256="e" * 64,
+                size_bytes=len(content),
+                workspace_manifest_digest=candidate.workspace_manifest_digest,
+            ),
+        ),
+    }
+    monkeypatch.setattr(
+        trusted_helper.repo_tools,
+        "read_candidate_file",
+        lambda unused: results[case],
+    )
+
+    exit_code, response = _dispatch_raw(raw, candidate.runtime_root)
+
+    assert exit_code == 70
+    assert response == _dispatcher_error("INTERNAL_ERROR")
+    for secret in (
+        raw,
+        content,
+        b"internal-result-secret",
+        b"content-type-secret",
+        b"output-type-secret",
+        b"other-secret.txt",
+    ):
+        assert secret not in response
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    (
+        ("path", "dump-path-secret.txt"),
+        ("content_sha256", "e" * 64),
+        ("size_bytes", 999),
+        ("workspace_manifest_digest", "e" * 64),
+    ),
+)
+def test_dispatcher_rejects_inconsistent_success_model_dump(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    wrong_value: object,
+) -> None:
+    content = b"file-secret"
+    candidate = _candidate(tmp_path, content)
+    raw = rfc8785.dumps(_dispatcher_request(candidate))
+    output = RepoReadOutput(
+        path="README.md",
+        content_sha256=hashlib.sha256(content).hexdigest(),
+        size_bytes=len(content),
+        workspace_manifest_digest=candidate.workspace_manifest_digest,
+    )
+
+    def inconsistent_dump(unused: RepoReadOutput, *, mode: str) -> dict[str, object]:
+        assert mode == "json"
+        dumped = {
+            "path": "README.md",
+            "content_sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+            "workspace_manifest_digest": candidate.workspace_manifest_digest,
+        }
+        dumped[field] = wrong_value
+        return dumped
+
+    monkeypatch.setattr(RepoReadOutput, "model_dump", inconsistent_dump)
+    monkeypatch.setattr(
+        trusted_helper.repo_tools,
+        "read_candidate_file",
+        lambda unused: repo_tools.CandidateReadResult(
+            content=content,
+            output=output,
+        ),
+    )
+
+    exit_code, response = _dispatch_raw(raw, candidate.runtime_root)
+
+    assert exit_code == 70
+    assert response == _dispatcher_error("INTERNAL_ERROR")
+    assert raw not in response
+    assert content not in response
+    assert b"dump-path-secret.txt" not in response
+
+
+def test_dispatcher_rejects_extra_success_model_dump_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = b"file-secret"
+    candidate = _candidate(tmp_path, content)
+    raw = rfc8785.dumps(_dispatcher_request(candidate))
+    output = RepoReadOutput(
+        path="README.md",
+        content_sha256=hashlib.sha256(content).hexdigest(),
+        size_bytes=len(content),
+        workspace_manifest_digest=candidate.workspace_manifest_digest,
+    )
+
+    def extra_dump(unused: RepoReadOutput, *, mode: str) -> dict[str, object]:
+        assert mode == "json"
+        return {
+            "path": "README.md",
+            "content_sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+            "workspace_manifest_digest": candidate.workspace_manifest_digest,
+            "extra": "extra-dump-secret",
+        }
+
+    monkeypatch.setattr(RepoReadOutput, "model_dump", extra_dump)
+    monkeypatch.setattr(
+        trusted_helper.repo_tools,
+        "read_candidate_file",
+        lambda unused: repo_tools.CandidateReadResult(content, output),
+    )
+
+    exit_code, response = _dispatch_raw(raw, candidate.runtime_root)
+
+    assert exit_code == 70
+    assert response == _dispatcher_error("INTERNAL_ERROR")
+    assert b"extra-dump-secret" not in response
+
+
+@pytest.mark.parametrize("case", ("raises", "uncodable"))
+def test_dispatcher_closes_raising_or_uncodable_success_model_dump(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    content = b"file-secret"
+    candidate = _candidate(tmp_path, content)
+    raw = rfc8785.dumps(_dispatcher_request(candidate))
+    output = RepoReadOutput(
+        path="README.md",
+        content_sha256=hashlib.sha256(content).hexdigest(),
+        size_bytes=len(content),
+        workspace_manifest_digest=candidate.workspace_manifest_digest,
+    )
+
+    def strange_dump(unused: RepoReadOutput, *, mode: str) -> dict[str, object]:
+        assert mode == "json"
+        if case == "raises":
+            raise SystemExit("model-dump-system-secret")
+        return {
+            "path": object(),
+            "content_sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+            "workspace_manifest_digest": candidate.workspace_manifest_digest,
+        }
+
+    monkeypatch.setattr(RepoReadOutput, "model_dump", strange_dump)
+    monkeypatch.setattr(
+        trusted_helper.repo_tools,
+        "read_candidate_file",
+        lambda unused: repo_tools.CandidateReadResult(content, output),
+    )
+
+    exit_code, response = _dispatch_raw(raw, candidate.runtime_root)
+
+    assert exit_code == 70
+    assert response == _dispatcher_error("INTERNAL_ERROR")
+    for secret in (content, b"model-dump-system-secret"):
+        assert secret not in response
+
+
+@pytest.mark.parametrize("failure", (RuntimeError, SystemExit, None))
+def test_dispatcher_closes_internal_canonicalizer_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: type[BaseException] | None,
+) -> None:
+    candidate = _candidate(tmp_path, b"file-secret")
+    raw = rfc8785.dumps(_dispatcher_request(candidate))
+    expected = _dispatcher_error("INTERNAL_ERROR")
+
+    def fail_canonicalization(unused: object) -> object:
+        if failure is None:
+            return "canonicalizer-return-secret"
+        raise failure("canonicalizer-internal-secret")
+
+    monkeypatch.setattr(trusted_helper.rfc8785, "dumps", fail_canonicalization)
+
+    exit_code, response = _dispatch_raw(raw, candidate.runtime_root)
+
+    assert exit_code == 70
+    assert response == expected
+    for secret in (
+        raw,
+        b"file-secret",
+        b"canonicalizer-internal-secret",
+        b"canonicalizer-return-secret",
+    ):
+        assert secret not in response
+
+
+def test_internal_error_frozen_bytes_match_canonical_response() -> None:
+    assert trusted_helper._INTERNAL_ERROR_BYTES == _dispatcher_error(
+        "INTERNAL_ERROR"
+    )
+
+
+@pytest.mark.parametrize("failure_mode", ("raises", "wrong_type"))
+def test_success_encoding_failure_writes_one_frozen_internal_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+) -> None:
+    candidate = _candidate(tmp_path, b"file-secret")
+    raw = rfc8785.dumps(_dispatcher_request(candidate))
+    expected = _dispatcher_error("INTERNAL_ERROR")
+    real_dumps = rfc8785.dumps
+    writes: list[bytes] = []
+
+    def fail_success_response(value: object) -> object:
+        if type(value) is dict and value.get("status") == "ok":
+            if failure_mode == "raises":
+                raise RuntimeError("success-encoding-secret")
+            return "success-encoding-return-secret"
+        return real_dumps(value)
+
+    class RecordingOutput:
+        def write(self, payload: bytes) -> int:
+            writes.append(payload)
+            return len(payload)
+
+    monkeypatch.setattr(trusted_helper.rfc8785, "dumps", fail_success_response)
+
+    exit_code = trusted_helper.main(
+        (),
+        io.BytesIO(raw),
+        RecordingOutput(),
+        candidate.runtime_root,
+    )
+
+    assert exit_code == 70
+    assert writes == [expected]
+    assert b"file-secret" not in writes[0]
+    assert b"success-encoding-secret" not in writes[0]
+    assert b"success-encoding-return-secret" not in writes[0]
 
 
 def test_dispatcher_returns_strict_unpadded_urlsafe_base64(tmp_path: Path) -> None:
