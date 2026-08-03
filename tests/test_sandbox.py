@@ -1350,12 +1350,7 @@ def test_derive_docker_execution_plan_is_exact_and_deterministic() -> None:
             "target=/output,volume-nocopy"
         ),
     )
-    assert first.start_container_argv == (
-        "/usr/local/bin/docker",
-        "start",
-        "--attach",
-        "owp-container-01",
-    )
+    assert not hasattr(first, "start_container_argv")
     assert first.preflight_absent_argv == (
         (
             "/usr/local/bin/docker",
@@ -1364,13 +1359,6 @@ def test_derive_docker_execution_plan_is_exact_and_deterministic() -> None:
             "--all",
             "--format",
             "{{.Names}}",
-        ),
-        (
-            "/usr/local/bin/docker",
-            "volume",
-            "ls",
-            "--format",
-            "{{.Name}}",
         ),
         (
             "/usr/local/bin/docker",
@@ -1491,6 +1479,17 @@ def _docker_container_inspection(
 ) -> dict:
     return {
         "Name": f"/{plan.container_name}",
+        "State": {
+            "Status": "created",
+            "Running": False,
+            "Paused": False,
+            "Restarting": False,
+            "Dead": False,
+            "Pid": 0,
+            "ExitCode": 0,
+            "StartedAt": "0001-01-01T00:00:00Z",
+            "FinishedAt": "0001-01-01T00:00:00Z",
+        },
         "Config": {
             "Image": plan.image_reference,
             "User": "65532:65532",
@@ -1542,6 +1541,13 @@ def _docker_container_inspection(
     }
 
 
+def _docker_image_inspection(plan: repo_tools.DockerExecutionPlan) -> dict:
+    return {
+        "RepoDigests": [plan.image_reference],
+        "Config": {"Volumes": None},
+    }
+
+
 def test_docker_lifecycle_requires_absence_and_cleans_only_created_owned(
 ) -> None:
     plan = _docker_plan()
@@ -1549,8 +1555,7 @@ def test_docker_lifecycle_requires_absence_and_cleans_only_created_owned(
         plan,
         repo_tools.DockerPreflightObservation(
             container_names=(),
-            workspace_volume_names=(),
-            output_volume_names=(),
+            volume_names=(),
         ),
     )
     state = repo_tools.mark_docker_resource_created(
@@ -1609,7 +1614,7 @@ def test_docker_cleanup_ignores_owned_resources_not_recorded_as_created(
     plan = _docker_plan()
     state = repo_tools.validate_docker_preflight_absent(
         plan,
-        repo_tools.DockerPreflightObservation((), (), ()),
+        repo_tools.DockerPreflightObservation((), ()),
     )
     state = repo_tools.mark_docker_resource_created(
         plan,
@@ -1648,8 +1653,8 @@ def test_docker_cleanup_ignores_owned_resources_not_recorded_as_created(
     ("field", "names"),
     (
         ("container_names", ("owp-container-01",)),
-        ("workspace_volume_names", ("owp-workspace-01",)),
-        ("output_volume_names", ("owp-output-01",)),
+        ("volume_names", ("owp-workspace-01",)),
+        ("volume_names", ("owp-output-01",)),
     ),
 )
 def test_docker_lifecycle_rejects_preexisting_resource(
@@ -1659,14 +1664,131 @@ def test_docker_lifecycle_rejects_preexisting_resource(
     plan = _docker_plan()
     values = {
         "container_names": (),
-        "workspace_volume_names": (),
-        "output_volume_names": (),
+        "volume_names": (),
         field: names,
     }
     with pytest.raises(ValueError, match="already exists"):
         repo_tools.validate_docker_preflight_absent(
             plan,
             repo_tools.DockerPreflightObservation(**values),
+        )
+
+
+def _complete_docker_lifecycle(
+    plan: repo_tools.DockerExecutionPlan,
+) -> repo_tools.DockerLifecycleState:
+    state = repo_tools.validate_docker_preflight_absent(
+        plan,
+        repo_tools.DockerPreflightObservation((), ()),
+    )
+    for resource in ("workspace_volume", "output_volume", "container"):
+        state = repo_tools.mark_docker_resource_created(
+            plan,
+            state,
+            resource,
+        )
+    return state
+
+
+def test_derive_ready_docker_start_requires_all_created_and_inspected() -> None:
+    plan = _docker_plan()
+    ready = repo_tools.derive_ready_docker_start(
+        plan,
+        _complete_docker_lifecycle(plan),
+        _docker_image_inspection(plan),
+        _docker_container_inspection(plan),
+        _docker_volume_inspection(plan, "workspace_volume"),
+        _docker_volume_inspection(plan, "output_volume"),
+    )
+
+    assert ready.start_argv == (
+        "/usr/local/bin/docker",
+        "start",
+        "--attach",
+        plan.container_name,
+    )
+
+
+def test_docker_lifecycle_rejects_out_of_order_creation() -> None:
+    plan = _docker_plan()
+    state = repo_tools.validate_docker_preflight_absent(
+        plan,
+        repo_tools.DockerPreflightObservation((), ()),
+    )
+    with pytest.raises(ValueError, match="creation order"):
+        repo_tools.mark_docker_resource_created(
+            plan,
+            state,
+            "container",
+        )
+
+
+def test_derive_ready_docker_start_rejects_incomplete_lifecycle() -> None:
+    plan = _docker_plan()
+    state = repo_tools.validate_docker_preflight_absent(
+        plan,
+        repo_tools.DockerPreflightObservation((), ()),
+    )
+    state = repo_tools.mark_docker_resource_created(
+        plan,
+        state,
+        "workspace_volume",
+    )
+    with pytest.raises(ValueError, match="lifecycle"):
+        repo_tools.derive_ready_docker_start(
+            plan,
+            state,
+            _docker_image_inspection(plan),
+            _docker_container_inspection(plan),
+            _docker_volume_inspection(plan, "workspace_volume"),
+            _docker_volume_inspection(plan, "output_volume"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "field", "value"),
+    (
+        ("running", "Running", True),
+        ("exited", "ExitCode", 1),
+        ("dead", "Dead", True),
+        ("restarting", "Restarting", True),
+        ("created", "StartedAt", "2026-08-03T00:00:00Z"),
+    ),
+)
+def test_derive_ready_docker_start_rejects_started_or_unsafe_state(
+    status: str,
+    field: str,
+    value: object,
+) -> None:
+    plan = _docker_plan()
+    container = _docker_container_inspection(plan)
+    container["State"]["Status"] = status
+    container["State"][field] = value
+
+    with pytest.raises(ValueError, match="ready to start"):
+        repo_tools.derive_ready_docker_start(
+            plan,
+            _complete_docker_lifecycle(plan),
+            _docker_image_inspection(plan),
+            container,
+            _docker_volume_inspection(plan, "workspace_volume"),
+            _docker_volume_inspection(plan, "output_volume"),
+        )
+
+
+def test_derive_ready_docker_start_rejects_malformed_state() -> None:
+    plan = _docker_plan()
+    container = _docker_container_inspection(plan)
+    container["State"] = {"Status": "created", "Running": False}
+
+    with pytest.raises(ValueError, match="ready to start"):
+        repo_tools.derive_ready_docker_start(
+            plan,
+            _complete_docker_lifecycle(plan),
+            _docker_image_inspection(plan),
+            container,
+            _docker_volume_inspection(plan, "workspace_volume"),
+            _docker_volume_inspection(plan, "output_volume"),
         )
 
 
@@ -1821,6 +1943,7 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
             "immutable Docker test image is not preloaded: "
             f"{image_reference}"
         )
+    image_inspection = json.loads(image.stdout)[0]
 
     suffix = f"{os.getpid()}-{time.time_ns()}"
     ownership_token = hashlib.sha256(suffix.encode("ascii")).hexdigest()
@@ -1856,8 +1979,7 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
         plan,
         repo_tools.DockerPreflightObservation(
             container_names=preflight_outputs[0],
-            workspace_volume_names=preflight_outputs[1],
-            output_volume_names=preflight_outputs[2],
+            volume_names=preflight_outputs[1],
         ),
     )
     try:
@@ -1925,15 +2047,17 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
                 timeout=10,
             ).stdout
         )[0]
-        repo_tools.validate_docker_execution_inspections(
+        ready = repo_tools.derive_ready_docker_start(
             plan,
+            lifecycle,
+            image_inspection,
             inspected,
             workspace_inspection,
             output_inspection,
         )
 
         executed = subprocess.run(
-            plan.start_container_argv,
+            ready.start_argv,
             capture_output=True,
             text=True,
             timeout=30,
@@ -1941,6 +2065,8 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
         assert executed.returncode == 0, executed.stderr
         assert executed.stdout == "containment-ok"
     finally:
+        active_failure = sys.exc_info()[1]
+        cleanup_failures = []
         current_inspections = {}
         inspection_commands = {
             "container": (
@@ -1971,23 +2097,75 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
                     timeout=10,
                 )
                 current_inspections[resource] = json.loads(current.stdout)[0]
-            except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+            except (OSError, subprocess.SubprocessError, ValueError, IndexError) as error:
+                cleanup_failures.append(
+                    f"inspect {resource} failed: {type(error).__name__}"
+                )
                 continue
-        cleanup = repo_tools.derive_docker_cleanup_plan(
-            plan,
-            lifecycle,
-            current_inspections,
-        )
+        cleanup = repo_tools.derive_docker_cleanup_plan(plan, lifecycle, current_inspections)
+        if cleanup.retained_resources:
+            cleanup_failures.append(
+                "retained resources: " + ",".join(cleanup.retained_resources)
+            )
         for cleanup_command in cleanup.commands:
             try:
-                subprocess.run(
+                cleaned = subprocess.run(
                     cleanup_command,
                     capture_output=True,
                     text=True,
                     timeout=15,
                 )
-            except (OSError, subprocess.SubprocessError):
+                if cleaned.returncode != 0:
+                    cleanup_failures.append(
+                        "cleanup exited "
+                        f"{cleaned.returncode}: {' '.join(cleanup_command[1:])}"
+                    )
+            except (OSError, subprocess.SubprocessError) as error:
+                cleanup_failures.append(
+                    "cleanup failed: "
+                    f"{' '.join(cleanup_command[1:])}: {type(error).__name__}"
+                )
                 continue
+        try:
+            remaining_container = subprocess.run(
+                plan.preflight_absent_argv[0],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout.splitlines()
+            remaining_volumes = subprocess.run(
+                plan.preflight_absent_argv[1],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout.splitlines()
+            remaining = []
+            if plan.container_name in remaining_container:
+                remaining.append(plan.container_name)
+            remaining.extend(
+                name
+                for name in (
+                    plan.workspace_volume.name,
+                    plan.output_volume.name,
+                )
+                if name in remaining_volumes
+            )
+            if remaining:
+                cleanup_failures.append(
+                    "resources still exist: " + ",".join(remaining)
+                )
+        except (OSError, subprocess.SubprocessError) as error:
+            cleanup_failures.append(
+                f"post-cleanup preflight failed: {type(error).__name__}"
+            )
+        if cleanup_failures:
+            message = "Docker cleanup failures: " + "; ".join(cleanup_failures)
+            if active_failure is not None:
+                active_failure.add_note(message)
+            else:
+                pytest.fail(message)
 
 
 def test_purge_expired_evidence_leaves_nonexpired_root_untouched(

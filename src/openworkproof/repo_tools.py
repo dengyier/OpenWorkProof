@@ -67,7 +67,12 @@ _DOCKER_IDENTIFIER_PATTERN = re.compile(
     r"^[a-z0-9][a-z0-9_.-]{0,62}$"
 )
 _DOCKER_OWNERSHIP_LABEL = "openworkproof.execution-owner"
-_DOCKER_RESOURCE_ORDER = (
+_DOCKER_CREATION_ORDER = (
+    "workspace_volume",
+    "output_volume",
+    "container",
+)
+_DOCKER_CLEANUP_ORDER = (
     "container",
     "workspace_volume",
     "output_volume",
@@ -445,15 +450,13 @@ class DockerExecutionPlan:
     workspace_volume: DockerVolumePlan
     output_volume: DockerVolumePlan
     create_container_argv: tuple[str, ...]
-    start_container_argv: tuple[str, ...]
     preflight_absent_argv: tuple[tuple[str, ...], ...]
 
 
 @dataclass(frozen=True, slots=True)
 class DockerPreflightObservation:
     container_names: tuple[str, ...]
-    workspace_volume_names: tuple[str, ...]
-    output_volume_names: tuple[str, ...]
+    volume_names: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,6 +474,13 @@ class DockerCleanupPlan:
     retained_resources: tuple[
         Literal["container", "workspace_volume", "output_volume"], ...
     ]
+
+
+@dataclass(frozen=True, slots=True)
+class DockerReadyStart:
+    ownership_token: str
+    resource_names: tuple[str, str, str]
+    start_argv: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -2941,12 +2951,6 @@ def derive_docker_execution_plan(
         workspace_volume=workspace,
         output_volume=output,
         create_container_argv=create_container_argv,
-        start_container_argv=(
-            docker,
-            "start",
-            "--attach",
-            container_name,
-        ),
         preflight_absent_argv=(
             (
                 docker,
@@ -2955,13 +2959,6 @@ def derive_docker_execution_plan(
                 "--all",
                 "--format",
                 "{{.Names}}",
-            ),
-            (
-                docker,
-                "volume",
-                "ls",
-                "--format",
-                "{{.Name}}",
             ),
             (
                 docker,
@@ -2994,11 +2991,8 @@ def _valid_docker_lifecycle_state(
         and state.ownership_token == plan.ownership_token
         and state.resource_names == _docker_plan_resource_names(plan)
         and type(state.created_resources) is tuple
-        and len(set(state.created_resources)) == len(state.created_resources)
-        and all(
-            resource in _DOCKER_RESOURCE_ORDER
-            for resource in state.created_resources
-        )
+        and state.created_resources
+        == _DOCKER_CREATION_ORDER[: len(state.created_resources)]
     )
 
 
@@ -3014,8 +3008,7 @@ def validate_docker_preflight_absent(
         raise ValueError("Docker preflight observation is invalid")
     name_groups = (
         observation.container_names,
-        observation.workspace_volume_names,
-        observation.output_volume_names,
+        observation.volume_names,
     )
     if any(
         type(group) is not tuple
@@ -3023,13 +3016,14 @@ def validate_docker_preflight_absent(
         for group in name_groups
     ):
         raise ValueError("Docker preflight observation is invalid")
-    for requested, observed_names in zip(
-        _docker_plan_resource_names(plan),
-        name_groups,
-        strict=True,
+    if plan.container_name in observation.container_names or any(
+        volume_name in observation.volume_names
+        for volume_name in (
+            plan.workspace_volume.name,
+            plan.output_volume.name,
+        )
     ):
-        if requested in observed_names:
-            raise ValueError("Docker resource already exists")
+        raise ValueError("Docker resource already exists")
     return DockerLifecycleState(
         ownership_token=plan.ownership_token,
         resource_names=_docker_plan_resource_names(plan),
@@ -3044,21 +3038,17 @@ def mark_docker_resource_created(
 ) -> DockerLifecycleState:
     """Record one successful create command after an absent preflight."""
 
-    if (
-        not _valid_docker_lifecycle_state(plan, state)
-        or resource not in _DOCKER_RESOURCE_ORDER
-        or resource in state.created_resources
-    ):
+    if not _valid_docker_lifecycle_state(plan, state):
         raise ValueError("Docker lifecycle transition is invalid")
-    created = {*state.created_resources, resource}
+    if (
+        len(state.created_resources) >= len(_DOCKER_CREATION_ORDER)
+        or resource != _DOCKER_CREATION_ORDER[len(state.created_resources)]
+    ):
+        raise ValueError("Docker resource creation order is invalid")
     return DockerLifecycleState(
         ownership_token=state.ownership_token,
         resource_names=state.resource_names,
-        created_resources=tuple(
-            candidate
-            for candidate in _DOCKER_RESOURCE_ORDER
-            if candidate in created
-        ),
+        created_resources=(*state.created_resources, resource),
     )
 
 
@@ -3107,7 +3097,9 @@ def derive_docker_cleanup_plan(
     docker = str(plan.docker_binary)
     commands: list[tuple[str, ...]] = []
     retained: list[str] = []
-    for resource in state.created_resources:
+    for resource in _DOCKER_CLEANUP_ORDER:
+        if resource not in state.created_resources:
+            continue
         inspection = current_inspections.get(resource)
         if not _docker_resource_is_owned(plan, resource, inspection):
             retained.append(resource)
@@ -3226,6 +3218,72 @@ def validate_docker_execution_inspections(
         valid = False
     if not valid:
         raise ValueError("Docker inspection does not match the frozen profile")
+
+
+def derive_ready_docker_start(
+    plan: DockerExecutionPlan,
+    lifecycle: DockerLifecycleState,
+    image_inspection: Mapping[str, Any],
+    container_inspection: Mapping[str, Any],
+    workspace_volume_inspection: Mapping[str, Any],
+    output_volume_inspection: Mapping[str, Any],
+) -> DockerReadyStart:
+    """Return start authority only for a fully inspected, never-started container."""
+
+    if (
+        not _valid_docker_lifecycle_state(plan, lifecycle)
+        or lifecycle.created_resources != _DOCKER_CREATION_ORDER
+    ):
+        raise ValueError("Docker lifecycle is not complete")
+    try:
+        image_config = image_inspection["Config"]
+        repo_digests = image_inspection["RepoDigests"]
+        image_valid = (
+            type(image_inspection) is dict
+            and type(image_config) is dict
+            and image_config.get("Volumes") in (None, {})
+            and type(repo_digests) is list
+            and plan.image_reference in repo_digests
+        )
+    except (KeyError, TypeError, AttributeError):
+        image_valid = False
+    if not image_valid:
+        raise ValueError("Docker image inspection is invalid")
+
+    validate_docker_execution_inspections(
+        plan,
+        container_inspection,
+        workspace_volume_inspection,
+        output_volume_inspection,
+    )
+    try:
+        state = container_inspection["State"]
+        ready = (
+            type(state) is dict
+            and state.get("Status") == "created"
+            and state.get("Running") is False
+            and state.get("Paused") is False
+            and state.get("Restarting") is False
+            and state.get("Dead") is False
+            and state.get("Pid") == 0
+            and state.get("ExitCode") == 0
+            and state.get("StartedAt") == "0001-01-01T00:00:00Z"
+            and state.get("FinishedAt") == "0001-01-01T00:00:00Z"
+        )
+    except (KeyError, TypeError, AttributeError):
+        ready = False
+    if not ready:
+        raise ValueError("Docker container is not ready to start")
+    return DockerReadyStart(
+        ownership_token=plan.ownership_token,
+        resource_names=_docker_plan_resource_names(plan),
+        start_argv=(
+            str(plan.docker_binary),
+            "start",
+            "--attach",
+            plan.container_name,
+        ),
+    )
 
 
 def classify_docker_execution_failure(
