@@ -2680,15 +2680,22 @@ def _read_verified_candidate_path(
         if os.read(checkpoint.leaf_descriptor, 1):
             raise CandidateReadError("FILE_CHANGED")
         content = b"".join(chunks)
-        if (
-            not _candidate_read_authority_matches(checkpoint)
-            or hashlib.sha256(content).hexdigest() != entry.sha256
+        if hashlib.sha256(content).hexdigest() != entry.sha256:
+            raise CandidateReadError("FILE_CHANGED")
+        fresh_manifest = scan_workspace_manifest(
+            checkpoint.worktree_descriptor,
+            checkpoint.manifest.head_commit,
+        )
+        if workspace_manifest_digest(fresh_manifest) != workspace_manifest_digest(
+            checkpoint.manifest
         ):
+            raise CandidateReadError("FILE_CHANGED")
+        if not _candidate_read_authority_matches(checkpoint):
             raise CandidateReadError("FILE_CHANGED")
         return content
     except CandidateReadError:
         raise
-    except OSError as error:
+    except (ManifestError, OSError) as error:
         raise CandidateReadError("FILE_CHANGED") from error
 
 
