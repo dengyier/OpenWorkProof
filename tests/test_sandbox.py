@@ -2101,18 +2101,44 @@ def test_classify_docker_execution_failure_uses_structured_volume_observation(
     assert not hasattr(observed, "stderr")
 
 
-def _real_docker_cli_and_image() -> tuple[Path, str]:
-    docker_location = os.environ.get("OPENWORKPROOF_DOCKER") or shutil.which(
-        "docker"
+def _docker_prerequisite_unavailable(message: str) -> None:
+    if os.environ.get("OPENWORKPROOF_REQUIRE_LIVE_DOCKER") == "1":
+        pytest.fail(message)
+    pytest.skip(message)
+
+
+def _real_docker_cli_and_image(*, which=shutil.which) -> tuple[Path, str]:
+    explicit_docker = os.environ.get("OPENWORKPROOF_DOCKER")
+    docker_location = (
+        explicit_docker if explicit_docker is not None else which("docker")
     )
     if docker_location is None:
-        pytest.skip("Docker CLI unavailable via OPENWORKPROOF_DOCKER or PATH")
-    docker_binary = Path(docker_location).expanduser().resolve()
+        _docker_prerequisite_unavailable(
+            "Docker CLI unavailable via OPENWORKPROOF_DOCKER or PATH"
+        )
+    try:
+        docker_binary = Path(docker_location).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError) as error:
+        if explicit_docker is not None:
+            pytest.fail(
+                "Docker CLI unavailable at explicit "
+                f"OPENWORKPROOF_DOCKER path: {type(error).__name__}"
+            )
+        _docker_prerequisite_unavailable(
+            f"Docker CLI unavailable from PATH: {type(error).__name__}"
+        )
     if not docker_binary.is_file() or not os.access(docker_binary, os.X_OK):
-        pytest.skip(f"Docker CLI unavailable at {docker_binary}")
+        if explicit_docker is not None:
+            pytest.fail(
+                "Docker CLI unavailable at explicit "
+                f"OPENWORKPROOF_DOCKER path: {docker_binary}"
+            )
+        _docker_prerequisite_unavailable(
+            f"Docker CLI unavailable at {docker_binary}"
+        )
     image_reference = os.environ.get("OPENWORKPROOF_DOCKER_TEST_IMAGE")
     if image_reference is None:
-        pytest.skip(
+        _docker_prerequisite_unavailable(
             "immutable preloaded image reference unavailable: set "
             "OPENWORKPROOF_DOCKER_TEST_IMAGE to repository@sha256:digest"
         )
@@ -2122,16 +2148,20 @@ def _real_docker_cli_and_image() -> tuple[Path, str]:
 def _require_real_docker_daemon_and_image(
     docker_binary: Path,
     image_reference: str,
+    *,
+    run=subprocess.run,
 ) -> dict:
     try:
-        daemon = subprocess.run(
+        daemon = run(
             (str(docker_binary), "info", "--format", "{{.ServerVersion}}"),
             capture_output=True,
             text=True,
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
-        pytest.skip(f"Docker daemon unavailable: {type(error).__name__}")
+        _docker_prerequisite_unavailable(
+            f"Docker daemon unavailable: {type(error).__name__}"
+        )
     if daemon.returncode != 0:
         details = daemon.stderr.strip().splitlines()
         detail = (
@@ -2139,10 +2169,12 @@ def _require_real_docker_daemon_and_image(
             if details
             else f"docker info exited {daemon.returncode}"
         )
-        pytest.skip(f"Docker daemon unavailable: {detail}")
+        _docker_prerequisite_unavailable(
+            f"Docker daemon unavailable: {detail}"
+        )
 
     repository, digest = image_reference.split("@", 1)
-    listed = subprocess.run(
+    listed = run(
         (
             str(docker_binary),
             "image",
@@ -2159,11 +2191,11 @@ def _require_real_docker_daemon_and_image(
         timeout=10,
     )
     if digest not in listed.stdout.splitlines():
-        pytest.skip(
+        _docker_prerequisite_unavailable(
             "immutable Docker test image is not preloaded: "
             f"{image_reference}"
         )
-    image = subprocess.run(
+    image = run(
         (str(docker_binary), "image", "inspect", image_reference),
         check=True,
         capture_output=True,
@@ -2171,6 +2203,350 @@ def _require_real_docker_daemon_and_image(
         timeout=10,
     )
     return json.loads(image.stdout)[0]
+
+
+def _cleanup_attempted_docker_resources(
+    *,
+    docker_binary: Path,
+    ownership_token: str,
+    attempted_resources: tuple[tuple[str, str], ...],
+    run=subprocess.run,
+) -> tuple[str, ...]:
+    docker = str(docker_binary)
+    failures = []
+    for resource, name in reversed(attempted_resources):
+        inspect_argv = (
+            (docker, "inspect", name)
+            if resource == "container"
+            else (docker, "volume", "inspect", name)
+        )
+        remove_argv = (
+            (docker, "rm", "--force", "--volumes", name)
+            if resource == "container"
+            else (docker, "volume", "rm", name)
+        )
+        try:
+            current = run(
+                inspect_argv,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if current.returncode != 0:
+                continue
+            inspection = json.loads(current.stdout)[0]
+            labels = (
+                inspection["Config"]["Labels"]
+                if resource == "container"
+                else inspection["Labels"]
+            )
+            if labels.get("openworkproof.execution-owner") != ownership_token:
+                failures.append(f"retained unowned {resource}: {name}")
+                continue
+            cleaned = run(
+                remove_argv,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if cleaned.returncode != 0:
+                failures.append(
+                    f"cleanup {resource} exited {cleaned.returncode}: {name}"
+                )
+        except (
+            OSError,
+            subprocess.SubprocessError,
+            ValueError,
+            IndexError,
+            KeyError,
+            TypeError,
+            AttributeError,
+        ) as error:
+            failures.append(
+                f"cleanup {resource} failed: {name}: {type(error).__name__}"
+            )
+
+    try:
+        container_names = run(
+            (
+                docker,
+                "container",
+                "ls",
+                "--all",
+                "--format",
+                "{{.Names}}",
+            ),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.splitlines()
+        volume_names = run(
+            (docker, "volume", "ls", "--format", "{{.Name}}"),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.splitlines()
+        remaining = [
+            name
+            for resource, name in attempted_resources
+            if name
+            in (container_names if resource == "container" else volume_names)
+        ]
+        if remaining:
+            failures.append("resources still exist: " + ",".join(remaining))
+    except (OSError, subprocess.SubprocessError) as error:
+        failures.append(
+            f"post-cleanup preflight failed: {type(error).__name__}"
+        )
+    return tuple(failures)
+
+
+def _report_docker_cleanup_failures(
+    active_failure: BaseException | None,
+    failures: tuple[str, ...],
+) -> None:
+    if not failures:
+        return
+    message = "Docker cleanup failures: " + "; ".join(failures)
+    if active_failure is not None:
+        active_failure.add_note(message)
+    else:
+        pytest.fail(message)
+
+
+def _immutable_docker_test_image() -> str:
+    return "registry.example/openworkproof/test@sha256:" + "a" * 64
+
+
+def test_real_docker_auto_discovery_absence_skips(monkeypatch) -> None:
+    monkeypatch.delenv("OPENWORKPROOF_DOCKER", raising=False)
+    monkeypatch.setenv(
+        "OPENWORKPROOF_DOCKER_TEST_IMAGE",
+        _immutable_docker_test_image(),
+    )
+    monkeypatch.delenv("OPENWORKPROOF_REQUIRE_LIVE_DOCKER", raising=False)
+
+    with pytest.raises(pytest.skip.Exception):
+        _real_docker_cli_and_image(which=lambda _: None)
+
+
+def test_real_docker_explicit_invalid_cli_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(
+        "OPENWORKPROOF_DOCKER",
+        str(tmp_path / "missing-docker"),
+    )
+    monkeypatch.setenv(
+        "OPENWORKPROOF_DOCKER_TEST_IMAGE",
+        _immutable_docker_test_image(),
+    )
+    monkeypatch.delenv("OPENWORKPROOF_REQUIRE_LIVE_DOCKER", raising=False)
+
+    with pytest.raises(pytest.fail.Exception, match="Docker CLI unavailable"):
+        _real_docker_cli_and_image()
+
+
+def test_required_live_docker_missing_auto_discovered_cli_fails(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("OPENWORKPROOF_DOCKER", raising=False)
+    monkeypatch.setenv(
+        "OPENWORKPROOF_DOCKER_TEST_IMAGE",
+        _immutable_docker_test_image(),
+    )
+    monkeypatch.setenv("OPENWORKPROOF_REQUIRE_LIVE_DOCKER", "1")
+
+    with pytest.raises(pytest.fail.Exception, match="Docker CLI unavailable"):
+        _real_docker_cli_and_image(which=lambda _: None)
+
+
+def test_required_live_docker_missing_image_environment_fails(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OPENWORKPROOF_DOCKER", sys.executable)
+    monkeypatch.delenv("OPENWORKPROOF_DOCKER_TEST_IMAGE", raising=False)
+    monkeypatch.setenv("OPENWORKPROOF_REQUIRE_LIVE_DOCKER", "1")
+
+    with pytest.raises(
+        pytest.fail.Exception,
+        match="immutable preloaded image reference unavailable",
+    ):
+        _real_docker_cli_and_image()
+
+
+def test_required_live_docker_unavailable_daemon_fails(monkeypatch) -> None:
+    monkeypatch.setenv("OPENWORKPROOF_REQUIRE_LIVE_DOCKER", "1")
+
+    def unavailable_daemon(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr="daemon unavailable",
+        )
+
+    with pytest.raises(pytest.fail.Exception, match="Docker daemon unavailable"):
+        _require_real_docker_daemon_and_image(
+            Path("/usr/bin/docker"),
+            _immutable_docker_test_image(),
+            run=unavailable_daemon,
+        )
+
+
+def test_required_live_docker_exact_image_absence_fails(monkeypatch) -> None:
+    monkeypatch.setenv("OPENWORKPROOF_REQUIRE_LIVE_DOCKER", "1")
+
+    def absent_image(command, **kwargs):
+        if command[1] == "info":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="29.5.2\n",
+                stderr="",
+            )
+        if command[1:3] == ("image", "ls"):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="",
+                stderr="",
+            )
+        raise AssertionError(f"unexpected Docker command: {command}")
+
+    with pytest.raises(
+        pytest.fail.Exception,
+        match="immutable Docker test image is not preloaded",
+    ):
+        _require_real_docker_daemon_and_image(
+            Path("/usr/bin/docker"),
+            _immutable_docker_test_image(),
+            run=absent_image,
+        )
+
+
+@pytest.mark.parametrize(
+    ("resource", "name"),
+    (
+        ("container", "owp-attempted-container"),
+        ("volume", "owp-attempted-volume"),
+    ),
+)
+def test_docker_cleanup_removes_attempted_owned_unmarked_resource(
+    resource: str,
+    name: str,
+) -> None:
+    docker_binary = Path("/usr/bin/docker")
+    ownership_token = "b" * 64
+    commands = []
+
+    def fake_docker(command, **kwargs):
+        command = tuple(command)
+        commands.append(command)
+        expected_inspect = (
+            ("inspect", name)
+            if resource == "container"
+            else ("volume", "inspect", name)
+        )
+        if command[1:] == expected_inspect:
+            inspection = (
+                {
+                    "Config": {
+                        "Labels": {
+                            "openworkproof.execution-owner": ownership_token,
+                        }
+                    }
+                }
+                if resource == "container"
+                else {
+                    "Labels": {
+                        "openworkproof.execution-owner": ownership_token,
+                    }
+                }
+            )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps([inspection]),
+                stderr="",
+            )
+        if command[1:3] == ("rm", "--force"):
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[1:3] == ("volume", "rm"):
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[1:3] == ("container", "ls"):
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[1:3] == ("volume", "ls"):
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected Docker command: {command}")
+
+    failures = _cleanup_attempted_docker_resources(
+        docker_binary=docker_binary,
+        ownership_token=ownership_token,
+        attempted_resources=((resource, name),),
+        run=fake_docker,
+    )
+
+    assert failures == ()
+    expected_remove = (
+        (str(docker_binary), "rm", "--force", "--volumes", name)
+        if resource == "container"
+        else (str(docker_binary), "volume", "rm", name)
+    )
+    assert expected_remove in commands
+
+
+def test_docker_cleanup_retains_attempted_unowned_resource() -> None:
+    docker_binary = Path("/usr/bin/docker")
+    container_name = "owp-unowned-container"
+    commands = []
+
+    def fake_docker(command, **kwargs):
+        command = tuple(command)
+        commands.append(command)
+        if command[1:] == ("inspect", container_name):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "Config": {
+                                "Labels": {
+                                    "openworkproof.execution-owner": "c" * 64,
+                                }
+                            }
+                        }
+                    ]
+                ),
+                stderr="",
+            )
+        if command[1:3] == ("container", "ls"):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=container_name + "\n",
+                stderr="",
+            )
+        if command[1:3] == ("volume", "ls"):
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected Docker command: {command}")
+
+    failures = _cleanup_attempted_docker_resources(
+        docker_binary=docker_binary,
+        ownership_token="b" * 64,
+        attempted_resources=(("container", container_name),),
+        run=fake_docker,
+    )
+
+    assert failures == (
+        f"retained unowned container: {container_name}",
+        f"resources still exist: {container_name}",
+    )
+    assert not any(command[1] == "rm" for command in commands)
 
 
 @pytest.mark.docker
@@ -2218,11 +2594,13 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
             volume_names=preflight_outputs[1],
         ),
     )
+    attempted_resources = []
     try:
         for resource, volume in (
             ("workspace_volume", plan.workspace_volume),
             ("output_volume", plan.output_volume),
         ):
+            attempted_resources.append(("volume", volume.name))
             subprocess.run(
                 volume.create_argv,
                 check=True,
@@ -2235,6 +2613,7 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
                 lifecycle,
                 resource,
             )
+        attempted_resources.append(("container", plan.container_name))
         subprocess.run(
             plan.create_container_argv,
             check=True,
@@ -2302,106 +2681,12 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
         assert executed.stdout == "containment-ok"
     finally:
         active_failure = sys.exc_info()[1]
-        cleanup_failures = []
-        current_inspections = {}
-        inspection_commands = {
-            "container": (
-                str(docker_binary),
-                "inspect",
-                plan.container_name,
-            ),
-            "workspace_volume": (
-                str(docker_binary),
-                "volume",
-                "inspect",
-                plan.workspace_volume.name,
-            ),
-            "output_volume": (
-                str(docker_binary),
-                "volume",
-                "inspect",
-                plan.output_volume.name,
-            ),
-        }
-        for resource in lifecycle.created_resources:
-            try:
-                current = subprocess.run(
-                    inspection_commands[resource],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                current_inspections[resource] = json.loads(current.stdout)[0]
-            except (OSError, subprocess.SubprocessError, ValueError, IndexError) as error:
-                cleanup_failures.append(
-                    f"inspect {resource} failed: {type(error).__name__}"
-                )
-                continue
-        cleanup = repo_tools.derive_docker_cleanup_plan(plan, lifecycle, current_inspections)
-        if cleanup.retained_resources:
-            cleanup_failures.append(
-                "retained resources: " + ",".join(cleanup.retained_resources)
-            )
-        for cleanup_command in cleanup.commands:
-            try:
-                cleaned = subprocess.run(
-                    cleanup_command,
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                )
-                if cleaned.returncode != 0:
-                    cleanup_failures.append(
-                        "cleanup exited "
-                        f"{cleaned.returncode}: {' '.join(cleanup_command[1:])}"
-                    )
-            except (OSError, subprocess.SubprocessError) as error:
-                cleanup_failures.append(
-                    "cleanup failed: "
-                    f"{' '.join(cleanup_command[1:])}: {type(error).__name__}"
-                )
-                continue
-        try:
-            remaining_container = subprocess.run(
-                plan.preflight_absent_argv[0],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            ).stdout.splitlines()
-            remaining_volumes = subprocess.run(
-                plan.preflight_absent_argv[1],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            ).stdout.splitlines()
-            remaining = []
-            if plan.container_name in remaining_container:
-                remaining.append(plan.container_name)
-            remaining.extend(
-                name
-                for name in (
-                    plan.workspace_volume.name,
-                    plan.output_volume.name,
-                )
-                if name in remaining_volumes
-            )
-            if remaining:
-                cleanup_failures.append(
-                    "resources still exist: " + ",".join(remaining)
-                )
-        except (OSError, subprocess.SubprocessError) as error:
-            cleanup_failures.append(
-                f"post-cleanup preflight failed: {type(error).__name__}"
-            )
-        if cleanup_failures:
-            message = "Docker cleanup failures: " + "; ".join(cleanup_failures)
-            if active_failure is not None:
-                active_failure.add_note(message)
-            else:
-                pytest.fail(message)
+        cleanup_failures = _cleanup_attempted_docker_resources(
+            docker_binary=docker_binary,
+            ownership_token=ownership_token,
+            attempted_resources=tuple(attempted_resources),
+        )
+        _report_docker_cleanup_failures(active_failure, cleanup_failures)
 
 
 @pytest.mark.docker
@@ -2473,10 +2758,9 @@ def test_real_docker_enforces_tmpfs_volume_capacity(
         ),
     )
 
-    volume_creation_attempted = False
-    container_creation_attempted = False
+    attempted_resources = []
     try:
-        volume_creation_attempted = True
+        attempted_resources.append(("volume", target_volume.name))
         subprocess.run(
             target_volume.create_argv,
             check=True,
@@ -2547,7 +2831,7 @@ def test_real_docker_enforces_tmpfs_volume_capacity(
             "-c",
             script,
         )
-        container_creation_attempted = True
+        attempted_resources.append(("container", plan.container_name))
         subprocess.run(
             create_container_argv,
             check=True,
@@ -2641,115 +2925,12 @@ def test_real_docker_enforces_tmpfs_volume_capacity(
         )
     finally:
         active_failure = sys.exc_info()[1]
-        cleanup_failures = []
-        cleanup_resources = (
-            (
-                "container",
-                container_creation_attempted,
-                (str(docker_binary), "inspect", plan.container_name),
-                (
-                    str(docker_binary),
-                    "rm",
-                    "--force",
-                    "--volumes",
-                    plan.container_name,
-                ),
-            ),
-            (
-                "volume",
-                volume_creation_attempted,
-                (
-                    str(docker_binary),
-                    "volume",
-                    "inspect",
-                    target_volume.name,
-                ),
-                (
-                    str(docker_binary),
-                    "volume",
-                    "rm",
-                    target_volume.name,
-                ),
-            ),
+        cleanup_failures = _cleanup_attempted_docker_resources(
+            docker_binary=docker_binary,
+            ownership_token=ownership_token,
+            attempted_resources=tuple(attempted_resources),
         )
-        for resource, created, inspect_argv, remove_argv in cleanup_resources:
-            if not created:
-                continue
-            try:
-                current = subprocess.run(
-                    inspect_argv,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                if current.returncode != 0:
-                    continue
-                inspection = json.loads(current.stdout)[0]
-                labels = (
-                    inspection["Config"]["Labels"]
-                    if resource == "container"
-                    else inspection["Labels"]
-                )
-                if labels.get("openworkproof.execution-owner") != ownership_token:
-                    cleanup_failures.append(f"retained unowned {resource}")
-                    continue
-                cleaned = subprocess.run(
-                    remove_argv,
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                )
-                if cleaned.returncode != 0:
-                    cleanup_failures.append(
-                        f"cleanup {resource} exited {cleaned.returncode}"
-                    )
-            except (
-                OSError,
-                subprocess.SubprocessError,
-                ValueError,
-                IndexError,
-                KeyError,
-                TypeError,
-                AttributeError,
-            ) as error:
-                cleanup_failures.append(
-                    f"cleanup {resource} failed: {type(error).__name__}"
-                )
-
-        try:
-            remaining_container = subprocess.run(
-                plan.preflight_absent_argv[0],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            ).stdout.splitlines()
-            remaining_volumes = subprocess.run(
-                plan.preflight_absent_argv[1],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            ).stdout.splitlines()
-            remaining = []
-            if plan.container_name in remaining_container:
-                remaining.append(plan.container_name)
-            if target_volume.name in remaining_volumes:
-                remaining.append(target_volume.name)
-            if remaining:
-                cleanup_failures.append(
-                    "resources still exist: " + ",".join(remaining)
-                )
-        except (OSError, subprocess.SubprocessError) as error:
-            cleanup_failures.append(
-                f"post-cleanup preflight failed: {type(error).__name__}"
-            )
-        if cleanup_failures:
-            message = "Docker cleanup failures: " + "; ".join(cleanup_failures)
-            if active_failure is not None:
-                active_failure.add_note(message)
-            else:
-                pytest.fail(message)
+        _report_docker_cleanup_failures(active_failure, cleanup_failures)
 
 
 def test_purge_expired_evidence_leaves_nonexpired_root_untouched(
