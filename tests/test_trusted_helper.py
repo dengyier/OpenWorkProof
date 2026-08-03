@@ -484,6 +484,136 @@ def test_read_candidate_file_rejects_metadata_change_after_checkpoint(
     assert raised.value.code == "FILE_CHANGED"
 
 
+def test_read_candidate_file_rejects_control_corruption_after_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    control = candidate.candidate_root / "control.json"
+
+    def corrupt_control() -> None:
+        control.write_bytes(b"corrupt")
+        control.chmod(0o600)
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_read_checkpoint_hook",
+        corrupt_control,
+    )
+
+    with pytest.raises(repo_tools.CandidateReadError) as raised:
+        repo_tools.read_candidate_file(_request(candidate))
+
+    assert raised.value.code == "FILE_CHANGED"
+
+
+@pytest.mark.parametrize(
+    "authority_name",
+    ("index", "ref", "head", "object"),
+)
+def test_read_candidate_file_rejects_git_authority_corruption_after_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    authority_name: str,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    authority_paths = {
+        "index": candidate.git_dir / "index",
+        "ref": candidate.git_dir / "refs" / "heads" / "candidate",
+        "head": candidate.git_dir / "HEAD",
+        "object": (
+            candidate.git_dir
+            / "objects"
+            / candidate.head_commit[:2]
+            / candidate.head_commit[2:]
+        ),
+    }
+    authority_path = authority_paths[authority_name]
+
+    def corrupt_authority() -> None:
+        content = bytearray(authority_path.read_bytes())
+        content[0] ^= 1
+        authority_path.chmod(0o600)
+        authority_path.write_bytes(content)
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_read_checkpoint_hook",
+        corrupt_authority,
+    )
+
+    with pytest.raises(repo_tools.CandidateReadError) as raised:
+        repo_tools.read_candidate_file(_request(candidate))
+
+    assert raised.value.code == "FILE_CHANGED"
+
+
+def test_read_candidate_file_rejects_ephemeral_ref_during_git_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    ref_path = candidate.git_dir / "refs" / "heads" / "candidate"
+    ref_raw = ref_path.read_bytes()
+    ref_path.unlink()
+    real_run = repo_tools._run_git_read_only
+    restored_calls = 0
+
+    def run_with_ephemeral_ref(*, git_dir, worktree, arguments):
+        nonlocal restored_calls
+        if arguments in {
+            ("rev-parse", "HEAD"),
+            ("cat-file", "-e", "HEAD^{commit}"),
+            ("diff-index", "--cached", "--quiet", "HEAD", "--"),
+        }:
+            restored_calls += 1
+            ref_path.write_bytes(ref_raw)
+            try:
+                return real_run(
+                    git_dir=git_dir,
+                    worktree=worktree,
+                    arguments=arguments,
+                )
+            finally:
+                ref_path.unlink()
+        return real_run(
+            git_dir=git_dir,
+            worktree=worktree,
+            arguments=arguments,
+        )
+
+    monkeypatch.setattr(repo_tools, "_run_git_read_only", run_with_ephemeral_ref)
+
+    with pytest.raises(repo_tools.CandidateReadError) as raised:
+        repo_tools.read_candidate_file(_request(candidate))
+
+    assert restored_calls == 3
+    assert not ref_path.exists()
+    assert raised.value.code == "RECOVERY_REQUIRED"
+
+
+@pytest.mark.parametrize(
+    ("limit_name", "limit_value"),
+    (
+        ("_MAX_GIT_AUTHORITY_ENTRIES", 1),
+        ("_MAX_GIT_AUTHORITY_TOTAL_BYTES", 1),
+    ),
+)
+def test_read_candidate_file_rejects_git_authority_snapshot_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    limit_name: str,
+    limit_value: int,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    monkeypatch.setattr(repo_tools, limit_name, limit_value)
+
+    with pytest.raises(repo_tools.CandidateReadError) as raised:
+        repo_tools.read_candidate_file(_request(candidate))
+
+    assert raised.value.code == "RECOVERY_REQUIRED"
+
+
 def test_read_candidate_file_never_returns_prefix_during_truncation_race(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -690,7 +820,7 @@ def test_read_candidate_file_closes_every_checkpoint_descriptor_on_error(
         repo_tools.read_candidate_file(_request(candidate, path="src/README.md"))
 
     assert raised.value.code == "FILE_CHANGED"
-    assert len(captured_descriptors) == 6
+    assert len(captured_descriptors) == 7
     for descriptor in captured_descriptors:
         with pytest.raises(OSError):
             os.fstat(descriptor)
@@ -719,7 +849,7 @@ def test_read_candidate_file_closes_descriptors_when_checkpoint_scan_fails(
         repo_tools.read_candidate_file(_request(candidate))
 
     assert raised.value.code == "RECOVERY_REQUIRED"
-    assert len(captured_descriptors) == 5
+    assert len(captured_descriptors) == 6
     for descriptor in captured_descriptors:
         with pytest.raises(OSError):
             os.fstat(descriptor)

@@ -112,6 +112,13 @@ _MAX_WORKSPACE_MANIFEST_ENTRIES = 512
 _WORKSPACE_TYPES = frozenset({"regular", "directory", "symlink", "other"})
 _MAX_PURGE_ENTRIES = 1_024
 _MAX_PURGE_DEPTH = 64
+# Git authority includes at most 126 source entries / 8 MiB of source plus
+# bounded Git metadata, so these limits leave headroom without an unbounded scan.
+_MAX_GIT_AUTHORITY_ENTRIES = 2_048
+_MAX_GIT_AUTHORITY_DEPTH = 64
+_MAX_GIT_AUTHORITY_PATH_BYTES = 1_024
+_MAX_GIT_AUTHORITY_FILE_BYTES = 8_388_608
+_MAX_GIT_AUTHORITY_TOTAL_BYTES = 16_777_216
 
 OPENAT2_RESOLVE_FLAGS = (
     "RESOLVE_BENEATH",
@@ -376,11 +383,25 @@ class _CandidateReadAnchor:
 
 
 @dataclass(frozen=True, slots=True)
+class _GitAuthoritySnapshotEntry:
+    path_bytes: bytes
+    entry_type: Literal["directory", "regular"]
+    token: str
+    size_bytes: int | None
+    sha256: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class _VerifiedCandidateReadCheckpoint:
     manifest: WorkspaceManifest
     anchors: tuple[_CandidateReadAnchor, ...]
     worktree_descriptor: int
+    git_descriptor: int
     leaf_descriptor: int
+    control_descriptor: int
+    control_size_bytes: int
+    control_sha256: str
+    git_authority_snapshot: tuple[_GitAuthoritySnapshotEntry, ...]
 
 
 def _candidate_read_checkpoint_hook() -> None:
@@ -2141,6 +2162,41 @@ def _verify_candidate_checkpoint_read_only(
             raise CandidateWorkspaceError(
                 "candidate control root has extra entries"
             )
+        control_named = os.stat(
+            "control.json",
+            dir_fd=candidate_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(control_named.st_mode)
+            or stat.S_IMODE(control_named.st_mode) != 0o600
+            or control_named.st_nlink != 1
+            or not 1 <= control_named.st_size <= 4_096
+        ):
+            raise CandidateWorkspaceError(
+                "candidate control record is invalid"
+            )
+        control_descriptor = os.open(
+            "control.json",
+            os.O_RDONLY | nofollow,
+            dir_fd=candidate_descriptor,
+        )
+        descriptors.append(control_descriptor)
+        control_anchor = _candidate_read_anchor(
+            control_descriptor,
+            parent_descriptor=candidate_descriptor,
+            name="control.json",
+        )
+        if control_anchor.token != _workspace_read_token(control_named):
+            raise CandidateWorkspaceError(
+                "candidate control record changed"
+            )
+        control_raw = _read_candidate_control_descriptor(
+            control_descriptor,
+            control_named.st_size,
+        )
+        control = _parse_candidate_control(control_raw, workspace)
+        anchors.append(control_anchor)
         try:
             os.stat(".git", dir_fd=worktree_descriptor, follow_symlinks=False)
         except FileNotFoundError:
@@ -2209,7 +2265,6 @@ def _verify_candidate_checkpoint_read_only(
                 "candidate leaf changed before checkpoint scan"
             )
         anchors.append(leaf_anchor)
-        control = _read_candidate_control(workspace)
         if (
             control["worktree_inode"]
             != os.fstat(worktree_descriptor).st_ino
@@ -2218,6 +2273,7 @@ def _verify_candidate_checkpoint_read_only(
             raise CandidateWorkspaceError(
                 "candidate control identity mismatches"
             )
+        git_authority_before = _scan_candidate_git_authority(git_descriptor)
         actual_head_result = _run_git_read_only(
             git_dir=workspace.git_dir,
             worktree=workspace.worktree,
@@ -2261,13 +2317,23 @@ def _verify_candidate_checkpoint_read_only(
             != workspace.workspace_manifest_digest
         ):
             raise CandidateWorkspaceError("candidate manifest mismatches")
+        git_authority_after = _scan_candidate_git_authority(git_descriptor)
+        if git_authority_after != git_authority_before:
+            raise CandidateWorkspaceError(
+                "candidate Git authority changed during checkpoint"
+            )
         checkpoint = _VerifiedCandidateReadCheckpoint(
             manifest=manifest,
             anchors=tuple(anchors),
             worktree_descriptor=worktree_descriptor,
+            git_descriptor=git_descriptor,
             leaf_descriptor=leaf_descriptor,
+            control_descriptor=control_descriptor,
+            control_size_bytes=control_named.st_size,
+            control_sha256=hashlib.sha256(control_raw).hexdigest(),
+            git_authority_snapshot=git_authority_after,
         )
-        if not _candidate_read_anchors_match(checkpoint):
+        if not _candidate_read_authority_matches(checkpoint):
             raise CandidateReadError("FILE_CHANGED")
         return checkpoint
     except CandidateReadError:
@@ -2320,6 +2386,242 @@ def _candidate_read_anchors_match(
         return False
 
 
+def _read_candidate_control_descriptor(
+    descriptor: int,
+    size_bytes: int,
+) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return _read_workspace_file(descriptor, size_bytes)
+
+
+def _scan_candidate_git_authority(
+    git_descriptor: int,
+) -> tuple[_GitAuthoritySnapshotEntry, ...]:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if (
+        type(nofollow) is not int
+        or nofollow <= 0
+        or type(directory) is not int
+        or directory <= 0
+    ):
+        raise CandidateWorkspaceError(
+            "candidate Git authority scan requires no-follow support"
+        )
+    root_metadata = os.fstat(git_descriptor)
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        raise CandidateWorkspaceError(
+            "candidate Git authority root is not a directory"
+        )
+    root_token = _workspace_read_token(root_metadata)
+    entries: list[_GitAuthoritySnapshotEntry] = [
+        _GitAuthoritySnapshotEntry(
+            path_bytes=b"",
+            entry_type="directory",
+            token=root_token,
+            size_bytes=None,
+            sha256=None,
+        )
+    ]
+    entries_seen = 1
+    total_bytes = 0
+    directory_flags = os.O_RDONLY | directory | nofollow
+
+    def scan(
+        directory_descriptor: int,
+        prefix: bytes,
+        depth: int,
+    ) -> None:
+        nonlocal entries_seen, total_bytes
+        if depth > _MAX_GIT_AUTHORITY_DEPTH:
+            raise CandidateWorkspaceError(
+                "candidate Git authority exceeds depth limit"
+            )
+        try:
+            iterator = os.scandir(directory_descriptor)
+        except OSError as error:
+            raise CandidateWorkspaceError(
+                "candidate Git authority directory cannot be scanned"
+            ) from error
+        with iterator:
+            for item in iterator:
+                if entries_seen >= _MAX_GIT_AUTHORITY_ENTRIES:
+                    raise CandidateWorkspaceError(
+                        "candidate Git authority exceeds entry limit"
+                    )
+                name = item.name
+                name_bytes = os.fsencode(name)
+                path_bytes = prefix + name_bytes if prefix else name_bytes
+                if (
+                    not name_bytes
+                    or b"\0" in name_bytes
+                    or len(path_bytes) > _MAX_GIT_AUTHORITY_PATH_BYTES
+                ):
+                    raise CandidateWorkspaceError(
+                        "candidate Git authority path is invalid"
+                    )
+                try:
+                    before = os.stat(
+                        name,
+                        dir_fd=directory_descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as error:
+                    raise CandidateWorkspaceError(
+                        "candidate Git authority entry cannot be inspected"
+                    ) from error
+                token = _workspace_read_token(before)
+                entries_seen += 1
+                if stat.S_ISDIR(before.st_mode):
+                    try:
+                        child_descriptor = os.open(
+                            name,
+                            directory_flags,
+                            dir_fd=directory_descriptor,
+                        )
+                    except OSError as error:
+                        raise CandidateWorkspaceError(
+                            "candidate Git authority directory cannot be opened"
+                        ) from error
+                    try:
+                        if (
+                            _workspace_read_token(os.fstat(child_descriptor))
+                            != token
+                        ):
+                            raise CandidateWorkspaceError(
+                                "candidate Git authority directory changed"
+                            )
+                        entries.append(
+                            _GitAuthoritySnapshotEntry(
+                                path_bytes=path_bytes,
+                                entry_type="directory",
+                                token=token,
+                                size_bytes=None,
+                                sha256=None,
+                            )
+                        )
+                        scan(
+                            child_descriptor,
+                            path_bytes + b"/",
+                            depth + 1,
+                        )
+                        named_after = os.stat(
+                            name,
+                            dir_fd=directory_descriptor,
+                            follow_symlinks=False,
+                        )
+                        if (
+                            _workspace_read_token(os.fstat(child_descriptor))
+                            != token
+                            or _workspace_read_token(named_after) != token
+                        ):
+                            raise CandidateWorkspaceError(
+                                "candidate Git authority directory changed"
+                            )
+                    finally:
+                        _close_candidate_read_descriptors([child_descriptor])
+                    continue
+                if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                    raise CandidateWorkspaceError(
+                        "candidate Git authority entry type is unsupported"
+                    )
+                if (
+                    before.st_size > _MAX_GIT_AUTHORITY_FILE_BYTES
+                    or total_bytes + before.st_size
+                    > _MAX_GIT_AUTHORITY_TOTAL_BYTES
+                ):
+                    raise CandidateWorkspaceError(
+                        "candidate Git authority exceeds byte limit"
+                    )
+                try:
+                    file_descriptor = os.open(
+                        name,
+                        os.O_RDONLY | nofollow,
+                        dir_fd=directory_descriptor,
+                    )
+                except OSError as error:
+                    raise CandidateWorkspaceError(
+                        "candidate Git authority file cannot be opened"
+                    ) from error
+                try:
+                    if (
+                        _workspace_read_token(os.fstat(file_descriptor))
+                        != token
+                    ):
+                        raise CandidateWorkspaceError(
+                            "candidate Git authority file changed"
+                        )
+                    digest = hashlib.sha256()
+                    remaining = before.st_size
+                    while remaining:
+                        chunk = os.read(
+                            file_descriptor,
+                            min(remaining, 65_536),
+                        )
+                        if not chunk:
+                            raise CandidateWorkspaceError(
+                                "candidate Git authority file was truncated"
+                            )
+                        digest.update(chunk)
+                        remaining -= len(chunk)
+                    if os.read(file_descriptor, 1):
+                        raise CandidateWorkspaceError(
+                            "candidate Git authority file grew during scan"
+                        )
+                    named_after = os.stat(
+                        name,
+                        dir_fd=directory_descriptor,
+                        follow_symlinks=False,
+                    )
+                    if (
+                        _workspace_read_token(os.fstat(file_descriptor))
+                        != token
+                        or _workspace_read_token(named_after) != token
+                    ):
+                        raise CandidateWorkspaceError(
+                            "candidate Git authority file changed"
+                        )
+                finally:
+                    _close_candidate_read_descriptors([file_descriptor])
+                total_bytes += before.st_size
+                entries.append(
+                    _GitAuthoritySnapshotEntry(
+                        path_bytes=path_bytes,
+                        entry_type="regular",
+                        token=token,
+                        size_bytes=before.st_size,
+                        sha256=digest.hexdigest(),
+                    )
+                )
+
+    scan(git_descriptor, b"", 0)
+    if _workspace_read_token(os.fstat(git_descriptor)) != root_token:
+        raise CandidateWorkspaceError(
+            "candidate Git authority root changed during scan"
+        )
+    return tuple(sorted(entries, key=lambda entry: entry.path_bytes))
+
+
+def _candidate_read_authority_matches(
+    checkpoint: _VerifiedCandidateReadCheckpoint,
+) -> bool:
+    try:
+        if not _candidate_read_anchors_match(checkpoint):
+            return False
+        control_raw = _read_candidate_control_descriptor(
+            checkpoint.control_descriptor,
+            checkpoint.control_size_bytes,
+        )
+        return (
+            hashlib.sha256(control_raw).hexdigest()
+            == checkpoint.control_sha256
+            and _scan_candidate_git_authority(checkpoint.git_descriptor)
+            == checkpoint.git_authority_snapshot
+        )
+    except (CandidateWorkspaceError, ManifestError, OSError):
+        return False
+
+
 def _close_candidate_read_checkpoint(
     checkpoint: _VerifiedCandidateReadCheckpoint,
 ) -> None:
@@ -2355,7 +2657,7 @@ def _read_verified_candidate_path(
     ):
         raise CandidateReadError("PATH_DENIED")
     try:
-        if not _candidate_read_anchors_match(checkpoint):
+        if not _candidate_read_authority_matches(checkpoint):
             raise CandidateReadError("FILE_CHANGED")
         opened = os.fstat(checkpoint.leaf_descriptor)
         if (
@@ -2379,7 +2681,7 @@ def _read_verified_candidate_path(
             raise CandidateReadError("FILE_CHANGED")
         content = b"".join(chunks)
         if (
-            not _candidate_read_anchors_match(checkpoint)
+            not _candidate_read_authority_matches(checkpoint)
             or hashlib.sha256(content).hexdigest() != entry.sha256
         ):
             raise CandidateReadError("FILE_CHANGED")
@@ -2415,6 +2717,13 @@ def _read_candidate_control(workspace: CandidateWorkspace) -> dict[str, Any]:
             raise CandidateWorkspaceError("candidate control record changed")
     finally:
         os.close(descriptor)
+    return _parse_candidate_control(raw, workspace)
+
+
+def _parse_candidate_control(
+    raw: bytes,
+    workspace: CandidateWorkspace,
+) -> dict[str, Any]:
     try:
         value = json.loads(raw)
         if rfc8785.dumps(value) != raw:
