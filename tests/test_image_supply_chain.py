@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -16,6 +17,10 @@ BASE_IMAGE = (
 SOURCE_REVISION = "33a485eacf4ab97b2507f00e5a824ba4a5c8c29c"
 INVENTORY_PATH = (
     IMAGE_ROOT / "candidates" / f"{SOURCE_REVISION}.json"
+)
+FULL_WHEELHOUSE_SUMS = Path(
+    "/Users/molin/Project/openWorkProof-day0/wheelhouse/"
+    "linux-arm64-cp312-full/SHA256SUMS"
 )
 
 
@@ -167,7 +172,20 @@ def test_candidate_inventory_is_closed_and_claims_only_local_evidence() -> None:
         "platform": "linux/arm64",
         "python_version": "3.12.13",
     }
-    assert set(inventory["build_inputs"]) == {"execution", "trusted_helper"}
+    assert set(inventory["build_inputs"]) == {
+        "global",
+        "execution",
+        "trusted_helper",
+    }
+    assert FULL_WHEELHOUSE_SUMS.is_file()
+    assert inventory["build_inputs"]["global"] == {
+        "project_requirements_lock_sha256": hashlib.sha256(
+            (ROOT / "requirements-lock.txt").read_bytes()
+        ).hexdigest(),
+        "full_wheelhouse_sha256sums_sha256": hashlib.sha256(
+            FULL_WHEELHOUSE_SUMS.read_bytes()
+        ).hexdigest(),
+    }
     for inputs in inventory["build_inputs"].values():
         assert all(
             re.fullmatch(r"[0-9a-f]{64}", digest)

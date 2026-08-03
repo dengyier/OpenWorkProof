@@ -7,6 +7,10 @@
     "python_version": "3.12.13"
   },
   "build_inputs": {
+    "global": {
+      "project_requirements_lock_sha256": "be6f8e10d7a82b978913eb2b6a73ee11efc5a9af623e5a783163e3cb78179f8c",
+      "full_wheelhouse_sha256sums_sha256": "e8d3ccaaa1cf735113e7bd533637cef028d710725981fbe20968179c70ea3a72"
+    },
     "execution": {
       "dockerfile_sha256": "9aa0f14acd630b5277988a3af6838821bbf5f7b198a37d9e03f657edc596448f",
       "requirements_lock_sha256": "f60a9bd1cc239a5c2eab11e92665d1af10f457ee06381398350d9ddf0b8d4c70",

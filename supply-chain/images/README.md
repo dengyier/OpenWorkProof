@@ -18,6 +18,10 @@ Acceptor 获取路径。
 - 外部 46-wheel `SHA256SUMS`：SHA-256 `e8d3ccaaa1cf735113e7bd533637cef028d710725981fbe20968179c70ea3a72`。
 - 完整 wheelhouse：`/Users/molin/Project/openWorkProof-day0/wheelhouse/linux-arm64-cp312-full`。它只是仓库外输入；两个构建上下文只复制各自 lock 列出的 wheel 和对应的精确 `SHA256SUMS` 子集。
 
+candidate inventory 将前两个哈希记录在闭合的 `build_inputs.global` 中；契约
+测试从仓库锁文件和外部 full wheelhouse 清单读取精确 bytes 后重新计算，不能
+只比较清单内的固定字符串。
+
 `execution` 仅安装 pytest 与 Rich 15 源码测试在 Python 3.12 上的运行依赖，
 不安装被测 Rich wheel，也不安装 OpenWorkProof、MCP、pip-tools 或 setuptools。
 固定 Verifier test 必须在测试代码中显式把只读 `/workspace` 插入 `sys.path`
