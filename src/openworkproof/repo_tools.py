@@ -29,6 +29,7 @@ from openworkproof.models import (
     EvidenceRef,
     PatchResultEvidence,
     ReplayProfile,
+    RepoReadOutput,
     TestResultEvidence,
     WorkOrder,
 )
@@ -335,6 +336,50 @@ class CandidateWorkspace:
     source_artifact_sha256: str
     head_commit: str
     workspace_manifest_digest: str
+
+
+CandidateReadFailureCode = Literal[
+    "RECOVERY_REQUIRED",
+    "PATH_DENIED",
+    "FILE_CHANGED",
+]
+
+
+class CandidateReadError(RuntimeError):
+    def __init__(self, code: CandidateReadFailureCode) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateReadRequest:
+    runtime_root: Path
+    workspace_id: str
+    source_artifact_sha256: str
+    expected_head_commit: str
+    expected_workspace_manifest_digest: str
+    path: str
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateReadResult:
+    content: bytes
+    output: RepoReadOutput
+
+
+def read_candidate_file(request: CandidateReadRequest) -> CandidateReadResult:
+    workspace = _candidate_from_read_request(request)
+    manifest = _verify_candidate_checkpoint_read_only(workspace)
+    content = _read_verified_candidate_path(workspace.worktree, request.path, manifest)
+    return CandidateReadResult(
+        content=content,
+        output=RepoReadOutput(
+            path=request.path,
+            content_sha256=hashlib.sha256(content).hexdigest(),
+            size_bytes=len(content),
+            workspace_manifest_digest=request.expected_workspace_manifest_digest,
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1706,6 +1751,50 @@ def _run_git(
     return completed.stdout
 
 
+def _run_git_read_only(
+    *,
+    git_dir: Path,
+    worktree: Path | None,
+    arguments: tuple[str, ...],
+) -> subprocess.CompletedProcess[bytes]:
+    executable = Path("/usr/bin/git")
+    if not executable.is_file():
+        raise CandidateWorkspaceError("trusted Git executable is unavailable")
+    command = [str(executable), f"--git-dir={git_dir}"]
+    if worktree is not None:
+        command.append(f"--work-tree={worktree}")
+    command.extend(
+        (
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "core.filemode=true",
+            "-c",
+            "core.hooksPath=/dev/null",
+        )
+    )
+    command.extend(arguments)
+    try:
+        return subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=30,
+            env={
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_TERMINAL_PROMPT": "0",
+                "LC_ALL": "C",
+                "PATH": "/usr/bin:/bin",
+            },
+            cwd=worktree if worktree is not None else None,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise CandidateWorkspaceError("trusted Git operation failed") from error
+
+
 def _write_candidate_source(
     worktree: Path,
     files: Sequence[SourceFile],
@@ -1907,6 +1996,212 @@ def initialize_candidate_workspace(
         raise CandidateWorkspaceError("RECOVERY_REQUIRED") from error
 
 
+def _candidate_from_read_request(
+    request: CandidateReadRequest,
+) -> CandidateWorkspace:
+    if type(request) is not CandidateReadRequest:
+        raise CandidateReadError("RECOVERY_REQUIRED")
+    try:
+        validate_canonical_relative_path(request.path)
+    except (PathError, TypeError, ValueError):
+        raise CandidateReadError("PATH_DENIED") from None
+    runtime_root = request.runtime_root
+    if (
+        type(runtime_root) is not type(Path())
+        or not runtime_root.is_absolute()
+        or runtime_root != Path(os.path.abspath(runtime_root))
+        or type(request.workspace_id) is not str
+        or _DIGEST_PATTERN.fullmatch(request.workspace_id) is None
+        or type(request.source_artifact_sha256) is not str
+        or _DIGEST_PATTERN.fullmatch(request.source_artifact_sha256) is None
+        or type(request.expected_head_commit) is not str
+        or _OID_PATTERN.fullmatch(request.expected_head_commit) is None
+        or type(request.expected_workspace_manifest_digest) is not str
+        or _DIGEST_PATTERN.fullmatch(
+            request.expected_workspace_manifest_digest
+        )
+        is None
+    ):
+        raise CandidateReadError("RECOVERY_REQUIRED")
+    candidate_root = runtime_root / request.workspace_id
+    return CandidateWorkspace(
+        runtime_root=runtime_root,
+        candidate_root=candidate_root,
+        worktree=candidate_root / "worktree",
+        git_dir=candidate_root / "git",
+        workspace_id=request.workspace_id,
+        source_artifact_sha256=request.source_artifact_sha256,
+        head_commit=request.expected_head_commit,
+        workspace_manifest_digest=request.expected_workspace_manifest_digest,
+    )
+
+
+def _verify_candidate_checkpoint_read_only(
+    workspace: CandidateWorkspace,
+) -> WorkspaceManifest:
+    try:
+        _validate_candidate_layout(workspace)
+        actual_head_result = _run_git_read_only(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=("rev-parse", "HEAD"),
+        )
+        if actual_head_result.returncode != 0:
+            raise CandidateWorkspaceError("candidate HEAD is unavailable")
+        actual_head = actual_head_result.stdout.decode("ascii").strip()
+        commit_result = _run_git_read_only(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=(
+                "cat-file",
+                "-e",
+                f"{workspace.head_commit}^{{commit}}",
+            ),
+        )
+        index_result = _run_git_read_only(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=(
+                "diff-index",
+                "--cached",
+                "--quiet",
+                workspace.head_commit,
+                "--",
+            ),
+        )
+        if (
+            actual_head != workspace.head_commit
+            or commit_result.returncode != 0
+            or index_result.returncode != 0
+        ):
+            raise CandidateWorkspaceError("candidate Git checkpoint mismatches")
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        directory = getattr(os, "O_DIRECTORY", None)
+        if (
+            type(nofollow) is not int
+            or nofollow <= 0
+            or type(directory) is not int
+            or directory <= 0
+        ):
+            raise CandidateWorkspaceError(
+                "candidate scan requires directory no-follow support"
+            )
+        descriptor = os.open(
+            workspace.worktree,
+            os.O_RDONLY | directory | nofollow,
+        )
+        try:
+            manifest = scan_workspace_manifest(descriptor, workspace.head_commit)
+        finally:
+            os.close(descriptor)
+        if (
+            workspace_manifest_digest(manifest)
+            != workspace.workspace_manifest_digest
+        ):
+            raise CandidateWorkspaceError("candidate manifest mismatches")
+        return manifest
+    except Exception as error:
+        raise CandidateReadError("RECOVERY_REQUIRED") from error
+
+
+def _read_verified_candidate_path(
+    worktree: Path,
+    path: str,
+    manifest: WorkspaceManifest,
+) -> bytes:
+    try:
+        entries, _ = _canonical_manifest_entries(manifest)
+        entry = entries.get(path)
+    except (ManifestError, TypeError, ValueError) as error:
+        raise CandidateReadError("PATH_DENIED") from error
+    if (
+        entry is None
+        or entry.type != "regular"
+        or type(entry.size_bytes) is not int
+        or not 0 <= entry.size_bytes <= _MAX_MANIFEST_BYTES
+        or type(entry.sha256) is not str
+        or _DIGEST_PATTERN.fullmatch(entry.sha256) is None
+    ):
+        raise CandidateReadError("PATH_DENIED")
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if (
+        type(nofollow) is not int
+        or nofollow <= 0
+        or type(directory) is not int
+        or directory <= 0
+    ):
+        raise CandidateReadError("PATH_DENIED")
+    directory_flags = os.O_RDONLY | directory | nofollow
+    try:
+        current_fd = os.open(worktree, directory_flags)
+    except OSError as error:
+        raise CandidateReadError("PATH_DENIED") from error
+    try:
+        segments = path.split("/")
+        for segment in segments[:-1]:
+            try:
+                child_fd = os.open(segment, directory_flags, dir_fd=current_fd)
+            except OSError as error:
+                raise CandidateReadError("PATH_DENIED") from error
+            os.close(current_fd)
+            current_fd = child_fd
+        leaf = segments[-1]
+        try:
+            before = os.stat(leaf, dir_fd=current_fd, follow_symlinks=False)
+        except OSError as error:
+            raise CandidateReadError("PATH_DENIED") from error
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size > _MAX_MANIFEST_BYTES
+        ):
+            raise CandidateReadError("PATH_DENIED")
+        token_before = _workspace_read_token(before)
+        try:
+            descriptor = os.open(
+                leaf,
+                os.O_RDONLY | nofollow,
+                dir_fd=current_fd,
+            )
+        except OSError as error:
+            raise CandidateReadError("FILE_CHANGED") from error
+        try:
+            opened = os.fstat(descriptor)
+            if _workspace_read_token(opened) != token_before:
+                raise CandidateReadError("FILE_CHANGED")
+            if (
+                entry.posix_mode != f"{opened.st_mode:06o}"
+                or entry.size_bytes != opened.st_size
+            ):
+                raise CandidateReadError("FILE_CHANGED")
+            chunks: list[bytes] = []
+            remaining = opened.st_size
+            while remaining:
+                chunk = os.read(descriptor, min(remaining, 65_536))
+                if not chunk:
+                    raise CandidateReadError("FILE_CHANGED")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if os.read(descriptor, 1):
+                raise CandidateReadError("FILE_CHANGED")
+            content = b"".join(chunks)
+            if (
+                _workspace_read_token(os.fstat(descriptor)) != token_before
+                or hashlib.sha256(content).hexdigest() != entry.sha256
+            ):
+                raise CandidateReadError("FILE_CHANGED")
+            return content
+        except CandidateReadError:
+            raise
+        except OSError as error:
+            raise CandidateReadError("FILE_CHANGED") from error
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(current_fd)
+
+
 def _read_candidate_control(workspace: CandidateWorkspace) -> dict[str, Any]:
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if type(nofollow) is not int or nofollow <= 0:
@@ -2013,17 +2308,18 @@ def _validate_candidate_layout(workspace: CandidateWorkspace) -> None:
     if os.path.lexists(workspace.worktree / ".git"):
         raise CandidateWorkspaceError("candidate Git metadata entered worktree")
     control = _read_candidate_control(workspace)
+    bare_repository = _run_git_read_only(
+        git_dir=workspace.git_dir,
+        worktree=None,
+        arguments=("rev-parse", "--is-bare-repository"),
+    )
     if (
         control["worktree_inode"]
         != os.stat(workspace.worktree, follow_symlinks=False).st_ino
         or control["git_inode"]
         != os.stat(workspace.git_dir, follow_symlinks=False).st_ino
-        or _run_git(
-            git_dir=workspace.git_dir,
-            worktree=None,
-            arguments=("rev-parse", "--is-bare-repository"),
-        ).strip()
-        != b"true"
+        or bare_repository.returncode != 0
+        or bare_repository.stdout.strip() != b"true"
     ):
         raise CandidateWorkspaceError("candidate control identity mismatches")
 
