@@ -3219,7 +3219,10 @@ def validate_docker_execution_inspections(
             is True
             and configured_output.get("Type") == "volume"
             and configured_output.get("Source") == plan.output_volume.name
-            and configured_output.get("ReadOnly") is False
+            and (
+                "ReadOnly" not in configured_output
+                or configured_output.get("ReadOnly") is False
+            )
             and configured_output.get("VolumeOptions", {}).get("NoCopy")
             is True
             and _valid_docker_volume_inspection(

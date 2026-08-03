@@ -1709,6 +1709,24 @@ def test_derive_ready_docker_start_requires_all_created_and_inspected() -> None:
     )
 
 
+def test_derive_ready_docker_start_accepts_omitted_output_readonly_default(
+) -> None:
+    plan = _docker_plan()
+    container = _docker_container_inspection(plan)
+    del container["HostConfig"]["Mounts"][1]["ReadOnly"]
+
+    ready = repo_tools.derive_ready_docker_start(
+        plan,
+        _complete_docker_lifecycle(plan),
+        _docker_image_inspection(plan),
+        container,
+        _docker_volume_inspection(plan, "workspace_volume"),
+        _docker_volume_inspection(plan, "output_volume"),
+    )
+
+    assert ready.start_argv[-1] == plan.container_name
+
+
 def _ready_docker_start_for_repo_digests(
     plan: repo_tools.DockerExecutionPlan,
     repo_digests: list[str],
@@ -1909,6 +1927,75 @@ def test_validate_docker_execution_inspections_accepts_exact_profile() -> None:
         _docker_volume_inspection(plan, "workspace_volume"),
         _docker_volume_inspection(plan, "output_volume"),
     )
+
+
+@pytest.mark.parametrize("read_only", (True, None, "false", 0, 1))
+def test_validate_docker_execution_inspections_rejects_explicit_invalid_output_readonly(
+    read_only: object,
+) -> None:
+    plan = _docker_plan()
+    container = _docker_container_inspection(plan)
+    container["HostConfig"]["Mounts"][1]["ReadOnly"] = read_only
+
+    with pytest.raises(ValueError, match="Docker inspection"):
+        repo_tools.validate_docker_execution_inspections(
+            plan,
+            container,
+            _docker_volume_inspection(plan, "workspace_volume"),
+            _docker_volume_inspection(plan, "output_volume"),
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("missing_mount", "malformed_mount", "missing_rw", "malformed_rw"),
+)
+def test_validate_docker_execution_inspections_rejects_invalid_output_runtime_mount(
+    mutation: str,
+) -> None:
+    plan = _docker_plan()
+    container = _docker_container_inspection(plan)
+    if mutation == "missing_mount":
+        del container["Mounts"][1]
+    elif mutation == "malformed_mount":
+        container["Mounts"][1] = None
+    elif mutation == "missing_rw":
+        del container["Mounts"][1]["RW"]
+    else:
+        container["Mounts"][1]["RW"] = "true"
+
+    with pytest.raises(ValueError, match="Docker inspection"):
+        repo_tools.validate_docker_execution_inspections(
+            plan,
+            container,
+            _docker_volume_inspection(plan, "workspace_volume"),
+            _docker_volume_inspection(plan, "output_volume"),
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("missing_configured_readonly", "writable", "missing_runtime_rw"),
+)
+def test_validate_docker_execution_inspections_keeps_workspace_readonly_explicit(
+    mutation: str,
+) -> None:
+    plan = _docker_plan()
+    container = _docker_container_inspection(plan)
+    if mutation == "missing_configured_readonly":
+        del container["HostConfig"]["Mounts"][0]["ReadOnly"]
+    elif mutation == "writable":
+        container["HostConfig"]["Mounts"][0]["ReadOnly"] = False
+    else:
+        del container["Mounts"][0]["RW"]
+
+    with pytest.raises(ValueError, match="Docker inspection"):
+        repo_tools.validate_docker_execution_inspections(
+            plan,
+            container,
+            _docker_volume_inspection(plan, "workspace_volume"),
+            _docker_volume_inspection(plan, "output_volume"),
+        )
 
 
 @pytest.mark.parametrize(
