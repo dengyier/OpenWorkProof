@@ -297,8 +297,35 @@ class CandidateWorkspace:
     worktree: Path
     git_dir: Path
     workspace_id: str
+    source_artifact_sha256: str
     head_commit: str
     workspace_manifest_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class PatchRequest:
+    workspace: CandidateWorkspace
+    patch_bytes: bytes
+    expected_patch_digest: str
+    expected_patch_size_bytes: int
+    declared_target_paths: tuple[str, ...]
+    parent_commit: str
+    parent_manifest_digest: str
+    occurred_at: str
+    replay_profile: ReplayProfile
+    replay_profile_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class PatchResult:
+    parent_commit: str
+    parent_manifest_digest: str
+    candidate_commit: str
+    workspace_manifest_digest: str
+    patch_digest: str
+    patch_size_bytes: int
+    changed_paths: tuple[str, ...]
+    evidence: PatchResultEvidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -1687,6 +1714,7 @@ def initialize_candidate_workspace(
             {
                 "schema_version": "openworkproof-candidate-control/0.1",
                 "workspace_id": request.workspace_id,
+                "source_artifact_sha256": source.artifact_sha256,
                 "head_commit": commit_oid,
                 "workspace_manifest_digest": manifest_digest,
                 "worktree_inode": os.stat(worktree, follow_symlinks=False).st_ino,
@@ -1718,6 +1746,7 @@ def initialize_candidate_workspace(
             worktree=worktree,
             git_dir=git_dir,
             workspace_id=request.workspace_id,
+            source_artifact_sha256=source.artifact_sha256,
             head_commit=commit_oid,
             workspace_manifest_digest=manifest_digest,
         )
@@ -1772,6 +1801,7 @@ def _read_candidate_control(workspace: CandidateWorkspace) -> dict[str, Any]:
         != {
             "schema_version",
             "workspace_id",
+            "source_artifact_sha256",
             "head_commit",
             "workspace_manifest_digest",
             "worktree_inode",
@@ -1780,6 +1810,8 @@ def _read_candidate_control(workspace: CandidateWorkspace) -> dict[str, Any]:
         or value["schema_version"]
         != "openworkproof-candidate-control/0.1"
         or value["workspace_id"] != workspace.workspace_id
+        or value["source_artifact_sha256"]
+        != workspace.source_artifact_sha256
         or value["head_commit"] != workspace.head_commit
         or value["workspace_manifest_digest"]
         != workspace.workspace_manifest_digest
@@ -1799,6 +1831,7 @@ def _validate_candidate_layout(workspace: CandidateWorkspace) -> None:
         or workspace.worktree != workspace.candidate_root / "worktree"
         or workspace.git_dir != workspace.candidate_root / "git"
         or _DIGEST_PATTERN.fullmatch(workspace.workspace_id) is None
+        or _DIGEST_PATTERN.fullmatch(workspace.source_artifact_sha256) is None
         or _OID_PATTERN.fullmatch(workspace.head_commit) is None
         or _DIGEST_PATTERN.fullmatch(workspace.workspace_manifest_digest) is None
     ):
@@ -1909,6 +1942,245 @@ def _verify_candidate_checkpoint(
         raise CandidateWorkspaceError(
             "candidate checkpoint does not match authority"
         )
+
+
+def _candidate_files_from_git(
+    workspace: CandidateWorkspace,
+    head_commit: str,
+) -> tuple[SourceFile, ...]:
+    listing = _run_git(
+        git_dir=workspace.git_dir,
+        worktree=workspace.worktree,
+        arguments=("ls-tree", "-rz", "--full-tree", head_commit),
+    )
+    if len(listing) > 131_072:
+        raise CandidateWorkspaceError("candidate Git tree listing is too large")
+    files: list[SourceFile] = []
+    for entry in listing.split(b"\0"):
+        if not entry:
+            continue
+        try:
+            metadata, path_bytes = entry.split(b"\t", 1)
+            mode, object_type, object_id = metadata.split(b" ", 2)
+            path = path_bytes.decode("ascii")
+            mode_text = mode.decode("ascii")
+            object_id_text = object_id.decode("ascii")
+        except (UnicodeDecodeError, ValueError) as error:
+            raise CandidateWorkspaceError(
+                "candidate Git tree entry is invalid"
+            ) from error
+        if (
+            object_type != b"blob"
+            or mode_text not in _ALLOWED_MODES
+            or _OID_PATTERN.fullmatch(object_id_text) is None
+        ):
+            raise CandidateWorkspaceError(
+                "candidate Git tree entry is unsupported"
+            )
+        size_raw = _run_git(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=("cat-file", "-s", object_id_text),
+        )
+        try:
+            size = int(size_raw.decode("ascii").strip())
+        except (UnicodeDecodeError, ValueError) as error:
+            raise CandidateWorkspaceError(
+                "candidate Git blob size is invalid"
+            ) from error
+        if not 0 <= size <= _MAX_SOURCE_FILE_BYTES:
+            raise CandidateWorkspaceError("candidate Git blob is too large")
+        content = _run_git(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=("cat-file", "blob", object_id_text),
+        )
+        if len(content) != size or git_blob_oid(content) != object_id_text:
+            raise CandidateWorkspaceError("candidate Git blob binding failed")
+        files.append(SourceFile(path, mode_text, content))
+    try:
+        return _validated_candidate_files(files)
+    except SourceArchiveError as error:
+        raise CandidateWorkspaceError(
+            "candidate Git file set is invalid"
+        ) from error
+
+
+def _materialize_candidate_changes(
+    workspace: CandidateWorkspace,
+    parent_files: Sequence[SourceFile],
+    application: PatchApplication,
+) -> None:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if type(nofollow) is not int or nofollow <= 0:
+        raise CandidateWorkspaceError("candidate patch requires O_NOFOLLOW")
+    parent_by_path = {item.path: item for item in parent_files}
+    result_by_path = {item.path: item for item in application.files}
+    for path in application.changed_paths:
+        target = workspace.worktree / path
+        before = parent_by_path.get(path)
+        after = result_by_path.get(path)
+        if after is None:
+            if before is None:
+                raise CandidateWorkspaceError(
+                    "candidate patch deletion binding is invalid"
+                )
+            os.unlink(target)
+            continue
+        flags = os.O_WRONLY | nofollow
+        if before is None:
+            flags |= os.O_CREAT | os.O_EXCL
+        else:
+            flags |= os.O_TRUNC
+        descriptor = os.open(target, flags, 0o600)
+        try:
+            view = memoryview(after.content)
+            written = 0
+            while written < len(view):
+                count = os.write(descriptor, view[written:])
+                if count <= 0:
+                    raise CandidateWorkspaceError(
+                        "candidate patch write made no progress"
+                    )
+                written += count
+            os.fchmod(descriptor, 0o755 if after.mode == "100755" else 0o644)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def apply_patch_in_candidate_workspace(request: PatchRequest) -> PatchResult:
+    """Apply one canonical patch and commit the verified candidate checkpoint."""
+
+    if type(request) is not PatchRequest:
+        raise CandidateWorkspaceError("candidate patch request is invalid")
+    workspace = request.workspace
+    _validate_candidate_layout(workspace)
+    if (
+        not isinstance(request.replay_profile, ReplayProfile)
+        or request.replay_profile.source_artifact_sha256
+        != workspace.source_artifact_sha256
+    ):
+        raise CandidateWorkspaceError("candidate replay profile is unbound")
+    _verify_candidate_checkpoint(
+        workspace,
+        head_commit=request.parent_commit,
+        manifest_digest=request.parent_manifest_digest,
+    )
+    patch = parse_patch_phase_a(
+        request.patch_bytes,
+        expected_patch_digest=request.expected_patch_digest,
+        expected_patch_size_bytes=request.expected_patch_size_bytes,
+        declared_target_paths=request.declared_target_paths,
+    )
+    parent_files = _candidate_files_from_git(workspace, request.parent_commit)
+    application = apply_patch_phase_b(
+        patch,
+        parent_files,
+        parent_commit=request.parent_commit,
+        parent_manifest_digest=request.parent_manifest_digest,
+        workspace_manifest_digest="0" * 64,
+        occurred_at=request.occurred_at,
+        replay_profile=request.replay_profile,
+        replay_profile_digest=request.replay_profile_digest,
+        observed_manifest_delta_paths=patch.derived_patch_paths,
+    )
+    try:
+        _, expected_manifest_digest = _replay_workspace_manifest(
+            application.files,
+            application.candidate_commit,
+        )
+    except ReplayError as error:
+        raise CandidateWorkspaceError(
+            "candidate result manifest is invalid"
+        ) from error
+    evidence = PatchResultEvidence(
+        schema_version="openworkproof-patch-result/0.1",
+        parent_commit=request.parent_commit,
+        parent_manifest_digest=request.parent_manifest_digest,
+        candidate_commit=application.candidate_commit,
+        workspace_manifest_digest=expected_manifest_digest,
+        patch_digest=patch.patch_digest,
+        patch_size_bytes=patch.patch_size_bytes,
+        replay_profile_digest=request.replay_profile_digest,
+    )
+
+    try:
+        _materialize_candidate_changes(workspace, parent_files, application)
+        _run_git(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=("add", "--all", "--", *application.changed_paths),
+        )
+        actual_tree = _run_git(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=("write-tree",),
+        ).decode("ascii").strip()
+        if actual_tree != application.tree_oid:
+            raise CandidateWorkspaceError("candidate patch tree mismatches")
+        actual_commit = _run_git(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=("hash-object", "-t", "commit", "-w", "--stdin"),
+            input_bytes=application.commit_raw,
+        ).decode("ascii").strip()
+        if actual_commit != application.candidate_commit:
+            raise CandidateWorkspaceError("candidate patch commit mismatches")
+        _run_git(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=(
+                "update-ref",
+                "HEAD",
+                actual_commit,
+                request.parent_commit,
+            ),
+        )
+        _run_git(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=("reset", "--hard", actual_commit),
+        )
+        _verify_candidate_checkpoint(
+            workspace,
+            head_commit=actual_commit,
+            manifest_digest=expected_manifest_digest,
+        )
+    except Exception as patch_error:
+        try:
+            _run_git(
+                git_dir=workspace.git_dir,
+                worktree=workspace.worktree,
+                arguments=("reset", "--hard", request.parent_commit),
+            )
+            _run_git(
+                git_dir=workspace.git_dir,
+                worktree=workspace.worktree,
+                arguments=("clean", "-ffdx"),
+            )
+            _verify_candidate_checkpoint(
+                workspace,
+                head_commit=request.parent_commit,
+                manifest_digest=request.parent_manifest_digest,
+            )
+        except Exception as recovery_error:
+            raise CandidateWorkspaceError("RECOVERY_REQUIRED") from recovery_error
+        if isinstance(patch_error, CandidateWorkspaceError):
+            raise patch_error
+        raise CandidateWorkspaceError(
+            "candidate patch application failed"
+        ) from patch_error
+    return PatchResult(
+        parent_commit=request.parent_commit,
+        parent_manifest_digest=request.parent_manifest_digest,
+        candidate_commit=application.candidate_commit,
+        workspace_manifest_digest=expected_manifest_digest,
+        patch_digest=patch.patch_digest,
+        patch_size_bytes=patch.patch_size_bytes,
+        changed_paths=application.changed_paths,
+        evidence=evidence,
+    )
 
 
 def rollback_candidate_workspace(request: RollbackRequest) -> RollbackResult:

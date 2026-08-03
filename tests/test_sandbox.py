@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 from pathlib import Path
 import stat
 import subprocess
 
 import pytest
+import rfc8785
 
 import openworkproof.mcp_server as mcp_server
 import openworkproof.repo_tools as repo_tools
@@ -37,6 +39,32 @@ def _source_snapshot() -> repo_tools.ParsedSourceArchive:
         artifact_size_bytes=1,
         shallow_bytes=None,
     )
+
+
+def _replay_profile(
+    source: repo_tools.ParsedSourceArchive,
+) -> tuple[repo_tools.ReplayProfile, str]:
+    profile = repo_tools.ReplayProfile(
+        schema_version="openworkproof-replay-profile/0.1",
+        patch_profile_id="openworkproof/canonical-text-patch/0.1",
+        object_format="sha1",
+        source_artifact_sha256=source.artifact_sha256,
+        trusted_helper_image_digest="sha256:" + "b" * 64,
+        author_name="OpenWorkProof Sidecar",
+        author_email="sidecar@openworkproof.invalid",
+        commit_message_prefix="OpenWorkProof patch ",
+        timestamp_rule="receipt-occurred-at-utc-seconds",
+        worktree_profile="linux-posix-case-sensitive-v0.1",
+    )
+    digest = hashlib.sha256(
+        rfc8785.dumps(
+            {
+                "domain": "openworkproof/replay-profile/v0.1",
+                "profile": profile.model_dump(mode="json"),
+            }
+        )
+    ).hexdigest()
+    return profile, digest
 
 
 def _candidate_git(
@@ -387,6 +415,172 @@ def test_rollback_candidate_workspace_restores_exact_parent_checkpoint(
     assert _candidate_git(candidate, "status", "--porcelain=v1") == b""
 
 
+def _modify_readme_patch() -> bytes:
+    old_oid = repo_tools.git_blob_oid(b"base\n")
+    new_oid = repo_tools.git_blob_oid(b"patched\n")
+    return (
+        "diff --git a/README.md b/README.md\n"
+        f"index {old_oid}..{new_oid} 100644\n"
+        "--- a/README.md\n"
+        "+++ b/README.md\n"
+        "@@ -1 +1 @@\n"
+        "-base\n"
+        "+patched\n"
+    ).encode("ascii")
+
+
+def _patch_request(
+    source: repo_tools.ParsedSourceArchive,
+    candidate: repo_tools.CandidateWorkspace,
+    *,
+    patch: bytes | None = None,
+    target_paths: tuple[str, ...] = ("README.md",),
+) -> repo_tools.PatchRequest:
+    patch_bytes = _modify_readme_patch() if patch is None else patch
+    profile, profile_digest = _replay_profile(source)
+    return repo_tools.PatchRequest(
+        workspace=candidate,
+        patch_bytes=patch_bytes,
+        expected_patch_digest=hashlib.sha256(patch_bytes).hexdigest(),
+        expected_patch_size_bytes=len(patch_bytes),
+        declared_target_paths=target_paths,
+        parent_commit=source.source_commit,
+        parent_manifest_digest=candidate.workspace_manifest_digest,
+        occurred_at="2026-01-01T00:00:01Z",
+        replay_profile=profile,
+        replay_profile_digest=profile_digest,
+    )
+
+
+def test_apply_patch_in_candidate_workspace_creates_exact_git_checkpoint(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    source = _source_snapshot()
+    candidate = repo_tools.initialize_candidate_workspace(
+        repo_tools.WorkspaceInitRequest(
+            runtime_root=runtime_root,
+            workspace_id="7" * 64,
+            source=source,
+        )
+    )
+    patch = _modify_readme_patch()
+
+    result = repo_tools.apply_patch_in_candidate_workspace(
+        _patch_request(source, candidate)
+    )
+
+    assert result.parent_commit == source.source_commit
+    assert result.changed_paths == ("README.md",)
+    assert result.patch_digest == hashlib.sha256(patch).hexdigest()
+    assert result.patch_size_bytes == len(patch)
+    assert (candidate.worktree / "README.md").read_bytes() == b"patched\n"
+    assert _candidate_git(candidate, "rev-parse", "HEAD").decode().strip() == (
+        result.candidate_commit
+    )
+    assert _candidate_git(candidate, "status", "--porcelain=v1") == b""
+    _, manifest_digest = _candidate_manifest(
+        candidate,
+        result.candidate_commit,
+    )
+    assert result.workspace_manifest_digest == manifest_digest
+    assert result.evidence.workspace_manifest_digest == manifest_digest
+
+
+def test_apply_patch_in_candidate_workspace_materializes_create_and_delete(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    source = _source_snapshot()
+    candidate = repo_tools.initialize_candidate_workspace(
+        repo_tools.WorkspaceInitRequest(
+            runtime_root=runtime_root,
+            workspace_id="9" * 64,
+            source=source,
+        )
+    )
+    old_oid = repo_tools.git_blob_oid(b"base\n")
+    new_oid = repo_tools.git_blob_oid(b"new\n")
+    patch = (
+        "diff --git a/README.md b/README.md\n"
+        "deleted file mode 100644\n"
+        f"index {old_oid}..{'0' * 40}\n"
+        "--- a/README.md\n"
+        "+++ /dev/null\n"
+        "@@ -1 +0,0 @@\n"
+        "-base\n"
+        "diff --git a/new.txt b/new.txt\n"
+        "new file mode 100644\n"
+        f"index {'0' * 40}..{new_oid}\n"
+        "--- /dev/null\n"
+        "+++ b/new.txt\n"
+        "@@ -0,0 +1 @@\n"
+        "+new\n"
+    ).encode("ascii")
+
+    result = repo_tools.apply_patch_in_candidate_workspace(
+        _patch_request(
+            source,
+            candidate,
+            patch=patch,
+            target_paths=("README.md", "new.txt"),
+        )
+    )
+
+    assert result.changed_paths == ("README.md", "new.txt")
+    assert not (candidate.worktree / "README.md").exists()
+    assert (candidate.worktree / "new.txt").read_bytes() == b"new\n"
+    assert _candidate_git(candidate, "status", "--porcelain=v1") == b""
+
+
+def test_apply_patch_in_candidate_workspace_restores_parent_after_postcheck_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    source = _source_snapshot()
+    candidate = repo_tools.initialize_candidate_workspace(
+        repo_tools.WorkspaceInitRequest(
+            runtime_root=runtime_root,
+            workspace_id="8" * 64,
+            source=source,
+        )
+    )
+    real_verify = repo_tools._verify_candidate_checkpoint
+    calls = 0
+
+    def fail_candidate_once(*args, **kwargs) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise repo_tools.CandidateWorkspaceError("injected postcheck failure")
+        real_verify(*args, **kwargs)
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_verify_candidate_checkpoint",
+        fail_candidate_once,
+    )
+
+    with pytest.raises(
+        repo_tools.CandidateWorkspaceError,
+        match="injected postcheck failure",
+    ):
+        repo_tools.apply_patch_in_candidate_workspace(
+            _patch_request(source, candidate)
+        )
+
+    assert calls == 3
+    assert _candidate_git(candidate, "rev-parse", "HEAD").decode().strip() == (
+        source.source_commit
+    )
+    assert (candidate.worktree / "README.md").read_bytes() == b"base\n"
+    assert _candidate_git(candidate, "status", "--porcelain=v1") == b""
+
+
 def _patched_candidate(
     tmp_path: Path,
     workspace_id: str,
@@ -406,25 +600,15 @@ def _patched_candidate(
             source=source,
         )
     )
-    (candidate.worktree / "README.md").write_bytes(b"patched\n")
-    _candidate_git(candidate, "add", "--all", "--", ".")
-    tree_oid = _candidate_git(candidate, "write-tree").decode().strip()
-    candidate_commit = _candidate_git(
-        candidate,
-        "commit-tree",
-        tree_oid,
-        "-p",
-        source.source_commit,
-        "-m",
-        "patch",
-    ).decode().strip()
-    _candidate_git(candidate, "update-ref", "HEAD", candidate_commit)
-    _candidate_git(candidate, "reset", "--hard", candidate_commit)
-    _, candidate_manifest_digest = _candidate_manifest(
-        candidate,
-        candidate_commit,
+    result = repo_tools.apply_patch_in_candidate_workspace(
+        _patch_request(source, candidate)
     )
-    return source, candidate, candidate_commit, candidate_manifest_digest
+    return (
+        source,
+        candidate,
+        result.candidate_commit,
+        result.workspace_manifest_digest,
+    )
 
 
 def _rollback_request(
