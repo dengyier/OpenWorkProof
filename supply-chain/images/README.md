@@ -4,7 +4,9 @@
 `.deb`、外部构建上下文和 OCI archive 不进入 Git。
 
 当前本地 candidate 的闭合机器清单为
-`candidates/33a485eacf4ab97b2507f00e5a824ba4a5c8c29c.json`。它绑定构建
+`candidates/ed2da68a1009dd8b333025404e7198dc5a12660e.json`。历史清单
+`candidates/33a485eacf4ab97b2507f00e5a824ba4a5c8c29c.json` 保留并继续按其
+自身 revision 验证。清单绑定构建
 revision、基础镜像、全部 build-context 清单哈希、本地 image ID、原样
 `.RepoDigests`、运行配置、OCI manifest 和 archive 哈希。当前外部本地根为
 `/Users/molin/Project/openWorkProof-day0`；清单中的外部路径必须按
@@ -42,8 +44,9 @@ Git closure 由固定基础镜像中的 Debian 13 trixie sources 解析；实际
 
 ## 仓库外构建上下文
 
-上下文必须位于 `/Users/molin/Project/openWorkProof-day0/build-contexts/` 之类的
-仓库外目录。每个上下文包含其 Dockerfile、`requirements.lock`、`wheels/`；
+当前上下文必须位于
+`/Users/molin/Project/openWorkProof-day0/build-contexts/<source-revision>/` 之类的
+revision 专属仓库外目录。每个上下文包含其 Dockerfile、`requirements.lock`、`wheels/`；
 helper 另含 `debs/` 和 `helper-src/`。`wheels/SHA256SUMS` 只列上下文内 wheel，
 `debs/SHA256SUMS` 只列上下文内 `.deb`。helper 源文件按 `SOURCE_ALLOWLIST`
 从指定 Git revision 的 blob 提取，禁止从 working tree 复制，也禁止复制整个
@@ -64,7 +67,7 @@ python "$OWP_REPO/supply-chain/images/prepare_context.py" \
   --source-revision "$OWP_SOURCE_REVISION" \
   --wheelhouse "$OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT/wheelhouse/linux-arm64-cp312-full" \
   --deb-closure "$OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT/debs/linux-arm64-trixie-git" \
-  --output-root "$OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT/build-contexts"
+  --output-root "$OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT/build-contexts/$OWP_SOURCE_REVISION"
 ```
 
 构建时固定 `--platform linux/arm64 --network none --pull=false`，并传入当前
@@ -85,10 +88,12 @@ python "$OWP_REPO/supply-chain/images/prepare_context.py" \
 - 两者运行身份均为 `65532:65532`，并记录 source、revision、role 和基础
   digest OCI labels。
 
-`*.docker-archive.tar` 是 `docker save` 产生的 Docker archive；
+当前 archive 位于 `oci/<source-revision>/`。`*.docker-archive.tar` 是
+`docker save` 产生并带 Docker `manifest.json` 的 Docker archive；
 `*.oci-archive.tar` 是 `docker buildx --output type=oci` 产生、包含
-`oci-layout` 与 `index.json` 的真实 OCI image-layout archive。两者格式和哈希
-在 candidate 清单中分开记录，不能互称。项目代码/文档许可证仍待权利人确认：
+`oci-layout` 与 `index.json` 且不带 Docker `manifest.json` 的真实 OCI
+image-layout archive。两者格式和哈希在 candidate 清单中分开记录，不能互称。
+项目代码/文档许可证仍待权利人确认：
 清单固定记录 `status=PENDING`、`spdx=NOASSERTION`，镜像中不添加 license
 OCI label。
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 import hashlib
 import json
 import os
@@ -18,7 +19,15 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE_ROOT = ROOT / "supply-chain" / "images"
 ASSEMBLER = IMAGE_ROOT / "prepare_context.py"
-INVENTORY = next((IMAGE_ROOT / "candidates").glob("*.json"))
+INVENTORY_ROOT = IMAGE_ROOT / "candidates"
+CURRENT_DEFINITION_PATHS = (
+    "supply-chain/images/trusted-helper/Dockerfile",
+    "supply-chain/images/trusted-helper/SOURCE_ALLOWLIST",
+)
+REQUEST_INVALID_RESPONSE = (
+    '{"code":"REQUEST_INVALID","schema_version":'
+    '"openworkproof-trusted-helper-response/0.1","status":"error"}'
+)
 NO_ARTIFACT_ROOT = (
     "set OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT to run candidate supply-chain integration"
 )
@@ -125,18 +134,78 @@ def _git_bytes(revision: str, relative_path: str) -> bytes:
     ).stdout
 
 
+def _select_inventory_for_definition(
+    candidates: Iterable[tuple[Path, dict[str, object]]],
+    definition: Mapping[str, bytes],
+) -> tuple[Path, dict[str, object]]:
+    matches: list[tuple[Path, dict[str, object]]] = []
+    for path, inventory in candidates:
+        revision = inventory["source_revision"]
+        assert isinstance(revision, str)
+        helper_inputs = inventory["build_inputs"]["trusted_helper"]
+        assert isinstance(helper_inputs, dict)
+        revision_definition = {
+            relative_path: _git_bytes(revision, relative_path)
+            for relative_path in CURRENT_DEFINITION_PATHS
+        }
+        assert helper_inputs["dockerfile_sha256"] == _sha256_bytes(
+            revision_definition[CURRENT_DEFINITION_PATHS[0]]
+        )
+        assert helper_inputs["source_allowlist_sha256"] == _sha256_bytes(
+            revision_definition[CURRENT_DEFINITION_PATHS[1]]
+        )
+        if revision_definition == dict(definition):
+            matches.append((path, inventory))
+    assert len(matches) == 1, (
+        "current candidate definition must select exactly one inventory; "
+        f"matched {len(matches)}"
+    )
+    return matches[0]
+
+
+def _select_current_inventory() -> tuple[Path, dict[str, object]]:
+    candidates = [
+        (path, json.loads(path.read_text(encoding="utf-8")))
+        for path in sorted(INVENTORY_ROOT.glob("*.json"))
+    ]
+    definition = {
+        relative_path: (ROOT / relative_path).read_bytes()
+        for relative_path in CURRENT_DEFINITION_PATHS
+    }
+    return _select_inventory_for_definition(candidates, definition)
+
+
+def _safe_archive_members(archive: tarfile.TarFile) -> dict[str, tarfile.TarInfo]:
+    members: dict[str, tarfile.TarInfo] = {}
+    for member in archive.getmembers():
+        name = member.name.rstrip("/")
+        member_path = PurePosixPath(name)
+        assert name and not member_path.is_absolute() and ".." not in member_path.parts
+        assert member_path.as_posix() == name
+        assert not member.issym() and not member.islnk()
+        assert member.isfile() or member.isdir()
+        assert name not in members
+        members[name] = member
+    return members
+
+
+def _verify_docker_archive(path: Path, expected_tag: str) -> None:
+    with tarfile.open(path, mode="r") as archive:
+        members = _safe_archive_members(archive)
+        assert "manifest.json" in members
+        stream = archive.extractfile(members["manifest.json"])
+        assert stream is not None
+        manifest = json.load(stream)
+        assert len(manifest) == 1
+        assert manifest[0]["RepoTags"] == [expected_tag]
+        assert manifest[0]["Config"]
+        assert manifest[0]["Layers"]
+
+
 def _verify_oci_archive(path: Path, expected_manifest_digest: str) -> None:
     with tarfile.open(path, mode="r") as archive:
-        members = {}
-        for member in archive.getmembers():
-            name = member.name.rstrip("/")
-            member_path = PurePosixPath(name)
-            assert name and not member_path.is_absolute() and ".." not in member_path.parts
-            assert member_path.as_posix() == name
-            assert not member.issym() and not member.islnk()
-            assert member.isfile() or member.isdir()
-            assert name not in members
-            members[name] = member
+        members = _safe_archive_members(archive)
+        assert "manifest.json" not in members
         assert "oci-layout" in members
         assert "index.json" in members
 
@@ -233,6 +302,33 @@ def test_context_manifest_binding_rejects_an_arbitrary_inventory_digest(
         _verify_context_manifest_bindings(execution, helper, inventory)
 
 
+def test_current_candidate_inventory_is_selected_by_tracked_definition() -> None:
+    path, inventory = _select_current_inventory()
+
+    assert path.name == f"{inventory['source_revision']}.json"
+
+
+def test_candidate_inventory_selector_rejects_zero_matches() -> None:
+    with pytest.raises(AssertionError, match="matched 0"):
+        _select_inventory_for_definition([], {})
+
+
+def test_candidate_inventory_selector_rejects_multiple_matches() -> None:
+    historical_path = sorted(INVENTORY_ROOT.glob("*.json"))[0]
+    historical = json.loads(historical_path.read_text(encoding="utf-8"))
+    revision = historical["source_revision"]
+    definition = {
+        relative_path: _git_bytes(revision, relative_path)
+        for relative_path in CURRENT_DEFINITION_PATHS
+    }
+
+    with pytest.raises(AssertionError, match="matched 2"):
+        _select_inventory_for_definition(
+            [(historical_path, historical), (historical_path, historical)],
+            definition,
+        )
+
+
 def _docker(
     executable: str, *args: str, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
@@ -268,12 +364,19 @@ def _verify_live_docker(inventory: dict[str, object]) -> None:
         assert f"{details['Os']}/{details['Architecture']}" == image["platform"]
         assert details["Config"]["User"] == image["user"]
         assert details["Config"]["Entrypoint"] == image["entrypoint"]
-        assert details["Config"]["Cmd"] == image["cmd"]
+        assert details["Config"].get("Cmd") == image["cmd"]
         assert details["Config"]["Labels"] == image["labels"]
 
     names = {
         key: f"owp-supplychain-{os.getpid()}-{key}"
-        for key in ("execution", "helper-python", "helper-git", "helper-dpkg")
+        for key in (
+            "execution",
+            "helper-python",
+            "helper-empty",
+            "helper-argv",
+            "helper-git",
+            "helper-dpkg",
+        )
     }
     for name in names.values():
         assert _docker(docker, "container", "inspect", name, check=False).returncode != 0
@@ -316,11 +419,32 @@ def _verify_live_docker(inventory: dict[str, object]) -> None:
         names["helper-python"],
         "--user",
         str(helper["user"]),
+        "--entrypoint",
+        "/opt/venv/bin/python",
         str(helper["local_image_id"]),
+        "-I",
         "-c",
         helper_check,
     )
     assert result.stdout == ""
+    for name, argv in (
+        (names["helper-empty"], ()),
+        (names["helper-argv"], ("unexpected",)),
+    ):
+        result = _docker(
+            docker,
+            *common,
+            "--name",
+            name,
+            "--user",
+            str(helper["user"]),
+            str(helper["local_image_id"]),
+            *argv,
+            check=False,
+        )
+        assert result.returncode == 64
+        assert result.stdout == REQUEST_INVALID_RESPONSE
+        assert result.stderr == ""
     result = _docker(
         docker,
         *common,
@@ -362,8 +486,8 @@ def test_candidate_artifact_chain(tmp_path: Path) -> None:
     artifact_root = Path(root_value).expanduser().resolve()
     assert artifact_root.is_dir(), f"candidate artifact root is missing: {artifact_root}"
 
-    inventory_bytes = INVENTORY.read_bytes()
-    inventory = json.loads(inventory_bytes)
+    inventory_path, inventory = _select_current_inventory()
+    inventory_bytes = inventory_path.read_bytes()
     revision = inventory["source_revision"]
     layout = inventory["external_layout"]["relative_paths"]
     paths = {
@@ -437,17 +561,21 @@ def test_candidate_artifact_chain(tmp_path: Path) -> None:
     }
     assert dict((name, digest) for digest, name in archive_rows) == expected_archives
     for image in inventory["images"].values():
+        docker_archive = image["archives"]["docker"]
         oci = image["archives"]["oci"]
+        _verify_docker_archive(
+            archives / docker_archive["filename"], image["candidate_name"]
+        )
         _verify_oci_archive(
             archives / oci["filename"], image["oci_manifest_digest"]
         )
 
-    archived_inventory = archives / INVENTORY.name
-    sidecar = archives / f"{INVENTORY.name}.sha256"
+    archived_inventory = archives / inventory_path.name
+    sidecar = archives / f"{inventory_path.name}.sha256"
     assert archived_inventory.read_bytes() == inventory_bytes
     inventory_digest = _sha256_bytes(inventory_bytes)
     assert sidecar.read_text(encoding="utf-8") == (
-        f"{inventory_digest}  {INVENTORY.name}\n"
+        f"{inventory_digest}  {inventory_path.name}\n"
     )
 
     if required_live:

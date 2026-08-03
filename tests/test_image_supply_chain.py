@@ -17,10 +17,9 @@ BASE_IMAGE = (
     "docker.io/library/python@sha256:"
     "57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de"
 )
-SOURCE_REVISION = "33a485eacf4ab97b2507f00e5a824ba4a5c8c29c"
-INVENTORY_PATH = (
-    IMAGE_ROOT / "candidates" / f"{SOURCE_REVISION}.json"
-)
+CANDIDATE_PATHS = tuple(sorted((IMAGE_ROOT / "candidates").glob("*.json")))
+
+
 def _read(relative_path: str) -> str:
     path = IMAGE_ROOT / relative_path
     assert path.is_file(), f"missing supply-chain input: {path}"
@@ -270,9 +269,12 @@ def test_supply_chain_record_keeps_day0_and_acceptor_claims_closed() -> None:
     assert "不构成 Day 0 PASS" in record
 
 
-def test_candidate_inventory_is_closed_and_claims_only_local_evidence() -> None:
-    assert INVENTORY_PATH.is_file(), f"missing candidate inventory: {INVENTORY_PATH}"
-    inventory = json.loads(INVENTORY_PATH.read_text(encoding="utf-8"))
+@pytest.mark.parametrize("inventory_path", CANDIDATE_PATHS, ids=lambda path: path.stem)
+def test_candidate_inventory_is_closed_and_claims_only_local_evidence(
+    inventory_path: Path,
+) -> None:
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    source_revision = inventory_path.stem
 
     assert set(inventory) == {
         "schema_version",
@@ -287,7 +289,7 @@ def test_candidate_inventory_is_closed_and_claims_only_local_evidence() -> None:
     assert inventory["schema_version"] == (
         "openworkproof-image-candidate-inventory/0.1"
     )
-    assert inventory["source_revision"] == SOURCE_REVISION
+    assert inventory["source_revision"] == source_revision
     assert inventory["base_image"] == {
         "reference": BASE_IMAGE,
         "platform": "linux/arm64",
@@ -347,7 +349,7 @@ def test_candidate_inventory_is_closed_and_claims_only_local_evidence() -> None:
         assert type(image["local_repo_digests"]) is list
         assert image["platform"] == "linux/arm64"
         assert image["user"] == "65532:65532"
-        assert image["labels"]["org.opencontainers.image.revision"] == SOURCE_REVISION
+        assert image["labels"]["org.opencontainers.image.revision"] == source_revision
         assert re.fullmatch(
             r"sha256:[0-9a-f]{64}", image["oci_manifest_digest"]
         )
@@ -366,13 +368,27 @@ def test_candidate_inventory_is_closed_and_claims_only_local_evidence() -> None:
     assert inventory["external_layout"]["path_rule"] == (
         "join-local-root-with-relative-path-no-parent-traversal"
     )
-    assert inventory["external_layout"]["relative_paths"] == {
-        "wheelhouse": "wheelhouse/linux-arm64-cp312-full",
-        "git_deb_closure": "debs/linux-arm64-trixie-git",
-        "execution_build_context": "build-contexts/execution",
-        "trusted_helper_build_context": "build-contexts/trusted-helper",
-        "archives": "oci",
-    }
+    relative_paths = inventory["external_layout"]["relative_paths"]
+    assert relative_paths["wheelhouse"] == "wheelhouse/linux-arm64-cp312-full"
+    assert relative_paths["git_deb_closure"] == "debs/linux-arm64-trixie-git"
+    if source_revision == "33a485eacf4ab97b2507f00e5a824ba4a5c8c29c":
+        assert relative_paths == {
+            "wheelhouse": "wheelhouse/linux-arm64-cp312-full",
+            "git_deb_closure": "debs/linux-arm64-trixie-git",
+            "execution_build_context": "build-contexts/execution",
+            "trusted_helper_build_context": "build-contexts/trusted-helper",
+            "archives": "oci",
+        }
+    else:
+        assert relative_paths == {
+            "wheelhouse": "wheelhouse/linux-arm64-cp312-full",
+            "git_deb_closure": "debs/linux-arm64-trixie-git",
+            "execution_build_context": f"build-contexts/{source_revision}/execution",
+            "trusted_helper_build_context": (
+                f"build-contexts/{source_revision}/trusted-helper"
+            ),
+            "archives": f"oci/{source_revision}",
+        }
     assert inventory["license"] == {
         "status": "PENDING",
         "spdx": "NOASSERTION",
