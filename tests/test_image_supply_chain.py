@@ -52,6 +52,9 @@ def _assert_fixed_helper_process_config(dockerfile: str) -> None:
     in_continuation = False
     for raw_line in dockerfile.splitlines():
         stripped = raw_line.lstrip()
+        assert not re.match(
+            r"#\s*(?:syntax|escape|check)\s*=", stripped, re.IGNORECASE
+        ), "Docker parser directives are not allowed"
         if in_continuation:
             in_continuation = raw_line.rstrip().endswith("\\")
             continue
@@ -179,6 +182,36 @@ def test_helper_process_config_parser_ignores_blank_lines_and_comments() -> None
     _assert_fixed_helper_process_config(
         dockerfile + '\n  # entrypoint ["/bin/false"]\n\n'
     )
+
+
+def test_trusted_helper_candidate_rejects_escape_directive_shadow() -> None:
+    dockerfile = _read("trusted-helper/Dockerfile")
+    mutated = (
+        "# escape=`\n"
+        + dockerfile
+        + 'RUN true \\\nENTRYPOINT ["/bin/false"]\n'
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_fixed_helper_process_config(mutated)
+
+
+@pytest.mark.parametrize(
+    "directive",
+    (
+        "# escape=`\n",
+        " # ESCAPE = \\\n",
+        "# syntax=docker/dockerfile:1\n",
+        "  # check = skip=JSONArgsRecommended\n",
+    ),
+)
+def test_helper_process_config_parser_rejects_parser_directives(
+    directive: str,
+) -> None:
+    dockerfile = _read("trusted-helper/Dockerfile")
+
+    with pytest.raises(AssertionError):
+        _assert_fixed_helper_process_config(directive + dockerfile)
 
 
 def test_trusted_helper_source_allowlist_is_the_exact_repo_read_closure() -> None:
