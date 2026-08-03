@@ -2141,33 +2141,41 @@ def _require_real_docker_daemon_and_image(
         )
         pytest.skip(f"Docker daemon unavailable: {detail}")
 
-    try:
-        image = subprocess.run(
-            (str(docker_binary), "image", "inspect", image_reference),
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        pytest.skip(
-            "immutable Docker test image is not preloaded: "
-            f"{image_reference} ({type(error).__name__})"
-        )
-    if image.returncode != 0:
+    repository, digest = image_reference.split("@", 1)
+    listed = subprocess.run(
+        (
+            str(docker_binary),
+            "image",
+            "ls",
+            "--digests",
+            "--no-trunc",
+            "--format",
+            "{{.Digest}}",
+            repository,
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if digest not in listed.stdout.splitlines():
         pytest.skip(
             "immutable Docker test image is not preloaded: "
             f"{image_reference}"
         )
+    image = subprocess.run(
+        (str(docker_binary), "image", "inspect", image_reference),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
     return json.loads(image.stdout)[0]
 
 
 @pytest.mark.docker
 def test_real_docker_enforces_frozen_containment_profile() -> None:
     docker_binary, image_reference = _real_docker_cli_and_image()
-    image_inspection = _require_real_docker_daemon_and_image(
-        docker_binary,
-        image_reference,
-    )
 
     suffix = f"{os.getpid()}-{time.time_ns()}"
     ownership_token = hashlib.sha256(suffix.encode("ascii")).hexdigest()
@@ -2188,6 +2196,10 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
         output_volume_name=f"owp-output-{suffix}",
         ownership_token=ownership_token,
         command=("/bin/sh", "-c", script),
+    )
+    image_inspection = _require_real_docker_daemon_and_image(
+        docker_binary,
+        image_reference,
     )
     preflight_outputs = []
     for preflight_command in plan.preflight_absent_argv:
@@ -2623,7 +2635,10 @@ def test_real_docker_enforces_tmpfs_volume_capacity(
         assert executed.returncode == int(observations["dd_status"])
         assert int(observations["file_bytes"]) == expected_bytes
         assert "No space left on device" in executed.stderr
-        assert f"{limit_mebibytes}+0 records out" in executed.stderr
+        assert (
+            f"{limit_mebibytes}+0 records out"
+            in executed.stderr.splitlines()
+        )
     finally:
         active_failure = sys.exc_info()[1]
         cleanup_failures = []
