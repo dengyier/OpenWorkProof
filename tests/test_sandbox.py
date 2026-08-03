@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import os
 from pathlib import Path
@@ -65,6 +66,39 @@ def _replay_profile(
         )
     ).hexdigest()
     return profile, digest
+
+
+def _bound_source(
+    work_order_dict: dict,
+) -> tuple[bytes, repo_tools.WorkOrder, repo_tools.ParsedSourceArchive]:
+    snapshot = _source_snapshot()
+    source_bytes = repo_tools.write_source_archive(
+        snapshot.files,
+        snapshot.commit_raw,
+    )
+    candidate = copy.deepcopy(work_order_dict)
+    artifact_digest = hashlib.sha256(source_bytes).hexdigest()
+    candidate["source_commit"] = snapshot.source_commit
+    candidate["source_artifact"]["sha256"] = artifact_digest
+    candidate["source_artifact"]["size_bytes"] = len(source_bytes)
+    candidate["replay_profile"]["source_artifact_sha256"] = artifact_digest
+    candidate["replay_profile_digest"] = hashlib.sha256(
+        rfc8785.dumps(
+            {
+                "domain": "openworkproof/replay-profile/v0.1",
+                "profile": candidate["replay_profile"],
+            }
+        )
+    ).hexdigest()
+    work_order = repo_tools.WorkOrder.model_validate(candidate)
+    parsed = repo_tools.parse_source_archive(
+        source_bytes,
+        work_order,
+        trusted_helper_image_digest=(
+            work_order.replay_profile.trusted_helper_image_digest
+        ),
+    )
+    return source_bytes, work_order, parsed
 
 
 def _candidate_git(
@@ -758,3 +792,234 @@ def test_candidate_rollback_handler_adapts_verified_git_result(
     assert result.execution_status == "succeeded"
     assert result.after_commit == source.source_commit
     assert result.after_manifest_digest == candidate.workspace_manifest_digest
+
+
+def test_rebuild_candidate_workspace_replaces_a_mismatched_checkpoint(
+    tmp_path: Path,
+    work_order_dict: dict,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    source_bytes, work_order, source = _bound_source(work_order_dict)
+    workspace_id = "d" * 64
+    candidate = repo_tools.initialize_candidate_workspace(
+        repo_tools.WorkspaceInitRequest(
+            runtime_root=runtime_root,
+            workspace_id=workspace_id,
+            source=source,
+        )
+    )
+    (candidate.worktree / "README.md").write_bytes(b"tampered\n")
+
+    rebuilt = repo_tools.rebuild_candidate_workspace(
+        repo_tools.WorkspaceRebuildRequest(
+            runtime_root=runtime_root,
+            workspace_id=workspace_id,
+            source_bytes=source_bytes,
+            work_order=work_order,
+            trusted_helper_image_digest=(
+                work_order.replay_profile.trusted_helper_image_digest
+            ),
+            steps=(),
+        )
+    )
+
+    assert rebuilt.candidate_root == candidate.candidate_root
+    assert rebuilt.head_commit == source.source_commit
+    assert (rebuilt.worktree / "README.md").read_bytes() == b"base\n"
+    assert _candidate_git(rebuilt, "status", "--porcelain=v1") == b""
+    assert not (runtime_root / f"{workspace_id}.rebuild").exists()
+
+
+def test_rebuild_candidate_workspace_replays_committed_patch_checkpoint(
+    tmp_path: Path,
+    work_order_dict: dict,
+) -> None:
+    source_bytes, work_order, source = _bound_source(work_order_dict)
+    seed_root = tmp_path / "seed"
+    seed_root.mkdir(mode=0o700)
+    seed = repo_tools.initialize_candidate_workspace(
+        repo_tools.WorkspaceInitRequest(
+            runtime_root=seed_root,
+            workspace_id="f" * 64,
+            source=source,
+        )
+    )
+    patch = _modify_readme_patch()
+    applied = repo_tools.apply_patch_in_candidate_workspace(
+        repo_tools.PatchRequest(
+            workspace=seed,
+            patch_bytes=patch,
+            expected_patch_digest=hashlib.sha256(patch).hexdigest(),
+            expected_patch_size_bytes=len(patch),
+            declared_target_paths=("README.md",),
+            parent_commit=source.source_commit,
+            parent_manifest_digest=seed.workspace_manifest_digest,
+            occurred_at="2026-01-01T00:00:01Z",
+            replay_profile=work_order.replay_profile,
+            replay_profile_digest=work_order.replay_profile_digest,
+        )
+    )
+    step = repo_tools.ReplayPatchStep(
+        patch_bytes=patch,
+        target_paths=("README.md",),
+        occurred_at="2026-01-01T00:00:01Z",
+        evidence=applied.evidence,
+        patch_receipt_id="1" * 64,
+        patch_receipt_digest="2" * 64,
+    )
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+
+    rebuilt = repo_tools.rebuild_candidate_workspace(
+        repo_tools.WorkspaceRebuildRequest(
+            runtime_root=runtime_root,
+            workspace_id="a" * 64,
+            source_bytes=source_bytes,
+            work_order=work_order,
+            trusted_helper_image_digest=(
+                work_order.replay_profile.trusted_helper_image_digest
+            ),
+            steps=(step,),
+        )
+    )
+
+    assert _candidate_git(rebuilt, "rev-parse", "HEAD").decode().strip() == (
+        applied.candidate_commit
+    )
+    assert (rebuilt.worktree / "README.md").read_bytes() == b"patched\n"
+
+    rollback_root = tmp_path / "rollback"
+    rollback_root.mkdir(mode=0o700)
+    restored = repo_tools.rebuild_candidate_workspace(
+        repo_tools.WorkspaceRebuildRequest(
+            runtime_root=rollback_root,
+            workspace_id="3" * 64,
+            source_bytes=source_bytes,
+            work_order=work_order,
+            trusted_helper_image_digest=(
+                work_order.replay_profile.trusted_helper_image_digest
+            ),
+            steps=(
+                step,
+                repo_tools.ReplayRollbackStep(
+                    target_patch_receipt_id=step.patch_receipt_id,
+                    target_patch_receipt_digest=step.patch_receipt_digest,
+                    before_commit=applied.candidate_commit,
+                    after_commit=source.source_commit,
+                    after_manifest_digest=seed.workspace_manifest_digest,
+                ),
+            ),
+        )
+    )
+
+    assert _candidate_git(restored, "rev-parse", "HEAD").decode().strip() == (
+        source.source_commit
+    )
+    assert (restored.worktree / "README.md").read_bytes() == b"base\n"
+
+
+def test_rebuild_candidate_workspace_restores_old_path_when_recreation_fails(
+    tmp_path: Path,
+    work_order_dict: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    source_bytes, work_order, source = _bound_source(work_order_dict)
+    workspace_id = "b" * 64
+    candidate = repo_tools.initialize_candidate_workspace(
+        repo_tools.WorkspaceInitRequest(
+            runtime_root=runtime_root,
+            workspace_id=workspace_id,
+            source=source,
+        )
+    )
+    (candidate.worktree / "README.md").write_bytes(b"tampered\n")
+
+    def fail_recreation(*args, **kwargs):
+        raise repo_tools.CandidateWorkspaceError("injected rebuild failure")
+
+    monkeypatch.setattr(
+        repo_tools,
+        "initialize_candidate_workspace",
+        fail_recreation,
+    )
+    with pytest.raises(
+        repo_tools.CandidateWorkspaceError,
+        match="injected rebuild failure",
+    ):
+        repo_tools.rebuild_candidate_workspace(
+            repo_tools.WorkspaceRebuildRequest(
+                runtime_root=runtime_root,
+                workspace_id=workspace_id,
+                source_bytes=source_bytes,
+                work_order=work_order,
+                trusted_helper_image_digest=(
+                    work_order.replay_profile.trusted_helper_image_digest
+                ),
+                steps=(),
+            )
+        )
+
+    assert (candidate.worktree / "README.md").read_bytes() == b"tampered\n"
+    assert not (runtime_root / f"{workspace_id}.rebuild").exists()
+
+
+def test_destroy_candidate_workspace_requires_and_removes_exact_checkpoint(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    source = _source_snapshot()
+    candidate = repo_tools.initialize_candidate_workspace(
+        repo_tools.WorkspaceInitRequest(
+            runtime_root=runtime_root,
+            workspace_id="e" * 64,
+            source=source,
+        )
+    )
+
+    result = repo_tools.destroy_candidate_workspace(
+        repo_tools.WorkspaceDestroyRequest(
+            workspace=candidate,
+            expected_head_commit=source.source_commit,
+            expected_manifest_digest=candidate.workspace_manifest_digest,
+            lifecycle_state="terminal",
+        )
+    )
+
+    assert result.workspace_id == candidate.workspace_id
+    assert result.destroyed is True
+    assert not candidate.candidate_root.exists()
+
+
+def test_destroy_candidate_workspace_rejects_wrong_checkpoint_without_removal(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    source = _source_snapshot()
+    candidate = repo_tools.initialize_candidate_workspace(
+        repo_tools.WorkspaceInitRequest(
+            runtime_root=runtime_root,
+            workspace_id="c" * 64,
+            source=source,
+        )
+    )
+
+    with pytest.raises(
+        repo_tools.CandidateWorkspaceError,
+        match="checkpoint",
+    ):
+        repo_tools.destroy_candidate_workspace(
+            repo_tools.WorkspaceDestroyRequest(
+                workspace=candidate,
+                expected_head_commit=source.source_commit,
+                expected_manifest_digest="0" * 64,
+                lifecycle_state="terminal",
+            )
+        )
+
+    assert candidate.candidate_root.is_dir()
+    assert (candidate.worktree / "README.md").read_bytes() == b"base\n"

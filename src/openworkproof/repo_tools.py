@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import struct
 import subprocess
@@ -51,6 +52,9 @@ _MAX_SOURCE_BYTES = 8_388_608
 _PATH_PATTERN = re.compile(r"^[A-Za-z0-9._/-]+$")
 _OID_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_RUNTIME_CHILD_PATTERN = re.compile(
+    r"^[0-9a-f]{64}(?:\.(?:rebuild|destroying))?$"
+)
 _IMAGE_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PATCH_PATH_PATTERN = re.compile(r"^[A-Za-z0-9._/-]+$")
 _PATCH_HEADER_PATTERN = re.compile(
@@ -347,6 +351,30 @@ class RollbackResult:
     before_commit: str
     after_commit: str
     after_manifest_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceRebuildRequest:
+    runtime_root: Path
+    workspace_id: str
+    source_bytes: bytes
+    work_order: WorkOrder
+    trusted_helper_image_digest: str
+    steps: tuple[ReplayPatchStep | ReplayTestStep | ReplayRollbackStep, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceDestroyRequest:
+    workspace: CandidateWorkspace
+    expected_head_commit: str
+    expected_manifest_digest: str
+    lifecycle_state: Literal["terminal", "aborted", "retention_expired"]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceDestroyResult:
+    workspace_id: str
+    destroyed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -1605,6 +1633,7 @@ def initialize_candidate_workspace(
     if (
         not isinstance(runtime_root, Path)
         or not runtime_root.is_absolute()
+        or runtime_root != Path(os.path.abspath(runtime_root))
         or type(request.workspace_id) is not str
         or _DIGEST_PATTERN.fullmatch(request.workspace_id) is None
         or type(source) is not ParsedSourceArchive
@@ -1615,6 +1644,7 @@ def initialize_candidate_workspace(
         if (
             not stat.S_ISDIR(root_named.st_mode)
             or stat.S_IMODE(root_named.st_mode) != 0o700
+            or root_named.st_uid != os.geteuid()
         ):
             raise CandidateWorkspaceError(
                 "candidate runtime root must be a private directory"
@@ -1826,6 +1856,8 @@ def _validate_candidate_layout(workspace: CandidateWorkspace) -> None:
     if (
         type(workspace) is not CandidateWorkspace
         or not workspace.runtime_root.is_absolute()
+        or workspace.runtime_root
+        != Path(os.path.abspath(workspace.runtime_root))
         or workspace.candidate_root
         != workspace.runtime_root / workspace.workspace_id
         or workspace.worktree != workspace.candidate_root / "worktree"
@@ -1846,6 +1878,7 @@ def _validate_candidate_layout(workspace: CandidateWorkspace) -> None:
         if (
             not stat.S_ISDIR(metadata.st_mode)
             or stat.S_IMODE(metadata.st_mode) != expected_mode
+            or metadata.st_uid != os.geteuid()
         ):
             raise CandidateWorkspaceError(
                 "candidate workspace directory identity is invalid"
@@ -2278,6 +2311,330 @@ def rollback_candidate_workspace(request: RollbackRequest) -> RollbackResult:
         before_commit=request.before_commit,
         after_commit=request.parent_commit,
         after_manifest_digest=request.parent_manifest_digest,
+    )
+
+
+def _open_candidate_runtime_root(runtime_root: Path) -> int:
+    if (
+        not isinstance(runtime_root, Path)
+        or not runtime_root.is_absolute()
+        or runtime_root != Path(os.path.abspath(runtime_root))
+    ):
+        raise CandidateWorkspaceError("candidate runtime root is invalid")
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if (
+        type(nofollow) is not int
+        or nofollow <= 0
+        or type(directory) is not int
+        or directory <= 0
+    ):
+        raise CandidateWorkspaceError(
+            "candidate runtime requires directory no-follow support"
+        )
+    named = os.stat(runtime_root, follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(named.st_mode)
+        or stat.S_IMODE(named.st_mode) != 0o700
+        or named.st_uid != os.geteuid()
+    ):
+        raise CandidateWorkspaceError(
+            "candidate runtime root must be a private owned directory"
+        )
+    descriptor = os.open(runtime_root, os.O_RDONLY | directory | nofollow)
+    if not os.path.samestat(named, os.fstat(descriptor)):
+        os.close(descriptor)
+        raise CandidateWorkspaceError("candidate runtime root changed")
+    return descriptor
+
+
+def _validate_runtime_child_name(child_name: str) -> None:
+    if (
+        type(child_name) is not str
+        or _RUNTIME_CHILD_PATTERN.fullmatch(child_name) is None
+    ):
+        raise CandidateWorkspaceError("candidate runtime child name is invalid")
+
+
+def _remove_runtime_child(runtime_root: Path, child_name: str) -> None:
+    _validate_runtime_child_name(child_name)
+    target = runtime_root / child_name
+    if target.parent != runtime_root:
+        raise CandidateWorkspaceError("candidate removal target is invalid")
+    metadata = os.stat(target, follow_symlinks=False)
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
+        raise CandidateWorkspaceError("candidate removal target is unsafe")
+    shutil.rmtree(target)
+
+
+def _rename_runtime_child(
+    runtime_root: Path,
+    source_name: str,
+    target_name: str,
+) -> None:
+    _validate_runtime_child_name(source_name)
+    _validate_runtime_child_name(target_name)
+    descriptor = _open_candidate_runtime_root(runtime_root)
+    try:
+        os.rename(
+            source_name,
+            target_name,
+            src_dir_fd=descriptor,
+            dst_dir_fd=descriptor,
+        )
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _source_workspace_identity(
+    runtime_root: Path,
+    workspace_id: str,
+    source: ParsedSourceArchive,
+) -> CandidateWorkspace:
+    try:
+        _, manifest_digest = _replay_workspace_manifest(
+            source.files,
+            source.source_commit,
+        )
+    except ReplayError as error:
+        raise CandidateWorkspaceError(
+            "candidate source checkpoint is invalid"
+        ) from error
+    candidate_root = runtime_root / workspace_id
+    return CandidateWorkspace(
+        runtime_root=runtime_root,
+        candidate_root=candidate_root,
+        worktree=candidate_root / "worktree",
+        git_dir=candidate_root / "git",
+        workspace_id=workspace_id,
+        source_artifact_sha256=source.artifact_sha256,
+        head_commit=source.source_commit,
+        workspace_manifest_digest=manifest_digest,
+    )
+
+
+def _replay_candidate_steps(
+    workspace: CandidateWorkspace,
+    work_order: WorkOrder,
+    steps: tuple[ReplayPatchStep | ReplayTestStep | ReplayRollbackStep, ...],
+) -> None:
+    active_patch: tuple[PatchResult, str, str] | None = None
+    for step in steps:
+        if isinstance(step, ReplayPatchStep):
+            result = apply_patch_in_candidate_workspace(
+                PatchRequest(
+                    workspace=workspace,
+                    patch_bytes=step.patch_bytes,
+                    expected_patch_digest=step.evidence.patch_digest,
+                    expected_patch_size_bytes=step.evidence.patch_size_bytes,
+                    declared_target_paths=step.target_paths,
+                    parent_commit=step.evidence.parent_commit,
+                    parent_manifest_digest=(
+                        step.evidence.parent_manifest_digest
+                    ),
+                    occurred_at=step.occurred_at,
+                    replay_profile=work_order.replay_profile,
+                    replay_profile_digest=work_order.replay_profile_digest,
+                )
+            )
+            if result.evidence != step.evidence:
+                raise CandidateWorkspaceError(
+                    "candidate replay patch evidence mismatches"
+                )
+            active_patch = (
+                result,
+                result.parent_commit,
+                result.parent_manifest_digest,
+            )
+            continue
+        if isinstance(step, ReplayTestStep):
+            continue
+        if not isinstance(step, ReplayRollbackStep) or active_patch is None:
+            raise CandidateWorkspaceError("candidate replay step is invalid")
+        patch_result, parent_commit, parent_manifest_digest = active_patch
+        result = rollback_candidate_workspace(
+            RollbackRequest(
+                workspace=workspace,
+                target_patch_receipt_id=step.target_patch_receipt_id,
+                target_patch_receipt_digest=step.target_patch_receipt_digest,
+                failure_target_patch_receipt_id=step.target_patch_receipt_id,
+                failure_target_patch_receipt_digest=(
+                    step.target_patch_receipt_digest
+                ),
+                before_commit=patch_result.candidate_commit,
+                before_manifest_digest=(
+                    patch_result.workspace_manifest_digest
+                ),
+                parent_commit=parent_commit,
+                parent_manifest_digest=parent_manifest_digest,
+            )
+        )
+        if (
+            result.execution_status != "succeeded"
+            or result.before_commit != step.before_commit
+            or result.after_commit != step.after_commit
+            or result.after_manifest_digest != step.after_manifest_digest
+        ):
+            raise CandidateWorkspaceError(
+                "candidate replay rollback evidence mismatches"
+            )
+        active_patch = None
+
+
+def rebuild_candidate_workspace(
+    request: WorkspaceRebuildRequest,
+) -> CandidateWorkspace:
+    """Converge a candidate path to the checkpoint proven by replay steps."""
+
+    if (
+        type(request) is not WorkspaceRebuildRequest
+        or _DIGEST_PATTERN.fullmatch(request.workspace_id) is None
+    ):
+        raise CandidateWorkspaceError("candidate rebuild request is invalid")
+    try:
+        steps = tuple(request.steps)
+        expected = replay_workspace_sequence(
+            source_bytes=request.source_bytes,
+            work_order=request.work_order,
+            trusted_helper_image_digest=request.trusted_helper_image_digest,
+            steps=steps,
+        )
+        source = parse_source_archive(
+            request.source_bytes,
+            request.work_order,
+            trusted_helper_image_digest=request.trusted_helper_image_digest,
+        )
+    except (ReplayError, SourceArchiveError, TypeError, ValueError) as error:
+        raise CandidateWorkspaceError(
+            "candidate rebuild authority is invalid"
+        ) from error
+    workspace = _source_workspace_identity(
+        request.runtime_root,
+        request.workspace_id,
+        source,
+    )
+    runtime_descriptor = _open_candidate_runtime_root(request.runtime_root)
+    os.close(runtime_descriptor)
+    candidate_name = request.workspace_id
+    backup_name = f"{request.workspace_id}.rebuild"
+    candidate_exists = os.path.lexists(workspace.candidate_root)
+    backup_path = request.runtime_root / backup_name
+    backup_exists = os.path.lexists(backup_path)
+
+    if backup_exists:
+        if candidate_exists:
+            try:
+                _validate_candidate_layout(workspace)
+                _verify_candidate_checkpoint(
+                    workspace,
+                    head_commit=expected.head_commit,
+                    manifest_digest=expected.workspace_manifest_digest,
+                )
+            except CandidateWorkspaceError:
+                _remove_runtime_child(request.runtime_root, candidate_name)
+                _rename_runtime_child(
+                    request.runtime_root,
+                    backup_name,
+                    candidate_name,
+                )
+                candidate_exists = True
+            else:
+                _remove_runtime_child(request.runtime_root, backup_name)
+                return workspace
+        else:
+            _rename_runtime_child(
+                request.runtime_root,
+                backup_name,
+                candidate_name,
+            )
+            candidate_exists = True
+
+    if candidate_exists:
+        try:
+            _validate_candidate_layout(workspace)
+            _verify_candidate_checkpoint(
+                workspace,
+                head_commit=expected.head_commit,
+                manifest_digest=expected.workspace_manifest_digest,
+            )
+        except CandidateWorkspaceError:
+            _rename_runtime_child(
+                request.runtime_root,
+                candidate_name,
+                backup_name,
+            )
+        else:
+            return workspace
+
+    try:
+        workspace = initialize_candidate_workspace(
+            WorkspaceInitRequest(
+                runtime_root=request.runtime_root,
+                workspace_id=request.workspace_id,
+                source=source,
+            )
+        )
+        _replay_candidate_steps(workspace, request.work_order, steps)
+        _verify_candidate_checkpoint(
+            workspace,
+            head_commit=expected.head_commit,
+            manifest_digest=expected.workspace_manifest_digest,
+        )
+        if os.path.lexists(backup_path):
+            _remove_runtime_child(request.runtime_root, backup_name)
+        return workspace
+    except Exception as rebuild_error:
+        try:
+            if os.path.lexists(workspace.candidate_root):
+                _remove_runtime_child(request.runtime_root, candidate_name)
+            if os.path.lexists(backup_path):
+                _rename_runtime_child(
+                    request.runtime_root,
+                    backup_name,
+                    candidate_name,
+                )
+        except Exception as recovery_error:
+            raise CandidateWorkspaceError("RECOVERY_REQUIRED") from recovery_error
+        if isinstance(rebuild_error, CandidateWorkspaceError):
+            raise rebuild_error
+        raise CandidateWorkspaceError("candidate rebuild failed") from rebuild_error
+
+
+def destroy_candidate_workspace(
+    request: WorkspaceDestroyRequest,
+) -> WorkspaceDestroyResult:
+    """Remove one exact terminal candidate without broad path deletion."""
+
+    if (
+        type(request) is not WorkspaceDestroyRequest
+        or request.lifecycle_state
+        not in {"terminal", "aborted", "retention_expired"}
+    ):
+        raise CandidateWorkspaceError("candidate destroy request is invalid")
+    workspace = request.workspace
+    _validate_candidate_layout(workspace)
+    _verify_candidate_checkpoint(
+        workspace,
+        head_commit=request.expected_head_commit,
+        manifest_digest=request.expected_manifest_digest,
+    )
+    tombstone_name = f"{workspace.workspace_id}.destroying"
+    tombstone = workspace.runtime_root / tombstone_name
+    if os.path.lexists(tombstone):
+        raise CandidateWorkspaceError("RECOVERY_REQUIRED")
+    _rename_runtime_child(
+        workspace.runtime_root,
+        workspace.workspace_id,
+        tombstone_name,
+    )
+    try:
+        _remove_runtime_child(workspace.runtime_root, tombstone_name)
+    except Exception as error:
+        raise CandidateWorkspaceError("RECOVERY_REQUIRED") from error
+    return WorkspaceDestroyResult(
+        workspace_id=workspace.workspace_id,
+        destroyed=True,
     )
 
 
