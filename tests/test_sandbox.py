@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
@@ -1230,6 +1231,7 @@ def _docker_plan(
     container_name: str = "owp-container-01",
     workspace_volume_name: str = "owp-workspace-01",
     output_volume_name: str = "owp-output-01",
+    ownership_token: str = "b" * 64,
 ) -> repo_tools.DockerExecutionPlan:
     return repo_tools.derive_docker_execution_plan(
         docker_binary=Path("/usr/local/bin/docker"),
@@ -1237,6 +1239,7 @@ def _docker_plan(
         container_name=container_name,
         workspace_volume_name=workspace_volume_name,
         output_volume_name=output_volume_name,
+        ownership_token=ownership_token,
         command=("/bin/sh", "-c", "printf containment-ok"),
     )
 
@@ -1262,14 +1265,28 @@ def test_derive_docker_execution_plan_is_exact_and_deterministic() -> None:
         "device=tmpfs",
         "--opt",
         "o=size=512m",
+        "--label",
+        "openworkproof.execution-owner=" + "b" * 64,
         "owp-workspace-01",
     )
     assert first.output_volume.name == "owp-output-01"
     assert first.output_volume.size_bytes == 64 * 1024 * 1024
     assert first.output_volume.mount_path == "/output"
     assert first.output_volume.read_only is False
-    assert first.output_volume.create_argv[-2:] == (
+    assert first.output_volume.create_argv == (
+        "/usr/local/bin/docker",
+        "volume",
+        "create",
+        "--driver",
+        "local",
+        "--opt",
+        "type=tmpfs",
+        "--opt",
+        "device=tmpfs",
+        "--opt",
         "o=size=64m",
+        "--label",
+        "openworkproof.execution-owner=" + "b" * 64,
         "owp-output-01",
     )
     assert first.create_container_argv == (
@@ -1277,6 +1294,8 @@ def test_derive_docker_execution_plan_is_exact_and_deterministic() -> None:
         "create",
         "--name",
         "owp-container-01",
+        "--label",
+        "openworkproof.execution-owner=" + "b" * 64,
         "--pull",
         "never",
         "--network",
@@ -1301,10 +1320,13 @@ def test_derive_docker_execution_plan_is_exact_and_deterministic() -> None:
         "--mount",
         (
             "type=volume,source=owp-workspace-01,"
-            "target=/workspace,readonly"
+            "target=/workspace,readonly,volume-nocopy"
         ),
         "--mount",
-        "type=volume,source=owp-output-01,target=/output",
+        (
+            "type=volume,source=owp-output-01,"
+            "target=/output,volume-nocopy"
+        ),
         (
             "registry.example/openworkproof/test-runner@sha256:"
             + "a" * 64
@@ -1319,8 +1341,14 @@ def test_derive_docker_execution_plan_is_exact_and_deterministic() -> None:
         if argument == "--mount"
     )
     assert mount_specs == (
-        "type=volume,source=owp-workspace-01,target=/workspace,readonly",
-        "type=volume,source=owp-output-01,target=/output",
+        (
+            "type=volume,source=owp-workspace-01,"
+            "target=/workspace,readonly,volume-nocopy"
+        ),
+        (
+            "type=volume,source=owp-output-01,"
+            "target=/output,volume-nocopy"
+        ),
     )
     assert first.start_container_argv == (
         "/usr/local/bin/docker",
@@ -1328,26 +1356,31 @@ def test_derive_docker_execution_plan_is_exact_and_deterministic() -> None:
         "--attach",
         "owp-container-01",
     )
-    assert first.cleanup_argv == (
+    assert first.preflight_absent_argv == (
         (
             "/usr/local/bin/docker",
-            "rm",
-            "--force",
-            "owp-container-01",
+            "container",
+            "ls",
+            "--all",
+            "--format",
+            "{{.Names}}",
         ),
         (
             "/usr/local/bin/docker",
             "volume",
-            "rm",
-            "owp-workspace-01",
+            "ls",
+            "--format",
+            "{{.Name}}",
         ),
         (
             "/usr/local/bin/docker",
             "volume",
-            "rm",
-            "owp-output-01",
+            "ls",
+            "--format",
+            "{{.Name}}",
         ),
     )
+    assert not hasattr(first, "cleanup_argv")
     joined = "\0".join(first.create_container_argv)
     for forbidden in (
         "/var/run/docker.sock",
@@ -1365,6 +1398,8 @@ def test_derive_docker_execution_plan_is_exact_and_deterministic() -> None:
     (
         "alpine",
         "alpine:latest",
+        "namespace/repo@sha256:" + "a" * 64,
+        "a/repo@sha256:" + "a" * 64,
         "sha256:" + "a" * 64,
         "registry.example/openworkproof/test-runner:latest",
         (
@@ -1372,6 +1407,20 @@ def test_derive_docker_execution_plan_is_exact_and_deterministic() -> None:
             + "a" * 64
         ),
         "registry.example/openworkproof/test-runner@sha256:" + "A" * 64,
+        "registry.example:0/openworkproof/runner@sha256:" + "a" * 64,
+        "registry.example:65536/openworkproof/runner@sha256:" + "a" * 64,
+        "r" * 64 + ".example/repo@sha256:" + "a" * 64,
+        (
+            "registry.example/" + "x" * 129 + "@sha256:" + "a" * 64
+        ),
+        (
+            "registry.example/"
+            + "x" * 100
+            + "/"
+            + "y" * 100
+            + "@sha256:"
+            + "a" * 64
+        ),
     ),
 )
 def test_derive_docker_execution_plan_rejects_mutable_or_unqualified_image(
@@ -1402,6 +1451,287 @@ def test_derive_docker_execution_plan_rejects_invalid_or_reused_names(
             container_name=container_name,
             workspace_volume_name=workspace_name,
             output_volume_name=output_name,
+        )
+
+
+@pytest.mark.parametrize("ownership_token", ("", "a" * 63, "A" * 64))
+def test_derive_docker_execution_plan_rejects_invalid_ownership_token(
+    ownership_token: str,
+) -> None:
+    with pytest.raises(ValueError, match="ownership token"):
+        _docker_plan(ownership_token=ownership_token)
+
+
+def _docker_volume_inspection(
+    plan: repo_tools.DockerExecutionPlan,
+    resource: str,
+) -> dict:
+    volume = (
+        plan.workspace_volume
+        if resource == "workspace_volume"
+        else plan.output_volume
+    )
+    size = "512m" if resource == "workspace_volume" else "64m"
+    return {
+        "Name": volume.name,
+        "Driver": "local",
+        "Labels": {
+            "openworkproof.execution-owner": plan.ownership_token,
+        },
+        "Options": {
+            "type": "tmpfs",
+            "device": "tmpfs",
+            "o": f"size={size}",
+        },
+    }
+
+
+def _docker_container_inspection(
+    plan: repo_tools.DockerExecutionPlan,
+) -> dict:
+    return {
+        "Name": f"/{plan.container_name}",
+        "Config": {
+            "Image": plan.image_reference,
+            "User": "65532:65532",
+            "Labels": {
+                "openworkproof.execution-owner": plan.ownership_token,
+            },
+            "Volumes": None,
+        },
+        "HostConfig": {
+            "NetworkMode": "none",
+            "ReadonlyRootfs": True,
+            "CapDrop": ["ALL"],
+            "SecurityOpt": ["no-new-privileges:true"],
+            "PidsLimit": 128,
+            "Memory": 1024 * 1024 * 1024,
+            "NanoCpus": 1_000_000_000,
+            "Tmpfs": {"/tmp": "rw,noexec,nosuid,size=256m"},
+            "Mounts": [
+                {
+                    "Type": "volume",
+                    "Source": plan.workspace_volume.name,
+                    "Target": "/workspace",
+                    "ReadOnly": True,
+                    "VolumeOptions": {"NoCopy": True},
+                },
+                {
+                    "Type": "volume",
+                    "Source": plan.output_volume.name,
+                    "Target": "/output",
+                    "ReadOnly": False,
+                    "VolumeOptions": {"NoCopy": True},
+                },
+            ],
+        },
+        "Mounts": [
+            {
+                "Destination": "/workspace",
+                "Type": "volume",
+                "Name": plan.workspace_volume.name,
+                "RW": False,
+            },
+            {
+                "Destination": "/output",
+                "Type": "volume",
+                "Name": plan.output_volume.name,
+                "RW": True,
+            },
+        ],
+    }
+
+
+def test_docker_lifecycle_requires_absence_and_cleans_only_created_owned(
+) -> None:
+    plan = _docker_plan()
+    state = repo_tools.validate_docker_preflight_absent(
+        plan,
+        repo_tools.DockerPreflightObservation(
+            container_names=(),
+            workspace_volume_names=(),
+            output_volume_names=(),
+        ),
+    )
+    state = repo_tools.mark_docker_resource_created(
+        plan,
+        state,
+        "workspace_volume",
+    )
+    state = repo_tools.mark_docker_resource_created(
+        plan,
+        state,
+        "output_volume",
+    )
+    state = repo_tools.mark_docker_resource_created(
+        plan,
+        state,
+        "container",
+    )
+    unowned_output = _docker_volume_inspection(plan, "output_volume")
+    unowned_output["Labels"] = {
+        "openworkproof.execution-owner": "c" * 64,
+    }
+
+    cleanup = repo_tools.derive_docker_cleanup_plan(
+        plan,
+        state,
+        {
+            "container": _docker_container_inspection(plan),
+            "workspace_volume": _docker_volume_inspection(
+                plan,
+                "workspace_volume",
+            ),
+            "output_volume": unowned_output,
+        },
+    )
+
+    assert cleanup.commands == (
+        (
+            "/usr/local/bin/docker",
+            "rm",
+            "--force",
+            "--volumes",
+            plan.container_name,
+        ),
+        (
+            "/usr/local/bin/docker",
+            "volume",
+            "rm",
+            plan.workspace_volume.name,
+        ),
+    )
+    assert cleanup.retained_resources == ("output_volume",)
+
+
+def test_docker_cleanup_ignores_owned_resources_not_recorded_as_created(
+) -> None:
+    plan = _docker_plan()
+    state = repo_tools.validate_docker_preflight_absent(
+        plan,
+        repo_tools.DockerPreflightObservation((), (), ()),
+    )
+    state = repo_tools.mark_docker_resource_created(
+        plan,
+        state,
+        "workspace_volume",
+    )
+
+    cleanup = repo_tools.derive_docker_cleanup_plan(
+        plan,
+        state,
+        {
+            "container": _docker_container_inspection(plan),
+            "workspace_volume": _docker_volume_inspection(
+                plan,
+                "workspace_volume",
+            ),
+            "output_volume": _docker_volume_inspection(
+                plan,
+                "output_volume",
+            ),
+        },
+    )
+
+    assert cleanup.commands == (
+        (
+            "/usr/local/bin/docker",
+            "volume",
+            "rm",
+            plan.workspace_volume.name,
+        ),
+    )
+    assert cleanup.retained_resources == ()
+
+
+@pytest.mark.parametrize(
+    ("field", "names"),
+    (
+        ("container_names", ("owp-container-01",)),
+        ("workspace_volume_names", ("owp-workspace-01",)),
+        ("output_volume_names", ("owp-output-01",)),
+    ),
+)
+def test_docker_lifecycle_rejects_preexisting_resource(
+    field: str,
+    names: tuple[str, ...],
+) -> None:
+    plan = _docker_plan()
+    values = {
+        "container_names": (),
+        "workspace_volume_names": (),
+        "output_volume_names": (),
+        field: names,
+    }
+    with pytest.raises(ValueError, match="already exists"):
+        repo_tools.validate_docker_preflight_absent(
+            plan,
+            repo_tools.DockerPreflightObservation(**values),
+        )
+
+
+def test_validate_docker_execution_inspections_accepts_exact_profile() -> None:
+    plan = _docker_plan()
+    repo_tools.validate_docker_execution_inspections(
+        plan,
+        _docker_container_inspection(plan),
+        _docker_volume_inspection(plan, "workspace_volume"),
+        _docker_volume_inspection(plan, "output_volume"),
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "image_volume",
+        "extra_mount",
+        "wrong_mount_access",
+        "wrong_nocopy",
+        "extra_tmpfs",
+        "wrong_volume_driver",
+        "wrong_volume_options",
+        "wrong_owner",
+    ),
+)
+def test_validate_docker_execution_inspections_rejects_unsafe_profile(
+    mutation: str,
+) -> None:
+    plan = _docker_plan()
+    container = _docker_container_inspection(plan)
+    workspace = _docker_volume_inspection(plan, "workspace_volume")
+    output = _docker_volume_inspection(plan, "output_volume")
+    if mutation == "image_volume":
+        container["Config"]["Volumes"] = {"/cache": {}}
+    elif mutation == "extra_mount":
+        container["Mounts"].append(
+            {
+                "Destination": "/cache",
+                "Type": "volume",
+                "Name": "anonymous",
+                "RW": True,
+            }
+        )
+    elif mutation == "wrong_mount_access":
+        container["Mounts"][0]["RW"] = True
+    elif mutation == "wrong_nocopy":
+        container["HostConfig"]["Mounts"][0]["VolumeOptions"] = {
+            "NoCopy": False,
+        }
+    elif mutation == "extra_tmpfs":
+        container["HostConfig"]["Tmpfs"]["/cache"] = "rw,size=1m"
+    elif mutation == "wrong_volume_driver":
+        workspace["Driver"] = "other"
+    elif mutation == "wrong_volume_options":
+        output["Options"]["o"] = "size=65m"
+    else:
+        container["Config"]["Labels"] = {}
+
+    with pytest.raises(ValueError, match="Docker inspection"):
+        repo_tools.validate_docker_execution_inspections(
+            plan,
+            container,
+            workspace,
+            output,
         )
 
 
@@ -1455,7 +1785,12 @@ def test_classify_docker_execution_failure_uses_structured_volume_observation(
 
 @pytest.mark.docker
 def test_real_docker_enforces_frozen_containment_profile() -> None:
-    docker_binary = Path("/usr/local/bin/docker")
+    docker_location = os.environ.get("OPENWORKPROOF_DOCKER") or shutil.which(
+        "docker"
+    )
+    if docker_location is None:
+        pytest.skip("Docker CLI unavailable via OPENWORKPROOF_DOCKER or PATH")
+    docker_binary = Path(docker_location).expanduser().resolve()
     if not docker_binary.is_file() or not os.access(docker_binary, os.X_OK):
         pytest.skip(f"Docker CLI unavailable at {docker_binary}")
     daemon = subprocess.run(
@@ -1488,6 +1823,7 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
         )
 
     suffix = f"{os.getpid()}-{time.time_ns()}"
+    ownership_token = hashlib.sha256(suffix.encode("ascii")).hexdigest()
     script = (
         "set -eu; "
         "test \"$(id -u):$(id -g)\" = 65532:65532; "
@@ -1503,10 +1839,32 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
         container_name=f"owp-container-{suffix}",
         workspace_volume_name=f"owp-workspace-{suffix}",
         output_volume_name=f"owp-output-{suffix}",
+        ownership_token=ownership_token,
         command=("/bin/sh", "-c", script),
     )
+    preflight_outputs = []
+    for preflight_command in plan.preflight_absent_argv:
+        checked = subprocess.run(
+            preflight_command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        preflight_outputs.append(tuple(checked.stdout.splitlines()))
+    lifecycle = repo_tools.validate_docker_preflight_absent(
+        plan,
+        repo_tools.DockerPreflightObservation(
+            container_names=preflight_outputs[0],
+            workspace_volume_names=preflight_outputs[1],
+            output_volume_names=preflight_outputs[2],
+        ),
+    )
     try:
-        for volume in (plan.workspace_volume, plan.output_volume):
+        for resource, volume in (
+            ("workspace_volume", plan.workspace_volume),
+            ("output_volume", plan.output_volume),
+        ):
             subprocess.run(
                 volume.create_argv,
                 check=True,
@@ -1514,12 +1872,22 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
                 text=True,
                 timeout=15,
             )
+            lifecycle = repo_tools.mark_docker_resource_created(
+                plan,
+                lifecycle,
+                resource,
+            )
         subprocess.run(
             plan.create_container_argv,
             check=True,
             capture_output=True,
             text=True,
             timeout=15,
+        )
+        lifecycle = repo_tools.mark_docker_resource_created(
+            plan,
+            lifecycle,
+            "container",
         )
         inspection = subprocess.run(
             (str(docker_binary), "inspect", plan.container_name),
@@ -1529,29 +1897,40 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
             timeout=10,
         )
         inspected = json.loads(inspection.stdout)[0]
-        host = inspected["HostConfig"]
-        assert inspected["Config"]["User"] == "65532:65532"
-        assert host["NetworkMode"] == "none"
-        assert host["ReadonlyRootfs"] is True
-        assert host["CapDrop"] == ["ALL"]
-        assert host["SecurityOpt"] in (
-            ["no-new-privileges"],
-            ["no-new-privileges:true"],
+        workspace_inspection = json.loads(
+            subprocess.run(
+                (
+                    str(docker_binary),
+                    "volume",
+                    "inspect",
+                    plan.workspace_volume.name,
+                ),
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout
+        )[0]
+        output_inspection = json.loads(
+            subprocess.run(
+                (
+                    str(docker_binary),
+                    "volume",
+                    "inspect",
+                    plan.output_volume.name,
+                ),
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout
+        )[0]
+        repo_tools.validate_docker_execution_inspections(
+            plan,
+            inspected,
+            workspace_inspection,
+            output_inspection,
         )
-        assert host["PidsLimit"] == 128
-        assert host["Memory"] == 1024 * 1024 * 1024
-        assert host["NanoCpus"] == 1_000_000_000
-        assert host["Tmpfs"] == {
-            "/tmp": "rw,noexec,nosuid,size=256m"
-        }
-        mounts = {item["Destination"]: item for item in inspected["Mounts"]}
-        assert set(mounts) == {"/workspace", "/output"}
-        assert mounts["/workspace"]["Type"] == "volume"
-        assert mounts["/workspace"]["Name"] == plan.workspace_volume.name
-        assert mounts["/workspace"]["RW"] is False
-        assert mounts["/output"]["Type"] == "volume"
-        assert mounts["/output"]["Name"] == plan.output_volume.name
-        assert mounts["/output"]["RW"] is True
 
         executed = subprocess.run(
             plan.start_container_argv,
@@ -1562,13 +1941,53 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
         assert executed.returncode == 0, executed.stderr
         assert executed.stdout == "containment-ok"
     finally:
-        for cleanup in plan.cleanup_argv:
-            subprocess.run(
-                cleanup,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
+        current_inspections = {}
+        inspection_commands = {
+            "container": (
+                str(docker_binary),
+                "inspect",
+                plan.container_name,
+            ),
+            "workspace_volume": (
+                str(docker_binary),
+                "volume",
+                "inspect",
+                plan.workspace_volume.name,
+            ),
+            "output_volume": (
+                str(docker_binary),
+                "volume",
+                "inspect",
+                plan.output_volume.name,
+            ),
+        }
+        for resource in lifecycle.created_resources:
+            try:
+                current = subprocess.run(
+                    inspection_commands[resource],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                current_inspections[resource] = json.loads(current.stdout)[0]
+            except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+                continue
+        cleanup = repo_tools.derive_docker_cleanup_plan(
+            plan,
+            lifecycle,
+            current_inspections,
+        )
+        for cleanup_command in cleanup.commands:
+            try:
+                subprocess.run(
+                    cleanup_command,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
 
 
 def test_purge_expired_evidence_leaves_nonexpired_root_untouched(

@@ -59,15 +59,18 @@ _RUNTIME_CHILD_PATTERN = re.compile(
     r"^[0-9a-f]{64}(?:\.(?:rebuild|destroying))?$"
 )
 _IMAGE_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
-_IMMUTABLE_IMAGE_REFERENCE_PATTERN = re.compile(
-    r"^(?:localhost|[a-z0-9]+(?:[.-][a-z0-9]+)*)"
-    r"(?::[1-9][0-9]{0,4})?/"
-    r"[a-z0-9]+(?:[._-][a-z0-9]+)*"
-    r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*"
-    r"@sha256:[0-9a-f]{64}$"
+_DOCKER_HOST_PATTERN = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
+_DOCKER_REPOSITORY_COMPONENT_PATTERN = re.compile(
+    r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$"
 )
 _DOCKER_IDENTIFIER_PATTERN = re.compile(
     r"^[a-z0-9][a-z0-9_.-]{0,62}$"
+)
+_DOCKER_OWNERSHIP_LABEL = "openworkproof.execution-owner"
+_DOCKER_RESOURCE_ORDER = (
+    "container",
+    "workspace_volume",
+    "output_volume",
 )
 _PATCH_PATH_PATTERN = re.compile(r"^[A-Za-z0-9._/-]+$")
 _PATCH_HEADER_PATTERN = re.compile(
@@ -437,12 +440,37 @@ class DockerExecutionPlan:
     docker_binary: Path
     image_reference: str
     container_name: str
+    ownership_token: str
     command: tuple[str, ...]
     workspace_volume: DockerVolumePlan
     output_volume: DockerVolumePlan
     create_container_argv: tuple[str, ...]
     start_container_argv: tuple[str, ...]
-    cleanup_argv: tuple[tuple[str, ...], ...]
+    preflight_absent_argv: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DockerPreflightObservation:
+    container_names: tuple[str, ...]
+    workspace_volume_names: tuple[str, ...]
+    output_volume_names: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DockerLifecycleState:
+    ownership_token: str
+    resource_names: tuple[str, str, str]
+    created_resources: tuple[
+        Literal["container", "workspace_volume", "output_volume"], ...
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class DockerCleanupPlan:
+    commands: tuple[tuple[str, ...], ...]
+    retained_resources: tuple[
+        Literal["container", "workspace_volume", "output_volume"], ...
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -2728,6 +2756,7 @@ def _docker_volume_plan(
     size_mebibytes: int,
     mount_path: str,
     read_only: bool,
+    ownership_token: str,
 ) -> DockerVolumePlan:
     return DockerVolumePlan(
         name=name,
@@ -2746,8 +2775,51 @@ def _docker_volume_plan(
             "device=tmpfs",
             "--opt",
             f"o=size={size_mebibytes}m",
+            "--label",
+            f"{_DOCKER_OWNERSHIP_LABEL}={ownership_token}",
             name,
         ),
+    )
+
+
+def _valid_immutable_image_reference(image_reference: object) -> bool:
+    if (
+        type(image_reference) is not str
+        or len(image_reference.encode("utf-8")) > 255
+        or image_reference.count("@") != 1
+    ):
+        return False
+    repository, digest = image_reference.split("@")
+    if _IMAGE_DIGEST_PATTERN.fullmatch(digest) is None:
+        return False
+    components = repository.split("/")
+    if len(components) < 2 or any(not component for component in components):
+        return False
+    registry = components[0]
+    host = registry
+    if ":" in registry:
+        if registry.count(":") != 1:
+            return False
+        host, port_text = registry.rsplit(":", 1)
+        if (
+            not port_text.isdigit()
+            or not 1 <= int(port_text) <= 65_535
+        ):
+            return False
+    elif registry != "localhost" and "." not in registry:
+        return False
+    if (
+        not host
+        or len(host) > 253
+        or _DOCKER_HOST_PATTERN.fullmatch(host) is None
+        or any(len(label) > 63 for label in host.split("."))
+    ):
+        return False
+    return all(
+        len(component) <= 128
+        and _DOCKER_REPOSITORY_COMPONENT_PATTERN.fullmatch(component)
+        is not None
+        for component in components[1:]
     )
 
 
@@ -2758,6 +2830,7 @@ def derive_docker_execution_plan(
     container_name: str,
     workspace_volume_name: str,
     output_volume_name: str,
+    ownership_token: str,
     command: tuple[str, ...],
 ) -> DockerExecutionPlan:
     """Return a deterministic, disposable Docker containment plan."""
@@ -2769,10 +2842,7 @@ def derive_docker_execution_plan(
         or "\0" in str(docker_binary)
     ):
         raise ValueError("Docker binary path is invalid")
-    if (
-        type(image_reference) is not str
-        or _IMMUTABLE_IMAGE_REFERENCE_PATTERN.fullmatch(image_reference) is None
-    ):
+    if not _valid_immutable_image_reference(image_reference):
         raise ValueError("Docker immutable image reference is invalid")
     identifiers = (
         container_name,
@@ -2788,6 +2858,11 @@ def derive_docker_execution_plan(
         or len(set(identifiers)) != len(identifiers)
     ):
         raise ValueError("Docker identifiers must be valid and unique")
+    if (
+        type(ownership_token) is not str
+        or _DIGEST_PATTERN.fullmatch(ownership_token) is None
+    ):
+        raise ValueError("Docker ownership token is invalid")
     if type(command) is not tuple or not 1 <= len(command) <= 16:
         raise ValueError("Docker command is invalid")
     for argument in command:
@@ -2806,6 +2881,7 @@ def derive_docker_execution_plan(
         size_mebibytes=512,
         mount_path="/workspace",
         read_only=True,
+        ownership_token=ownership_token,
     )
     output = _docker_volume_plan(
         docker,
@@ -2813,12 +2889,15 @@ def derive_docker_execution_plan(
         size_mebibytes=64,
         mount_path="/output",
         read_only=False,
+        ownership_token=ownership_token,
     )
     create_container_argv = (
         docker,
         "create",
         "--name",
         container_name,
+        "--label",
+        f"{_DOCKER_OWNERSHIP_LABEL}={ownership_token}",
         "--pull",
         "never",
         "--network",
@@ -2843,10 +2922,13 @@ def derive_docker_execution_plan(
         "--mount",
         (
             f"type=volume,source={workspace.name},"
-            "target=/workspace,readonly"
+            "target=/workspace,readonly,volume-nocopy"
         ),
         "--mount",
-        f"type=volume,source={output.name},target=/output",
+        (
+            f"type=volume,source={output.name},"
+            "target=/output,volume-nocopy"
+        ),
         image_reference,
         *command,
     )
@@ -2854,6 +2936,7 @@ def derive_docker_execution_plan(
         docker_binary=docker_binary,
         image_reference=image_reference,
         container_name=container_name,
+        ownership_token=ownership_token,
         command=command,
         workspace_volume=workspace,
         output_volume=output,
@@ -2864,12 +2947,285 @@ def derive_docker_execution_plan(
             "--attach",
             container_name,
         ),
-        cleanup_argv=(
-            (docker, "rm", "--force", container_name),
-            (docker, "volume", "rm", workspace.name),
-            (docker, "volume", "rm", output.name),
+        preflight_absent_argv=(
+            (
+                docker,
+                "container",
+                "ls",
+                "--all",
+                "--format",
+                "{{.Names}}",
+            ),
+            (
+                docker,
+                "volume",
+                "ls",
+                "--format",
+                "{{.Name}}",
+            ),
+            (
+                docker,
+                "volume",
+                "ls",
+                "--format",
+                "{{.Name}}",
+            ),
         ),
     )
+
+
+def _docker_plan_resource_names(
+    plan: DockerExecutionPlan,
+) -> tuple[str, str, str]:
+    return (
+        plan.container_name,
+        plan.workspace_volume.name,
+        plan.output_volume.name,
+    )
+
+
+def _valid_docker_lifecycle_state(
+    plan: DockerExecutionPlan,
+    state: DockerLifecycleState,
+) -> bool:
+    return (
+        type(plan) is DockerExecutionPlan
+        and type(state) is DockerLifecycleState
+        and state.ownership_token == plan.ownership_token
+        and state.resource_names == _docker_plan_resource_names(plan)
+        and type(state.created_resources) is tuple
+        and len(set(state.created_resources)) == len(state.created_resources)
+        and all(
+            resource in _DOCKER_RESOURCE_ORDER
+            for resource in state.created_resources
+        )
+    )
+
+
+def validate_docker_preflight_absent(
+    plan: DockerExecutionPlan,
+    observation: DockerPreflightObservation,
+) -> DockerLifecycleState:
+    """Start lifecycle state only after all caller names are absent."""
+
+    if type(plan) is not DockerExecutionPlan or type(
+        observation
+    ) is not DockerPreflightObservation:
+        raise ValueError("Docker preflight observation is invalid")
+    name_groups = (
+        observation.container_names,
+        observation.workspace_volume_names,
+        observation.output_volume_names,
+    )
+    if any(
+        type(group) is not tuple
+        or any(type(name) is not str for name in group)
+        for group in name_groups
+    ):
+        raise ValueError("Docker preflight observation is invalid")
+    for requested, observed_names in zip(
+        _docker_plan_resource_names(plan),
+        name_groups,
+        strict=True,
+    ):
+        if requested in observed_names:
+            raise ValueError("Docker resource already exists")
+    return DockerLifecycleState(
+        ownership_token=plan.ownership_token,
+        resource_names=_docker_plan_resource_names(plan),
+        created_resources=(),
+    )
+
+
+def mark_docker_resource_created(
+    plan: DockerExecutionPlan,
+    state: DockerLifecycleState,
+    resource: Literal["container", "workspace_volume", "output_volume"],
+) -> DockerLifecycleState:
+    """Record one successful create command after an absent preflight."""
+
+    if (
+        not _valid_docker_lifecycle_state(plan, state)
+        or resource not in _DOCKER_RESOURCE_ORDER
+        or resource in state.created_resources
+    ):
+        raise ValueError("Docker lifecycle transition is invalid")
+    created = {*state.created_resources, resource}
+    return DockerLifecycleState(
+        ownership_token=state.ownership_token,
+        resource_names=state.resource_names,
+        created_resources=tuple(
+            candidate
+            for candidate in _DOCKER_RESOURCE_ORDER
+            if candidate in created
+        ),
+    )
+
+
+def _docker_resource_is_owned(
+    plan: DockerExecutionPlan,
+    resource: str,
+    inspection: object,
+) -> bool:
+    if type(inspection) is not dict:
+        return False
+    if resource == "container":
+        config = inspection.get("Config")
+        return (
+            inspection.get("Name") == f"/{plan.container_name}"
+            and type(config) is dict
+            and type(config.get("Labels")) is dict
+            and config["Labels"].get(_DOCKER_OWNERSHIP_LABEL)
+            == plan.ownership_token
+        )
+    if resource == "workspace_volume":
+        expected_name = plan.workspace_volume.name
+    elif resource == "output_volume":
+        expected_name = plan.output_volume.name
+    else:
+        return False
+    labels = inspection.get("Labels")
+    return (
+        inspection.get("Name") == expected_name
+        and type(labels) is dict
+        and labels.get(_DOCKER_OWNERSHIP_LABEL) == plan.ownership_token
+    )
+
+
+def derive_docker_cleanup_plan(
+    plan: DockerExecutionPlan,
+    state: DockerLifecycleState,
+    current_inspections: Mapping[str, Mapping[str, Any]],
+) -> DockerCleanupPlan:
+    """Remove only resources created in-state and still bearing its label."""
+
+    if (
+        not _valid_docker_lifecycle_state(plan, state)
+        or type(current_inspections) is not dict
+    ):
+        raise ValueError("Docker cleanup state is invalid")
+    docker = str(plan.docker_binary)
+    commands: list[tuple[str, ...]] = []
+    retained: list[str] = []
+    for resource in state.created_resources:
+        inspection = current_inspections.get(resource)
+        if not _docker_resource_is_owned(plan, resource, inspection):
+            retained.append(resource)
+            continue
+        if resource == "container":
+            commands.append(
+                (
+                    docker,
+                    "rm",
+                    "--force",
+                    "--volumes",
+                    plan.container_name,
+                )
+            )
+        elif resource == "workspace_volume":
+            commands.append(
+                (docker, "volume", "rm", plan.workspace_volume.name)
+            )
+        else:
+            commands.append(
+                (docker, "volume", "rm", plan.output_volume.name)
+            )
+    return DockerCleanupPlan(
+        commands=tuple(commands),
+        retained_resources=tuple(retained),
+    )
+
+
+def _valid_docker_volume_inspection(
+    plan: DockerExecutionPlan,
+    inspection: object,
+    *,
+    resource: Literal["workspace_volume", "output_volume"],
+) -> bool:
+    size = "512m" if resource == "workspace_volume" else "64m"
+    return (
+        _docker_resource_is_owned(plan, resource, inspection)
+        and inspection.get("Driver") == "local"
+        and inspection.get("Options")
+        == {"type": "tmpfs", "device": "tmpfs", "o": f"size={size}"}
+    )
+
+
+def validate_docker_execution_inspections(
+    plan: DockerExecutionPlan,
+    container_inspection: Mapping[str, Any],
+    workspace_volume_inspection: Mapping[str, Any],
+    output_volume_inspection: Mapping[str, Any],
+) -> None:
+    """Fail closed unless runtime inspect matches the frozen profile."""
+
+    try:
+        config = container_inspection["Config"]
+        host = container_inspection["HostConfig"]
+        mounts = container_inspection["Mounts"]
+        configured_mounts = host["Mounts"]
+        by_destination = {mount["Destination"]: mount for mount in mounts}
+        by_target = {mount["Target"]: mount for mount in configured_mounts}
+        workspace_mount = by_destination["/workspace"]
+        output_mount = by_destination["/output"]
+        configured_workspace = by_target["/workspace"]
+        configured_output = by_target["/output"]
+        valid = (
+            type(plan) is DockerExecutionPlan
+            and _docker_resource_is_owned(
+                plan,
+                "container",
+                container_inspection,
+            )
+            and config.get("Image") == plan.image_reference
+            and config.get("User") == "65532:65532"
+            and config.get("Volumes") in (None, {})
+            and host.get("NetworkMode") == "none"
+            and host.get("ReadonlyRootfs") is True
+            and host.get("CapDrop") == ["ALL"]
+            and host.get("SecurityOpt")
+            in (["no-new-privileges"], ["no-new-privileges:true"])
+            and host.get("PidsLimit") == 128
+            and host.get("Memory") == 1_024 * 1_024 * 1_024
+            and host.get("NanoCpus") == 1_000_000_000
+            and host.get("Tmpfs")
+            == {"/tmp": "rw,noexec,nosuid,size=256m"}
+            and len(mounts) == 2
+            and set(by_destination) == {"/workspace", "/output"}
+            and len(configured_mounts) == 2
+            and set(by_target) == {"/workspace", "/output"}
+            and workspace_mount.get("Type") == "volume"
+            and workspace_mount.get("Name") == plan.workspace_volume.name
+            and workspace_mount.get("RW") is False
+            and output_mount.get("Type") == "volume"
+            and output_mount.get("Name") == plan.output_volume.name
+            and output_mount.get("RW") is True
+            and configured_workspace.get("Type") == "volume"
+            and configured_workspace.get("Source")
+            == plan.workspace_volume.name
+            and configured_workspace.get("ReadOnly") is True
+            and configured_workspace.get("VolumeOptions", {}).get("NoCopy")
+            is True
+            and configured_output.get("Type") == "volume"
+            and configured_output.get("Source") == plan.output_volume.name
+            and configured_output.get("ReadOnly") is False
+            and configured_output.get("VolumeOptions", {}).get("NoCopy")
+            is True
+            and _valid_docker_volume_inspection(
+                plan,
+                workspace_volume_inspection,
+                resource="workspace_volume",
+            )
+            and _valid_docker_volume_inspection(
+                plan,
+                output_volume_inspection,
+                resource="output_volume",
+            )
+        )
+    except (KeyError, TypeError, AttributeError):
+        valid = False
+    if not valid:
+        raise ValueError("Docker inspection does not match the frozen profile")
 
 
 def classify_docker_execution_failure(
