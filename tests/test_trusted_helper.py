@@ -11,6 +11,7 @@ from pathlib import Path
 import socket
 import stat
 import subprocess
+import sys
 import tempfile
 
 import pytest
@@ -425,6 +426,227 @@ def test_dispatcher_maps_only_closed_candidate_read_errors(
     assert b"CandidateReadError" not in response
 
 
+def test_dispatcher_closes_unhashable_candidate_error_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"file-secret")
+    raw = rfc8785.dumps(_dispatcher_request(candidate))
+
+    def reject(unused: object) -> None:
+        raise repo_tools.CandidateReadError([])
+
+    monkeypatch.setattr(trusted_helper.repo_tools, "read_candidate_file", reject)
+
+    exit_code, response = _dispatch_raw(raw, candidate.runtime_root)
+
+    assert exit_code == 70
+    assert response == _dispatcher_error("INTERNAL_ERROR")
+    for secret in (raw, b"file-secret", b"CandidateReadError", b"[]"):
+        assert secret not in response
+
+
+def test_dispatcher_closes_candidate_error_code_property_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"file-secret")
+    raw = rfc8785.dumps(_dispatcher_request(candidate))
+
+    class SecretCodeAccessError(Exception):
+        pass
+
+    class ExplodingCodeError(repo_tools.CandidateReadError):
+        def __init__(self) -> None:
+            RuntimeError.__init__(self, "constructor-secret")
+
+        @property
+        def code(self) -> str:
+            raise SecretCodeAccessError("code-property-secret")
+
+    def reject(unused: object) -> None:
+        raise ExplodingCodeError
+
+    monkeypatch.setattr(trusted_helper.repo_tools, "read_candidate_file", reject)
+
+    exit_code, response = _dispatch_raw(raw, candidate.runtime_root)
+
+    assert exit_code == 70
+    assert response == _dispatcher_error("INTERNAL_ERROR")
+    for secret in (
+        raw,
+        b"file-secret",
+        b"ExplodingCodeError",
+        b"SecretCodeAccessError",
+        b"constructor-secret",
+        b"code-property-secret",
+    ):
+        assert secret not in response
+
+
+def test_dispatcher_rejects_nested_duplicate_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    raw = rfc8785.dumps(_dispatcher_request(candidate)).replace(
+        b'"path":"README.md"',
+        b'"path":{"nested":1,"nested":2}',
+    )
+    observed_nested_duplicate = False
+    real_hook = trusted_helper._object_without_duplicate_keys
+
+    def observe_hook(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        nonlocal observed_nested_duplicate
+        if pairs == [("nested", 1), ("nested", 2)]:
+            observed_nested_duplicate = True
+        return real_hook(pairs)
+
+    monkeypatch.setattr(
+        trusted_helper,
+        "_object_without_duplicate_keys",
+        observe_hook,
+    )
+    monkeypatch.setattr(
+        trusted_helper.repo_tools,
+        "read_candidate_file",
+        lambda unused: pytest.fail("invalid request reached repository read"),
+    )
+
+    _assert_dispatch_error(raw, candidate.runtime_root)
+
+    assert observed_nested_duplicate is True
+
+
+def test_dispatcher_accepts_exact_512_byte_canonical_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = "x" * 512
+    manifest_digest = "d" * 64
+    request = {
+        "schema_version": trusted_helper.REQUEST_SCHEMA,
+        "operation": "repo_read",
+        "workspace_id": "b" * 64,
+        "source_artifact_sha256": "a" * 64,
+        "expected_head_commit": "c" * 40,
+        "expected_workspace_manifest_digest": manifest_digest,
+        "path": path,
+    }
+    observed_paths: list[str] = []
+
+    def read_candidate_file(
+        candidate_request: repo_tools.CandidateReadRequest,
+    ) -> repo_tools.CandidateReadResult:
+        observed_paths.append(candidate_request.path)
+        return repo_tools.CandidateReadResult(
+            content=b"",
+            output=RepoReadOutput(
+                path=path,
+                content_sha256=hashlib.sha256(b"").hexdigest(),
+                size_bytes=0,
+                workspace_manifest_digest=manifest_digest,
+            ),
+        )
+
+    monkeypatch.setattr(
+        trusted_helper.repo_tools,
+        "read_candidate_file",
+        read_candidate_file,
+    )
+
+    exit_code, response = _dispatch_raw(
+        rfc8785.dumps(request),
+        Path("/runtime"),
+    )
+
+    assert exit_code == 0
+    assert observed_paths == [path]
+    assert json.loads(response)["result"]["path"] == path
+
+
+def test_dispatcher_rejects_513_byte_canonical_path_upfront(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = {
+        "schema_version": trusted_helper.REQUEST_SCHEMA,
+        "operation": "repo_read",
+        "workspace_id": "b" * 64,
+        "source_artifact_sha256": "a" * 64,
+        "expected_head_commit": "c" * 40,
+        "expected_workspace_manifest_digest": "d" * 64,
+        "path": "x" * 513,
+    }
+    monkeypatch.setattr(
+        trusted_helper.repo_tools,
+        "read_candidate_file",
+        lambda unused: pytest.fail("invalid request reached repository read"),
+    )
+
+    _assert_dispatch_error(rfc8785.dumps(request), Path("/runtime"))
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "schema_version",
+        "operation",
+        "workspace_id",
+        "source_artifact_sha256",
+        "expected_head_commit",
+        "expected_workspace_manifest_digest",
+        "path",
+    ),
+)
+@pytest.mark.parametrize("wrong_value", (0, True, None))
+def test_dispatcher_rejects_number_bool_and_null_for_each_request_field(
+    field: str,
+    wrong_value: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request: dict[str, object] = {
+        "schema_version": trusted_helper.REQUEST_SCHEMA,
+        "operation": "repo_read",
+        "workspace_id": "b" * 64,
+        "source_artifact_sha256": "a" * 64,
+        "expected_head_commit": "c" * 40,
+        "expected_workspace_manifest_digest": "d" * 64,
+        "path": "README.md",
+    }
+    request[field] = wrong_value
+    raw = rfc8785.dumps(request)
+    monkeypatch.setattr(
+        trusted_helper.repo_tools,
+        "read_candidate_file",
+        lambda unused: pytest.fail("invalid request reached repository read"),
+    )
+
+    _assert_dispatch_error(raw, Path("/runtime"))
+
+
+@pytest.mark.parametrize("argv", ((), ("unexpected",)))
+def test_trusted_helper_module_rejects_empty_stdin_with_empty_stderr(
+    tmp_path: Path,
+    argv: tuple[str, ...],
+) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-m",
+            "openworkproof.trusted_helper",
+            *argv,
+        ],
+        input=b"",
+        capture_output=True,
+        check=False,
+        cwd=tmp_path,
+    )
+
+    assert completed.returncode == 64
+    assert completed.stdout == _dispatcher_error("REQUEST_INVALID")
+    assert completed.stderr == b""
+
+
 def test_dispatcher_closes_unexpected_exceptions_without_leakage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -461,15 +683,28 @@ def test_dispatcher_closes_unexpected_exceptions_without_leakage(
 
 
 def test_dispatcher_returns_strict_unpadded_urlsafe_base64(tmp_path: Path) -> None:
-    candidate = _candidate(tmp_path, b"\xfb\xff")
+    content = b"\xfb\xff"
+    candidate = _candidate(tmp_path, content)
     raw = rfc8785.dumps(_dispatcher_request(candidate))
 
     exit_code, response_raw = _dispatch_raw(raw, candidate.runtime_root)
     response = json.loads(response_raw)
+    encoded = response["content_b64url"]
+    padded = encoded + "=" * (-len(encoded) % 4)
+    decoded = base64.b64decode(
+        padded.encode("ascii"),
+        altchars=b"-_",
+        validate=True,
+    )
 
     assert exit_code == 0
-    assert response["content_b64url"] == "-_8"
-    assert "=" not in response["content_b64url"]
+    assert encoded == "-_8"
+    assert "=" not in encoded
+    assert decoded == content
+    assert len(decoded) == response["result"]["size_bytes"]
+    assert hashlib.sha256(decoded).hexdigest() == (
+        response["result"]["content_sha256"]
+    )
 
 
 def test_dispatcher_does_not_retry_failed_stdout_write() -> None:

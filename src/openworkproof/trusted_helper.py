@@ -37,8 +37,10 @@ _REQUEST_KEYS = frozenset(
         "path",
     }
 )
-_CANDIDATE_ERROR_CODES = frozenset(
-    {"RECOVERY_REQUIRED", "PATH_DENIED", "FILE_CHANGED"}
+_CANDIDATE_ERROR_CODES = (
+    "RECOVERY_REQUIRED",
+    "PATH_DENIED",
+    "FILE_CHANGED",
 )
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
@@ -110,6 +112,18 @@ def _error_response(code: str) -> dict[str, str]:
     }
 
 
+def _closed_candidate_error_code(
+    error: repo_tools.CandidateReadError,
+) -> str:
+    try:
+        code = error.code
+    except BaseException:
+        return "INTERNAL_ERROR"
+    if type(code) is str and code in _CANDIDATE_ERROR_CODES:
+        return code
+    return "INTERNAL_ERROR"
+
+
 def _write_response(
     stdout: BinaryIO,
     response: dict[str, object],
@@ -164,11 +178,7 @@ def main(
     except _RequestInvalid:
         code = "REQUEST_INVALID"
     except repo_tools.CandidateReadError as error:
-        code = (
-            error.code
-            if error.code in _CANDIDATE_ERROR_CODES
-            else "INTERNAL_ERROR"
-        )
+        code = _closed_candidate_error_code(error)
     except Exception:
         code = "INTERNAL_ERROR"
     return _write_response(stdout, _error_response(code), EXIT_BY_CODE[code])
