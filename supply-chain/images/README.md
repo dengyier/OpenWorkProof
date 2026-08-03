@@ -27,7 +27,7 @@ candidate inventory 将前两个哈希记录在闭合的 `build_inputs.global` �
 固定 Verifier test 必须在测试代码中显式把只读 `/workspace` 插入 `sys.path`
 后再 import Rich；镜像不使用 `.pth` 或 `sitecustomize.py` 隐式执行 workspace
 内容。`trusted-helper-candidate` 仅复制
-`SOURCE_ALLOWLIST` 中的三个 OpenWorkProof 文件及其 Python 运行闭包，并从
+`SOURCE_ALLOWLIST` 中的四个 OpenWorkProof 文件及其 Python 运行闭包，并从
 仓库外精确 `.deb` closure 离线安装 `/usr/bin/git`；Dockerfile 中没有 apt
 更新或下载。
 
@@ -47,7 +47,7 @@ Git closure 由固定基础镜像中的 Debian 13 trixie sources 解析；实际
 helper 另含 `debs/` 和 `helper-src/`。`wheels/SHA256SUMS` 只列上下文内 wheel，
 `debs/SHA256SUMS` 只列上下文内 `.deb`。helper 源文件按 `SOURCE_ALLOWLIST`
 从指定 Git revision 的 blob 提取，禁止从 working tree 复制，也禁止复制整个
-`src/openworkproof`；`helper-src/SHA256SUMS` 必须按构建 revision 的三份精确
+`src/openworkproof`；`helper-src/SHA256SUMS` 必须按构建 revision 的四份精确
 bytes 生成，Dockerfile 在 COPY 后再次校验并删除该清单。
 
 `prepare_context.py` 是生成这两个 context 的唯一标准入口；不得手工拼装或使用
@@ -76,9 +76,12 @@ python "$OWP_REPO/supply-chain/images/prepare_context.py" \
 - execution/test：`ENTRYPOINT ["/usr/bin/env", "--"]`，默认命令为
   `/opt/venv/bin/python -I -m pytest`；这允许冻结执行计划传入完整 argv，而不
   发生入口前缀重复。
-- helper：`ENTRYPOINT ["/opt/venv/bin/python", "-I"]`。当前仓库没有已冻结的
-  受限 helper 调度接口，因此镜像明确命名为 `trusted-helper-candidate`，默认
-  退出 64；不得把它描述为最终 trusted helper。
+- helper：`ENTRYPOINT ["/opt/venv/bin/python", "-I", "-m",
+  "openworkproof.trusted_helper"]`，且 `CMD []`。trusted controller 将一个
+  WorkOrder 对应的 candidate runtime root 只读挂载为 `/runtime:ro`；helper
+  拒绝全部 argv，唯一 operation 为 `repo_read`。initialize、apply、rollback、
+  rebuild 和 destroy 仍未提供；镜像仍明确命名为 `trusted-helper-candidate`，
+  不是最终 trusted helper，也不构成 D8、Day 0 或 Acceptor 独立复现证据。
 - 两者运行身份均为 `65532:65532`，并记录 source、revision、role 和基础
   digest OCI labels。
 

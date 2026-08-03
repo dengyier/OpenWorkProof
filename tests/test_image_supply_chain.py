@@ -85,7 +85,6 @@ def test_execution_image_contract_is_minimal_and_offline() -> None:
 def test_trusted_helper_candidate_has_a_closed_package_surface() -> None:
     dockerfile = _read("trusted-helper/Dockerfile")
     lock_text = _read("trusted-helper/requirements.lock")
-    source_allowlist = _read("trusted-helper/SOURCE_ALLOWLIST")
 
     assert f"FROM {BASE_IMAGE}" in dockerfile
     assert not dockerfile.startswith("# syntax=")
@@ -95,7 +94,6 @@ def test_trusted_helper_candidate_has_a_closed_package_surface() -> None:
     assert "dpkg --install /tmp/debs/*.deb" in dockerfile
     assert not re.search(r"\b(?:apt-get|apt|curl|wget)\b", dockerfile)
     assert "USER 65532:65532" in dockerfile
-    assert 'ENTRYPOINT ["/opt/venv/bin/python", "-I"]' in dockerfile
     assert _locked_packages(lock_text) == (
         "annotated-types",
         "pydantic",
@@ -104,11 +102,6 @@ def test_trusted_helper_candidate_has_a_closed_package_surface() -> None:
         "typing-extensions",
         "typing-inspection",
     )
-    assert source_allowlist.splitlines() == [
-        "src/openworkproof/__init__.py",
-        "src/openworkproof/models.py",
-        "src/openworkproof/repo_tools.py",
-    ]
     assert "COPY helper-src/ /opt/venv/lib/python3.12/site-packages/openworkproof/" in dockerfile
     assert (
         "cd /opt/venv/lib/python3.12/site-packages/openworkproof/"
@@ -117,6 +110,31 @@ def test_trusted_helper_candidate_has_a_closed_package_surface() -> None:
     assert "rm SHA256SUMS" in dockerfile
     assert "mcp_server.py" not in dockerfile
     assert "cli.py" not in dockerfile
+
+
+def test_trusted_helper_candidate_has_a_fixed_repo_read_entrypoint() -> None:
+    dockerfile = _read("trusted-helper/Dockerfile")
+
+    assert [
+        line for line in dockerfile.splitlines() if line.startswith("ENTRYPOINT ")
+    ] == [
+        'ENTRYPOINT ["/opt/venv/bin/python", "-I", "-m", '
+        '"openworkproof.trusted_helper"]'
+    ]
+    assert [
+        line for line in dockerfile.splitlines() if line.startswith("CMD ")
+    ] == ["CMD []"]
+
+
+def test_trusted_helper_source_allowlist_is_the_exact_repo_read_closure() -> None:
+    source_allowlist = _read("trusted-helper/SOURCE_ALLOWLIST")
+
+    assert source_allowlist == (
+        "src/openworkproof/__init__.py\n"
+        "src/openworkproof/models.py\n"
+        "src/openworkproof/repo_tools.py\n"
+        "src/openworkproof/trusted_helper.py\n"
+    )
 
 
 def test_helper_debian_lock_is_an_exact_sha256_closure() -> None:

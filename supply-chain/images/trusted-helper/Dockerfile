@@ -43,5 +43,5 @@ RUN cd /opt/venv/lib/python3.12/site-packages/openworkproof/ \
 
 WORKDIR /workspace
 USER 65532:65532
-ENTRYPOINT ["/opt/venv/bin/python", "-I"]
-CMD ["-c", "import sys; sys.exit(64)"]
+ENTRYPOINT ["/opt/venv/bin/python", "-I", "-m", "openworkproof.trusted_helper"]
+CMD []
