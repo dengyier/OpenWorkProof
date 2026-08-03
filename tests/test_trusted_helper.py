@@ -81,19 +81,6 @@ def _request(
     )
 
 
-def _manifest(
-    candidate: repo_tools.CandidateWorkspace,
-) -> repo_tools.WorkspaceManifest:
-    descriptor = os.open(
-        candidate.worktree,
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-    )
-    try:
-        return repo_tools.scan_workspace_manifest(descriptor, candidate.head_commit)
-    finally:
-        os.close(descriptor)
-
-
 def test_read_candidate_file_returns_exact_closed_result(tmp_path: Path) -> None:
     candidate = _candidate(tmp_path, b"base\n")
     result = repo_tools.read_candidate_file(_request(candidate))
@@ -147,18 +134,11 @@ def test_read_candidate_file_denies_directory(tmp_path: Path) -> None:
 
 def test_read_candidate_file_denies_symlink(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = _candidate(tmp_path, b"base\n")
-    manifest = _manifest(candidate)
     target = candidate.worktree / "README.md"
     target.unlink()
     target.symlink_to("missing")
-    monkeypatch.setattr(
-        repo_tools,
-        "_verify_candidate_checkpoint_read_only",
-        lambda workspace: manifest,
-    )
 
     with pytest.raises(repo_tools.CandidateReadError) as raised:
         repo_tools.read_candidate_file(_request(candidate))
@@ -168,20 +148,12 @@ def test_read_candidate_file_denies_symlink(
 
 def test_read_candidate_file_denies_ancestor_symlink(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = _candidate(tmp_path, b"base\n", source_path="src/README.md")
-    manifest = _manifest(candidate)
     target = candidate.worktree / "src"
     (target / "README.md").unlink()
     target.rmdir()
     target.symlink_to("missing")
-    monkeypatch.setattr(
-        repo_tools,
-        "_verify_candidate_checkpoint_read_only",
-        lambda workspace: manifest,
-    )
-
     with pytest.raises(repo_tools.CandidateReadError) as raised:
         repo_tools.read_candidate_file(_request(candidate, path="src/README.md"))
 
@@ -190,21 +162,13 @@ def test_read_candidate_file_denies_ancestor_symlink(
 
 def test_read_candidate_file_denies_hardlink(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = _candidate(tmp_path, b"base\n")
-    manifest = _manifest(candidate)
     external = tmp_path / "external"
     external.write_bytes(b"base\n")
     target = candidate.worktree / "README.md"
     target.unlink()
     os.link(external, target)
-    monkeypatch.setattr(
-        repo_tools,
-        "_verify_candidate_checkpoint_read_only",
-        lambda workspace: manifest,
-    )
-
     with pytest.raises(repo_tools.CandidateReadError) as raised:
         repo_tools.read_candidate_file(_request(candidate))
 
@@ -213,19 +177,11 @@ def test_read_candidate_file_denies_hardlink(
 
 def test_read_candidate_file_denies_fifo(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = _candidate(tmp_path, b"base\n")
-    manifest = _manifest(candidate)
     target = candidate.worktree / "README.md"
     target.unlink()
     os.mkfifo(target)
-    monkeypatch.setattr(
-        repo_tools,
-        "_verify_candidate_checkpoint_read_only",
-        lambda workspace: manifest,
-    )
-
     with pytest.raises(repo_tools.CandidateReadError) as raised:
         repo_tools.read_candidate_file(_request(candidate))
 
@@ -234,10 +190,8 @@ def test_read_candidate_file_denies_fifo(
 
 def test_read_candidate_file_denies_socket(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = _candidate(tmp_path, b"base\n")
-    manifest = _manifest(candidate)
     target = candidate.worktree / "README.md"
     target.unlink()
     short_root = Path(tempfile.mkdtemp(prefix="owp-socket-", dir="/tmp"))
@@ -245,11 +199,6 @@ def test_read_candidate_file_denies_socket(
     short_worktree.symlink_to(candidate.worktree)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(str(short_worktree / "README.md"))
-    monkeypatch.setattr(
-        repo_tools,
-        "_verify_candidate_checkpoint_read_only",
-        lambda workspace: manifest,
-    )
     try:
         with pytest.raises(repo_tools.CandidateReadError) as raised:
             repo_tools.read_candidate_file(_request(candidate))
@@ -352,6 +301,18 @@ def test_read_candidate_file_rejects_changed_worktree_bytes(tmp_path: Path) -> N
     assert raised.value.code == "RECOVERY_REQUIRED"
 
 
+def test_read_candidate_file_rejects_initial_metadata_mismatch_as_recovery(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    (candidate.worktree / "README.md").chmod(0o000)
+
+    with pytest.raises(repo_tools.CandidateReadError) as raised:
+        repo_tools.read_candidate_file(_request(candidate))
+
+    assert raised.value.code == "RECOVERY_REQUIRED"
+
+
 def test_read_candidate_file_rejects_changed_git_head(tmp_path: Path) -> None:
     candidate = _candidate(tmp_path, b"base\n")
     subprocess.run(
@@ -383,24 +344,32 @@ def test_read_candidate_file_rejects_post_read_identity_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = _candidate(tmp_path, b"base\n")
-    manifest = _manifest(candidate)
     target_inode = (candidate.worktree / "README.md").stat().st_ino
     real_token = repo_tools._workspace_read_token
     target_calls = 0
+    checkpoint_complete = False
 
     def drift_after_read(metadata: os.stat_result) -> str:
         nonlocal target_calls
         token = real_token(metadata)
-        if metadata.st_ino == target_inode and stat.S_ISREG(metadata.st_mode):
+        if (
+            checkpoint_complete
+            and metadata.st_ino == target_inode
+            and stat.S_ISREG(metadata.st_mode)
+        ):
             target_calls += 1
             if target_calls == 3:
                 return token + ":drift"
         return token
 
+    def mark_checkpoint_complete() -> None:
+        nonlocal checkpoint_complete
+        checkpoint_complete = True
+
     monkeypatch.setattr(
         repo_tools,
-        "_verify_candidate_checkpoint_read_only",
-        lambda workspace: manifest,
+        "_candidate_read_checkpoint_hook",
+        mark_checkpoint_complete,
     )
     monkeypatch.setattr(repo_tools, "_workspace_read_token", drift_after_read)
 
@@ -408,6 +377,180 @@ def test_read_candidate_file_rejects_post_read_identity_drift(
         repo_tools.read_candidate_file(_request(candidate))
 
     assert target_calls == 3
+    assert raised.value.code == "FILE_CHANGED"
+
+
+def test_read_candidate_file_rejects_leaf_replaced_after_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    target = candidate.worktree / "README.md"
+    original_inode = target.stat().st_ino
+
+    def replace_leaf() -> None:
+        replacement = candidate.worktree / "replacement"
+        replacement.write_bytes(b"base\n")
+        replacement.chmod(0o644)
+        replacement.replace(target)
+        assert target.stat().st_ino != original_inode
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_read_checkpoint_hook",
+        replace_leaf,
+        raising=False,
+    )
+
+    with pytest.raises(repo_tools.CandidateReadError) as raised:
+        repo_tools.read_candidate_file(_request(candidate))
+
+    assert raised.value.code == "FILE_CHANGED"
+
+
+def test_read_candidate_file_rejects_ancestor_replaced_after_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n", source_path="src/README.md")
+    ancestor = candidate.worktree / "src"
+    original_inode = ancestor.stat().st_ino
+
+    def replace_ancestor() -> None:
+        ancestor.rename(candidate.worktree / "old-src")
+        ancestor.mkdir(mode=0o755)
+        replacement = ancestor / "README.md"
+        replacement.write_bytes(b"base\n")
+        replacement.chmod(0o644)
+        assert ancestor.stat().st_ino != original_inode
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_read_checkpoint_hook",
+        replace_ancestor,
+    )
+
+    with pytest.raises(repo_tools.CandidateReadError) as raised:
+        repo_tools.read_candidate_file(_request(candidate, path="src/README.md"))
+
+    assert raised.value.code == "FILE_CHANGED"
+
+
+def test_read_candidate_file_rejects_worktree_replaced_after_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    original_inode = candidate.worktree.stat().st_ino
+
+    def replace_worktree() -> None:
+        candidate.worktree.rename(candidate.candidate_root / "old-worktree")
+        candidate.worktree.mkdir(mode=0o700)
+        replacement = candidate.worktree / "README.md"
+        replacement.write_bytes(b"base\n")
+        replacement.chmod(0o644)
+        assert candidate.worktree.stat().st_ino != original_inode
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_read_checkpoint_hook",
+        replace_worktree,
+    )
+
+    with pytest.raises(repo_tools.CandidateReadError) as raised:
+        repo_tools.read_candidate_file(_request(candidate))
+
+    assert raised.value.code == "FILE_CHANGED"
+
+
+def test_read_candidate_file_rejects_metadata_change_after_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+
+    def change_metadata() -> None:
+        (candidate.worktree / "README.md").chmod(0o600)
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_read_checkpoint_hook",
+        change_metadata,
+    )
+
+    with pytest.raises(repo_tools.CandidateReadError) as raised:
+        repo_tools.read_candidate_file(_request(candidate))
+
+    assert raised.value.code == "FILE_CHANGED"
+
+
+def test_read_candidate_file_never_returns_prefix_during_truncation_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    target = candidate.worktree / "README.md"
+    real_read = repo_tools.os.read
+    checkpoint_complete = False
+    raced = False
+
+    def mark_checkpoint_complete() -> None:
+        nonlocal checkpoint_complete
+        checkpoint_complete = True
+
+    def truncate_during_read(descriptor: int, size: int) -> bytes:
+        nonlocal raced
+        if checkpoint_complete and not raced:
+            raced = True
+            target.write_bytes(b"x")
+        return real_read(descriptor, size)
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_read_checkpoint_hook",
+        mark_checkpoint_complete,
+    )
+    monkeypatch.setattr(repo_tools.os, "read", truncate_during_read)
+
+    with pytest.raises(repo_tools.CandidateReadError) as raised:
+        repo_tools.read_candidate_file(_request(candidate))
+
+    assert raced is True
+    assert raised.value.code == "FILE_CHANGED"
+
+
+def test_read_candidate_file_rejects_content_change_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    target = candidate.worktree / "README.md"
+    real_read = repo_tools.os.read
+    checkpoint_complete = False
+    raced = False
+
+    def mark_checkpoint_complete() -> None:
+        nonlocal checkpoint_complete
+        checkpoint_complete = True
+
+    def change_content_during_read(descriptor: int, size: int) -> bytes:
+        nonlocal raced
+        if checkpoint_complete and not raced:
+            raced = True
+            target.write_bytes(b"evil\n")
+        return real_read(descriptor, size)
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_read_checkpoint_hook",
+        mark_checkpoint_complete,
+    )
+    monkeypatch.setattr(repo_tools.os, "read", change_content_during_read)
+
+    with pytest.raises(repo_tools.CandidateReadError) as raised:
+        repo_tools.read_candidate_file(_request(candidate))
+
+    assert raced is True
     assert raised.value.code == "FILE_CHANGED"
 
 
@@ -477,15 +620,16 @@ def test_read_candidate_file_uses_only_frozen_read_only_git_calls(
         assert kwargs["check"] is False
         assert "status" not in command
         assert "write-tree" not in command
+        assert candidate.head_commit not in command
     assert observed_arguments == [
         ("rev-parse", "--is-bare-repository"),
         ("rev-parse", "HEAD"),
-        ("cat-file", "-e", f"{candidate.head_commit}^{{commit}}"),
+        ("cat-file", "-e", "HEAD^{commit}"),
         (
             "diff-index",
             "--cached",
             "--quiet",
-            candidate.head_commit,
+            "HEAD",
             "--",
         ),
     ]
@@ -496,19 +640,86 @@ def test_read_candidate_file_closes_read_error_as_file_changed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = _candidate(tmp_path, b"base\n")
-    manifest = _manifest(candidate)
+    checkpoint_complete = False
+
+    def mark_checkpoint_complete() -> None:
+        nonlocal checkpoint_complete
+        checkpoint_complete = True
+
     monkeypatch.setattr(
         repo_tools,
-        "_verify_candidate_checkpoint_read_only",
-        lambda workspace: manifest,
+        "_candidate_read_checkpoint_hook",
+        mark_checkpoint_complete,
     )
 
     def fail_read(descriptor: int, size: int) -> bytes:
-        raise OSError("injected read failure")
+        if checkpoint_complete:
+            raise OSError("injected read failure")
+        return real_read(descriptor, size)
 
+    real_read = repo_tools.os.read
     monkeypatch.setattr(repo_tools.os, "read", fail_read)
 
     with pytest.raises(repo_tools.CandidateReadError) as raised:
         repo_tools.read_candidate_file(_request(candidate))
 
     assert raised.value.code == "FILE_CHANGED"
+
+
+def test_read_candidate_file_closes_every_checkpoint_descriptor_on_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n", source_path="src/README.md")
+    captured_descriptors: tuple[int, ...] = ()
+
+    def fail_after_checkpoint(checkpoint, path: str) -> bytes:
+        nonlocal captured_descriptors
+        captured_descriptors = tuple(
+            anchor.descriptor for anchor in checkpoint.anchors
+        )
+        raise repo_tools.CandidateReadError("FILE_CHANGED")
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_read_verified_candidate_path",
+        fail_after_checkpoint,
+    )
+
+    with pytest.raises(repo_tools.CandidateReadError) as raised:
+        repo_tools.read_candidate_file(_request(candidate, path="src/README.md"))
+
+    assert raised.value.code == "FILE_CHANGED"
+    assert len(captured_descriptors) == 6
+    for descriptor in captured_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+def test_read_candidate_file_closes_descriptors_when_checkpoint_scan_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    real_anchor = repo_tools._candidate_read_anchor
+    captured_descriptors: list[int] = []
+
+    def observe_anchor(*args, **kwargs):
+        anchor = real_anchor(*args, **kwargs)
+        captured_descriptors.append(anchor.descriptor)
+        return anchor
+
+    def fail_scan(root_fd: int, head_commit: str):
+        raise repo_tools.ManifestError("injected scan failure")
+
+    monkeypatch.setattr(repo_tools, "_candidate_read_anchor", observe_anchor)
+    monkeypatch.setattr(repo_tools, "scan_workspace_manifest", fail_scan)
+
+    with pytest.raises(repo_tools.CandidateReadError) as raised:
+        repo_tools.read_candidate_file(_request(candidate))
+
+    assert raised.value.code == "RECOVERY_REQUIRED"
+    assert len(captured_descriptors) == 5
+    for descriptor in captured_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)

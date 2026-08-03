@@ -367,19 +367,45 @@ class CandidateReadResult:
     output: RepoReadOutput
 
 
+@dataclass(frozen=True, slots=True)
+class _CandidateReadAnchor:
+    descriptor: int
+    token: str
+    parent_descriptor: int | None
+    name: str | Path
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedCandidateReadCheckpoint:
+    manifest: WorkspaceManifest
+    anchors: tuple[_CandidateReadAnchor, ...]
+    worktree_descriptor: int
+    leaf_descriptor: int
+
+
+def _candidate_read_checkpoint_hook() -> None:
+    """Provide a deterministic test seam after checkpoint verification."""
+
+
 def read_candidate_file(request: CandidateReadRequest) -> CandidateReadResult:
     workspace = _candidate_from_read_request(request)
-    manifest = _verify_candidate_checkpoint_read_only(workspace)
-    content = _read_verified_candidate_path(workspace.worktree, request.path, manifest)
-    return CandidateReadResult(
-        content=content,
-        output=RepoReadOutput(
-            path=request.path,
-            content_sha256=hashlib.sha256(content).hexdigest(),
-            size_bytes=len(content),
-            workspace_manifest_digest=request.expected_workspace_manifest_digest,
-        ),
-    )
+    checkpoint = _verify_candidate_checkpoint_read_only(workspace, request.path)
+    try:
+        _candidate_read_checkpoint_hook()
+        content = _read_verified_candidate_path(checkpoint, request.path)
+        return CandidateReadResult(
+            content=content,
+            output=RepoReadOutput(
+                path=request.path,
+                content_sha256=hashlib.sha256(content).hexdigest(),
+                size_bytes=len(content),
+                workspace_manifest_digest=(
+                    request.expected_workspace_manifest_digest
+                ),
+            ),
+        )
+    finally:
+        _close_candidate_read_checkpoint(checkpoint)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2038,9 +2064,160 @@ def _candidate_from_read_request(
 
 def _verify_candidate_checkpoint_read_only(
     workspace: CandidateWorkspace,
-) -> WorkspaceManifest:
+    path: str,
+) -> _VerifiedCandidateReadCheckpoint:
+    descriptors: list[int] = []
     try:
         _validate_candidate_layout(workspace)
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        directory = getattr(os, "O_DIRECTORY", None)
+        if (
+            type(nofollow) is not int
+            or nofollow <= 0
+            or type(directory) is not int
+            or directory <= 0
+        ):
+            raise CandidateWorkspaceError(
+                "candidate scan requires directory no-follow support"
+            )
+        directory_flags = os.O_RDONLY | directory | nofollow
+        root_descriptor = os.open(workspace.runtime_root, directory_flags)
+        descriptors.append(root_descriptor)
+        candidate_descriptor = os.open(
+            workspace.workspace_id,
+            directory_flags,
+            dir_fd=root_descriptor,
+        )
+        descriptors.append(candidate_descriptor)
+        worktree_descriptor = os.open(
+            "worktree",
+            directory_flags,
+            dir_fd=candidate_descriptor,
+        )
+        descriptors.append(worktree_descriptor)
+        git_descriptor = os.open(
+            "git",
+            directory_flags,
+            dir_fd=candidate_descriptor,
+        )
+        descriptors.append(git_descriptor)
+        anchors: list[_CandidateReadAnchor] = [
+            _candidate_read_anchor(
+                root_descriptor,
+                parent_descriptor=None,
+                name=workspace.runtime_root,
+            ),
+            _candidate_read_anchor(
+                candidate_descriptor,
+                parent_descriptor=root_descriptor,
+                name=workspace.workspace_id,
+            ),
+            _candidate_read_anchor(
+                worktree_descriptor,
+                parent_descriptor=candidate_descriptor,
+                name="worktree",
+            ),
+            _candidate_read_anchor(
+                git_descriptor,
+                parent_descriptor=candidate_descriptor,
+                name="git",
+            ),
+        ]
+        for anchor in anchors:
+            metadata = os.fstat(anchor.descriptor)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) != 0o700
+                or metadata.st_uid != os.geteuid()
+            ):
+                raise CandidateWorkspaceError(
+                    "candidate workspace directory identity is invalid"
+                )
+        if set(os.listdir(candidate_descriptor)) != {
+            "control.json",
+            "git",
+            "worktree",
+        }:
+            raise CandidateWorkspaceError(
+                "candidate control root has extra entries"
+            )
+        try:
+            os.stat(".git", dir_fd=worktree_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise CandidateWorkspaceError(
+                "candidate Git metadata entered worktree"
+            )
+        current_descriptor = worktree_descriptor
+        segments = path.split("/")
+        for segment in segments[:-1]:
+            try:
+                child_descriptor = os.open(
+                    segment,
+                    directory_flags,
+                    dir_fd=current_descriptor,
+                )
+            except OSError as error:
+                raise CandidateReadError("PATH_DENIED") from error
+            descriptors.append(child_descriptor)
+            try:
+                anchor = _candidate_read_anchor(
+                    child_descriptor,
+                    parent_descriptor=current_descriptor,
+                    name=segment,
+                )
+            except OSError as error:
+                raise CandidateWorkspaceError(
+                    "candidate ancestor changed before checkpoint scan"
+                ) from error
+            anchors.append(anchor)
+            current_descriptor = child_descriptor
+        leaf_name = segments[-1]
+        try:
+            leaf_named = os.stat(
+                leaf_name,
+                dir_fd=current_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise CandidateReadError("PATH_DENIED") from error
+        if (
+            not stat.S_ISREG(leaf_named.st_mode)
+            or leaf_named.st_nlink != 1
+            or leaf_named.st_size > _MAX_MANIFEST_BYTES
+        ):
+            raise CandidateReadError("PATH_DENIED")
+        try:
+            leaf_descriptor = os.open(
+                leaf_name,
+                os.O_RDONLY | nofollow,
+                dir_fd=current_descriptor,
+            )
+        except OSError as error:
+            raise CandidateWorkspaceError(
+                "candidate leaf cannot be opened for checkpoint scan"
+            ) from error
+        descriptors.append(leaf_descriptor)
+        leaf_anchor = _candidate_read_anchor(
+            leaf_descriptor,
+            parent_descriptor=current_descriptor,
+            name=leaf_name,
+        )
+        if leaf_anchor.token != _workspace_read_token(leaf_named):
+            raise CandidateWorkspaceError(
+                "candidate leaf changed before checkpoint scan"
+            )
+        anchors.append(leaf_anchor)
+        control = _read_candidate_control(workspace)
+        if (
+            control["worktree_inode"]
+            != os.fstat(worktree_descriptor).st_ino
+            or control["git_inode"] != os.fstat(git_descriptor).st_ino
+        ):
+            raise CandidateWorkspaceError(
+                "candidate control identity mismatches"
+            )
         actual_head_result = _run_git_read_only(
             git_dir=workspace.git_dir,
             worktree=workspace.worktree,
@@ -2055,7 +2232,7 @@ def _verify_candidate_checkpoint_read_only(
             arguments=(
                 "cat-file",
                 "-e",
-                f"{workspace.head_commit}^{{commit}}",
+                "HEAD^{commit}",
             ),
         )
         index_result = _run_git_read_only(
@@ -2065,7 +2242,7 @@ def _verify_candidate_checkpoint_read_only(
                 "diff-index",
                 "--cached",
                 "--quiet",
-                workspace.head_commit,
+                "HEAD",
                 "--",
             ),
         )
@@ -2075,42 +2252,96 @@ def _verify_candidate_checkpoint_read_only(
             or index_result.returncode != 0
         ):
             raise CandidateWorkspaceError("candidate Git checkpoint mismatches")
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        directory = getattr(os, "O_DIRECTORY", None)
-        if (
-            type(nofollow) is not int
-            or nofollow <= 0
-            or type(directory) is not int
-            or directory <= 0
-        ):
-            raise CandidateWorkspaceError(
-                "candidate scan requires directory no-follow support"
-            )
-        descriptor = os.open(
-            workspace.worktree,
-            os.O_RDONLY | directory | nofollow,
+        manifest = scan_workspace_manifest(
+            worktree_descriptor,
+            workspace.head_commit,
         )
-        try:
-            manifest = scan_workspace_manifest(descriptor, workspace.head_commit)
-        finally:
-            os.close(descriptor)
         if (
             workspace_manifest_digest(manifest)
             != workspace.workspace_manifest_digest
         ):
             raise CandidateWorkspaceError("candidate manifest mismatches")
-        return manifest
+        checkpoint = _VerifiedCandidateReadCheckpoint(
+            manifest=manifest,
+            anchors=tuple(anchors),
+            worktree_descriptor=worktree_descriptor,
+            leaf_descriptor=leaf_descriptor,
+        )
+        if not _candidate_read_anchors_match(checkpoint):
+            raise CandidateReadError("FILE_CHANGED")
+        return checkpoint
+    except CandidateReadError:
+        _close_candidate_read_descriptors(descriptors)
+        raise
     except Exception as error:
+        _close_candidate_read_descriptors(descriptors)
         raise CandidateReadError("RECOVERY_REQUIRED") from error
 
 
+def _candidate_read_anchor(
+    descriptor: int,
+    *,
+    parent_descriptor: int | None,
+    name: str | Path,
+) -> _CandidateReadAnchor:
+    anchor = _CandidateReadAnchor(
+        descriptor=descriptor,
+        token=_workspace_read_token(os.fstat(descriptor)),
+        parent_descriptor=parent_descriptor,
+        name=name,
+    )
+    if _candidate_read_named_token(anchor) != anchor.token:
+        raise OSError("candidate read anchor binding changed")
+    return anchor
+
+
+def _candidate_read_named_token(anchor: _CandidateReadAnchor) -> str:
+    if anchor.parent_descriptor is None:
+        metadata = os.stat(anchor.name, follow_symlinks=False)
+    else:
+        metadata = os.stat(
+            anchor.name,
+            dir_fd=anchor.parent_descriptor,
+            follow_symlinks=False,
+        )
+    return _workspace_read_token(metadata)
+
+
+def _candidate_read_anchors_match(
+    checkpoint: _VerifiedCandidateReadCheckpoint,
+) -> bool:
+    try:
+        return all(
+            _workspace_read_token(os.fstat(anchor.descriptor)) == anchor.token
+            and _candidate_read_named_token(anchor) == anchor.token
+            for anchor in checkpoint.anchors
+        )
+    except OSError:
+        return False
+
+
+def _close_candidate_read_checkpoint(
+    checkpoint: _VerifiedCandidateReadCheckpoint,
+) -> None:
+    _close_candidate_read_descriptors(
+        [anchor.descriptor for anchor in checkpoint.anchors]
+    )
+
+
+def _close_candidate_read_descriptors(descriptors: Sequence[int]) -> None:
+    for descriptor in reversed(descriptors):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
 def _read_verified_candidate_path(
-    worktree: Path,
+    checkpoint: _VerifiedCandidateReadCheckpoint,
     path: str,
-    manifest: WorkspaceManifest,
 ) -> bytes:
     try:
-        entries, _ = _canonical_manifest_entries(manifest)
+        entries, _ = _canonical_manifest_entries(checkpoint.manifest)
         entry = entries.get(path)
     except (ManifestError, TypeError, ValueError) as error:
         raise CandidateReadError("PATH_DENIED") from error
@@ -2123,83 +2354,40 @@ def _read_verified_candidate_path(
         or _DIGEST_PATTERN.fullmatch(entry.sha256) is None
     ):
         raise CandidateReadError("PATH_DENIED")
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    directory = getattr(os, "O_DIRECTORY", None)
-    if (
-        type(nofollow) is not int
-        or nofollow <= 0
-        or type(directory) is not int
-        or directory <= 0
-    ):
-        raise CandidateReadError("PATH_DENIED")
-    directory_flags = os.O_RDONLY | directory | nofollow
     try:
-        current_fd = os.open(worktree, directory_flags)
-    except OSError as error:
-        raise CandidateReadError("PATH_DENIED") from error
-    try:
-        segments = path.split("/")
-        for segment in segments[:-1]:
-            try:
-                child_fd = os.open(segment, directory_flags, dir_fd=current_fd)
-            except OSError as error:
-                raise CandidateReadError("PATH_DENIED") from error
-            os.close(current_fd)
-            current_fd = child_fd
-        leaf = segments[-1]
-        try:
-            before = os.stat(leaf, dir_fd=current_fd, follow_symlinks=False)
-        except OSError as error:
-            raise CandidateReadError("PATH_DENIED") from error
+        if not _candidate_read_anchors_match(checkpoint):
+            raise CandidateReadError("FILE_CHANGED")
+        opened = os.fstat(checkpoint.leaf_descriptor)
         if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_nlink != 1
-            or before.st_size > _MAX_MANIFEST_BYTES
+            entry.posix_mode != f"{opened.st_mode:06o}"
+            or entry.size_bytes != opened.st_size
         ):
-            raise CandidateReadError("PATH_DENIED")
-        token_before = _workspace_read_token(before)
-        try:
-            descriptor = os.open(
-                leaf,
-                os.O_RDONLY | nofollow,
-                dir_fd=current_fd,
+            raise CandidateReadError("FILE_CHANGED")
+        os.lseek(checkpoint.leaf_descriptor, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(
+                checkpoint.leaf_descriptor,
+                min(remaining, 65_536),
             )
-        except OSError as error:
-            raise CandidateReadError("FILE_CHANGED") from error
-        try:
-            opened = os.fstat(descriptor)
-            if _workspace_read_token(opened) != token_before:
+            if not chunk:
                 raise CandidateReadError("FILE_CHANGED")
-            if (
-                entry.posix_mode != f"{opened.st_mode:06o}"
-                or entry.size_bytes != opened.st_size
-            ):
-                raise CandidateReadError("FILE_CHANGED")
-            chunks: list[bytes] = []
-            remaining = opened.st_size
-            while remaining:
-                chunk = os.read(descriptor, min(remaining, 65_536))
-                if not chunk:
-                    raise CandidateReadError("FILE_CHANGED")
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            if os.read(descriptor, 1):
-                raise CandidateReadError("FILE_CHANGED")
-            content = b"".join(chunks)
-            if (
-                _workspace_read_token(os.fstat(descriptor)) != token_before
-                or hashlib.sha256(content).hexdigest() != entry.sha256
-            ):
-                raise CandidateReadError("FILE_CHANGED")
-            return content
-        except CandidateReadError:
-            raise
-        except OSError as error:
-            raise CandidateReadError("FILE_CHANGED") from error
-        finally:
-            os.close(descriptor)
-    finally:
-        os.close(current_fd)
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(checkpoint.leaf_descriptor, 1):
+            raise CandidateReadError("FILE_CHANGED")
+        content = b"".join(chunks)
+        if (
+            not _candidate_read_anchors_match(checkpoint)
+            or hashlib.sha256(content).hexdigest() != entry.sha256
+        ):
+            raise CandidateReadError("FILE_CHANGED")
+        return content
+    except CandidateReadError:
+        raise
+    except OSError as error:
+        raise CandidateReadError("FILE_CHANGED") from error
 
 
 def _read_candidate_control(workspace: CandidateWorkspace) -> dict[str, Any]:
