@@ -201,9 +201,9 @@ def _copy_anchored_tree(
                 os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                 dir_fd=source_fd,
             )
-            token = _stat_token(os.fstat(child_fd))
-            assert token == _stat_token(before)
             try:
+                token = _stat_token(os.fstat(child_fd))
+                assert token == _stat_token(before)
                 target.mkdir(mode=0o700)
                 _copy_anchored_tree(child_fd, target, budget, depth=depth + 1)
                 _assert_fd_binding(source_fd, name, child_fd, token)
@@ -216,10 +216,10 @@ def _copy_anchored_tree(
         budget["bytes"] += before.st_size
         assert budget["bytes"] <= MAX_SNAPSHOT_TOTAL_BYTES
         file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=source_fd)
-        token = _stat_token(os.fstat(file_fd))
-        assert token == _stat_token(before)
-        copied = 0
         try:
+            token = _stat_token(os.fstat(file_fd))
+            assert token == _stat_token(before)
+            copied = 0
             with target.open("xb") as output:
                 while True:
                     chunk = os.read(file_fd, 1024 * 1024)
@@ -245,14 +245,15 @@ def _snapshot_external_subtrees(
     assert not destination.exists()
     root_details = root.lstat()
     assert stat.S_ISDIR(root_details.st_mode) and not root.is_symlink()
-    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    root_token = _stat_token(os.fstat(root_fd))
-    assert root_token == _stat_token(root_details)
     opened: list[int] = []
     bindings: list[tuple[int, str, int, tuple[int, ...]]] = []
     leaves: dict[str, int] = {}
     succeeded = False
     try:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        opened.append(root_fd)
+        root_token = _stat_token(os.fstat(root_fd))
+        assert root_token == _stat_token(root_details)
         assert type(relative_paths) is dict and relative_paths
         for key, relative in relative_paths.items():
             assert type(key) is str and key and key not in leaves
@@ -263,9 +264,9 @@ def _snapshot_external_subtrees(
                     os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                     dir_fd=parent_fd,
                 )
+                opened.append(child_fd)
                 token = _stat_token(os.fstat(child_fd))
                 _assert_fd_binding(parent_fd, part, child_fd, token)
-                opened.append(child_fd)
                 bindings.append((parent_fd, part, child_fd, token))
                 parent_fd = child_fd
             leaves[key] = parent_fd
@@ -290,7 +291,6 @@ def _snapshot_external_subtrees(
     finally:
         for descriptor in reversed(opened):
             os.close(descriptor)
-        os.close(root_fd)
         if not succeeded and destination.exists():
             shutil.rmtree(destination)
 
@@ -395,10 +395,11 @@ class _ArchiveMembers(dict[str, tarfile.TarInfo]):
 
 
 def _safe_archive_members(archive: tarfile.TarFile) -> _ArchiveMembers:
-    raw_members = archive.getmembers()
-    assert len(raw_members) <= MAX_ARCHIVE_MEMBERS, "archive member count is unbounded"
     members = _ArchiveMembers()
-    for member in raw_members:
+    for member in archive:
+        assert len(members) < MAX_ARCHIVE_MEMBERS, (
+            "archive member count is unbounded"
+        )
         name = member.name.rstrip("/")
         member_path = PurePosixPath(name)
         assert name and not member_path.is_absolute() and ".." not in member_path.parts
@@ -744,6 +745,7 @@ def _verify_attestation_manifest(
     members: Mapping[str, tarfile.TarInfo],
     manifest_raw: bytes,
     selected_manifest_digest: str,
+    expected_tag: str,
 ) -> None:
     manifest = _archive_json(manifest_raw, "attestation manifest")
     assert set(manifest) == {"schemaVersion", "mediaType", "config", "layers"}
@@ -781,7 +783,13 @@ def _verify_attestation_manifest(
     subject = statement["subject"]
     assert type(subject) is list and len(subject) == 1
     assert type(subject[0]) is dict and set(subject[0]) == {"digest", "name"}
-    assert type(subject[0]["name"]) is str and subject[0]["name"]
+    repository, separator, revision = expected_tag.rpartition(":")
+    assert separator == ":" and repository and ":" not in repository
+    assert re.fullmatch(r"[0-9a-f]{40}", revision)
+    expected_subject_name = (
+        f"pkg:docker/{repository}@{revision}?platform=linux%2Farm64"
+    )
+    assert subject[0]["name"] == expected_subject_name
     assert subject[0]["digest"] == {"sha256": selected_manifest_digest[7:]}
 
 
@@ -896,6 +904,7 @@ def _verify_docker_archive(
             members,
             attestation_raw,
             str(image_descriptor["digest"]),
+            expected_tag,
         )
         if expected_image is not None:
             assert image_descriptor["digest"] == expected_image["oci_manifest_digest"]
@@ -1042,7 +1051,8 @@ def _synthetic_oci_files(
 def _synthetic_docker_files(
     mutation: str | None = None,
 ) -> tuple[dict[str, bytes], str, str]:
-    tag = "openworkproof/execution-test:revision"
+    revision = "a" * 40
+    tag = f"openworkproof/execution-test:{revision}"
     files, selected_digest = _synthetic_oci_files()
     selected_hex = selected_digest[7:]
     selected_raw = files[f"blobs/sha256/{selected_hex}"]
@@ -1055,7 +1065,10 @@ def _synthetic_docker_files(
         "subject": [
             {
                 "digest": {"sha256": selected_hex},
-                "name": "pkg:docker/openworkproof/execution-test@revision?platform=linux%2Farm64",
+                "name": (
+                    "pkg:docker/openworkproof/execution-test@"
+                    f"{revision}?platform=linux%2Farm64"
+                ),
             }
         ],
     }
@@ -1063,6 +1076,8 @@ def _synthetic_docker_files(
         statement["predicateType"] = "https://example.invalid/predicate"
     elif mutation == "statement-subject":
         statement["subject"][0]["digest"]["sha256"] = "f" * 64
+    elif mutation == "statement-subject-name":
+        statement["subject"][0]["name"] = "arbitrary-but-nonempty"
     statement_raw = json.dumps(statement, separators=(",", ":")).encode()
     statement_hex = _sha256_bytes(statement_raw)
 
@@ -1166,7 +1181,7 @@ def _synthetic_docker_files(
             {
                 "annotations": {
                     "io.containerd.image.name": f"docker.io/{tag}",
-                    "org.opencontainers.image.ref.name": "revision",
+                    "org.opencontainers.image.ref.name": revision,
                 },
                 "digest": f"sha256:{nested_hex}",
                 "mediaType": OCI_INDEX,
@@ -1326,6 +1341,7 @@ def test_synthetic_docker_archive_matches_actual_attestation_shape(
         "predicate-annotation",
         "statement-predicate-type",
         "statement-subject",
+        "statement-subject-name",
     ),
 )
 def test_docker_archive_rejects_nonactual_attestation_shape(
@@ -1347,6 +1363,28 @@ class _MembersOnlyArchive:
     def getmembers(self) -> list[tarfile.TarInfo]:
         return self._members
 
+    def __iter__(self):
+        return iter(self._members)
+
+
+class _EarlyStopArchive:
+    def __init__(self) -> None:
+        self.getmembers_called = False
+        self.yielded = 0
+        self.requested_member_130 = False
+
+    def __iter__(self):
+        for index in range(MAX_ARCHIVE_MEMBERS + 2):
+            if index == MAX_ARCHIVE_MEMBERS + 1:
+                self.requested_member_130 = True
+                raise RuntimeError("member 130 must never be requested")
+            self.yielded += 1
+            yield _regular_tar_member(f"payload-{index}")
+
+    def getmembers(self) -> list[tarfile.TarInfo]:
+        self.getmembers_called = True
+        return list(self)
+
 
 def _regular_tar_member(name: str, size: int = 1) -> tarfile.TarInfo:
     member = tarfile.TarInfo(name)
@@ -1362,6 +1400,33 @@ def test_archive_rejects_more_than_bounded_member_count() -> None:
 
     with pytest.raises(AssertionError, match="member count"):
         _safe_archive_members(archive)  # type: ignore[arg-type]
+
+
+def test_archive_member_limit_stops_before_requesting_member_130() -> None:
+    archive = _EarlyStopArchive()
+
+    with pytest.raises(AssertionError, match="member count"):
+        _safe_archive_members(archive)  # type: ignore[arg-type]
+
+    assert not archive.getmembers_called
+    assert archive.yielded == MAX_ARCHIVE_MEMBERS + 1
+    assert not archive.requested_member_130
+
+
+def test_real_tar_member_limit_keeps_only_bounded_cache(tmp_path: Path) -> None:
+    path = tmp_path / "many-members.tar"
+    _write_test_archive(
+        path,
+        {
+            f"payload-{index}": b"x"
+            for index in range(MAX_ARCHIVE_MEMBERS + 2)
+        },
+    )
+
+    with tarfile.open(path, mode="r") as archive:
+        with pytest.raises(AssertionError, match="member count"):
+            _safe_archive_members(archive)
+        assert len(archive.members) <= MAX_ARCHIVE_MEMBERS + 1
 
 
 def test_archive_json_rejects_payload_larger_than_one_mebibyte() -> None:
@@ -1467,6 +1532,57 @@ def test_external_snapshot_stays_anchored_when_open_ancestor_is_replaced(
             for path in snapshot.rglob("*")
             if path.is_file()
         }
+
+
+def _open_fd_set() -> set[int]:
+    descriptors: set[int] = set()
+    for descriptor in range(1024):
+        try:
+            os.fstat(descriptor)
+        except OSError:
+            continue
+        descriptors.add(descriptor)
+    return descriptors
+
+
+@pytest.mark.parametrize("failed_binding", (1, 2), ids=("first", "child"))
+def test_external_snapshot_closes_new_fds_when_initial_binding_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_binding: int,
+) -> None:
+    root = tmp_path / "root"
+    (root / "a/b").mkdir(parents=True)
+    snapshot = tmp_path / "snapshot"
+    before = _open_fd_set()
+    calls = 0
+
+    def fail_selected_binding(*_args) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == failed_binding:
+            raise AssertionError("forced binding failure")
+
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_assert_fd_binding",
+        fail_selected_binding,
+    )
+    after: set[int] = set()
+    try:
+        with pytest.raises(AssertionError, match="forced binding failure"):
+            _snapshot_external_subtrees(
+                root,
+                {"required": "a/b"},
+                snapshot,
+            )
+        after = _open_fd_set()
+    finally:
+        for descriptor in after - before:
+            os.close(descriptor)
+
+    assert after == before
+    assert not snapshot.exists()
 
 
 @pytest.mark.parametrize("entry_kind", ("symlink", "hardlink", "fifo"))
