@@ -9,10 +9,12 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import stat
 import struct
-from typing import Any, Mapping, Sequence
+import subprocess
+from typing import Any, Literal, Mapping, Sequence
 import zlib
 
 import rfc8785
@@ -116,6 +118,10 @@ class ReplayError(ValueError):
 
 class EvidenceOrdinalError(ValueError):
     """A patch evidence pair cannot be derived from the immutable prefix."""
+
+
+class CandidateWorkspaceError(RuntimeError):
+    """A trusted candidate workspace cannot be proven or reconstructed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +281,45 @@ class ReplayCheckpoint:
     workspace_manifest: WorkspaceManifest
     workspace_manifest_digest: str
     verified_test_results: tuple[TestResultEvidence, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceInitRequest:
+    runtime_root: Path
+    workspace_id: str
+    source: ParsedSourceArchive
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateWorkspace:
+    runtime_root: Path
+    candidate_root: Path
+    worktree: Path
+    git_dir: Path
+    workspace_id: str
+    head_commit: str
+    workspace_manifest_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class RollbackRequest:
+    workspace: CandidateWorkspace
+    target_patch_receipt_id: str
+    target_patch_receipt_digest: str
+    failure_target_patch_receipt_id: str
+    failure_target_patch_receipt_digest: str
+    before_commit: str
+    before_manifest_digest: str
+    parent_commit: str
+    parent_manifest_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class RollbackResult:
+    execution_status: Literal["succeeded", "failed"]
+    before_commit: str
+    after_commit: str
+    after_manifest_digest: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -1431,6 +1476,537 @@ def scan_workspace_manifest(
     manifest = build_workspace_manifest(head_commit, records)
     _workspace_manifest_json(manifest)
     return manifest
+
+
+def _git_environment() -> dict[str, str]:
+    return {
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+    }
+
+
+def _run_git(
+    *,
+    git_dir: Path | None,
+    worktree: Path | None,
+    arguments: Sequence[str],
+    input_bytes: bytes | None = None,
+) -> bytes:
+    executable = Path("/usr/bin/git")
+    if not executable.is_file():
+        raise CandidateWorkspaceError("trusted Git executable is unavailable")
+    command = [str(executable)]
+    if git_dir is not None:
+        command.append(f"--git-dir={git_dir}")
+    if worktree is not None:
+        command.append(f"--work-tree={worktree}")
+    command.extend(
+        (
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "core.filemode=true",
+            "-c",
+            "core.hooksPath=/dev/null",
+        )
+    )
+    command.extend(arguments)
+    try:
+        completed = subprocess.run(
+            command,
+            input=input_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            timeout=30,
+            env=_git_environment(),
+            cwd=worktree if worktree is not None else None,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise CandidateWorkspaceError("trusted Git operation failed") from error
+    return completed.stdout
+
+
+def _write_candidate_source(
+    worktree: Path,
+    files: Sequence[SourceFile],
+) -> None:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if type(nofollow) is not int or nofollow <= 0:
+        raise CandidateWorkspaceError("candidate setup requires O_NOFOLLOW")
+    for source_file in files:
+        segments = source_file.path.split("/")
+        parent = worktree
+        for segment in segments[:-1]:
+            parent = parent / segment
+            parent.mkdir(mode=0o755, exist_ok=True)
+            parent.chmod(0o755)
+        target = parent / segments[-1]
+        descriptor = os.open(
+            target,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+            0o600,
+        )
+        try:
+            view = memoryview(source_file.content)
+            written = 0
+            while written < len(view):
+                count = os.write(descriptor, view[written:])
+                if count <= 0:
+                    raise CandidateWorkspaceError(
+                        "candidate source write made no progress"
+                    )
+                written += count
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        target.chmod(0o755 if source_file.mode == "100755" else 0o644)
+
+
+def initialize_candidate_workspace(
+    request: WorkspaceInitRequest,
+) -> CandidateWorkspace:
+    """Recreate one controlled candidate using separate Git metadata."""
+
+    if type(request) is not WorkspaceInitRequest:
+        raise CandidateWorkspaceError("workspace initialization request is invalid")
+    runtime_root = request.runtime_root
+    source = request.source
+    if (
+        not isinstance(runtime_root, Path)
+        or not runtime_root.is_absolute()
+        or type(request.workspace_id) is not str
+        or _DIGEST_PATTERN.fullmatch(request.workspace_id) is None
+        or type(source) is not ParsedSourceArchive
+    ):
+        raise CandidateWorkspaceError("workspace initialization binding is invalid")
+    try:
+        root_named = os.stat(runtime_root, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(root_named.st_mode)
+            or stat.S_IMODE(root_named.st_mode) != 0o700
+        ):
+            raise CandidateWorkspaceError(
+                "candidate runtime root must be a private directory"
+            )
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        directory = getattr(os, "O_DIRECTORY", None)
+        if (
+            type(nofollow) is not int
+            or nofollow <= 0
+            or type(directory) is not int
+            or directory <= 0
+        ):
+            raise CandidateWorkspaceError(
+                "candidate setup requires directory no-follow support"
+            )
+        root_fd = os.open(runtime_root, os.O_RDONLY | directory | nofollow)
+        try:
+            if not os.path.samestat(root_named, os.fstat(root_fd)):
+                raise CandidateWorkspaceError("candidate runtime root changed")
+            os.mkdir(request.workspace_id, 0o700, dir_fd=root_fd)
+        finally:
+            os.close(root_fd)
+        candidate_root = runtime_root / request.workspace_id
+        candidate_root.chmod(0o700)
+        worktree = candidate_root / "worktree"
+        git_dir = candidate_root / "git"
+        worktree.mkdir(mode=0o700)
+        git_dir.mkdir(mode=0o700)
+
+        files = _validated_candidate_files(source.files)
+        if (
+            git_tree_oid(files) != source.tree_oid
+            or git_commit_oid(source.commit_raw) != source.source_commit
+        ):
+            raise CandidateWorkspaceError(
+                "candidate source object binding is invalid"
+            )
+        _validate_commit_raw(source.commit_raw, source.tree_oid)
+        _write_candidate_source(worktree, files)
+        _run_git(
+            git_dir=None,
+            worktree=None,
+            arguments=("init", "--bare", "--quiet", str(git_dir)),
+        )
+        _run_git(
+            git_dir=git_dir,
+            worktree=worktree,
+            arguments=("add", "--all", "--", "."),
+        )
+        tree_oid = _run_git(
+            git_dir=git_dir,
+            worktree=worktree,
+            arguments=("write-tree",),
+        ).decode("ascii").strip()
+        if tree_oid != source.tree_oid:
+            raise CandidateWorkspaceError(
+                "candidate Git tree does not match source"
+            )
+        commit_oid = _run_git(
+            git_dir=git_dir,
+            worktree=worktree,
+            arguments=("hash-object", "-t", "commit", "-w", "--stdin"),
+            input_bytes=source.commit_raw,
+        ).decode("ascii").strip()
+        if commit_oid != source.source_commit:
+            raise CandidateWorkspaceError(
+                "candidate Git commit does not match source"
+            )
+        _run_git(
+            git_dir=git_dir,
+            worktree=worktree,
+            arguments=("update-ref", "refs/heads/candidate", commit_oid),
+        )
+        _run_git(
+            git_dir=git_dir,
+            worktree=worktree,
+            arguments=("symbolic-ref", "HEAD", "refs/heads/candidate"),
+        )
+        _run_git(
+            git_dir=git_dir,
+            worktree=worktree,
+            arguments=("reset", "--hard", commit_oid),
+        )
+        if _run_git(
+            git_dir=git_dir,
+            worktree=worktree,
+            arguments=("status", "--porcelain=v1", "--untracked-files=all"),
+        ):
+            raise CandidateWorkspaceError("candidate Git worktree is not clean")
+        worktree_fd = os.open(worktree, os.O_RDONLY | directory | nofollow)
+        try:
+            manifest = scan_workspace_manifest(worktree_fd, commit_oid)
+        finally:
+            os.close(worktree_fd)
+        manifest_digest = workspace_manifest_digest(manifest)
+        control = rfc8785.dumps(
+            {
+                "schema_version": "openworkproof-candidate-control/0.1",
+                "workspace_id": request.workspace_id,
+                "head_commit": commit_oid,
+                "workspace_manifest_digest": manifest_digest,
+                "worktree_inode": os.stat(worktree, follow_symlinks=False).st_ino,
+                "git_inode": os.stat(git_dir, follow_symlinks=False).st_ino,
+            }
+        )
+        control_path = candidate_root / "control.json"
+        control_fd = os.open(
+            control_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+            0o600,
+        )
+        try:
+            view = memoryview(control)
+            written = 0
+            while written < len(view):
+                count = os.write(control_fd, view[written:])
+                if count <= 0:
+                    raise CandidateWorkspaceError(
+                        "candidate control record write made no progress"
+                    )
+                written += count
+            os.fsync(control_fd)
+        finally:
+            os.close(control_fd)
+        return CandidateWorkspace(
+            runtime_root=runtime_root,
+            candidate_root=candidate_root,
+            worktree=worktree,
+            git_dir=git_dir,
+            workspace_id=request.workspace_id,
+            head_commit=commit_oid,
+            workspace_manifest_digest=manifest_digest,
+        )
+    except CandidateWorkspaceError:
+        raise
+    except Exception as error:
+        raise CandidateWorkspaceError("RECOVERY_REQUIRED") from error
+
+
+def _read_candidate_control(workspace: CandidateWorkspace) -> dict[str, Any]:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if type(nofollow) is not int or nofollow <= 0:
+        raise CandidateWorkspaceError("candidate control requires O_NOFOLLOW")
+    control_path = workspace.candidate_root / "control.json"
+    metadata = os.stat(control_path, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+        or not 1 <= metadata.st_size <= 4_096
+    ):
+        raise CandidateWorkspaceError("candidate control record is invalid")
+    descriptor = os.open(control_path, os.O_RDONLY | nofollow)
+    try:
+        opened = os.fstat(descriptor)
+        if not os.path.samestat(metadata, opened):
+            raise CandidateWorkspaceError("candidate control record changed")
+        raw = _read_workspace_file(descriptor, metadata.st_size)
+        if _workspace_read_token(os.fstat(descriptor)) != _workspace_read_token(
+            opened
+        ):
+            raise CandidateWorkspaceError("candidate control record changed")
+    finally:
+        os.close(descriptor)
+    try:
+        value = json.loads(raw)
+        if rfc8785.dumps(value) != raw:
+            raise CandidateWorkspaceError(
+                "candidate control record is not canonical"
+            )
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        rfc8785.CanonicalizationError,
+    ) as error:
+        raise CandidateWorkspaceError(
+            "candidate control record cannot be parsed"
+        ) from error
+    if (
+        type(value) is not dict
+        or set(value)
+        != {
+            "schema_version",
+            "workspace_id",
+            "head_commit",
+            "workspace_manifest_digest",
+            "worktree_inode",
+            "git_inode",
+        }
+        or value["schema_version"]
+        != "openworkproof-candidate-control/0.1"
+        or value["workspace_id"] != workspace.workspace_id
+        or value["head_commit"] != workspace.head_commit
+        or value["workspace_manifest_digest"]
+        != workspace.workspace_manifest_digest
+        or type(value["worktree_inode"]) is not int
+        or type(value["git_inode"]) is not int
+    ):
+        raise CandidateWorkspaceError("candidate control binding is invalid")
+    return value
+
+
+def _validate_candidate_layout(workspace: CandidateWorkspace) -> None:
+    if (
+        type(workspace) is not CandidateWorkspace
+        or not workspace.runtime_root.is_absolute()
+        or workspace.candidate_root
+        != workspace.runtime_root / workspace.workspace_id
+        or workspace.worktree != workspace.candidate_root / "worktree"
+        or workspace.git_dir != workspace.candidate_root / "git"
+        or _DIGEST_PATTERN.fullmatch(workspace.workspace_id) is None
+        or _OID_PATTERN.fullmatch(workspace.head_commit) is None
+        or _DIGEST_PATTERN.fullmatch(workspace.workspace_manifest_digest) is None
+    ):
+        raise CandidateWorkspaceError("candidate workspace layout is invalid")
+    for path, expected_mode in (
+        (workspace.runtime_root, 0o700),
+        (workspace.candidate_root, 0o700),
+        (workspace.worktree, 0o700),
+        (workspace.git_dir, 0o700),
+    ):
+        metadata = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != expected_mode
+        ):
+            raise CandidateWorkspaceError(
+                "candidate workspace directory identity is invalid"
+            )
+    if set(os.listdir(workspace.candidate_root)) != {
+        "control.json",
+        "git",
+        "worktree",
+    }:
+        raise CandidateWorkspaceError("candidate control root has extra entries")
+    if os.path.lexists(workspace.worktree / ".git"):
+        raise CandidateWorkspaceError("candidate Git metadata entered worktree")
+    control = _read_candidate_control(workspace)
+    if (
+        control["worktree_inode"]
+        != os.stat(workspace.worktree, follow_symlinks=False).st_ino
+        or control["git_inode"]
+        != os.stat(workspace.git_dir, follow_symlinks=False).st_ino
+        or _run_git(
+            git_dir=workspace.git_dir,
+            worktree=None,
+            arguments=("rev-parse", "--is-bare-repository"),
+        ).strip()
+        != b"true"
+    ):
+        raise CandidateWorkspaceError("candidate control identity mismatches")
+
+
+def _candidate_manifest_digest(
+    workspace: CandidateWorkspace,
+    head_commit: str,
+) -> str:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if (
+        type(nofollow) is not int
+        or nofollow <= 0
+        or type(directory) is not int
+        or directory <= 0
+    ):
+        raise CandidateWorkspaceError(
+            "candidate scan requires directory no-follow support"
+        )
+    descriptor = os.open(
+        workspace.worktree,
+        os.O_RDONLY | directory | nofollow,
+    )
+    try:
+        return workspace_manifest_digest(
+            scan_workspace_manifest(descriptor, head_commit)
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _verify_candidate_checkpoint(
+    workspace: CandidateWorkspace,
+    *,
+    head_commit: str,
+    manifest_digest: str,
+) -> None:
+    actual_head = _run_git(
+        git_dir=workspace.git_dir,
+        worktree=workspace.worktree,
+        arguments=("rev-parse", "HEAD"),
+    ).decode("ascii").strip()
+    status = _run_git(
+        git_dir=workspace.git_dir,
+        worktree=workspace.worktree,
+        arguments=(
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ),
+    )
+    index_tree = _run_git(
+        git_dir=workspace.git_dir,
+        worktree=workspace.worktree,
+        arguments=("write-tree",),
+    ).decode("ascii").strip()
+    commit_tree = _run_git(
+        git_dir=workspace.git_dir,
+        worktree=workspace.worktree,
+        arguments=("rev-parse", f"{head_commit}^{{tree}}"),
+    ).decode("ascii").strip()
+    if (
+        actual_head != head_commit
+        or status
+        or index_tree != commit_tree
+        or _candidate_manifest_digest(workspace, head_commit)
+        != manifest_digest
+    ):
+        raise CandidateWorkspaceError(
+            "candidate checkpoint does not match authority"
+        )
+
+
+def rollback_candidate_workspace(request: RollbackRequest) -> RollbackResult:
+    """Restore one frozen failure target to its exact parent checkpoint."""
+
+    if type(request) is not RollbackRequest:
+        raise CandidateWorkspaceError("rollback request is invalid")
+    digest_values = (
+        request.target_patch_receipt_id,
+        request.target_patch_receipt_digest,
+        request.failure_target_patch_receipt_id,
+        request.failure_target_patch_receipt_digest,
+        request.before_manifest_digest,
+        request.parent_manifest_digest,
+    )
+    if (
+        any(
+            type(value) is not str or _DIGEST_PATTERN.fullmatch(value) is None
+            for value in digest_values
+        )
+        or type(request.before_commit) is not str
+        or _OID_PATTERN.fullmatch(request.before_commit) is None
+        or type(request.parent_commit) is not str
+        or _OID_PATTERN.fullmatch(request.parent_commit) is None
+        or request.before_commit == request.parent_commit
+        or request.target_patch_receipt_id
+        != request.failure_target_patch_receipt_id
+        or request.target_patch_receipt_digest
+        != request.failure_target_patch_receipt_digest
+    ):
+        raise CandidateWorkspaceError("rollback target binding is invalid")
+    workspace = request.workspace
+    _validate_candidate_layout(workspace)
+    _verify_candidate_checkpoint(
+        workspace,
+        head_commit=request.before_commit,
+        manifest_digest=request.before_manifest_digest,
+    )
+    commit = _run_git(
+        git_dir=workspace.git_dir,
+        worktree=workspace.worktree,
+        arguments=("cat-file", "-p", request.before_commit),
+    )
+    parent_lines = tuple(
+        line.removeprefix(b"parent ")
+        for line in commit.splitlines()
+        if line.startswith(b"parent ")
+    )
+    if parent_lines != (request.parent_commit.encode("ascii"),):
+        raise CandidateWorkspaceError("rollback parent binding is invalid")
+
+    try:
+        _run_git(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=("reset", "--hard", request.parent_commit),
+        )
+        _run_git(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=("clean", "-ffdx"),
+        )
+        _verify_candidate_checkpoint(
+            workspace,
+            head_commit=request.parent_commit,
+            manifest_digest=request.parent_manifest_digest,
+        )
+    except CandidateWorkspaceError:
+        try:
+            _run_git(
+                git_dir=workspace.git_dir,
+                worktree=workspace.worktree,
+                arguments=("reset", "--hard", request.before_commit),
+            )
+            _run_git(
+                git_dir=workspace.git_dir,
+                worktree=workspace.worktree,
+                arguments=("clean", "-ffdx"),
+            )
+            _verify_candidate_checkpoint(
+                workspace,
+                head_commit=request.before_commit,
+                manifest_digest=request.before_manifest_digest,
+            )
+        except CandidateWorkspaceError as recovery_error:
+            raise CandidateWorkspaceError("RECOVERY_REQUIRED") from recovery_error
+        return RollbackResult(
+            execution_status="failed",
+            before_commit=request.before_commit,
+            after_commit=request.before_commit,
+            after_manifest_digest=request.before_manifest_digest,
+        )
+    return RollbackResult(
+        execution_status="succeeded",
+        before_commit=request.before_commit,
+        after_commit=request.parent_commit,
+        after_manifest_digest=request.parent_manifest_digest,
+    )
 
 
 def _workspace_manifest_json(

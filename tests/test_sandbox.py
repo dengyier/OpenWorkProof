@@ -5,14 +5,84 @@ from __future__ import annotations
 import base64
 import os
 from pathlib import Path
+import stat
+import subprocess
 
 import pytest
 
+import openworkproof.mcp_server as mcp_server
 import openworkproof.repo_tools as repo_tools
 
 
 def _decode_path(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _source_snapshot() -> repo_tools.ParsedSourceArchive:
+    files = (repo_tools.SourceFile("README.md", "100644", b"base\n"),)
+    tree_oid = repo_tools.git_tree_oid(files)
+    commit_raw = (
+        f"tree {tree_oid}\n"
+        "author OpenWorkProof <owp@example.invalid> 0 +0000\n"
+        "committer OpenWorkProof <owp@example.invalid> 0 +0000\n"
+        "\n"
+        "base\n"
+    ).encode("ascii")
+    return repo_tools.ParsedSourceArchive(
+        files=files,
+        commit_raw=commit_raw,
+        tree_oid=tree_oid,
+        source_commit=repo_tools.git_commit_oid(commit_raw),
+        artifact_sha256="a" * 64,
+        artifact_size_bytes=1,
+        shallow_bytes=None,
+    )
+
+
+def _candidate_git(
+    candidate: repo_tools.CandidateWorkspace,
+    *arguments: str,
+) -> bytes:
+    environment = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "OpenWorkProof",
+        "GIT_AUTHOR_EMAIL": "owp@example.invalid",
+        "GIT_AUTHOR_DATE": "1970-01-01T00:00:01Z",
+        "GIT_COMMITTER_NAME": "OpenWorkProof",
+        "GIT_COMMITTER_EMAIL": "owp@example.invalid",
+        "GIT_COMMITTER_DATE": "1970-01-01T00:00:01Z",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    return subprocess.run(
+        [
+            "/usr/bin/git",
+            f"--git-dir={candidate.git_dir}",
+            f"--work-tree={candidate.worktree}",
+            "-c",
+            "core.hooksPath=/dev/null",
+            *arguments,
+        ],
+        check=True,
+        capture_output=True,
+        env=environment,
+        cwd=candidate.worktree,
+    ).stdout
+
+
+def _candidate_manifest(
+    candidate: repo_tools.CandidateWorkspace,
+    head_commit: str,
+) -> tuple[repo_tools.WorkspaceManifest, str]:
+    root_fd = os.open(
+        candidate.worktree,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        manifest = repo_tools.scan_workspace_manifest(root_fd, head_commit)
+    finally:
+        os.close(root_fd)
+    return manifest, repo_tools.workspace_manifest_digest(manifest)
 
 
 def test_scan_workspace_manifest_includes_every_descendant_without_following(
@@ -236,3 +306,271 @@ def test_scan_workspace_manifest_requires_nofollow_support(
             repo_tools.scan_workspace_manifest(root_fd, "a" * 40)
     finally:
         os.close(root_fd)
+
+
+def test_initialize_candidate_workspace_recreates_separate_git_checkpoint(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    source = _source_snapshot()
+    candidate = repo_tools.initialize_candidate_workspace(
+        repo_tools.WorkspaceInitRequest(
+            runtime_root=runtime_root,
+            workspace_id="1" * 64,
+            source=source,
+        )
+    )
+
+    assert candidate.head_commit == source.source_commit
+    assert candidate.worktree.parent == candidate.git_dir.parent
+    assert candidate.worktree != candidate.git_dir
+    assert stat.S_IMODE(os.stat(candidate.worktree).st_mode) == 0o700
+    assert stat.S_IMODE(os.stat(candidate.git_dir).st_mode) == 0o700
+    assert not (candidate.worktree / ".git").exists()
+    assert (candidate.worktree / "README.md").read_bytes() == b"base\n"
+    completed = subprocess.run(
+        [
+            "/usr/bin/git",
+            f"--git-dir={candidate.git_dir}",
+            f"--work-tree={candidate.worktree}",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    assert completed.stdout == b""
+    root_fd = os.open(
+        candidate.worktree,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        manifest = repo_tools.scan_workspace_manifest(
+            root_fd,
+            source.source_commit,
+        )
+    finally:
+        os.close(root_fd)
+    assert repo_tools.workspace_manifest_digest(manifest) == (
+        candidate.workspace_manifest_digest
+    )
+
+
+def test_rollback_candidate_workspace_restores_exact_parent_checkpoint(
+    tmp_path: Path,
+) -> None:
+    source, candidate, candidate_commit, candidate_manifest_digest = (
+        _patched_candidate(tmp_path, "2" * 64)
+    )
+
+    result = repo_tools.rollback_candidate_workspace(
+        repo_tools.RollbackRequest(
+            workspace=candidate,
+            target_patch_receipt_id="a" * 64,
+            target_patch_receipt_digest="b" * 64,
+            failure_target_patch_receipt_id="a" * 64,
+            failure_target_patch_receipt_digest="b" * 64,
+            before_commit=candidate_commit,
+            before_manifest_digest=candidate_manifest_digest,
+            parent_commit=source.source_commit,
+            parent_manifest_digest=candidate.workspace_manifest_digest,
+        )
+    )
+
+    assert result.execution_status == "succeeded"
+    assert result.before_commit == candidate_commit
+    assert result.after_commit == source.source_commit
+    assert result.after_manifest_digest == candidate.workspace_manifest_digest
+    assert (candidate.worktree / "README.md").read_bytes() == b"base\n"
+    assert _candidate_git(candidate, "status", "--porcelain=v1") == b""
+
+
+def _patched_candidate(
+    tmp_path: Path,
+    workspace_id: str,
+) -> tuple[
+    repo_tools.ParsedSourceArchive,
+    repo_tools.CandidateWorkspace,
+    str,
+    str,
+]:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    source = _source_snapshot()
+    candidate = repo_tools.initialize_candidate_workspace(
+        repo_tools.WorkspaceInitRequest(
+            runtime_root=runtime_root,
+            workspace_id=workspace_id,
+            source=source,
+        )
+    )
+    (candidate.worktree / "README.md").write_bytes(b"patched\n")
+    _candidate_git(candidate, "add", "--all", "--", ".")
+    tree_oid = _candidate_git(candidate, "write-tree").decode().strip()
+    candidate_commit = _candidate_git(
+        candidate,
+        "commit-tree",
+        tree_oid,
+        "-p",
+        source.source_commit,
+        "-m",
+        "patch",
+    ).decode().strip()
+    _candidate_git(candidate, "update-ref", "HEAD", candidate_commit)
+    _candidate_git(candidate, "reset", "--hard", candidate_commit)
+    _, candidate_manifest_digest = _candidate_manifest(
+        candidate,
+        candidate_commit,
+    )
+    return source, candidate, candidate_commit, candidate_manifest_digest
+
+
+def _rollback_request(
+    *,
+    source: repo_tools.ParsedSourceArchive,
+    candidate: repo_tools.CandidateWorkspace,
+    candidate_commit: str,
+    candidate_manifest_digest: str,
+    failure_target_id: str = "a" * 64,
+) -> repo_tools.RollbackRequest:
+    return repo_tools.RollbackRequest(
+        workspace=candidate,
+        target_patch_receipt_id="a" * 64,
+        target_patch_receipt_digest="b" * 64,
+        failure_target_patch_receipt_id=failure_target_id,
+        failure_target_patch_receipt_digest="b" * 64,
+        before_commit=candidate_commit,
+        before_manifest_digest=candidate_manifest_digest,
+        parent_commit=source.source_commit,
+        parent_manifest_digest=candidate.workspace_manifest_digest,
+    )
+
+
+def test_rollback_candidate_workspace_rejects_wrong_failure_target_without_mutation(
+    tmp_path: Path,
+) -> None:
+    source, candidate, candidate_commit, manifest_digest = _patched_candidate(
+        tmp_path,
+        "3" * 64,
+    )
+
+    with pytest.raises(repo_tools.CandidateWorkspaceError, match="target binding"):
+        repo_tools.rollback_candidate_workspace(
+            _rollback_request(
+                source=source,
+                candidate=candidate,
+                candidate_commit=candidate_commit,
+                candidate_manifest_digest=manifest_digest,
+                failure_target_id="c" * 64,
+            )
+        )
+
+    assert _candidate_git(candidate, "rev-parse", "HEAD").decode().strip() == (
+        candidate_commit
+    )
+    assert (candidate.worktree / "README.md").read_bytes() == b"patched\n"
+
+
+def test_rollback_candidate_workspace_rejects_noncanonical_control_without_mutation(
+    tmp_path: Path,
+) -> None:
+    source, candidate, candidate_commit, manifest_digest = _patched_candidate(
+        tmp_path,
+        "6" * 64,
+    )
+    control_path = candidate.candidate_root / "control.json"
+    control_path.write_bytes(b" " + control_path.read_bytes())
+    control_path.chmod(0o600)
+
+    with pytest.raises(
+        repo_tools.CandidateWorkspaceError,
+        match="control record",
+    ):
+        repo_tools.rollback_candidate_workspace(
+            _rollback_request(
+                source=source,
+                candidate=candidate,
+                candidate_commit=candidate_commit,
+                candidate_manifest_digest=manifest_digest,
+            )
+        )
+
+    assert _candidate_git(candidate, "rev-parse", "HEAD").decode().strip() == (
+        candidate_commit
+    )
+    assert (candidate.worktree / "README.md").read_bytes() == b"patched\n"
+
+
+def test_rollback_candidate_workspace_restores_candidate_after_postcheck_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, candidate, candidate_commit, manifest_digest = _patched_candidate(
+        tmp_path,
+        "4" * 64,
+    )
+    real_verify = repo_tools._verify_candidate_checkpoint
+    calls = 0
+
+    def fail_parent_once(*args, **kwargs) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise repo_tools.CandidateWorkspaceError("injected postcheck failure")
+        real_verify(*args, **kwargs)
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_verify_candidate_checkpoint",
+        fail_parent_once,
+    )
+    result = repo_tools.rollback_candidate_workspace(
+        _rollback_request(
+            source=source,
+            candidate=candidate,
+            candidate_commit=candidate_commit,
+            candidate_manifest_digest=manifest_digest,
+        )
+    )
+
+    assert calls == 3
+    assert result.execution_status == "failed"
+    assert result.after_commit == candidate_commit
+    assert result.after_manifest_digest == manifest_digest
+    assert (candidate.worktree / "README.md").read_bytes() == b"patched\n"
+    assert _candidate_git(candidate, "status", "--porcelain=v1") == b""
+
+
+def test_candidate_rollback_handler_adapts_verified_git_result(
+    tmp_path: Path,
+) -> None:
+    source, candidate, candidate_commit, manifest_digest = _patched_candidate(
+        tmp_path,
+        "5" * 64,
+    )
+    factory = getattr(mcp_server, "make_candidate_rollback_handler", None)
+    assert callable(factory)
+    handler = factory(
+        workspace=candidate,
+        failure_target_patch_receipt_id="a" * 64,
+        failure_target_patch_receipt_digest="b" * 64,
+        before_commit=candidate_commit,
+        before_manifest_digest=manifest_digest,
+        parent_commit=source.source_commit,
+        parent_manifest_digest=candidate.workspace_manifest_digest,
+    )
+
+    result = handler(
+        mcp_server.RollbackCommand(
+            target_patch_receipt_id="a" * 64,
+            target_patch_digest="b" * 64,
+            before_commit=candidate_commit,
+        )
+    )
+
+    assert isinstance(result, mcp_server.RollbackHandlerResult)
+    assert result.execution_status == "succeeded"
+    assert result.after_commit == source.source_commit
+    assert result.after_manifest_digest == candidate.workspace_manifest_digest

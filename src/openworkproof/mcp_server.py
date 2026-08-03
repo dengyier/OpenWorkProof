@@ -49,6 +49,11 @@ from openworkproof.predicates import (
     evaluate_required_predicates,
     select_required_predicates,
 )
+from openworkproof.repo_tools import (
+    CandidateWorkspace,
+    RollbackRequest as WorkspaceRollbackRequest,
+    rollback_candidate_workspace,
+)
 from openworkproof.signing import key_id, sign_payload
 
 
@@ -112,6 +117,70 @@ class RollbackHandlerResult:
             )
         ):
             raise HandlerCoordinationError("rollback handler result is malformed")
+
+
+def make_candidate_rollback_handler(
+    *,
+    workspace: CandidateWorkspace,
+    failure_target_patch_receipt_id: str,
+    failure_target_patch_receipt_digest: str,
+    before_commit: str,
+    before_manifest_digest: str,
+    parent_commit: str,
+    parent_manifest_digest: str,
+) -> Callable[[RollbackCommand], RollbackHandlerResult]:
+    """Bind one trusted candidate checkpoint to the rollback coordinator."""
+
+    frozen_command = RollbackCommand(
+        target_patch_receipt_id=failure_target_patch_receipt_id,
+        target_patch_digest=failure_target_patch_receipt_digest,
+        before_commit=before_commit,
+    )
+    if (
+        type(workspace) is not CandidateWorkspace
+        or type(before_manifest_digest) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", before_manifest_digest) is None
+    ):
+        raise HandlerCoordinationError(
+            "candidate rollback binding is malformed"
+        )
+    RollbackHandlerResult(
+        execution_status="succeeded",
+        before_commit=before_commit,
+        after_commit=parent_commit,
+        after_manifest_digest=parent_manifest_digest,
+    )
+
+    def handler(command: RollbackCommand) -> RollbackHandlerResult:
+        if type(command) is not RollbackCommand or command != frozen_command:
+            raise HandlerCoordinationError(
+                "rollback command does not match frozen workspace target"
+            )
+        result = rollback_candidate_workspace(
+            WorkspaceRollbackRequest(
+                workspace=workspace,
+                target_patch_receipt_id=command.target_patch_receipt_id,
+                target_patch_receipt_digest=command.target_patch_digest,
+                failure_target_patch_receipt_id=(
+                    failure_target_patch_receipt_id
+                ),
+                failure_target_patch_receipt_digest=(
+                    failure_target_patch_receipt_digest
+                ),
+                before_commit=command.before_commit,
+                before_manifest_digest=before_manifest_digest,
+                parent_commit=parent_commit,
+                parent_manifest_digest=parent_manifest_digest,
+            )
+        )
+        return RollbackHandlerResult(
+            execution_status=result.execution_status,
+            before_commit=result.before_commit,
+            after_commit=result.after_commit,
+            after_manifest_digest=result.after_manifest_digest,
+        )
+
+    return handler
 
 
 _MAX_RECEIPT_BYTES = 64 * 1024
@@ -1287,4 +1356,5 @@ __all__ = [
     "ToolCallDenied",
     "execute_rollback",
     "execute_run_tests",
+    "make_candidate_rollback_handler",
 ]
