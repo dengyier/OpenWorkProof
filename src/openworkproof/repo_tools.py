@@ -109,6 +109,8 @@ _MAX_PATCH_PATHS = 32
 _MAX_PATCH_PATH_BYTES = 512
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _MAX_WORKSPACE_MANIFEST_ENTRIES = 512
+_MAX_WORKSPACE_IDENTITY_DEPTH = 256
+_MAX_WORKSPACE_IDENTITY_PATH_BYTES = _MAX_PATCH_PATH_BYTES
 _WORKSPACE_TYPES = frozenset({"regular", "directory", "symlink", "other"})
 _MAX_PURGE_ENTRIES = 1_024
 _MAX_PURGE_DEPTH = 64
@@ -392,8 +394,16 @@ class _GitAuthoritySnapshotEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class _WorkspaceIdentitySnapshotEntry:
+    path_bytes: bytes
+    entry_type: Literal["directory", "regular"]
+    token: str
+
+
+@dataclass(frozen=True, slots=True)
 class _VerifiedCandidateReadCheckpoint:
     manifest: WorkspaceManifest
+    workspace_snapshot: tuple[_WorkspaceIdentitySnapshotEntry, ...]
     anchors: tuple[_CandidateReadAnchor, ...]
     worktree_descriptor: int
     git_descriptor: int
@@ -2308,12 +2318,19 @@ def _verify_candidate_checkpoint_read_only(
             or index_result.returncode != 0
         ):
             raise CandidateWorkspaceError("candidate Git checkpoint mismatches")
+        workspace_snapshot_before = _scan_candidate_workspace_identity(
+            worktree_descriptor
+        )
         manifest = scan_workspace_manifest(
             worktree_descriptor,
             workspace.head_commit,
         )
+        workspace_snapshot_after = _scan_candidate_workspace_identity(
+            worktree_descriptor
+        )
         if (
-            workspace_manifest_digest(manifest)
+            workspace_snapshot_before != workspace_snapshot_after
+            or workspace_manifest_digest(manifest)
             != workspace.workspace_manifest_digest
         ):
             raise CandidateWorkspaceError("candidate manifest mismatches")
@@ -2324,6 +2341,7 @@ def _verify_candidate_checkpoint_read_only(
             )
         checkpoint = _VerifiedCandidateReadCheckpoint(
             manifest=manifest,
+            workspace_snapshot=workspace_snapshot_after,
             anchors=tuple(anchors),
             worktree_descriptor=worktree_descriptor,
             git_descriptor=git_descriptor,
@@ -2392,6 +2410,204 @@ def _read_candidate_control_descriptor(
 ) -> bytes:
     os.lseek(descriptor, 0, os.SEEK_SET)
     return _read_workspace_file(descriptor, size_bytes)
+
+
+def _scan_candidate_workspace_identity(
+    worktree_descriptor: int,
+) -> tuple[_WorkspaceIdentitySnapshotEntry, ...]:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if (
+        type(nofollow) is not int
+        or nofollow <= 0
+        or type(directory) is not int
+        or directory <= 0
+    ):
+        raise CandidateWorkspaceError(
+            "candidate workspace identity scan requires no-follow support"
+        )
+    try:
+        root_metadata = os.fstat(worktree_descriptor)
+    except OSError as error:
+        raise CandidateWorkspaceError(
+            "candidate workspace identity root is unavailable"
+        ) from error
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        raise CandidateWorkspaceError(
+            "candidate workspace identity root is not a directory"
+        )
+    root_token = _workspace_read_token(root_metadata)
+    entries: list[_WorkspaceIdentitySnapshotEntry] = [
+        _WorkspaceIdentitySnapshotEntry(
+            path_bytes=b"",
+            entry_type="directory",
+            token=root_token,
+        )
+    ]
+    entries_seen = 0
+    directory_flags = os.O_RDONLY | directory | nofollow
+
+    def scan(
+        directory_descriptor: int,
+        prefix: bytes,
+        depth: int,
+    ) -> None:
+        nonlocal entries_seen
+        if depth > _MAX_WORKSPACE_IDENTITY_DEPTH:
+            raise CandidateWorkspaceError(
+                "candidate workspace identity exceeds depth limit"
+            )
+        try:
+            iterator = os.scandir(directory_descriptor)
+        except OSError as error:
+            raise CandidateWorkspaceError(
+                "candidate workspace identity directory cannot be listed"
+            ) from error
+        names: list[str] = []
+        with iterator:
+            for item in iterator:
+                if (
+                    len(names)
+                    >= _MAX_WORKSPACE_MANIFEST_ENTRIES - entries_seen
+                ):
+                    raise CandidateWorkspaceError(
+                        "candidate workspace identity exceeds entry limit"
+                    )
+                names.append(item.name)
+        names.sort(key=os.fsencode)
+        for name in names:
+            name_bytes = os.fsencode(name)
+            path_bytes = prefix + name_bytes if prefix else name_bytes
+            if len(path_bytes) > _MAX_WORKSPACE_IDENTITY_PATH_BYTES:
+                raise CandidateWorkspaceError(
+                    "candidate workspace identity path exceeds limit"
+                )
+            try:
+                validate_canonical_relative_path(path_bytes.decode("ascii"))
+            except (PathError, UnicodeDecodeError) as error:
+                raise CandidateWorkspaceError(
+                    "candidate workspace identity path is invalid"
+                ) from error
+            try:
+                before = os.stat(
+                    name,
+                    dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError as error:
+                raise CandidateWorkspaceError(
+                    "candidate workspace identity entry cannot be inspected"
+                ) from error
+            token = _workspace_read_token(before)
+            entries_seen += 1
+            if stat.S_ISDIR(before.st_mode):
+                try:
+                    child_descriptor = os.open(
+                        name,
+                        directory_flags,
+                        dir_fd=directory_descriptor,
+                    )
+                except OSError as error:
+                    raise CandidateWorkspaceError(
+                        "candidate workspace identity directory cannot be opened"
+                    ) from error
+                try:
+                    if (
+                        _workspace_read_token(os.fstat(child_descriptor))
+                        != token
+                    ):
+                        raise CandidateWorkspaceError(
+                            "candidate workspace identity directory changed"
+                        )
+                    entries.append(
+                        _WorkspaceIdentitySnapshotEntry(
+                            path_bytes=path_bytes,
+                            entry_type="directory",
+                            token=token,
+                        )
+                    )
+                    scan(
+                        child_descriptor,
+                        path_bytes + b"/",
+                        depth + 1,
+                    )
+                    named_after = os.stat(
+                        name,
+                        dir_fd=directory_descriptor,
+                        follow_symlinks=False,
+                    )
+                    if (
+                        _workspace_read_token(os.fstat(child_descriptor))
+                        != token
+                        or _workspace_read_token(named_after) != token
+                    ):
+                        raise CandidateWorkspaceError(
+                            "candidate workspace identity directory changed"
+                        )
+                except OSError as error:
+                    raise CandidateWorkspaceError(
+                        "candidate workspace identity directory changed"
+                    ) from error
+                finally:
+                    _close_candidate_read_descriptors([child_descriptor])
+                continue
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise CandidateWorkspaceError(
+                    "candidate workspace identity entry type is unsupported"
+                )
+            try:
+                file_descriptor = os.open(
+                    name,
+                    os.O_RDONLY | nofollow,
+                    dir_fd=directory_descriptor,
+                )
+            except OSError as error:
+                raise CandidateWorkspaceError(
+                    "candidate workspace identity file cannot be opened"
+                ) from error
+            try:
+                if _workspace_read_token(os.fstat(file_descriptor)) != token:
+                    raise CandidateWorkspaceError(
+                        "candidate workspace identity file changed"
+                    )
+                named_after = os.stat(
+                    name,
+                    dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                )
+                if (
+                    _workspace_read_token(os.fstat(file_descriptor)) != token
+                    or _workspace_read_token(named_after) != token
+                ):
+                    raise CandidateWorkspaceError(
+                        "candidate workspace identity file changed"
+                    )
+            except OSError as error:
+                raise CandidateWorkspaceError(
+                    "candidate workspace identity file changed"
+                ) from error
+            finally:
+                _close_candidate_read_descriptors([file_descriptor])
+            entries.append(
+                _WorkspaceIdentitySnapshotEntry(
+                    path_bytes=path_bytes,
+                    entry_type="regular",
+                    token=token,
+                )
+            )
+
+    scan(worktree_descriptor, b"", 0)
+    try:
+        root_after = os.fstat(worktree_descriptor)
+    except OSError as error:
+        raise CandidateWorkspaceError(
+            "candidate workspace identity root changed during scan"
+        ) from error
+    if _workspace_read_token(root_after) != root_token:
+        raise CandidateWorkspaceError(
+            "candidate workspace identity root changed during scan"
+        )
+    return tuple(sorted(entries, key=lambda entry: entry.path_bytes))
 
 
 def _scan_candidate_git_authority(
@@ -2682,12 +2898,21 @@ def _read_verified_candidate_path(
         content = b"".join(chunks)
         if hashlib.sha256(content).hexdigest() != entry.sha256:
             raise CandidateReadError("FILE_CHANGED")
+        workspace_snapshot_before = _scan_candidate_workspace_identity(
+            checkpoint.worktree_descriptor
+        )
         fresh_manifest = scan_workspace_manifest(
             checkpoint.worktree_descriptor,
             checkpoint.manifest.head_commit,
         )
-        if workspace_manifest_digest(fresh_manifest) != workspace_manifest_digest(
-            checkpoint.manifest
+        workspace_snapshot_after = _scan_candidate_workspace_identity(
+            checkpoint.worktree_descriptor
+        )
+        if (
+            workspace_snapshot_before != workspace_snapshot_after
+            or workspace_snapshot_before != checkpoint.workspace_snapshot
+            or workspace_manifest_digest(fresh_manifest)
+            != workspace_manifest_digest(checkpoint.manifest)
         ):
             raise CandidateReadError("FILE_CHANGED")
         if not _candidate_read_authority_matches(checkpoint):
@@ -2695,7 +2920,7 @@ def _read_verified_candidate_path(
         return content
     except CandidateReadError:
         raise
-    except (ManifestError, OSError) as error:
+    except (CandidateWorkspaceError, ManifestError, OSError) as error:
         raise CandidateReadError("FILE_CHANGED") from error
 
 

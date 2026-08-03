@@ -1642,6 +1642,137 @@ def test_read_candidate_file_rejects_nested_sibling_content_change(
     assert raised.value.code == "FILE_CHANGED"
 
 
+def test_read_candidate_file_rejects_globally_woven_sibling_aba(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"base\n",
+        additional_files=(
+            repo_tools.SourceFile("a.txt", "100644", b"alpha\n"),
+            repo_tools.SourceFile("b.txt", "100644", b"bravo\n"),
+        ),
+    )
+    a_path = candidate.worktree / "a.txt"
+    b_path = candidate.worktree / "b.txt"
+    a_inode = a_path.stat().st_ino
+    b_inode = b_path.stat().st_ino
+    real_scan = repo_tools.scan_workspace_manifest
+    real_stat = repo_tools.os.stat
+    scan_calls = 0
+    woven_a_stats = 0
+    weaving = False
+
+    def weave_manifest_scan(
+        root_fd: int,
+        head_commit: str,
+    ) -> repo_tools.WorkspaceManifest:
+        nonlocal scan_calls, weaving
+        scan_calls += 1
+        weaving = scan_calls == 2
+        try:
+            return real_scan(root_fd, head_commit)
+        finally:
+            weaving = False
+
+    def weave_siblings(
+        path,
+        *,
+        dir_fd=None,
+        follow_symlinks=True,
+    ) -> os.stat_result:
+        nonlocal woven_a_stats
+        if weaving and path == "a.txt":
+            woven_a_stats += 1
+            if woven_a_stats == 1:
+                a_path.write_bytes(b"alpha\n")
+                return real_stat(
+                    path,
+                    dir_fd=dir_fd,
+                    follow_symlinks=follow_symlinks,
+                )
+            if woven_a_stats == 2:
+                metadata = real_stat(
+                    path,
+                    dir_fd=dir_fd,
+                    follow_symlinks=follow_symlinks,
+                )
+                a_path.write_bytes(b"evil!\n")
+                b_path.write_bytes(b"bravo\n")
+                return metadata
+        return real_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    def start_with_both_siblings_changed() -> None:
+        a_path.write_bytes(b"evil!\n")
+        b_path.write_bytes(b"evil!\n")
+        assert a_path.stat().st_ino == a_inode
+        assert b_path.stat().st_ino == b_inode
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_read_checkpoint_hook",
+        start_with_both_siblings_changed,
+    )
+    monkeypatch.setattr(
+        repo_tools,
+        "scan_workspace_manifest",
+        weave_manifest_scan,
+    )
+    monkeypatch.setattr(repo_tools.os, "stat", weave_siblings)
+
+    with pytest.raises(repo_tools.CandidateReadError) as raised:
+        repo_tools.read_candidate_file(_request(candidate))
+
+    assert scan_calls == 2
+    assert woven_a_stats == 2
+    assert a_path.read_bytes() == b"evil!\n"
+    assert b_path.read_bytes() == b"bravo\n"
+    assert raised.value.code == "FILE_CHANGED"
+
+
+def test_read_candidate_file_rejects_initial_manifest_metadata_aba(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    target = candidate.worktree / "README.md"
+    target_inode = target.stat().st_ino
+    initial_token = repo_tools._workspace_read_token(target.stat())
+    real_scan = repo_tools.scan_workspace_manifest
+    scan_calls = 0
+
+    def restore_metadata_before_initial_scan(
+        root_fd: int,
+        head_commit: str,
+    ) -> repo_tools.WorkspaceManifest:
+        nonlocal scan_calls
+        scan_calls += 1
+        if scan_calls == 1:
+            target.chmod(0o755)
+            target.chmod(0o644)
+            assert target.stat().st_ino == target_inode
+            assert stat.S_IMODE(target.stat().st_mode) == 0o644
+            assert repo_tools._workspace_read_token(target.stat()) != initial_token
+        return real_scan(root_fd, head_commit)
+
+    monkeypatch.setattr(
+        repo_tools,
+        "scan_workspace_manifest",
+        restore_metadata_before_initial_scan,
+    )
+
+    with pytest.raises(repo_tools.CandidateReadError) as raised:
+        repo_tools.read_candidate_file(_request(candidate))
+
+    assert scan_calls == 1
+    assert raised.value.code == "RECOVERY_REQUIRED"
+
+
 def test_read_candidate_file_maps_post_read_manifest_scan_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1821,6 +1952,123 @@ def test_read_candidate_file_rejects_git_authority_snapshot_limit(
         repo_tools.read_candidate_file(_request(candidate))
 
     assert raised.value.code == "RECOVERY_REQUIRED"
+
+
+@pytest.mark.parametrize("entry_kind", ("symlink", "fifo"))
+def test_workspace_identity_snapshot_rejects_unsupported_entry(
+    tmp_path: Path,
+    entry_kind: str,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    unexpected = candidate.worktree / "unexpected"
+    if entry_kind == "symlink":
+        unexpected.symlink_to("README.md")
+    else:
+        os.mkfifo(unexpected, mode=0o600)
+    descriptor = os.open(
+        candidate.worktree,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+
+    try:
+        with pytest.raises(repo_tools.CandidateWorkspaceError):
+            repo_tools._scan_candidate_workspace_identity(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def test_workspace_identity_snapshot_closes_child_fd_on_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"base\n",
+        additional_files=(
+            repo_tools.SourceFile("nested/other.txt", "100644", b"other\n"),
+        ),
+    )
+    descriptor = os.open(
+        candidate.worktree,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    real_open = repo_tools.os.open
+    real_stat = repo_tools.os.stat
+    child_descriptors: list[int] = []
+
+    def observe_open(path, flags, mode=0o777, *, dir_fd=None):
+        opened = real_open(path, flags, mode, dir_fd=dir_fd)
+        if path == "nested":
+            child_descriptors.append(opened)
+        return opened
+
+    def fail_nested_stat(path, *, dir_fd=None, follow_symlinks=True):
+        if path == "other.txt":
+            raise OSError("injected identity stat failure")
+        return real_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(repo_tools.os, "open", observe_open)
+    monkeypatch.setattr(repo_tools.os, "stat", fail_nested_stat)
+
+    try:
+        with pytest.raises(repo_tools.CandidateWorkspaceError):
+            repo_tools._scan_candidate_workspace_identity(descriptor)
+    finally:
+        os.close(descriptor)
+
+    assert child_descriptors
+    for child_descriptor in child_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(child_descriptor)
+
+
+@pytest.mark.parametrize(
+    ("limit_name", "limit_value", "additional_files"),
+    (
+        (
+            "_MAX_WORKSPACE_MANIFEST_ENTRIES",
+            1,
+            (repo_tools.SourceFile("other.txt", "100644", b"other\n"),),
+        ),
+        (
+            "_MAX_WORKSPACE_IDENTITY_DEPTH",
+            0,
+            (repo_tools.SourceFile("nested/other.txt", "100644", b"other\n"),),
+        ),
+        (
+            "_MAX_WORKSPACE_IDENTITY_PATH_BYTES",
+            3,
+            (),
+        ),
+    ),
+)
+def test_workspace_identity_snapshot_rejects_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    limit_name: str,
+    limit_value: int,
+    additional_files: tuple[repo_tools.SourceFile, ...],
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"base\n",
+        additional_files=additional_files,
+    )
+    descriptor = os.open(
+        candidate.worktree,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    monkeypatch.setattr(repo_tools, limit_name, limit_value)
+
+    try:
+        with pytest.raises(repo_tools.CandidateWorkspaceError):
+            repo_tools._scan_candidate_workspace_identity(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def test_read_candidate_file_never_returns_prefix_during_truncation_race(
