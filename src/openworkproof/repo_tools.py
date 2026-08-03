@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import base64
 import calendar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import selectors
 import shutil
+import signal
 import stat
 import struct
 import subprocess
+import time
 from typing import Any, Literal, Mapping, Sequence
 import zlib
 
@@ -126,6 +129,10 @@ class EvidenceOrdinalError(ValueError):
 
 class CandidateWorkspaceError(RuntimeError):
     """A trusted candidate workspace cannot be proven or reconstructed."""
+
+
+class ProcessExecutionError(RuntimeError):
+    """A bounded child process cannot be launched or cleaned up safely."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,6 +382,29 @@ class WorkspaceDestroyRequest:
 class WorkspaceDestroyResult:
     workspace_id: str
     destroyed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxPolicy:
+    max_combined_stdio_bytes: int = field(default=1_048_576, init=False)
+    wall_clock_timeout_seconds: int = field(default=120, init=False)
+    cleanup_grace_seconds: int = field(default=10, init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessRequest:
+    argv: tuple[str, ...]
+    working_directory: Path
+    environment: Mapping[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class BoundedProcessResult:
+    exit_code: int | None
+    failure_code: Literal["OUTPUT_LIMIT", "TIMEOUT", "DISK_LIMIT"] | None
+    stdout_prefix: bytes
+    stderr_prefix: bytes
+    combined_bytes_captured: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -2635,6 +2665,193 @@ def destroy_candidate_workspace(
     return WorkspaceDestroyResult(
         workspace_id=workspace.workspace_id,
         destroyed=True,
+    )
+
+
+def _validated_process_request(
+    request: ProcessRequest,
+    policy: SandboxPolicy,
+) -> tuple[tuple[str, ...], Path, dict[str, str]]:
+    if (
+        type(request) is not ProcessRequest
+        or type(policy) is not SandboxPolicy
+        or policy != SandboxPolicy()
+    ):
+        raise ProcessExecutionError("bounded process binding is invalid")
+    argv = request.argv
+    if type(argv) is not tuple or not 1 <= len(argv) <= 16:
+        raise ProcessExecutionError("bounded process argv is invalid")
+    for argument in argv:
+        if (
+            type(argument) is not str
+            or not argument
+            or "\0" in argument
+            or len(argument.encode("utf-8")) > 4_096
+        ):
+            raise ProcessExecutionError("bounded process argument is invalid")
+    executable = Path(argv[0])
+    if (
+        not executable.is_absolute()
+        or not executable.is_file()
+        or not os.access(executable, os.X_OK)
+    ):
+        raise ProcessExecutionError("bounded process executable is invalid")
+    working_directory = request.working_directory
+    if (
+        not isinstance(working_directory, Path)
+        or not working_directory.is_absolute()
+        or working_directory != Path(os.path.abspath(working_directory))
+    ):
+        raise ProcessExecutionError(
+            "bounded process working directory is invalid"
+        )
+    metadata = os.stat(working_directory, follow_symlinks=False)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ProcessExecutionError(
+            "bounded process working directory is not a directory"
+        )
+    environment = request.environment
+    if type(environment) is not dict or len(environment) > 32:
+        raise ProcessExecutionError("bounded process environment is invalid")
+    validated_environment: dict[str, str] = {}
+    total_environment_bytes = 0
+    for key, value in environment.items():
+        if (
+            type(key) is not str
+            or type(value) is not str
+            or not key
+            or "=" in key
+            or "\0" in key
+            or "\0" in value
+        ):
+            raise ProcessExecutionError(
+                "bounded process environment entry is invalid"
+            )
+        total_environment_bytes += len(key.encode("utf-8"))
+        total_environment_bytes += len(value.encode("utf-8"))
+        if total_environment_bytes > 16_384:
+            raise ProcessExecutionError(
+                "bounded process environment is too large"
+            )
+        validated_environment[key] = value
+    return argv, working_directory, validated_environment
+
+
+def _terminate_process_group(
+    process: subprocess.Popen[bytes],
+    cleanup_grace_seconds: int,
+) -> None:
+    deadline = time.monotonic() + cleanup_grace_seconds
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    remaining = max(0.0, deadline - time.monotonic())
+    try:
+        process.wait(timeout=remaining)
+    except subprocess.TimeoutExpired as error:
+        raise ProcessExecutionError(
+            "bounded process cleanup exceeded its grace period"
+        ) from error
+
+
+def run_bounded_process(
+    request: ProcessRequest,
+    policy: SandboxPolicy,
+) -> BoundedProcessResult:
+    """Run one child with incremental shared-cap stdout/stderr capture."""
+
+    argv, working_directory, environment = _validated_process_request(
+        request,
+        policy,
+    )
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=working_directory,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise ProcessExecutionError("bounded process could not start") from error
+    if process.stdout is None or process.stderr is None:
+        _terminate_process_group(process, policy.cleanup_grace_seconds)
+        raise ProcessExecutionError("bounded process pipes are unavailable")
+
+    selector = selectors.DefaultSelector()
+    streams = {
+        "stdout": process.stdout,
+        "stderr": process.stderr,
+    }
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    captured = 0
+    failure_code: Literal["OUTPUT_LIMIT", "TIMEOUT", "DISK_LIMIT"] | None = None
+    deadline = time.monotonic() + policy.wall_clock_timeout_seconds
+    try:
+        for name, stream in streams.items():
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, name)
+        while selector.get_map() or process.poll() is None:
+            remaining_time = deadline - time.monotonic()
+            if remaining_time <= 0:
+                failure_code = "TIMEOUT"
+                break
+            try:
+                events = selector.select(timeout=min(remaining_time, 0.1))
+            except InterruptedError:
+                continue
+            for key, _ in events:
+                remaining_bytes = policy.max_combined_stdio_bytes - captured
+                read_size = min(65_536, remaining_bytes + 1)
+                try:
+                    data = os.read(key.fd, read_size)
+                except BlockingIOError:
+                    continue
+                if not data:
+                    selector.unregister(key.fileobj)
+                    continue
+                retained = data[:remaining_bytes]
+                if retained:
+                    buffers[key.data].extend(retained)
+                    captured += len(retained)
+                if len(data) > remaining_bytes:
+                    failure_code = "OUTPUT_LIMIT"
+                    break
+            if failure_code is not None:
+                break
+        if failure_code is not None:
+            _terminate_process_group(process, policy.cleanup_grace_seconds)
+        elif process.poll() is None:
+            _terminate_process_group(process, policy.cleanup_grace_seconds)
+            raise ProcessExecutionError("bounded process ended without a status")
+    except ProcessExecutionError:
+        raise
+    except Exception as error:
+        _terminate_process_group(process, policy.cleanup_grace_seconds)
+        raise ProcessExecutionError("bounded process capture failed") from error
+    finally:
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
+    return BoundedProcessResult(
+        exit_code=process.returncode,
+        failure_code=failure_code,
+        stdout_prefix=bytes(buffers["stdout"]),
+        stderr_prefix=bytes(buffers["stderr"]),
+        combined_bytes_captured=captured,
     )
 
 

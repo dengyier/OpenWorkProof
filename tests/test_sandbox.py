@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
+import time
 
 import pytest
 import rfc8785
@@ -1023,3 +1025,196 @@ def test_destroy_candidate_workspace_rejects_wrong_checkpoint_without_removal(
 
     assert candidate.candidate_root.is_dir()
     assert (candidate.worktree / "README.md").read_bytes() == b"base\n"
+
+
+def _process_request(
+    tmp_path: Path,
+    script: str,
+) -> repo_tools.ProcessRequest:
+    return repo_tools.ProcessRequest(
+        argv=(sys.executable, "-c", script),
+        working_directory=tmp_path,
+        environment={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+    )
+
+
+def test_run_bounded_process_returns_exact_small_stdout_and_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = repo_tools.SandboxPolicy()
+    assert policy.max_combined_stdio_bytes == 1_048_576
+    assert policy.wall_clock_timeout_seconds == 120
+    assert policy.cleanup_grace_seconds == 10
+    with pytest.raises(TypeError):
+        repo_tools.SandboxPolicy(max_combined_stdio_bytes=1)
+    tampered_policy = repo_tools.SandboxPolicy()
+    object.__setattr__(tampered_policy, "max_combined_stdio_bytes", 1)
+    with pytest.raises(
+        repo_tools.ProcessExecutionError,
+        match="binding",
+    ):
+        repo_tools.run_bounded_process(
+            _process_request(tmp_path, "raise SystemExit(0)"),
+            tampered_policy,
+        )
+
+    def forbid_unbounded_communicate(*args, **kwargs):
+        raise AssertionError("bounded capture called communicate")
+
+    monkeypatch.setattr(
+        subprocess.Popen,
+        "communicate",
+        forbid_unbounded_communicate,
+    )
+
+    result = repo_tools.run_bounded_process(
+        _process_request(
+            tmp_path,
+            "import os; os.write(1, b'out'); os.write(2, b'err')",
+        ),
+        policy,
+    )
+
+    assert result.failure_code is None
+    assert result.exit_code == 0
+    assert result.stdout_prefix == b"out"
+    assert result.stderr_prefix == b"err"
+    assert result.combined_bytes_captured == 6
+
+
+def test_run_bounded_process_does_not_inherit_host_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENWORKPROOF_HOST_SECRET", "must-not-leak")
+
+    result = repo_tools.run_bounded_process(
+        _process_request(
+            tmp_path,
+            (
+                "import os; print("
+                "os.environ.get('OPENWORKPROOF_HOST_SECRET', 'missing'))"
+            ),
+        ),
+        repo_tools.SandboxPolicy(),
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout_prefix == b"missing\n"
+
+
+def test_run_bounded_process_returns_actual_nonzero_exit_code(
+    tmp_path: Path,
+) -> None:
+    result = repo_tools.run_bounded_process(
+        _process_request(tmp_path, "raise SystemExit(7)"),
+        repo_tools.SandboxPolicy(),
+    )
+
+    assert result.failure_code is None
+    assert result.exit_code == 7
+
+
+def test_run_bounded_process_accepts_exact_stdio_capacity(
+    tmp_path: Path,
+) -> None:
+    result = repo_tools.run_bounded_process(
+        _process_request(
+            tmp_path,
+            (
+                "import os\n"
+                "chunk = b'x' * 65536\n"
+                "for _ in range(16):\n"
+                "    view = memoryview(chunk)\n"
+                "    while view:\n"
+                "        view = view[os.write(1, view):]\n"
+            ),
+        ),
+        repo_tools.SandboxPolicy(),
+    )
+
+    assert result.failure_code is None
+    assert result.exit_code == 0
+    assert len(result.stdout_prefix) == 1_048_576
+    assert result.combined_bytes_captured == 1_048_576
+
+
+def test_run_bounded_process_enforces_one_shared_stdio_limit(
+    tmp_path: Path,
+) -> None:
+    script = (
+        "import os\n"
+        "chunk = b'x' * 4096\n"
+        "for _ in range(160):\n"
+        "    os.write(1, chunk)\n"
+        "    os.write(2, chunk)\n"
+    )
+
+    result = repo_tools.run_bounded_process(
+        _process_request(tmp_path, script),
+        repo_tools.SandboxPolicy(),
+    )
+
+    assert result.failure_code == "OUTPUT_LIMIT"
+    assert result.exit_code is not None
+    assert len(result.stdout_prefix) + len(result.stderr_prefix) == 1_048_576
+    assert result.combined_bytes_captured == 1_048_576
+
+
+def test_run_bounded_process_returns_timeout_after_frozen_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_monotonic = time.monotonic
+    calls = 0
+
+    def jump_past_deadline_once() -> float:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            return real_monotonic() + 121
+        return real_monotonic()
+
+    monkeypatch.setattr(
+        repo_tools.time,
+        "monotonic",
+        jump_past_deadline_once,
+    )
+
+    result = repo_tools.run_bounded_process(
+        _process_request(tmp_path, "import time; time.sleep(30)"),
+        repo_tools.SandboxPolicy(),
+    )
+
+    assert result.failure_code == "TIMEOUT"
+    assert result.exit_code is not None
+    assert result.combined_bytes_captured == 0
+
+
+def test_run_bounded_process_output_limit_kills_descendant_process_group(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "descendant-escaped.txt"
+    descendant = (
+        "import time\n"
+        "from pathlib import Path\n"
+        "time.sleep(0.5)\n"
+        f"Path({str(marker)!r}).write_text('escaped')\n"
+    )
+    script = (
+        "import os, subprocess, sys\n"
+        f"subprocess.Popen([sys.executable, '-c', {descendant!r}])\n"
+        "chunk = b'x' * 65536\n"
+        "while True:\n"
+        "    os.write(1, chunk)\n"
+    )
+
+    result = repo_tools.run_bounded_process(
+        _process_request(tmp_path, script),
+        repo_tools.SandboxPolicy(),
+    )
+    time.sleep(0.7)
+
+    assert result.failure_code == "OUTPUT_LIMIT"
+    assert not marker.exists()
