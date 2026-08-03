@@ -1709,6 +1709,115 @@ def test_derive_ready_docker_start_requires_all_created_and_inspected() -> None:
     )
 
 
+def _ready_docker_start_for_repo_digests(
+    plan: repo_tools.DockerExecutionPlan,
+    repo_digests: list[str],
+) -> repo_tools.DockerReadyStart:
+    image_inspection = _docker_image_inspection(plan)
+    image_inspection["RepoDigests"] = repo_digests
+    return repo_tools.derive_ready_docker_start(
+        plan,
+        _complete_docker_lifecycle(plan),
+        image_inspection,
+        _docker_container_inspection(plan),
+        _docker_volume_inspection(plan, "workspace_volume"),
+        _docker_volume_inspection(plan, "output_volume"),
+    )
+
+
+def test_derive_ready_docker_start_accepts_familiar_docker_hub_digest() -> None:
+    digest = "sha256:" + "a" * 64
+    plan = _docker_plan(
+        image_reference=f"docker.io/library/python@{digest}",
+    )
+    ready = _ready_docker_start_for_repo_digests(
+        plan,
+        [f"python@{digest}"],
+    )
+
+    assert ready.start_argv == (
+        "/usr/local/bin/docker",
+        "start",
+        "--attach",
+        plan.container_name,
+    )
+
+
+def test_derive_ready_docker_start_accepts_familiar_docker_hub_namespace(
+) -> None:
+    digest = "sha256:" + "a" * 64
+    plan = _docker_plan(
+        image_reference=f"docker.io/openworkproof/runner@{digest}",
+    )
+    ready = _ready_docker_start_for_repo_digests(
+        plan,
+        [f"openworkproof/runner@{digest}"],
+    )
+
+    assert ready.start_argv[-1] == plan.container_name
+
+
+@pytest.mark.parametrize(
+    "observed_repository",
+    (
+        "other/python",
+        "library/pypy",
+        "docker.io/python",
+        "registry.example/library/python",
+        "localhost:5000/library/python",
+    ),
+)
+def test_derive_ready_docker_start_rejects_other_repo_with_same_digest(
+    observed_repository: str,
+) -> None:
+    digest = "sha256:" + "a" * 64
+    plan = _docker_plan(
+        image_reference=f"docker.io/library/python@{digest}",
+    )
+
+    with pytest.raises(ValueError, match="image inspection"):
+        _ready_docker_start_for_repo_digests(
+            plan,
+            [f"{observed_repository}@{digest}"],
+        )
+
+
+def test_derive_ready_docker_start_rejects_different_digest() -> None:
+    plan_digest = "sha256:" + "a" * 64
+    plan = _docker_plan(
+        image_reference=f"docker.io/library/python@{plan_digest}",
+    )
+
+    with pytest.raises(ValueError, match="image inspection"):
+        _ready_docker_start_for_repo_digests(
+            plan,
+            ["python@sha256:" + "b" * 64],
+        )
+
+
+@pytest.mark.parametrize(
+    "observed_repo_digest",
+    (
+        "python",
+        "Python@sha256:" + "a" * 64,
+        "python:3.12@sha256:" + "a" * 64,
+    ),
+)
+def test_derive_ready_docker_start_rejects_invalid_observed_repo_digest(
+    observed_repo_digest: str,
+) -> None:
+    digest = "sha256:" + "a" * 64
+    plan = _docker_plan(
+        image_reference=f"docker.io/library/python@{digest}",
+    )
+
+    with pytest.raises(ValueError, match="image inspection"):
+        _ready_docker_start_for_repo_digests(
+            plan,
+            [observed_repo_digest],
+        )
+
+
 def test_docker_lifecycle_rejects_out_of_order_creation() -> None:
     plan = _docker_plan()
     state = repo_tools.validate_docker_preflight_absent(

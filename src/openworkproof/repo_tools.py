@@ -2833,6 +2833,25 @@ def _valid_immutable_image_reference(image_reference: object) -> bool:
     )
 
 
+def _canonical_observed_repo_digest(reference: object) -> str | None:
+    if type(reference) is not str or reference.count("@") != 1:
+        return None
+    repository, digest = reference.split("@")
+    components = repository.split("/")
+    if not components or any(not component for component in components):
+        return None
+    first = components[0]
+    if len(components) == 1:
+        qualified = f"docker.io/library/{repository}@{digest}"
+    elif first == "localhost" or "." in first or ":" in first:
+        qualified = reference
+    else:
+        qualified = f"docker.io/{repository}@{digest}"
+    if not _valid_immutable_image_reference(qualified):
+        return None
+    return qualified
+
+
 def derive_docker_execution_plan(
     *,
     docker_binary: Path,
@@ -3238,12 +3257,17 @@ def derive_ready_docker_start(
     try:
         image_config = image_inspection["Config"]
         repo_digests = image_inspection["RepoDigests"]
+        canonical_repo_digests = [
+            _canonical_observed_repo_digest(reference)
+            for reference in repo_digests
+        ]
         image_valid = (
             type(image_inspection) is dict
             and type(image_config) is dict
             and image_config.get("Volumes") in (None, {})
             and type(repo_digests) is list
-            and plan.image_reference in repo_digests
+            and None not in canonical_repo_digests
+            and plan.image_reference in canonical_repo_digests
         )
     except (KeyError, TypeError, AttributeError):
         image_valid = False
