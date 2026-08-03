@@ -2101,8 +2101,7 @@ def test_classify_docker_execution_failure_uses_structured_volume_observation(
     assert not hasattr(observed, "stderr")
 
 
-@pytest.mark.docker
-def test_real_docker_enforces_frozen_containment_profile() -> None:
+def _real_docker_cli_and_image() -> tuple[Path, str]:
     docker_location = os.environ.get("OPENWORKPROOF_DOCKER") or shutil.which(
         "docker"
     )
@@ -2111,35 +2110,64 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
     docker_binary = Path(docker_location).expanduser().resolve()
     if not docker_binary.is_file() or not os.access(docker_binary, os.X_OK):
         pytest.skip(f"Docker CLI unavailable at {docker_binary}")
-    daemon = subprocess.run(
-        (str(docker_binary), "info", "--format", "{{.ServerVersion}}"),
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    if daemon.returncode != 0:
-        details = daemon.stderr.strip().splitlines()
-        detail = details[-1] if details else f"docker info exited {daemon.returncode}"
-        pytest.skip(f"Docker daemon unavailable: {detail}")
-
     image_reference = os.environ.get("OPENWORKPROOF_DOCKER_TEST_IMAGE")
     if image_reference is None:
         pytest.skip(
             "immutable preloaded image reference unavailable: set "
             "OPENWORKPROOF_DOCKER_TEST_IMAGE to repository@sha256:digest"
         )
-    image = subprocess.run(
-        (str(docker_binary), "image", "inspect", image_reference),
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    return docker_binary, image_reference
+
+
+def _require_real_docker_daemon_and_image(
+    docker_binary: Path,
+    image_reference: str,
+) -> dict:
+    try:
+        daemon = subprocess.run(
+            (str(docker_binary), "info", "--format", "{{.ServerVersion}}"),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        pytest.skip(f"Docker daemon unavailable: {type(error).__name__}")
+    if daemon.returncode != 0:
+        details = daemon.stderr.strip().splitlines()
+        detail = (
+            details[-1]
+            if details
+            else f"docker info exited {daemon.returncode}"
+        )
+        pytest.skip(f"Docker daemon unavailable: {detail}")
+
+    try:
+        image = subprocess.run(
+            (str(docker_binary), "image", "inspect", image_reference),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        pytest.skip(
+            "immutable Docker test image is not preloaded: "
+            f"{image_reference} ({type(error).__name__})"
+        )
     if image.returncode != 0:
         pytest.skip(
             "immutable Docker test image is not preloaded: "
             f"{image_reference}"
         )
-    image_inspection = json.loads(image.stdout)[0]
+    return json.loads(image.stdout)[0]
+
+
+@pytest.mark.docker
+def test_real_docker_enforces_frozen_containment_profile() -> None:
+    docker_binary, image_reference = _real_docker_cli_and_image()
+    image_inspection = _require_real_docker_daemon_and_image(
+        docker_binary,
+        image_reference,
+    )
 
     suffix = f"{os.getpid()}-{time.time_ns()}"
     ownership_token = hashlib.sha256(suffix.encode("ascii")).hexdigest()
@@ -2348,6 +2376,351 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
                 )
                 if name in remaining_volumes
             )
+            if remaining:
+                cleanup_failures.append(
+                    "resources still exist: " + ",".join(remaining)
+                )
+        except (OSError, subprocess.SubprocessError) as error:
+            cleanup_failures.append(
+                f"post-cleanup preflight failed: {type(error).__name__}"
+            )
+        if cleanup_failures:
+            message = "Docker cleanup failures: " + "; ".join(cleanup_failures)
+            if active_failure is not None:
+                active_failure.add_note(message)
+            else:
+                pytest.fail(message)
+
+
+@pytest.mark.docker
+@pytest.mark.parametrize(
+    ("limit_mebibytes", "write_mebibytes", "mount_path"),
+    (
+        (64, 65, "/output"),
+        (512, 513, "/workspace"),
+    ),
+)
+def test_real_docker_enforces_tmpfs_volume_capacity(
+    limit_mebibytes: int,
+    write_mebibytes: int,
+    mount_path: str,
+) -> None:
+    docker_binary, image_reference = _real_docker_cli_and_image()
+
+    suffix = f"capacity-{limit_mebibytes}-{os.getpid()}-{time.time_ns()}"
+    ownership_token = hashlib.sha256(suffix.encode("ascii")).hexdigest()
+    expected_bytes = limit_mebibytes * 1024 * 1024
+    script = (
+        "set -u; "
+        "uid_gid=\"$(id -u):$(id -g)\"; "
+        "if touch /root-forbidden 2>/dev/null; then exit 42; fi; "
+        "test ! -e /var/run/docker.sock || exit 43; "
+        "set +e; "
+        f"LC_ALL=C dd if=/dev/zero of={mount_path}/capacity.bin "
+        f"bs=1048576 count={write_mebibytes} 2>/tmp/dd.stderr; "
+        "dd_status=$?; "
+        "set -e; "
+        f"file_bytes=\"$(wc -c < {mount_path}/capacity.bin)\"; "
+        "printf 'uid_gid=%s\\ndd_status=%s\\nfile_bytes=%s\\n' "
+        '"$uid_gid" "$dd_status" "$file_bytes"; '
+        "cat /tmp/dd.stderr >&2; "
+        'exit "$dd_status"'
+    )
+    plan = repo_tools.derive_docker_execution_plan(
+        docker_binary=docker_binary,
+        image_reference=image_reference,
+        container_name=f"owp-{suffix}",
+        workspace_volume_name=f"owp-workspace-{suffix}",
+        output_volume_name=f"owp-output-{suffix}",
+        ownership_token=ownership_token,
+        command=("/bin/sh", "-c", script),
+    )
+    target_volume = (
+        plan.output_volume if mount_path == "/output" else plan.workspace_volume
+    )
+    assert target_volume.size_bytes == expected_bytes
+    assert target_volume.mount_path == mount_path
+
+    _require_real_docker_daemon_and_image(docker_binary, image_reference)
+
+    preflight_outputs = []
+    for preflight_command in plan.preflight_absent_argv:
+        checked = subprocess.run(
+            preflight_command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        preflight_outputs.append(tuple(checked.stdout.splitlines()))
+    repo_tools.validate_docker_preflight_absent(
+        plan,
+        repo_tools.DockerPreflightObservation(
+            container_names=preflight_outputs[0],
+            volume_names=preflight_outputs[1],
+        ),
+    )
+
+    volume_creation_attempted = False
+    container_creation_attempted = False
+    try:
+        volume_creation_attempted = True
+        subprocess.run(
+            target_volume.create_argv,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        inspected_volume = json.loads(
+            subprocess.run(
+                (
+                    str(docker_binary),
+                    "volume",
+                    "inspect",
+                    target_volume.name,
+                ),
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout
+        )[0]
+        assert inspected_volume["Name"] == target_volume.name
+        assert inspected_volume["Driver"] == "local"
+        assert inspected_volume["Labels"] == {
+            "openworkproof.execution-owner": ownership_token,
+        }
+        assert inspected_volume["Options"] == {
+            "type": "tmpfs",
+            "device": "tmpfs",
+            "o": f"size={limit_mebibytes}m",
+        }
+
+        create_container_argv = (
+            str(docker_binary),
+            "create",
+            "--name",
+            plan.container_name,
+            "--label",
+            f"openworkproof.execution-owner={ownership_token}",
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--read-only",
+            "--user",
+            "65532:65532",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "128",
+            "--memory",
+            "1g",
+            "--cpus",
+            "1",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=256m",
+            "--workdir",
+            mount_path,
+            "--mount",
+            (
+                f"type=volume,source={target_volume.name},"
+                f"target={mount_path},volume-nocopy"
+            ),
+            image_reference,
+            "/bin/sh",
+            "-c",
+            script,
+        )
+        container_creation_attempted = True
+        subprocess.run(
+            create_container_argv,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        inspected_container = json.loads(
+            subprocess.run(
+                (str(docker_binary), "inspect", plan.container_name),
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout
+        )[0]
+        assert inspected_container["Config"]["Image"] == image_reference
+        assert inspected_container["Config"]["User"] == "65532:65532"
+        assert inspected_container["Config"]["Labels"].get(
+            "openworkproof.execution-owner"
+        ) == ownership_token
+        host = inspected_container["HostConfig"]
+        assert host["NetworkMode"] == "none"
+        assert host["Binds"] is None
+        assert host["ReadonlyRootfs"] is True
+        assert host["CapDrop"] == ["ALL"]
+        assert host["SecurityOpt"] in (
+            ["no-new-privileges"],
+            ["no-new-privileges:true"],
+        )
+        assert host["PidsLimit"] == 128
+        assert host["Memory"] == 1024 * 1024 * 1024
+        assert host["NanoCpus"] == 1_000_000_000
+        assert host["Tmpfs"] == {
+            "/tmp": "rw,noexec,nosuid,size=256m",
+        }
+        assert len(host["Mounts"]) == 1
+        configured_mount = host["Mounts"][0]
+        assert configured_mount["Type"] == "volume"
+        assert configured_mount["Source"] == target_volume.name
+        assert configured_mount["Target"] == mount_path
+        assert (
+            "ReadOnly" not in configured_mount
+            or configured_mount["ReadOnly"] is False
+        )
+        assert configured_mount["VolumeOptions"] == {"NoCopy": True}
+        assert len(inspected_container["Mounts"]) == 1
+        runtime_mount = inspected_container["Mounts"][0]
+        assert runtime_mount["Destination"] == mount_path
+        assert runtime_mount["Type"] == "volume"
+        assert runtime_mount["Name"] == target_volume.name
+        assert runtime_mount["RW"] is True
+        assert inspected_container["State"] == {
+            **inspected_container["State"],
+            "Status": "created",
+            "Running": False,
+            "Paused": False,
+            "Restarting": False,
+            "Dead": False,
+            "Pid": 0,
+            "ExitCode": 0,
+            "StartedAt": "0001-01-01T00:00:00Z",
+            "FinishedAt": "0001-01-01T00:00:00Z",
+        }
+
+        executed = subprocess.run(
+            (
+                str(docker_binary),
+                "start",
+                "--attach",
+                plan.container_name,
+            ),
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+        observations = dict(
+            line.split("=", 1)
+            for line in executed.stdout.splitlines()
+            if "=" in line
+        )
+        assert executed.returncode != 0
+        assert observations["uid_gid"] == "65532:65532"
+        assert int(observations["dd_status"]) != 0
+        assert executed.returncode == int(observations["dd_status"])
+        assert int(observations["file_bytes"]) == expected_bytes
+        assert "No space left on device" in executed.stderr
+        assert f"{limit_mebibytes}+0 records out" in executed.stderr
+    finally:
+        active_failure = sys.exc_info()[1]
+        cleanup_failures = []
+        cleanup_resources = (
+            (
+                "container",
+                container_creation_attempted,
+                (str(docker_binary), "inspect", plan.container_name),
+                (
+                    str(docker_binary),
+                    "rm",
+                    "--force",
+                    "--volumes",
+                    plan.container_name,
+                ),
+            ),
+            (
+                "volume",
+                volume_creation_attempted,
+                (
+                    str(docker_binary),
+                    "volume",
+                    "inspect",
+                    target_volume.name,
+                ),
+                (
+                    str(docker_binary),
+                    "volume",
+                    "rm",
+                    target_volume.name,
+                ),
+            ),
+        )
+        for resource, created, inspect_argv, remove_argv in cleanup_resources:
+            if not created:
+                continue
+            try:
+                current = subprocess.run(
+                    inspect_argv,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if current.returncode != 0:
+                    continue
+                inspection = json.loads(current.stdout)[0]
+                labels = (
+                    inspection["Config"]["Labels"]
+                    if resource == "container"
+                    else inspection["Labels"]
+                )
+                if labels.get("openworkproof.execution-owner") != ownership_token:
+                    cleanup_failures.append(f"retained unowned {resource}")
+                    continue
+                cleaned = subprocess.run(
+                    remove_argv,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if cleaned.returncode != 0:
+                    cleanup_failures.append(
+                        f"cleanup {resource} exited {cleaned.returncode}"
+                    )
+            except (
+                OSError,
+                subprocess.SubprocessError,
+                ValueError,
+                IndexError,
+                KeyError,
+                TypeError,
+                AttributeError,
+            ) as error:
+                cleanup_failures.append(
+                    f"cleanup {resource} failed: {type(error).__name__}"
+                )
+
+        try:
+            remaining_container = subprocess.run(
+                plan.preflight_absent_argv[0],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout.splitlines()
+            remaining_volumes = subprocess.run(
+                plan.preflight_absent_argv[1],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout.splitlines()
+            remaining = []
+            if plan.container_name in remaining_container:
+                remaining.append(plan.container_name)
+            if target_volume.name in remaining_volumes:
+                remaining.append(target_volume.name)
             if remaining:
                 cleanup_failures.append(
                     "resources still exist: " + ",".join(remaining)
