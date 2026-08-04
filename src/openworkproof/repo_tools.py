@@ -121,6 +121,7 @@ _MAX_GIT_AUTHORITY_DEPTH = 64
 _MAX_GIT_AUTHORITY_PATH_BYTES = 1_024
 _MAX_GIT_AUTHORITY_FILE_BYTES = 8_388_608
 _MAX_GIT_AUTHORITY_TOTAL_BYTES = 16_777_216
+_MAX_RUN_TESTS_ENVELOPE_BYTES = 8_192
 
 OPENAT2_RESOLVE_FLAGS = (
     "RESOLVE_BENEATH",
@@ -592,6 +593,344 @@ class DockerObservedResult:
     timed_out: bool
     workspace_volume_exhausted: bool
     output_volume_exhausted: bool
+
+
+RunTestsFailureCode = Literal["OUTPUT_LIMIT", "TIMEOUT", "DISK_LIMIT"]
+
+
+@dataclass(frozen=True, slots=True)
+class RunTestsExecutionContract:
+    execution_id: str
+    request_digest: str
+    arguments_digest: str
+    candidate_workspace_id: str
+    source_artifact_sha256: str
+    source_commit: str
+    candidate_commit: str
+    workspace_manifest_digest: str
+    container_image_digest: str
+    command_digest: str
+    fixed_test_source_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class RunTestsStartedEnvelope:
+    execution_id: str
+    execution_contract_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class RunTestsResultEnvelope:
+    execution_id: str
+    execution_contract_digest: str
+    actual_exit_code: int | None
+    failure_code: RunTestsFailureCode | None
+    stdout_bytes: int
+    stdout_sha256: str
+    stderr_bytes: int
+    stderr_sha256: str
+
+    def __post_init__(self) -> None:
+        completed = self.actual_exit_code is not None and self.failure_code is None
+        failed = self.actual_exit_code is None and self.failure_code is not None
+        if completed == failed:
+            raise ValueError("run-tests result does not contain one closed outcome")
+
+
+FROZEN_VERIFIER_ARGV = (
+    "/opt/venv/bin/python",
+    "-I",
+    "-m",
+    "pytest",
+    "-q",
+)
+
+
+def frozen_verifier_command_digest() -> str:
+    return hashlib.sha256(
+        rfc8785.dumps(
+            {
+                "domain": "openworkproof/verifier-command/v0.1",
+                "argv": list(FROZEN_VERIFIER_ARGV),
+            }
+        )
+    ).hexdigest()
+
+
+def _run_tests_digest(value: object) -> str:
+    if type(value) is not str or _DIGEST_PATTERN.fullmatch(value) is None:
+        raise ValueError("run-tests digest is invalid")
+    return value
+
+
+def _run_tests_oid(value: object) -> str:
+    if type(value) is not str or _OID_PATTERN.fullmatch(value) is None:
+        raise ValueError("run-tests object id is invalid")
+    return value
+
+
+def _run_tests_image_digest(value: object) -> str:
+    if type(value) is not str or _IMAGE_DIGEST_PATTERN.fullmatch(value) is None:
+        raise ValueError("run-tests image digest is invalid")
+    return value
+
+
+def _run_tests_safe_size(value: object) -> int:
+    if type(value) is not int or not 0 <= value <= _MAX_SAFE_INTEGER:
+        raise ValueError("run-tests stream size is invalid")
+    return value
+
+
+def _run_tests_execution_contract_json(
+    contract: RunTestsExecutionContract,
+) -> dict[str, str]:
+    if type(contract) is not RunTestsExecutionContract:
+        raise ValueError("run-tests execution contract is invalid")
+    return {
+        "arguments_digest": _run_tests_digest(contract.arguments_digest),
+        "candidate_commit": _run_tests_oid(contract.candidate_commit),
+        "candidate_workspace_id": _run_tests_digest(
+            contract.candidate_workspace_id
+        ),
+        "command_digest": _run_tests_digest(contract.command_digest),
+        "container_image_digest": _run_tests_image_digest(
+            contract.container_image_digest
+        ),
+        "execution_id": _run_tests_digest(contract.execution_id),
+        "fixed_test_source_digest": _run_tests_digest(
+            contract.fixed_test_source_digest
+        ),
+        "request_digest": _run_tests_digest(contract.request_digest),
+        "schema_version": "openworkproof-run-contract/0.1",
+        "source_artifact_sha256": _run_tests_digest(
+            contract.source_artifact_sha256
+        ),
+        "source_commit": _run_tests_oid(contract.source_commit),
+        "test_mode": "verifier",
+        "tool_name": "owp.run_tests",
+        "workspace_manifest_digest": _run_tests_digest(
+            contract.workspace_manifest_digest
+        ),
+    }
+
+
+def encode_run_tests_execution_contract(
+    contract: RunTestsExecutionContract,
+) -> bytes:
+    return rfc8785.dumps(_run_tests_execution_contract_json(contract))
+
+
+def _run_tests_started_envelope_json(
+    envelope: RunTestsStartedEnvelope,
+) -> dict[str, str]:
+    if type(envelope) is not RunTestsStartedEnvelope:
+        raise ValueError("run-tests started envelope is invalid")
+    return {
+        "execution_contract_digest": _run_tests_digest(
+            envelope.execution_contract_digest
+        ),
+        "execution_id": _run_tests_digest(envelope.execution_id),
+        "schema_version": "openworkproof-run-started/0.1",
+    }
+
+
+def encode_run_tests_started_envelope(
+    envelope: RunTestsStartedEnvelope,
+) -> bytes:
+    return rfc8785.dumps(_run_tests_started_envelope_json(envelope))
+
+
+def _run_tests_result_envelope_json(
+    envelope: RunTestsResultEnvelope,
+) -> dict[str, str | int | None]:
+    if type(envelope) is not RunTestsResultEnvelope:
+        raise ValueError("run-tests result envelope is invalid")
+    actual_exit_code = envelope.actual_exit_code
+    failure_code = envelope.failure_code
+    completed = (
+        type(actual_exit_code) is int
+        and 0 <= actual_exit_code <= 255
+        and failure_code is None
+    )
+    failed = (
+        actual_exit_code is None
+        and type(failure_code) is str
+        and failure_code in {"OUTPUT_LIMIT", "TIMEOUT", "DISK_LIMIT"}
+    )
+    if not completed and not failed:
+        raise ValueError("run-tests result does not contain one closed outcome")
+    return {
+        "actual_exit_code": actual_exit_code,
+        "execution_contract_digest": _run_tests_digest(
+            envelope.execution_contract_digest
+        ),
+        "execution_id": _run_tests_digest(envelope.execution_id),
+        "failure_code": failure_code,
+        "schema_version": "openworkproof-run-result/0.1",
+        "stderr_bytes": _run_tests_safe_size(envelope.stderr_bytes),
+        "stderr_sha256": _run_tests_digest(envelope.stderr_sha256),
+        "stdout_bytes": _run_tests_safe_size(envelope.stdout_bytes),
+        "stdout_sha256": _run_tests_digest(envelope.stdout_sha256),
+    }
+
+
+def encode_run_tests_result_envelope(
+    envelope: RunTestsResultEnvelope,
+) -> bytes:
+    return rfc8785.dumps(_run_tests_result_envelope_json(envelope))
+
+
+def _decode_run_tests_json(
+    raw: bytes,
+    expected_keys: frozenset[str],
+) -> dict[str, Any]:
+    if (
+        type(raw) is not bytes
+        or not 1 <= len(raw) <= _MAX_RUN_TESTS_ENVELOPE_BYTES
+    ):
+        raise ValueError("run-tests envelope size is invalid")
+    try:
+        text = raw.decode("utf-8")
+
+        def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            value: dict[str, Any] = {}
+            for key, item in pairs:
+                if key in value:
+                    raise ValueError("run-tests envelope has duplicate keys")
+                value[key] = item
+            return value
+
+        def reject_constant(constant: str) -> None:
+            raise ValueError(f"invalid JSON constant: {constant}")
+
+        value = json.loads(
+            text,
+            object_pairs_hook=reject_duplicates,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError("run-tests envelope cannot be parsed") from error
+    if type(value) is not dict or frozenset(value) != expected_keys:
+        raise ValueError("run-tests envelope has invalid keys")
+    return value
+
+
+def decode_run_tests_execution_contract(raw: bytes) -> RunTestsExecutionContract:
+    value = _decode_run_tests_json(
+        raw,
+        frozenset(
+            {
+                "arguments_digest",
+                "candidate_commit",
+                "candidate_workspace_id",
+                "command_digest",
+                "container_image_digest",
+                "execution_id",
+                "fixed_test_source_digest",
+                "request_digest",
+                "schema_version",
+                "source_artifact_sha256",
+                "source_commit",
+                "test_mode",
+                "tool_name",
+                "workspace_manifest_digest",
+            }
+        ),
+    )
+    if (
+        value["schema_version"] != "openworkproof-run-contract/0.1"
+        or value["test_mode"] != "verifier"
+        or value["tool_name"] != "owp.run_tests"
+    ):
+        raise ValueError("run-tests execution contract constants are invalid")
+    contract = RunTestsExecutionContract(
+        execution_id=_run_tests_digest(value["execution_id"]),
+        request_digest=_run_tests_digest(value["request_digest"]),
+        arguments_digest=_run_tests_digest(value["arguments_digest"]),
+        candidate_workspace_id=_run_tests_digest(value["candidate_workspace_id"]),
+        source_artifact_sha256=_run_tests_digest(
+            value["source_artifact_sha256"]
+        ),
+        source_commit=_run_tests_oid(value["source_commit"]),
+        candidate_commit=_run_tests_oid(value["candidate_commit"]),
+        workspace_manifest_digest=_run_tests_digest(
+            value["workspace_manifest_digest"]
+        ),
+        container_image_digest=_run_tests_image_digest(
+            value["container_image_digest"]
+        ),
+        command_digest=_run_tests_digest(value["command_digest"]),
+        fixed_test_source_digest=_run_tests_digest(
+            value["fixed_test_source_digest"]
+        ),
+    )
+    if encode_run_tests_execution_contract(contract) != raw:
+        raise ValueError("run-tests execution contract is not canonical")
+    return contract
+
+
+def decode_run_tests_started_envelope(raw: bytes) -> RunTestsStartedEnvelope:
+    value = _decode_run_tests_json(
+        raw,
+        frozenset(
+            {
+                "execution_contract_digest",
+                "execution_id",
+                "schema_version",
+            }
+        ),
+    )
+    if value["schema_version"] != "openworkproof-run-started/0.1":
+        raise ValueError("run-tests started envelope schema is invalid")
+    envelope = RunTestsStartedEnvelope(
+        execution_id=_run_tests_digest(value["execution_id"]),
+        execution_contract_digest=_run_tests_digest(
+            value["execution_contract_digest"]
+        ),
+    )
+    if encode_run_tests_started_envelope(envelope) != raw:
+        raise ValueError("run-tests started envelope is not canonical")
+    return envelope
+
+
+def decode_run_tests_result_envelope(raw: bytes) -> RunTestsResultEnvelope:
+    value = _decode_run_tests_json(
+        raw,
+        frozenset(
+            {
+                "actual_exit_code",
+                "execution_contract_digest",
+                "execution_id",
+                "failure_code",
+                "schema_version",
+                "stderr_bytes",
+                "stderr_sha256",
+                "stdout_bytes",
+                "stdout_sha256",
+            }
+        ),
+    )
+    if value["schema_version"] != "openworkproof-run-result/0.1":
+        raise ValueError("run-tests result envelope schema is invalid")
+    try:
+        envelope = RunTestsResultEnvelope(
+            execution_id=_run_tests_digest(value["execution_id"]),
+            execution_contract_digest=_run_tests_digest(
+                value["execution_contract_digest"]
+            ),
+            actual_exit_code=value["actual_exit_code"],
+            failure_code=value["failure_code"],
+            stdout_bytes=_run_tests_safe_size(value["stdout_bytes"]),
+            stdout_sha256=_run_tests_digest(value["stdout_sha256"]),
+            stderr_bytes=_run_tests_safe_size(value["stderr_bytes"]),
+            stderr_sha256=_run_tests_digest(value["stderr_sha256"]),
+        )
+        _run_tests_result_envelope_json(envelope)
+    except ValueError as error:
+        raise ValueError("run-tests result envelope is invalid") from error
+    if encode_run_tests_result_envelope(envelope) != raw:
+        raise ValueError("run-tests result envelope is not canonical")
+    return envelope
 
 
 @dataclass(frozen=True, slots=True)

@@ -2053,6 +2053,284 @@ def test_validate_docker_execution_inspections_rejects_unsafe_profile(
         )
 
 
+def _run_tests_execution_contract() -> repo_tools.RunTestsExecutionContract:
+    return repo_tools.RunTestsExecutionContract(
+        execution_id="1" * 64,
+        request_digest="2" * 64,
+        arguments_digest="3" * 64,
+        candidate_workspace_id="4" * 64,
+        source_artifact_sha256="5" * 64,
+        source_commit="6" * 40,
+        candidate_commit="7" * 40,
+        workspace_manifest_digest="8" * 64,
+        container_image_digest="sha256:" + "9" * 64,
+        command_digest="a" * 64,
+        fixed_test_source_digest="b" * 64,
+    )
+
+
+def _run_tests_result_envelope() -> repo_tools.RunTestsResultEnvelope:
+    return repo_tools.RunTestsResultEnvelope(
+        execution_id="1" * 64,
+        execution_contract_digest="2" * 64,
+        actual_exit_code=0,
+        failure_code=None,
+        stdout_bytes=0,
+        stdout_sha256=hashlib.sha256(b"").hexdigest(),
+        stderr_bytes=0,
+        stderr_sha256=hashlib.sha256(b"").hexdigest(),
+    )
+
+
+def test_run_tests_execution_contract_round_trips_canonical_bytes() -> None:
+    contract = _run_tests_execution_contract()
+    encoded = repo_tools.encode_run_tests_execution_contract(contract)
+
+    assert encoded == rfc8785.dumps(
+        {
+            "arguments_digest": "3" * 64,
+            "candidate_commit": "7" * 40,
+            "candidate_workspace_id": "4" * 64,
+            "command_digest": "a" * 64,
+            "container_image_digest": "sha256:" + "9" * 64,
+            "execution_id": "1" * 64,
+            "fixed_test_source_digest": "b" * 64,
+            "request_digest": "2" * 64,
+            "schema_version": "openworkproof-run-contract/0.1",
+            "source_artifact_sha256": "5" * 64,
+            "source_commit": "6" * 40,
+            "test_mode": "verifier",
+            "tool_name": "owp.run_tests",
+            "workspace_manifest_digest": "8" * 64,
+        }
+    )
+    assert repo_tools.decode_run_tests_execution_contract(encoded) == contract
+
+
+def test_run_tests_started_and_result_round_trip_canonical_bytes() -> None:
+    started = repo_tools.RunTestsStartedEnvelope(
+        execution_id="1" * 64,
+        execution_contract_digest="2" * 64,
+    )
+    result = _run_tests_result_envelope()
+
+    assert repo_tools.decode_run_tests_started_envelope(
+        repo_tools.encode_run_tests_started_envelope(started)
+    ) == started
+    assert repo_tools.decode_run_tests_result_envelope(
+        repo_tools.encode_run_tests_result_envelope(result)
+    ) == result
+
+
+def test_run_tests_result_requires_one_closed_outcome() -> None:
+    with pytest.raises(ValueError, match="closed outcome"):
+        repo_tools.RunTestsResultEnvelope(
+            execution_id="1" * 64,
+            execution_contract_digest="2" * 64,
+            actual_exit_code=1,
+            failure_code="TIMEOUT",
+            stdout_bytes=0,
+            stdout_sha256=hashlib.sha256(b"").hexdigest(),
+            stderr_bytes=0,
+            stderr_sha256=hashlib.sha256(b"").hexdigest(),
+        )
+
+
+def test_frozen_verifier_command_digest_is_domain_separated() -> None:
+    assert repo_tools.FROZEN_VERIFIER_ARGV == (
+        "/opt/venv/bin/python",
+        "-I",
+        "-m",
+        "pytest",
+        "-q",
+    )
+    assert repo_tools.frozen_verifier_command_digest() == hashlib.sha256(
+        rfc8785.dumps(
+            {
+                "domain": "openworkproof/verifier-command/v0.1",
+                "argv": list(repo_tools.FROZEN_VERIFIER_ARGV),
+            }
+        )
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("decoder", "encoded"),
+    (
+        (
+            "decode_run_tests_execution_contract",
+            lambda: repo_tools.encode_run_tests_execution_contract(
+                _run_tests_execution_contract()
+            ),
+        ),
+        (
+            "decode_run_tests_started_envelope",
+            lambda: repo_tools.encode_run_tests_started_envelope(
+                repo_tools.RunTestsStartedEnvelope(
+                    execution_id="1" * 64,
+                    execution_contract_digest="2" * 64,
+                )
+            ),
+        ),
+        (
+            "decode_run_tests_result_envelope",
+            lambda: repo_tools.encode_run_tests_result_envelope(
+                _run_tests_result_envelope()
+            ),
+        ),
+    ),
+)
+@pytest.mark.parametrize(
+    "raw",
+    (
+        b"",
+        b" " * 8193,
+        b'\xef\xbb\xbf{}',
+    ),
+)
+def test_run_tests_decoders_reject_empty_oversize_and_bom(
+    decoder: str,
+    encoded: object,
+    raw: bytes,
+) -> None:
+    assert callable(encoded)
+    with pytest.raises(ValueError):
+        getattr(repo_tools, decoder)(raw)
+
+
+@pytest.mark.parametrize(
+    ("decoder", "encoded"),
+    (
+        (
+            "decode_run_tests_execution_contract",
+            lambda: repo_tools.encode_run_tests_execution_contract(
+                _run_tests_execution_contract()
+            ),
+        ),
+        (
+            "decode_run_tests_started_envelope",
+            lambda: repo_tools.encode_run_tests_started_envelope(
+                repo_tools.RunTestsStartedEnvelope(
+                    execution_id="1" * 64,
+                    execution_contract_digest="2" * 64,
+                )
+            ),
+        ),
+        (
+            "decode_run_tests_result_envelope",
+            lambda: repo_tools.encode_run_tests_result_envelope(
+                _run_tests_result_envelope()
+            ),
+        ),
+    ),
+)
+@pytest.mark.parametrize("mutation", ("duplicate", "unknown", "newline", "order"))
+def test_run_tests_decoders_reject_noncanonical_json(
+    decoder: str,
+    encoded: object,
+    mutation: str,
+) -> None:
+    assert callable(encoded)
+    raw = encoded()
+    value = json.loads(raw)
+    if mutation == "duplicate":
+        first_key = next(iter(value))
+        malformed = b'{"' + first_key.encode("ascii") + b'":null,' + raw[1:]
+    elif mutation == "unknown":
+        value["unknown"] = "value"
+        malformed = rfc8785.dumps(value)
+    elif mutation == "newline":
+        malformed = raw + b"\n"
+    else:
+        malformed = json.dumps(
+            {key: value[key] for key in reversed(tuple(value))},
+            separators=(",", ":"),
+        ).encode("ascii")
+        assert malformed != raw
+    with pytest.raises(ValueError):
+        getattr(repo_tools, decoder)(malformed)
+
+
+@pytest.mark.parametrize(
+    ("decoder", "encoded", "field", "value"),
+    (
+        (
+            "decode_run_tests_execution_contract",
+            lambda: repo_tools.encode_run_tests_execution_contract(
+                _run_tests_execution_contract()
+            ),
+            "execution_id",
+            1,
+        ),
+        (
+            "decode_run_tests_started_envelope",
+            lambda: repo_tools.encode_run_tests_started_envelope(
+                repo_tools.RunTestsStartedEnvelope(
+                    execution_id="1" * 64,
+                    execution_contract_digest="2" * 64,
+                )
+            ),
+            "execution_id",
+            True,
+        ),
+        (
+            "decode_run_tests_result_envelope",
+            lambda: repo_tools.encode_run_tests_result_envelope(
+                _run_tests_result_envelope()
+            ),
+            "stdout_bytes",
+            "0",
+        ),
+    ),
+)
+def test_run_tests_decoders_reject_wrong_scalar_types(
+    decoder: str,
+    encoded: object,
+    field: str,
+    value: object,
+) -> None:
+    assert callable(encoded)
+    decoded = json.loads(encoded())
+    decoded[field] = value
+    with pytest.raises(ValueError):
+        getattr(repo_tools, decoder)(rfc8785.dumps(decoded))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("test_mode", "developer"),
+        ("tool_name", "owp.rollback_patch"),
+    ),
+)
+def test_run_tests_execution_contract_decoder_rejects_other_mode_or_tool(
+    field: str,
+    value: str,
+) -> None:
+    encoded = repo_tools.encode_run_tests_execution_contract(
+        _run_tests_execution_contract()
+    )
+    decoded = json.loads(encoded)
+    decoded[field] = value
+
+    with pytest.raises(ValueError):
+        repo_tools.decode_run_tests_execution_contract(rfc8785.dumps(decoded))
+
+
+@pytest.mark.parametrize("exit_code", (-1, 256, True))
+def test_run_tests_result_decoder_rejects_invalid_exit_code(
+    exit_code: int | bool,
+) -> None:
+    encoded = repo_tools.encode_run_tests_result_envelope(
+        _run_tests_result_envelope()
+    )
+    decoded = json.loads(encoded)
+    decoded["actual_exit_code"] = exit_code
+
+    with pytest.raises(ValueError):
+        repo_tools.decode_run_tests_result_envelope(rfc8785.dumps(decoded))
+
+
 def test_classify_docker_execution_failure_preserves_existing_precedence(
 ) -> None:
     observed = repo_tools.DockerObservedResult(
