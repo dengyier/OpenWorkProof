@@ -2136,6 +2136,34 @@ def test_run_tests_result_requires_one_closed_outcome() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("actual_exit_code", "failure_code"),
+    (
+        (True, None),
+        (-1, None),
+        (256, None),
+        ("0", None),
+        (None, True),
+        (None, "OTHER"),
+    ),
+)
+def test_run_tests_result_constructor_rejects_invalid_closed_outcome_values(
+    actual_exit_code: int | str | bool | None,
+    failure_code: str | bool | None,
+) -> None:
+    with pytest.raises(ValueError, match="closed outcome"):
+        repo_tools.RunTestsResultEnvelope(
+            execution_id="1" * 64,
+            execution_contract_digest="2" * 64,
+            actual_exit_code=actual_exit_code,
+            failure_code=failure_code,
+            stdout_bytes=0,
+            stdout_sha256=hashlib.sha256(b"").hexdigest(),
+            stderr_bytes=0,
+            stderr_sha256=hashlib.sha256(b"").hexdigest(),
+        )
+
+
 def test_frozen_verifier_command_digest_is_domain_separated() -> None:
     assert repo_tools.FROZEN_VERIFIER_ARGV == (
         "/opt/venv/bin/python",

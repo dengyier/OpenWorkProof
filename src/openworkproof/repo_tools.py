@@ -631,9 +631,17 @@ class RunTestsResultEnvelope:
     stderr_sha256: str
 
     def __post_init__(self) -> None:
-        completed = self.actual_exit_code is not None and self.failure_code is None
-        failed = self.actual_exit_code is None and self.failure_code is not None
-        if completed == failed:
+        completed = (
+            type(self.actual_exit_code) is int
+            and 0 <= self.actual_exit_code <= 255
+            and self.failure_code is None
+        )
+        failed = (
+            self.actual_exit_code is None
+            and type(self.failure_code) is str
+            and self.failure_code in {"OUTPUT_LIMIT", "TIMEOUT", "DISK_LIMIT"}
+        )
+        if not completed and not failed:
             raise ValueError("run-tests result does not contain one closed outcome")
 
 
