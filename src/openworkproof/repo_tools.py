@@ -18,7 +18,7 @@ import stat
 import struct
 import subprocess
 import time
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Sequence, TypeVar
 import zlib
 
 import rfc8785
@@ -33,6 +33,9 @@ from openworkproof.models import (
     TestResultEvidence,
     WorkOrder,
 )
+
+
+_CheckpointOperationResult = TypeVar("_CheckpointOperationResult")
 
 
 _LOCAL_SIGNATURE = 0x04034B50
@@ -445,8 +448,8 @@ def _candidate_execution_snapshot_after_files_hook() -> None:
 
 def read_candidate_file(request: CandidateReadRequest) -> CandidateReadResult:
     workspace = _candidate_from_read_request(request)
-    checkpoint = _verify_candidate_checkpoint_read_only(workspace, request.path)
-    try:
+
+    def read(checkpoint: _VerifiedCandidateReadCheckpoint) -> CandidateReadResult:
         _candidate_read_checkpoint_hook()
         content = _read_verified_candidate_path(checkpoint, request.path)
         return CandidateReadResult(
@@ -460,8 +463,12 @@ def read_candidate_file(request: CandidateReadRequest) -> CandidateReadResult:
                 ),
             ),
         )
-    finally:
-        _close_candidate_read_checkpoint(checkpoint)
+
+    return _with_verified_candidate_checkpoint_read_only(
+        workspace,
+        request.path,
+        read,
+    )
 
 
 def prepare_candidate_execution_snapshot(
@@ -469,61 +476,69 @@ def prepare_candidate_execution_snapshot(
 ) -> CandidateExecutionSnapshot:
     """Capture exact candidate worktree bytes for one verifier execution."""
 
-    checkpoint: _VerifiedCandidateReadCheckpoint | None = None
     try:
         workspace = _candidate_from_execution_snapshot_request(request)
-        checkpoint = _verify_candidate_checkpoint_read_only(workspace, None)
-        checkpoint_manifest_digest = workspace_manifest_digest(
-            checkpoint.manifest
-        )
-        if (
-            checkpoint.manifest.head_commit
-            != request.expected_head_commit
-            or checkpoint_manifest_digest
-            != request.expected_workspace_manifest_digest
-            or not _candidate_read_semantic_authority_matches(
-                checkpoint,
-                workspace,
+
+        def capture(
+            checkpoint: _VerifiedCandidateReadCheckpoint,
+        ) -> CandidateExecutionSnapshot:
+            checkpoint_manifest_digest = workspace_manifest_digest(
+                checkpoint.manifest
             )
-        ):
-            raise CandidateReadError("RECOVERY_REQUIRED")
-        regular_entries = _candidate_execution_snapshot_regular_entries(
-            checkpoint.manifest
-        )
-        files = tuple(
-            _read_candidate_execution_snapshot_file(
-                checkpoint,
-                entry,
+            if (
+                checkpoint.manifest.head_commit
+                != request.expected_head_commit
+                or checkpoint_manifest_digest
+                != request.expected_workspace_manifest_digest
+                or not _candidate_read_semantic_authority_matches(
+                    checkpoint,
+                    workspace,
+                )
+            ):
+                raise CandidateReadError("RECOVERY_REQUIRED")
+            regular_entries = _candidate_execution_snapshot_regular_entries(
+                checkpoint.manifest
             )
-            for entry in regular_entries
-        )
-        _candidate_execution_snapshot_after_files_hook()
-        workspace_snapshot_before = _scan_candidate_workspace_identity(
-            checkpoint.worktree_descriptor
-        )
-        fresh_manifest = scan_workspace_manifest(
-            checkpoint.worktree_descriptor,
-            checkpoint.manifest.head_commit,
-        )
-        workspace_snapshot_after = _scan_candidate_workspace_identity(
-            checkpoint.worktree_descriptor
-        )
-        if (
-            workspace_snapshot_before != workspace_snapshot_after
-            or workspace_snapshot_after != checkpoint.workspace_snapshot
-            or workspace_manifest_digest(fresh_manifest)
-            != checkpoint_manifest_digest
-            or not _candidate_read_semantic_authority_matches(
-                checkpoint,
-                workspace,
+            files = tuple(
+                _read_candidate_execution_snapshot_file(
+                    checkpoint,
+                    entry,
+                )
+                for entry in regular_entries
             )
-        ):
-            raise CandidateReadError("RECOVERY_REQUIRED")
-        plan = derive_execution_snapshot_plan(checkpoint.manifest, files)
-        return CandidateExecutionSnapshot(
-            head_commit=checkpoint.manifest.head_commit,
-            workspace_manifest_digest=checkpoint_manifest_digest,
-            plan=plan,
+            _candidate_execution_snapshot_after_files_hook()
+            workspace_snapshot_before = _scan_candidate_workspace_identity(
+                checkpoint.worktree_descriptor
+            )
+            fresh_manifest = scan_workspace_manifest(
+                checkpoint.worktree_descriptor,
+                checkpoint.manifest.head_commit,
+            )
+            workspace_snapshot_after = _scan_candidate_workspace_identity(
+                checkpoint.worktree_descriptor
+            )
+            if (
+                workspace_snapshot_before != workspace_snapshot_after
+                or workspace_snapshot_after != checkpoint.workspace_snapshot
+                or workspace_manifest_digest(fresh_manifest)
+                != checkpoint_manifest_digest
+                or not _candidate_read_semantic_authority_matches(
+                    checkpoint,
+                    workspace,
+                )
+            ):
+                raise CandidateReadError("RECOVERY_REQUIRED")
+            plan = derive_execution_snapshot_plan(checkpoint.manifest, files)
+            return CandidateExecutionSnapshot(
+                head_commit=checkpoint.manifest.head_commit,
+                workspace_manifest_digest=checkpoint_manifest_digest,
+                plan=plan,
+            )
+
+        return _with_verified_candidate_checkpoint_read_only(
+            workspace,
+            None,
+            capture,
         )
     except (
         CandidateReadError,
@@ -532,9 +547,6 @@ def prepare_candidate_execution_snapshot(
         OSError,
     ) as error:
         raise CandidateReadError("RECOVERY_REQUIRED") from error
-    finally:
-        if checkpoint is not None:
-            _close_candidate_read_checkpoint(checkpoint)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2575,12 +2587,16 @@ def _candidate_from_request_binding(
     )
 
 
-def _verify_candidate_checkpoint_read_only(
+def _with_verified_candidate_checkpoint_read_only(
     workspace: CandidateWorkspace,
     path: str | None,
-) -> _VerifiedCandidateReadCheckpoint:
+    operation: Callable[
+        [_VerifiedCandidateReadCheckpoint],
+        _CheckpointOperationResult,
+    ],
+) -> _CheckpointOperationResult:
     descriptors: list[int] = []
-    ownership_transferred = False
+    verification_complete = False
     try:
         _validate_candidate_layout(workspace)
         nofollow = getattr(os, "O_NOFOLLOW", None)
@@ -2809,15 +2825,17 @@ def _verify_candidate_checkpoint_read_only(
             raise CandidateWorkspaceError(
                 "candidate Git checkpoint mismatches"
             )
-        ownership_transferred = True
-        return checkpoint
+        verification_complete = True
+        operation_result = operation(checkpoint)
+        return operation_result
     except CandidateReadError:
         raise
     except Exception as error:
+        if verification_complete:
+            raise
         raise CandidateReadError("RECOVERY_REQUIRED") from error
     finally:
-        if not ownership_transferred:
-            _close_candidate_read_descriptors(descriptors)
+        _close_candidate_read_descriptors(descriptors)
 
 
 def _candidate_read_anchor(
@@ -3347,14 +3365,6 @@ def _candidate_read_semantic_authority_matches(
         semantic_matches = False
     authority_matches_after = _candidate_read_authority_matches(checkpoint)
     return semantic_matches and authority_matches_after
-
-
-def _close_candidate_read_checkpoint(
-    checkpoint: _VerifiedCandidateReadCheckpoint,
-) -> None:
-    _close_candidate_read_descriptors(
-        [anchor.descriptor for anchor in checkpoint.anchors]
-    )
 
 
 def _close_candidate_read_descriptors(descriptors: Sequence[int]) -> None:

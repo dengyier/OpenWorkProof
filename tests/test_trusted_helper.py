@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from dataclasses import replace
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -1914,32 +1915,22 @@ def test_prepare_candidate_execution_snapshot_closes_every_fd_on_file_failure(
         b"base\n",
         source_path="nested/README.md",
     )
-    real_verify = repo_tools._verify_candidate_checkpoint_read_only
-    real_close = repo_tools._close_candidate_read_checkpoint
+    real_anchor = repo_tools._candidate_read_anchor
     real_open = repo_tools.os.open
     real_read_workspace_file = repo_tools._read_workspace_file
-    checkpoint_descriptors: tuple[int, ...] = ()
+    checkpoint_descriptors: list[int] = []
     file_descriptors: list[int] = []
     file_read_armed = False
-    close_calls = 0
 
-    def capture_checkpoint(*args, **kwargs):
-        nonlocal checkpoint_descriptors
-        checkpoint = real_verify(*args, **kwargs)
-        checkpoint_descriptors = tuple(
-            anchor.descriptor for anchor in checkpoint.anchors
-        )
-        return checkpoint
+    def capture_anchor(*args, **kwargs):
+        anchor = real_anchor(*args, **kwargs)
+        checkpoint_descriptors.append(anchor.descriptor)
+        return anchor
 
     def arm_file_failure(path: str) -> None:
         nonlocal file_read_armed
         assert path == "nested/README.md"
         file_read_armed = True
-
-    def capture_close(checkpoint) -> None:
-        nonlocal close_calls
-        close_calls += 1
-        real_close(checkpoint)
 
     def capture_open(path, flags, mode=0o777, *, dir_fd=None):
         descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
@@ -1954,24 +1945,18 @@ def test_prepare_candidate_execution_snapshot_closes_every_fd_on_file_failure(
 
     monkeypatch.setattr(
         repo_tools,
-        "_verify_candidate_checkpoint_read_only",
-        capture_checkpoint,
+        "_candidate_read_anchor",
+        capture_anchor,
     )
     monkeypatch.setattr(
         repo_tools,
         "_candidate_execution_snapshot_file_hook",
         arm_file_failure,
     )
-    monkeypatch.setattr(
-        repo_tools,
-        "_close_candidate_read_checkpoint",
-        capture_close,
-    )
     monkeypatch.setattr(repo_tools.os, "open", capture_open)
     monkeypatch.setattr(repo_tools, "_read_workspace_file", fail_file_read)
 
     _assert_snapshot_recovery(candidate)
-    assert close_calls == 1
     assert len(checkpoint_descriptors) == 5
     assert len(file_descriptors) == 2
     for descriptor in (*checkpoint_descriptors, *file_descriptors):
@@ -2050,6 +2035,62 @@ def test_prepare_candidate_execution_snapshot_closes_checkpoint_fds_on_base_exce
     assert raised.value.args == ("injected base exception",)
     assert len(captured_descriptors) == 5
     assert leaked_descriptors == []
+
+
+@pytest.mark.parametrize("failure_type", (KeyboardInterrupt, SystemExit))
+def test_snapshot_closes_checkpoint_fds_when_owner_return_is_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[BaseException],
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    real_anchor = repo_tools._candidate_read_anchor
+    captured_descriptors: list[int] = []
+    owner = repo_tools._with_verified_candidate_checkpoint_read_only
+    source_lines, first_line = inspect.getsourcelines(owner)
+    return_line = next(
+        first_line + offset
+        for offset, source_line in enumerate(source_lines)
+        if source_line.strip() == "return operation_result"
+    )
+    failure = failure_type("injected owner return interruption")
+
+    def capture_anchor(*args, **kwargs):
+        anchor = real_anchor(*args, **kwargs)
+        captured_descriptors.append(anchor.descriptor)
+        return anchor
+
+    def interrupt_owner_return(frame, event, unused_argument):
+        if (
+            event == "line"
+            and frame.f_code is owner.__code__
+            and frame.f_lineno == return_line
+        ):
+            raise failure
+        return interrupt_owner_return
+
+    monkeypatch.setattr(repo_tools, "_candidate_read_anchor", capture_anchor)
+
+    leaked_descriptors: list[int] = []
+    with pytest.raises(failure_type) as raised:
+        try:
+            sys.settrace(interrupt_owner_return)
+            repo_tools.prepare_candidate_execution_snapshot(
+                _snapshot_request(candidate)
+            )
+        finally:
+            sys.settrace(None)
+            for descriptor in captured_descriptors:
+                try:
+                    os.fstat(descriptor)
+                except OSError:
+                    continue
+                leaked_descriptors.append(descriptor)
+                os.close(descriptor)
+
+    assert len(captured_descriptors) == 5
+    assert leaked_descriptors == []
+    assert raised.value is failure
 
 
 @pytest.mark.parametrize(
@@ -2788,8 +2829,8 @@ def test_read_candidate_file_maps_post_read_manifest_scan_error(
 ) -> None:
     candidate = _candidate(tmp_path, b"base\n")
     real_scan = repo_tools.scan_workspace_manifest
-    real_close = repo_tools._close_candidate_read_checkpoint
-    closed_descriptors: tuple[int, ...] = ()
+    real_anchor = repo_tools._candidate_read_anchor
+    closed_descriptors: list[int] = []
     scan_calls = 0
 
     def fail_post_read_scan(
@@ -2802,14 +2843,10 @@ def test_read_candidate_file_maps_post_read_manifest_scan_error(
             raise repo_tools.ManifestError("post-read scan failed")
         return real_scan(root_fd, head_commit)
 
-    def observe_close(
-        checkpoint: repo_tools._VerifiedCandidateReadCheckpoint,
-    ) -> None:
-        nonlocal closed_descriptors
-        closed_descriptors = tuple(
-            anchor.descriptor for anchor in checkpoint.anchors
-        )
-        real_close(checkpoint)
+    def capture_anchor(*args, **kwargs):
+        anchor = real_anchor(*args, **kwargs)
+        closed_descriptors.append(anchor.descriptor)
+        return anchor
 
     monkeypatch.setattr(
         repo_tools,
@@ -2818,8 +2855,8 @@ def test_read_candidate_file_maps_post_read_manifest_scan_error(
     )
     monkeypatch.setattr(
         repo_tools,
-        "_close_candidate_read_checkpoint",
-        observe_close,
+        "_candidate_read_anchor",
+        capture_anchor,
     )
 
     with pytest.raises(repo_tools.CandidateReadError) as raised:
