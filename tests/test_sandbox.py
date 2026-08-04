@@ -2257,7 +2257,7 @@ def test_run_tests_contract_codec_rejects_malformed_image_digest(
     "invalid_size",
     (-1, True, 9_007_199_254_740_992),
 )
-def test_run_tests_result_codec_rejects_invalid_stream_sizes(
+def test_run_tests_result_encoder_rejects_invalid_stream_sizes(
     field: str,
     invalid_size: int | bool,
 ) -> None:
@@ -2267,10 +2267,38 @@ def test_run_tests_result_codec_rejects_invalid_stream_sizes(
             replace(result, **{field: invalid_size})
         )
 
+
+@pytest.mark.parametrize("field", ("stdout_bytes", "stderr_bytes"))
+@pytest.mark.parametrize(
+    "invalid_size",
+    (-1, True, 9_007_199_254_740_992),
+)
+def test_run_tests_result_decoder_rejects_invalid_stream_sizes(
+    field: str,
+    invalid_size: int | bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _run_tests_result_envelope()
     value = json.loads(repo_tools.encode_run_tests_result_envelope(result))
     value[field] = invalid_size
+    raw = (
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+        if invalid_size == 9_007_199_254_740_992
+        else rfc8785.dumps(value)
+    )
+    if invalid_size == 9_007_199_254_740_992:
+        monkeypatch.setattr(
+            repo_tools,
+            "encode_run_tests_result_envelope",
+            lambda envelope: raw,
+        )
     with pytest.raises(ValueError):
-        repo_tools.decode_run_tests_result_envelope(rfc8785.dumps(value))
+        repo_tools.decode_run_tests_result_envelope(raw)
 
 
 @pytest.mark.parametrize(
