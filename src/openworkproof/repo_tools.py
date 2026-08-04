@@ -2291,6 +2291,8 @@ def _run_git_read_only(
             "core.filemode=true",
             "-c",
             "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
         )
     )
     command.extend(arguments)

@@ -1906,6 +1906,102 @@ def test_prepare_candidate_execution_snapshot_reruns_git_semantics_after_files(
     ]
 
 
+def test_prepare_candidate_execution_snapshot_disables_candidate_fsmonitor(
+    tmp_path: Path,
+) -> None:
+    content = b"base\n"
+    candidate = _candidate(tmp_path, content)
+    fsmonitor = tmp_path / "candidate-fsmonitor"
+    marker = tmp_path / "fsmonitor-marker"
+    fsmonitor.write_bytes(
+        b'#!/bin/sh\n: > "${0%/*}/fsmonitor-marker"\n'
+    )
+    fsmonitor.chmod(0o700)
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            f"--git-dir={candidate.git_dir}",
+            "config",
+            "core.fsmonitor",
+            str(fsmonitor),
+        ],
+        check=True,
+        capture_output=True,
+        env={
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "LC_ALL": "C",
+            "PATH": "/usr/bin:/bin",
+        },
+    )
+
+    result = repo_tools.prepare_candidate_execution_snapshot(
+        _snapshot_request(candidate)
+    )
+
+    assert result.plan.files == (
+        repo_tools.SourceFile("README.md", "100644", content),
+    )
+    assert not marker.exists()
+
+
+def test_prepare_candidate_execution_snapshot_disables_candidate_external_diff(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    external_diff = tmp_path / "candidate-external-diff"
+    marker = tmp_path / "external-diff-marker"
+    external_diff.write_bytes(
+        b'#!/bin/sh\n: > "${0%/*}/external-diff-marker"\nexit 0\n'
+    )
+    external_diff.chmod(0o700)
+    git_environment = {
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+    }
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            f"--git-dir={candidate.git_dir}",
+            f"--work-tree={candidate.worktree}",
+            "update-index",
+            "--chmod=+x",
+            "README.md",
+        ],
+        check=True,
+        capture_output=True,
+        env=git_environment,
+    )
+    for key, value in (
+        ("diff.external", str(external_diff)),
+        ("diff.trustExitCode", "true"),
+    ):
+        subprocess.run(
+            [
+                "/usr/bin/git",
+                f"--git-dir={candidate.git_dir}",
+                "config",
+                key,
+                value,
+            ],
+            check=True,
+            capture_output=True,
+            env=git_environment,
+        )
+
+    error_code = None
+    try:
+        repo_tools.prepare_candidate_execution_snapshot(
+            _snapshot_request(candidate)
+        )
+    except repo_tools.CandidateReadError as error:
+        error_code = error.code
+
+    assert (error_code, marker.exists()) == ("RECOVERY_REQUIRED", False)
+
+
 def test_prepare_candidate_execution_snapshot_closes_every_fd_on_file_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3316,15 +3412,17 @@ def test_read_candidate_file_uses_only_frozen_read_only_git_calls(
     for command, kwargs in observed:
         assert command[0] == "/usr/bin/git"
         config_index = command.index("-c")
-        assert command[config_index : config_index + 6] == [
+        assert command[config_index : config_index + 8] == [
             "-c",
             "core.autocrlf=false",
             "-c",
             "core.filemode=true",
             "-c",
             "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
         ]
-        observed_arguments.append(tuple(command[config_index + 6 :]))
+        observed_arguments.append(tuple(command[config_index + 8 :]))
         assert kwargs["env"] == expected_environment
         assert kwargs["timeout"] == 30
         assert kwargs["check"] is False
