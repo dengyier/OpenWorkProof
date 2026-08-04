@@ -159,6 +159,28 @@ def _load_candidate_inventory(inventory_path: Path) -> dict[str, object]:
         assert build_inputs[group][key] == hashlib.sha256(
             _git_bytes(revision, relative_path)
         ).hexdigest()
+    try:
+        source_paths = _git_bytes(
+            revision,
+            "supply-chain/images/trusted-helper/SOURCE_ALLOWLIST",
+        ).decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise AssertionError("helper source allowlist must be UTF-8") from error
+    assert source_paths and all(source_paths)
+    helper_source_sums = b"".join(
+        (
+            hashlib.sha256(_git_bytes(revision, relative_path)).hexdigest()
+            + "  "
+            + Path(relative_path).name
+            + "\n"
+        ).encode("utf-8")
+        for relative_path in source_paths
+    )
+    assert build_inputs["trusted_helper"][
+        "helper_src_sha256sums_sha256"
+    ] == hashlib.sha256(helper_source_sums).hexdigest(), (
+        "helper source manifest must derive from revision blobs"
+    )
 
     images = _assert_exact_keys(
         inventory["images"], {"execution", "trusted_helper"}, "images"
@@ -660,6 +682,18 @@ def test_inventory_loader_rejects_bool_as_integer_alias(tmp_path: Path) -> None:
     inventory["claims"]["day0_pass"] = 0
 
     with pytest.raises(AssertionError, match="bool"):
+        _load_candidate_inventory(_write_inventory(tmp_path, inventory))
+
+
+def test_inventory_loader_rejects_helper_source_manifest_not_derived_from_revision(
+    tmp_path: Path,
+) -> None:
+    inventory = copy.deepcopy(_load_candidate_inventory(CANDIDATE_PATHS[-1]))
+    inventory["build_inputs"]["trusted_helper"][
+        "helper_src_sha256sums_sha256"
+    ] = "f" * 64
+
+    with pytest.raises(AssertionError, match="helper source"):
         _load_candidate_inventory(_write_inventory(tmp_path, inventory))
 
 

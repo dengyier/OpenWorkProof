@@ -35,7 +35,14 @@ ALL_TRACKED_DEFINITION_PATHS = (
     "supply-chain/images/trusted-helper/debian-packages.lock",
     "supply-chain/images/trusted-helper/SOURCE_ALLOWLIST",
 )
-CURRENT_DEFINITION_PATHS = ALL_TRACKED_DEFINITION_PATHS
+HELPER_SOURCE_PATHS = tuple(
+    line
+    for line in (
+        IMAGE_ROOT / "trusted-helper" / "SOURCE_ALLOWLIST"
+    ).read_text(encoding="utf-8").splitlines()
+    if line
+)
+CURRENT_DEFINITION_PATHS = ALL_TRACKED_DEFINITION_PATHS + HELPER_SOURCE_PATHS
 REQUEST_INVALID_RESPONSE = (
     '{"code":"REQUEST_INVALID","schema_version":'
     '"openworkproof-trusted-helper-response/0.1","status":"error"}'
@@ -361,10 +368,13 @@ def _select_inventory_for_definition(
         inventory = loaded
         revision = inventory["source_revision"]
         assert isinstance(revision, str)
-        revision_definition = {
-            relative_path: _git_bytes(revision, relative_path)
-            for relative_path in CURRENT_DEFINITION_PATHS
-        }
+        try:
+            revision_definition = {
+                relative_path: _git_bytes(revision, relative_path)
+                for relative_path in CURRENT_DEFINITION_PATHS
+            }
+        except subprocess.CalledProcessError:
+            continue
         if revision_definition == dict(definition):
             matches.append((path, inventory))
     assert len(matches) == 1, (
@@ -1709,15 +1719,22 @@ def test_current_candidate_inventory_is_selected_by_tracked_definition() -> None
     assert path.name == f"{inventory['source_revision']}.json"
 
 
+def test_current_candidate_selector_chooses_full_workspace_source_revision() -> None:
+    _, inventory = _select_current_inventory()
+
+    assert inventory["source_revision"] == (
+        "4460abf3615252077bd37f182c8b69acf5c9da70"
+    )
+
+
 def test_candidate_inventory_selector_rejects_zero_matches() -> None:
     with pytest.raises(AssertionError, match="matched 0"):
         _select_inventory_for_definition([], {})
 
 
 def test_candidate_inventory_selector_rejects_multiple_matches() -> None:
-    historical_path = sorted(INVENTORY_ROOT.glob("*.json"))[0]
-    historical = _load_candidate_inventory(historical_path)
-    revision = historical["source_revision"]
+    current_path, current = _select_current_inventory()
+    revision = current["source_revision"]
     definition = {
         relative_path: _git_bytes(revision, relative_path)
         for relative_path in CURRENT_DEFINITION_PATHS
@@ -1725,29 +1742,42 @@ def test_candidate_inventory_selector_rejects_multiple_matches() -> None:
 
     with pytest.raises(AssertionError, match="matched 2"):
         _select_inventory_for_definition(
-            [(historical_path, historical), (historical_path, historical)],
+            [(current_path, current), (current_path, current)],
             definition,
         )
 
 
 def test_candidate_inventory_selector_covers_every_tracked_definition() -> None:
-    assert CURRENT_DEFINITION_PATHS == ALL_TRACKED_DEFINITION_PATHS
+    allowlist = tuple(
+        line
+        for line in (
+            ROOT / "supply-chain/images/trusted-helper/SOURCE_ALLOWLIST"
+        ).read_text(encoding="utf-8").splitlines()
+        if line
+    )
+    assert allowlist == (
+        "src/openworkproof/__init__.py",
+        "src/openworkproof/models.py",
+        "src/openworkproof/repo_tools.py",
+        "src/openworkproof/trusted_helper.py",
+    )
+    assert CURRENT_DEFINITION_PATHS == ALL_TRACKED_DEFINITION_PATHS + allowlist
 
 
-def test_candidate_inventory_selector_rejects_head_revision_alias(
+def test_candidate_inventory_selector_rejects_other_revision_alias(
     tmp_path: Path,
 ) -> None:
-    current_path, current = _select_current_inventory()
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
+    _, current = _select_current_inventory()
+    alias_revision = subprocess.run(
+        ["git", "rev-parse", f"{current['source_revision']}^"],
         cwd=ROOT,
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
     mutated = copy.deepcopy(current)
-    mutated["source_revision"] = head
-    path = tmp_path / f"{head}.json"
+    mutated["source_revision"] = alias_revision
+    path = tmp_path / f"{alias_revision}.json"
     path.write_text(json.dumps(mutated), encoding="utf-8")
     definition = {
         relative_path: (ROOT / relative_path).read_bytes()
@@ -1758,7 +1788,7 @@ def test_candidate_inventory_selector_rejects_head_revision_alias(
         _select_inventory_for_definition([(path, mutated)], definition)
 
 
-@pytest.mark.parametrize("relative_path", ALL_TRACKED_DEFINITION_PATHS)
+@pytest.mark.parametrize("relative_path", CURRENT_DEFINITION_PATHS)
 def test_candidate_inventory_selector_rejects_each_tracked_definition_mutation(
     relative_path: str,
 ) -> None:
@@ -1768,7 +1798,7 @@ def test_candidate_inventory_selector_rejects_each_tracked_definition_mutation(
     ]
     definition = {
         tracked_path: (ROOT / tracked_path).read_bytes()
-        for tracked_path in ALL_TRACKED_DEFINITION_PATHS
+        for tracked_path in CURRENT_DEFINITION_PATHS
     }
     definition[relative_path] += b"\nmutation"
 
