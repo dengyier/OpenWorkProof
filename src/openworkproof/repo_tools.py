@@ -4755,6 +4755,12 @@ def reconcile_run_tests_docker_execution(
 
     if not ever_started:
         return "UNRESOLVED"
+    if (
+        observation.staging_container is not None
+        or observation.workspace_volume is None
+        or observation.output_volume is None
+    ):
+        return "UNRESOLVED"
     if status in {"running", "paused", "restarting"}:
         if result is not None:
             return "UNRESOLVED"

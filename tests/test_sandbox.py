@@ -1633,7 +1633,7 @@ def test_reconcile_run_tests_cleans_every_owned_reserved_partial_position(
             lambda b: _run_tests_observation(
                 b, status="running", ever_started=True
             ),
-            "WAIT_RUNNING",
+            "UNRESOLVED",
         ),
         (
             lambda b: _run_tests_observation(
@@ -1644,7 +1644,7 @@ def test_reconcile_run_tests_cleans_every_owned_reserved_partial_position(
                 result=_run_tests_result(b),
                 staging=True,
             ),
-            "RESUME_RESULT",
+            "UNRESOLVED",
         ),
         (
             lambda b: _run_tests_observation(
@@ -1670,6 +1670,84 @@ def test_reconcile_run_tests_partial_started_evidence_uses_started_rules(
         expected_execution_contract_digest="c" * 64,
         receipt_state="ABSENT",
     ) == expected
+
+
+@pytest.mark.parametrize(
+    ("staging", "workspace", "output"),
+    (
+        (False, False, False),
+        (False, True, False),
+        (False, False, True),
+        (True, False, False),
+        (True, True, False),
+        (True, False, True),
+        (True, True, True),
+    ),
+)
+def test_reconcile_run_tests_exited_result_requires_complete_resources(
+    staging: bool,
+    workspace: bool,
+    output: bool,
+) -> None:
+    binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
+
+    assert repo_tools.reconcile_run_tests_docker_execution(
+        "STARTED_UNCONFIRMED",
+        binding,
+        _run_tests_observation(
+            binding,
+            status="exited",
+            ever_started=True,
+            started=_run_tests_started(binding),
+            result=_run_tests_result(binding),
+            staging=staging,
+            workspace=workspace,
+            output=output,
+        ),
+        expected_execution_contract_digest="c" * 64,
+        receipt_state="ABSENT",
+    ) == "UNRESOLVED"
+
+
+def test_reconcile_run_tests_exited_result_resumes_with_complete_resources(
+) -> None:
+    binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
+
+    assert repo_tools.reconcile_run_tests_docker_execution(
+        "STARTED_UNCONFIRMED",
+        binding,
+        _run_tests_observation(
+            binding,
+            status="exited",
+            ever_started=True,
+            started=_run_tests_started(binding),
+            result=_run_tests_result(binding),
+            workspace=True,
+            output=True,
+        ),
+        expected_execution_contract_digest="c" * 64,
+        receipt_state="ABSENT",
+    ) == "RESUME_RESULT"
+
+
+@pytest.mark.parametrize("status", ("running", "paused", "restarting"))
+def test_reconcile_run_tests_active_partial_resources_fail_closed(
+    status: str,
+) -> None:
+    binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
+
+    assert repo_tools.reconcile_run_tests_docker_execution(
+        "STARTED_UNCONFIRMED",
+        binding,
+        _run_tests_observation(
+            binding,
+            status=status,
+            ever_started=True,
+            workspace=True,
+        ),
+        expected_execution_contract_digest="c" * 64,
+        receipt_state="ABSENT",
+    ) == "UNRESOLVED"
 
 
 @pytest.mark.parametrize(
