@@ -1682,13 +1682,70 @@ def test_prepare_candidate_execution_snapshot_rejects_fifo(
 
 def test_prepare_candidate_execution_snapshot_rejects_oversize_regular_file(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    files = (
+        repo_tools.SourceFile(
+            "README.md",
+            "100644",
+            b"x" * (1_048_576 + 1),
+        ),
+    )
     candidate = _candidate(tmp_path, b"base\n")
-    (candidate.worktree / "README.md").write_bytes(
-        b"x" * (1_048_576 + 1)
+    records = repo_tools._workspace_records_for_files(files)
+    scanned_manifests: list[repo_tools.WorkspaceManifest] = []
+
+    def build_oversize_manifest(
+        unused_root_fd: int,
+        head_commit: str,
+    ) -> repo_tools.WorkspaceManifest:
+        manifest = repo_tools.build_workspace_manifest(head_commit, records)
+        scanned_manifests.append(manifest)
+        return manifest
+
+    monkeypatch.setattr(
+        repo_tools,
+        "scan_workspace_manifest",
+        build_oversize_manifest,
+    )
+    candidate = _rebound_snapshot_candidate(
+        candidate,
+        files,
+    )
+    manifest = repo_tools.build_workspace_manifest(
+        candidate.head_commit,
+        records,
+    )
+    gate_calls: list[repo_tools.WorkspaceManifest] = []
+    gate_returns: list[tuple[repo_tools.WorkspaceManifestEntry, ...]] = []
+    file_hook_calls: list[str] = []
+    real_gate = repo_tools._candidate_execution_snapshot_regular_entries
+
+    def observe_gate(
+        candidate_manifest: repo_tools.WorkspaceManifest,
+    ) -> tuple[repo_tools.WorkspaceManifestEntry, ...]:
+        gate_calls.append(candidate_manifest)
+        entries = real_gate(candidate_manifest)
+        gate_returns.append(entries)
+        return entries
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_regular_entries",
+        observe_gate,
+    )
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_file_hook",
+        file_hook_calls.append,
     )
 
     _assert_snapshot_recovery(candidate)
+
+    assert scanned_manifests == [manifest, manifest]
+    assert gate_calls == [manifest]
+    assert gate_returns == []
+    assert file_hook_calls == []
 
 
 def test_prepare_candidate_execution_snapshot_rejects_wrong_source_digest(
