@@ -829,6 +829,7 @@ RunTestsRecoveryAction = Literal[
     "CLEAN_COMMITTED",
     "UNRESOLVED",
 ]
+RunTestsReceiptState = Literal["ABSENT", "MATCH", "MISMATCH"]
 
 
 FROZEN_VERIFIER_ARGV = (
@@ -4560,6 +4561,8 @@ def _run_tests_resource_observation_matches(
 def _run_tests_container_observation_matches(
     observation: object,
     binding: RunTestsDockerBinding,
+    *,
+    expected_execution_contract_digest: str,
 ) -> bool:
     return (
         type(observation) is dict
@@ -4583,6 +4586,8 @@ def _run_tests_container_observation_matches(
             observation["execution_contract_digest"]
         )
         is not None
+        and observation.get("execution_contract_digest")
+        == expected_execution_contract_digest
         and type(observation.get("status")) is str
         and observation.get("status")
         in {"created", "running", "paused", "restarting", "dead", "exited"}
@@ -4633,7 +4638,9 @@ def reconcile_run_tests_docker_execution(
     journal_state: Literal["RESERVED", "STARTED_UNCONFIRMED"],
     binding: RunTestsDockerBinding,
     observation: RunTestsDockerObservation,
-    receipt_matches: bool,
+    *,
+    expected_execution_contract_digest: str,
+    receipt_state: RunTestsReceiptState,
 ) -> RunTestsRecoveryAction:
     """Reduce closed Docker observations to one side-effect-free action."""
 
@@ -4649,7 +4656,17 @@ def reconcile_run_tests_docker_execution(
         raise ValueError("run-tests Docker binding is invalid")
     if type(observation) is not RunTestsDockerObservation:
         raise ValueError("run-tests Docker observation is invalid")
-    if type(receipt_matches) is not bool:
+    if (
+        type(expected_execution_contract_digest) is not str
+        or _DIGEST_PATTERN.fullmatch(expected_execution_contract_digest)
+        is None
+    ):
+        raise ValueError("run-tests execution contract digest is invalid")
+    if type(receipt_state) is not str or receipt_state not in {
+        "ABSENT",
+        "MATCH",
+        "MISMATCH",
+    }:
         raise ValueError("run-tests Receipt observation is invalid")
 
     resources = (
@@ -4683,7 +4700,13 @@ def reconcile_run_tests_docker_execution(
     ):
         return "UNRESOLVED"
     if observation.container is not None and not (
-        _run_tests_container_observation_matches(observation.container, binding)
+        _run_tests_container_observation_matches(
+            observation.container,
+            binding,
+            expected_execution_contract_digest=(
+                expected_execution_contract_digest
+            ),
+        )
     ):
         return "UNRESOLVED"
 
@@ -4691,7 +4714,9 @@ def reconcile_run_tests_docker_execution(
     if container is None:
         if observation.started is not None or observation.result is not None:
             return "UNRESOLVED"
-        if receipt_matches:
+        if receipt_state == "MISMATCH":
+            return "UNRESOLVED"
+        if receipt_state == "MATCH":
             return "CLEAN_COMMITTED"
         if journal_state == "STARTED_UNCONFIRMED":
             return "UNRESOLVED"
@@ -4699,29 +4724,21 @@ def reconcile_run_tests_docker_execution(
             return "SAFE_TO_RETRY"
         return "CLEAN_PRESTART"
 
-    if (
-        observation.workspace_volume is None
-        or observation.output_volume is None
-        or observation.staging_container is not None
-    ):
-        return "UNRESOLVED"
-
     status = container["status"]
     ever_started = container["ever_started"]
-    contract_digest = container["execution_contract_digest"]
     started = observation.started
     result = observation.result
 
     if started is not None and not _valid_run_tests_started_observation(
         started,
         execution_id=binding.execution_id,
-        contract_digest=contract_digest,
+        contract_digest=expected_execution_contract_digest,
     ):
         return "UNRESOLVED"
     if result is not None and not _valid_run_tests_result_observation(
         result,
         execution_id=binding.execution_id,
-        contract_digest=contract_digest,
+        contract_digest=expected_execution_contract_digest,
     ):
         return "UNRESOLVED"
     if result is not None and started is None:
@@ -4730,7 +4747,9 @@ def reconcile_run_tests_docker_execution(
     if status == "created":
         if ever_started or started is not None or result is not None:
             return "UNRESOLVED"
-        if receipt_matches:
+        if receipt_state == "MISMATCH":
+            return "UNRESOLVED"
+        if receipt_state == "MATCH":
             return "CLEAN_COMMITTED"
         return "CLEAN_PRESTART"
 
@@ -4739,14 +4758,20 @@ def reconcile_run_tests_docker_execution(
     if status in {"running", "paused", "restarting"}:
         if result is not None:
             return "UNRESOLVED"
-        if receipt_matches:
+        if receipt_state == "MISMATCH":
+            return "UNRESOLVED"
+        if receipt_state == "MATCH":
             return "CLEAN_COMMITTED"
         return "WAIT_RUNNING"
     if status == "dead":
-        if receipt_matches:
+        if receipt_state == "MISMATCH":
+            return "UNRESOLVED"
+        if receipt_state == "MATCH":
             return "CLEAN_COMMITTED"
         return "UNRESOLVED"
-    if receipt_matches:
+    if receipt_state == "MISMATCH":
+        return "UNRESOLVED"
+    if receipt_state == "MATCH":
         return "CLEAN_COMMITTED"
     if started is not None and result is not None:
         return "RESUME_RESULT"

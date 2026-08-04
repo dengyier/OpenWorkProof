@@ -1312,6 +1312,7 @@ def _run_tests_observation(
     *,
     status: str | None = None,
     ever_started: bool = False,
+    contract_digest: str = "c" * 64,
     started: repo_tools.RunTestsStartedEnvelope | None = None,
     result: repo_tools.RunTestsResultEnvelope | object | None = None,
     staging: bool = False,
@@ -1332,6 +1333,7 @@ def _run_tests_observation(
                 binding,
                 status=status,
                 ever_started=ever_started,
+                contract_digest=contract_digest,
             )
             if status is not None
             else None
@@ -1388,13 +1390,18 @@ def test_derive_run_tests_docker_binding_rejects_invalid_execution_id(
 
 
 @pytest.mark.parametrize(
-    ("journal_state", "observation_factory", "receipt_matches", "expected"),
+    ("journal_state", "observation_factory", "receipt_state", "expected"),
     (
-        ("RESERVED", lambda b: _run_tests_observation(b), False, "SAFE_TO_RETRY"),
+        (
+            "RESERVED",
+            lambda b: _run_tests_observation(b),
+            "ABSENT",
+            "SAFE_TO_RETRY",
+        ),
         (
             "RESERVED",
             lambda b: _run_tests_observation(b, staging=True, workspace=True),
-            False,
+            "ABSENT",
             "CLEAN_PRESTART",
         ),
         (
@@ -1402,7 +1409,7 @@ def test_derive_run_tests_docker_binding_rejects_invalid_execution_id(
             lambda b: _run_tests_observation(
                 b, status="created", workspace=True, output=True
             ),
-            False,
+            "ABSENT",
             "CLEAN_PRESTART",
         ),
         (
@@ -1410,7 +1417,7 @@ def test_derive_run_tests_docker_binding_rejects_invalid_execution_id(
             lambda b: _run_tests_observation(
                 b, status="created", workspace=True, output=True
             ),
-            False,
+            "ABSENT",
             "CLEAN_PRESTART",
         ),
         (
@@ -1422,7 +1429,7 @@ def test_derive_run_tests_docker_binding_rejects_invalid_execution_id(
                 workspace=True,
                 output=True,
             ),
-            False,
+            "ABSENT",
             "WAIT_RUNNING",
         ),
         (
@@ -1435,7 +1442,7 @@ def test_derive_run_tests_docker_binding_rejects_invalid_execution_id(
                 workspace=True,
                 output=True,
             ),
-            False,
+            "ABSENT",
             "WAIT_RUNNING",
         ),
         (
@@ -1448,7 +1455,7 @@ def test_derive_run_tests_docker_binding_rejects_invalid_execution_id(
                 workspace=True,
                 output=True,
             ),
-            False,
+            "ABSENT",
             "WAIT_RUNNING",
         ),
         (
@@ -1461,7 +1468,7 @@ def test_derive_run_tests_docker_binding_rejects_invalid_execution_id(
                 workspace=True,
                 output=True,
             ),
-            False,
+            "ABSENT",
             "UNRESOLVED",
         ),
         (
@@ -1475,7 +1482,7 @@ def test_derive_run_tests_docker_binding_rejects_invalid_execution_id(
                 workspace=True,
                 output=True,
             ),
-            False,
+            "ABSENT",
             "RESUME_RESULT",
         ),
         (
@@ -1489,7 +1496,7 @@ def test_derive_run_tests_docker_binding_rejects_invalid_execution_id(
                 workspace=True,
                 output=True,
             ),
-            False,
+            "ABSENT",
             "RESUME_RESULT",
         ),
         (
@@ -1502,7 +1509,7 @@ def test_derive_run_tests_docker_binding_rejects_invalid_execution_id(
                 workspace=True,
                 output=True,
             ),
-            False,
+            "ABSENT",
             "UNRESOLVED",
         ),
         (
@@ -1516,7 +1523,7 @@ def test_derive_run_tests_docker_binding_rejects_invalid_execution_id(
                 workspace=True,
                 output=True,
             ),
-            False,
+            "ABSENT",
             "UNRESOLVED",
         ),
         (
@@ -1525,12 +1532,13 @@ def test_derive_run_tests_docker_binding_rejects_invalid_execution_id(
                 b,
                 status="exited",
                 ever_started=True,
+                contract_digest="d" * 64,
                 started=_run_tests_started(b, contract_digest="d" * 64),
                 result=_run_tests_result(b, contract_digest="d" * 64),
                 workspace=True,
                 output=True,
             ),
-            False,
+            "ABSENT",
             "UNRESOLVED",
         ),
         (
@@ -1544,13 +1552,13 @@ def test_derive_run_tests_docker_binding_rejects_invalid_execution_id(
                 workspace=True,
                 output=True,
             ),
-            True,
+            "MATCH",
             "CLEAN_COMMITTED",
         ),
         (
             "RESERVED",
             lambda b: _run_tests_observation(b),
-            True,
+            "MATCH",
             "CLEAN_COMMITTED",
         ),
     ),
@@ -1558,7 +1566,7 @@ def test_derive_run_tests_docker_binding_rejects_invalid_execution_id(
 def test_reconcile_run_tests_returns_exact_pure_state_table_action(
     journal_state: str,
     observation_factory: object,
-    receipt_matches: bool,
+    receipt_state: str,
     expected: str,
 ) -> None:
     binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
@@ -1568,7 +1576,8 @@ def test_reconcile_run_tests_returns_exact_pure_state_table_action(
         journal_state,
         binding,
         observation,
-        receipt_matches=receipt_matches,
+        expected_execution_contract_digest="c" * 64,
+        receipt_state=receipt_state,
     )
 
     assert action == expected
@@ -1581,6 +1590,129 @@ def test_reconcile_run_tests_returns_exact_pure_state_table_action(
         "UNRESOLVED",
     }
     assert not hasattr(action, "commands")
+
+
+@pytest.mark.parametrize(
+    "observation_factory",
+    (
+        lambda b: _run_tests_observation(b, staging=True),
+        lambda b: _run_tests_observation(b, workspace=True),
+        lambda b: _run_tests_observation(b, output=True),
+        lambda b: _run_tests_observation(b, status="created"),
+        lambda b: _run_tests_observation(
+            b, status="created", workspace=True
+        ),
+        lambda b: _run_tests_observation(b, status="created", output=True),
+        lambda b: _run_tests_observation(
+            b,
+            status="created",
+            staging=True,
+            workspace=True,
+            output=True,
+        ),
+    ),
+)
+def test_reconcile_run_tests_cleans_every_owned_reserved_partial_position(
+    observation_factory: object,
+) -> None:
+    binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
+
+    assert repo_tools.reconcile_run_tests_docker_execution(
+        "RESERVED",
+        binding,
+        observation_factory(binding),
+        expected_execution_contract_digest="c" * 64,
+        receipt_state="ABSENT",
+    ) == "CLEAN_PRESTART"
+
+
+@pytest.mark.parametrize(
+    ("observation_factory", "expected"),
+    (
+        (
+            lambda b: _run_tests_observation(
+                b, status="running", ever_started=True
+            ),
+            "WAIT_RUNNING",
+        ),
+        (
+            lambda b: _run_tests_observation(
+                b,
+                status="exited",
+                ever_started=True,
+                started=_run_tests_started(b),
+                result=_run_tests_result(b),
+                staging=True,
+            ),
+            "RESUME_RESULT",
+        ),
+        (
+            lambda b: _run_tests_observation(
+                b,
+                status="created",
+                started=_run_tests_started(b),
+                staging=True,
+            ),
+            "UNRESOLVED",
+        ),
+    ),
+)
+def test_reconcile_run_tests_partial_started_evidence_uses_started_rules(
+    observation_factory: object,
+    expected: str,
+) -> None:
+    binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
+
+    assert repo_tools.reconcile_run_tests_docker_execution(
+        "RESERVED",
+        binding,
+        observation_factory(binding),
+        expected_execution_contract_digest="c" * 64,
+        receipt_state="ABSENT",
+    ) == expected
+
+
+@pytest.mark.parametrize(
+    ("receipt_state", "expected"),
+    (
+        ("ABSENT", "SAFE_TO_RETRY"),
+        ("MATCH", "CLEAN_COMMITTED"),
+        ("MISMATCH", "UNRESOLVED"),
+    ),
+)
+def test_reconcile_run_tests_receipt_truth_is_closed_tri_state(
+    receipt_state: str,
+    expected: str,
+) -> None:
+    binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
+
+    assert repo_tools.reconcile_run_tests_docker_execution(
+        "RESERVED",
+        binding,
+        _run_tests_observation(binding),
+        expected_execution_contract_digest="c" * 64,
+        receipt_state=receipt_state,
+    ) == expected
+
+
+def test_reconcile_run_tests_rejects_internally_consistent_spoofed_contract(
+) -> None:
+    binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
+
+    assert repo_tools.reconcile_run_tests_docker_execution(
+        "STARTED_UNCONFIRMED",
+        binding,
+        _run_tests_observation(
+            binding,
+            status="exited",
+            ever_started=True,
+            contract_digest="d" * 64,
+            started=_run_tests_started(binding, contract_digest="d" * 64),
+            result=_run_tests_result(binding, contract_digest="d" * 64),
+        ),
+        expected_execution_contract_digest="c" * 64,
+        receipt_state="ABSENT",
+    ) == "UNRESOLVED"
 
 
 @pytest.mark.parametrize(
@@ -1627,7 +1759,8 @@ def test_reconcile_run_tests_rejects_unowned_or_mismatched_resources(
         "STARTED_UNCONFIRMED",
         binding,
         observation,
-        receipt_matches=True,
+        expected_execution_contract_digest="c" * 64,
+        receipt_state="MATCH",
     ) == "UNRESOLVED"
 
 
@@ -1658,7 +1791,8 @@ def test_reconcile_run_tests_rejects_multiple_resource_mismatches() -> None:
             started=observation.started,
             result=observation.result,
         ),
-        receipt_matches=True,
+        expected_execution_contract_digest="c" * 64,
+        receipt_state="MATCH",
     ) == "UNRESOLVED"
 
 
@@ -1700,7 +1834,8 @@ def test_reconcile_run_tests_rejects_contradictory_facts(
         "STARTED_UNCONFIRMED",
         binding,
         observation_factory(binding),
-        receipt_matches=True,
+        expected_execution_contract_digest="c" * 64,
+        receipt_state="MATCH",
     ) == "UNRESOLVED"
 
 
