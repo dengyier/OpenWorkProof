@@ -4542,6 +4542,17 @@ def derive_run_tests_docker_binding(
     )
 
 
+def _run_tests_observation_has_exact_keys(
+    observation: object,
+    expected_keys: frozenset[str],
+) -> bool:
+    return (
+        type(observation) is dict
+        and all(type(key) is str for key in observation)
+        and frozenset(observation) == expected_keys
+    )
+
+
 def _run_tests_resource_observation_matches(
     observation: object,
     *,
@@ -4549,9 +4560,12 @@ def _run_tests_resource_observation_matches(
     ownership_token: str,
 ) -> bool:
     return (
-        type(observation) is dict
-        and frozenset(observation)
-        == {"name", "ownership_token", "configuration_matches"}
+        _run_tests_observation_has_exact_keys(
+            observation,
+            frozenset(
+                {"name", "ownership_token", "configuration_matches"}
+            ),
+        )
         and type(observation.get("name")) is str
         and observation.get("name") == name
         and type(observation.get("ownership_token")) is str
@@ -4567,19 +4581,22 @@ def _run_tests_container_observation_matches(
     expected_execution_contract_digest: str,
 ) -> bool:
     return (
-        type(observation) is dict
-        and frozenset(observation)
-        == {
-            "name",
-            "ownership_token",
-            "execution_id",
-            "execution_contract_digest",
-            "status",
-            "ever_started",
-            "immutable_image_matches",
-            "config_matches",
-            "mounts_match",
-        }
+        _run_tests_observation_has_exact_keys(
+            observation,
+            frozenset(
+                {
+                    "name",
+                    "ownership_token",
+                    "execution_id",
+                    "execution_contract_digest",
+                    "status",
+                    "ever_started",
+                    "immutable_image_matches",
+                    "config_matches",
+                    "mounts_match",
+                }
+            ),
+        )
         and type(observation.get("name")) is str
         and observation.get("name") == binding.container_name
         and type(observation.get("ownership_token")) is str

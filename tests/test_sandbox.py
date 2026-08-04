@@ -1373,6 +1373,28 @@ class _RunTestsStrSubclass(str):
     pass
 
 
+class _RunTestsEqualKey:
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def __hash__(self) -> int:
+        return hash(self._value)
+
+    def __eq__(self, other: object) -> bool:
+        return other == self._value
+
+
+class _RunTestsExplodingKey:
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def __hash__(self) -> int:
+        return hash(self._value)
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("adversarial key equality was dispatched")
+
+
 def test_derive_run_tests_docker_binding_is_stable_and_closed() -> None:
     binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
 
@@ -1973,6 +1995,53 @@ def test_reconcile_run_tests_rejects_adversarial_observed_identity_types(
     changed[field] = value
     observation = repo_tools.RunTestsDockerObservation(
         staging_container=observation.staging_container,
+        container=changed if resource == "container" else observation.container,
+        workspace_volume=(
+            changed
+            if resource == "workspace_volume"
+            else observation.workspace_volume
+        ),
+        output_volume=observation.output_volume,
+        started=None,
+        result=None,
+    )
+
+    assert repo_tools.reconcile_run_tests_docker_execution(
+        "RESERVED",
+        binding,
+        observation,
+        expected_execution_contract_digest="c" * 64,
+        receipt_state="MATCH",
+    ) == "UNRESOLVED"
+
+
+@pytest.mark.parametrize(
+    ("resource", "replacement_key"),
+    (
+        ("workspace_volume", _RunTestsEqualKey("name")),
+        ("workspace_volume", _RunTestsStrSubclass("name")),
+        ("workspace_volume", _RunTestsExplodingKey("name")),
+        ("container", _RunTestsEqualKey("name")),
+        ("container", _RunTestsStrSubclass("name")),
+        ("container", _RunTestsExplodingKey("name")),
+    ),
+)
+def test_reconcile_run_tests_rejects_non_exact_observation_keys_without_equality(
+    resource: str,
+    replacement_key: object,
+) -> None:
+    binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
+    observation = _run_tests_observation(
+        binding,
+        status="created",
+        workspace=True,
+        output=True,
+    )
+    changed = dict(getattr(observation, resource))
+    name = changed.pop("name")
+    changed[replacement_key] = name
+    observation = repo_tools.RunTestsDockerObservation(
+        staging_container=None,
         container=changed if resource == "container" else observation.container,
         workspace_volume=(
             changed
