@@ -801,6 +801,36 @@ class RunTestsResultEnvelope:
             raise ValueError("run-tests result does not contain one closed outcome")
 
 
+@dataclass(frozen=True, slots=True)
+class RunTestsDockerBinding:
+    execution_id: str
+    ownership_token: str
+    staging_container_name: str
+    container_name: str
+    workspace_volume_name: str
+    output_volume_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class RunTestsDockerObservation:
+    staging_container: Mapping[str, Any] | None
+    container: Mapping[str, Any] | None
+    workspace_volume: Mapping[str, Any] | None
+    output_volume: Mapping[str, Any] | None
+    started: RunTestsStartedEnvelope | None
+    result: RunTestsResultEnvelope | None
+
+
+RunTestsRecoveryAction = Literal[
+    "SAFE_TO_RETRY",
+    "CLEAN_PRESTART",
+    "WAIT_RUNNING",
+    "RESUME_RESULT",
+    "CLEAN_COMMITTED",
+    "UNRESOLVED",
+]
+
+
 FROZEN_VERIFIER_ARGV = (
     "/opt/venv/bin/python",
     "-I",
@@ -4486,6 +4516,241 @@ def destroy_candidate_workspace(
         workspace_id=workspace.workspace_id,
         destroyed=True,
     )
+
+
+def derive_run_tests_docker_binding(
+    execution_id: str,
+) -> RunTestsDockerBinding:
+    """Derive the only Docker names and owner token for one execution."""
+
+    if type(execution_id) is not str or _DIGEST_PATTERN.fullmatch(
+        execution_id
+    ) is None:
+        raise ValueError("run-tests execution id is invalid")
+    suffix = execution_id[:32]
+    return RunTestsDockerBinding(
+        execution_id=execution_id,
+        ownership_token=hashlib.sha256(
+            b"openworkproof/docker-run/v0.1\x00"
+            + execution_id.encode("ascii")
+        ).hexdigest(),
+        staging_container_name=f"owp-stage-{suffix}",
+        container_name=f"owp-run-{suffix}",
+        workspace_volume_name=f"owp-workspace-{suffix}",
+        output_volume_name=f"owp-output-{suffix}",
+    )
+
+
+def _run_tests_resource_observation_matches(
+    observation: object,
+    *,
+    name: str,
+    ownership_token: str,
+) -> bool:
+    return (
+        type(observation) is dict
+        and frozenset(observation)
+        == {"name", "ownership_token", "configuration_matches"}
+        and observation.get("name") == name
+        and observation.get("ownership_token") == ownership_token
+        and observation.get("configuration_matches") is True
+    )
+
+
+def _run_tests_container_observation_matches(
+    observation: object,
+    binding: RunTestsDockerBinding,
+) -> bool:
+    return (
+        type(observation) is dict
+        and frozenset(observation)
+        == {
+            "name",
+            "ownership_token",
+            "execution_id",
+            "execution_contract_digest",
+            "status",
+            "ever_started",
+            "immutable_image_matches",
+            "config_matches",
+            "mounts_match",
+        }
+        and observation.get("name") == binding.container_name
+        and observation.get("ownership_token") == binding.ownership_token
+        and observation.get("execution_id") == binding.execution_id
+        and type(observation.get("execution_contract_digest")) is str
+        and _DIGEST_PATTERN.fullmatch(
+            observation["execution_contract_digest"]
+        )
+        is not None
+        and type(observation.get("status")) is str
+        and observation.get("status")
+        in {"created", "running", "paused", "restarting", "dead", "exited"}
+        and type(observation.get("ever_started")) is bool
+        and observation.get("immutable_image_matches") is True
+        and observation.get("config_matches") is True
+        and observation.get("mounts_match") is True
+    )
+
+
+def _valid_run_tests_started_observation(
+    started: object,
+    *,
+    execution_id: str,
+    contract_digest: str,
+) -> bool:
+    if type(started) is not RunTestsStartedEnvelope:
+        return False
+    try:
+        encode_run_tests_started_envelope(started)
+    except ValueError:
+        return False
+    return (
+        started.execution_id == execution_id
+        and started.execution_contract_digest == contract_digest
+    )
+
+
+def _valid_run_tests_result_observation(
+    result: object,
+    *,
+    execution_id: str,
+    contract_digest: str,
+) -> bool:
+    if type(result) is not RunTestsResultEnvelope:
+        return False
+    try:
+        encode_run_tests_result_envelope(result)
+    except ValueError:
+        return False
+    return (
+        result.execution_id == execution_id
+        and result.execution_contract_digest == contract_digest
+    )
+
+
+def reconcile_run_tests_docker_execution(
+    journal_state: Literal["RESERVED", "STARTED_UNCONFIRMED"],
+    binding: RunTestsDockerBinding,
+    observation: RunTestsDockerObservation,
+    receipt_matches: bool,
+) -> RunTestsRecoveryAction:
+    """Reduce closed Docker observations to one side-effect-free action."""
+
+    if type(journal_state) is not str or journal_state not in {
+        "RESERVED",
+        "STARTED_UNCONFIRMED",
+    }:
+        raise ValueError("run-tests journal state is invalid")
+    if (
+        type(binding) is not RunTestsDockerBinding
+        or derive_run_tests_docker_binding(binding.execution_id) != binding
+    ):
+        raise ValueError("run-tests Docker binding is invalid")
+    if type(observation) is not RunTestsDockerObservation:
+        raise ValueError("run-tests Docker observation is invalid")
+    if type(receipt_matches) is not bool:
+        raise ValueError("run-tests Receipt observation is invalid")
+
+    resources = (
+        observation.staging_container,
+        observation.container,
+        observation.workspace_volume,
+        observation.output_volume,
+    )
+    if observation.staging_container is not None and not (
+        _run_tests_resource_observation_matches(
+            observation.staging_container,
+            name=binding.staging_container_name,
+            ownership_token=binding.ownership_token,
+        )
+    ):
+        return "UNRESOLVED"
+    if observation.workspace_volume is not None and not (
+        _run_tests_resource_observation_matches(
+            observation.workspace_volume,
+            name=binding.workspace_volume_name,
+            ownership_token=binding.ownership_token,
+        )
+    ):
+        return "UNRESOLVED"
+    if observation.output_volume is not None and not (
+        _run_tests_resource_observation_matches(
+            observation.output_volume,
+            name=binding.output_volume_name,
+            ownership_token=binding.ownership_token,
+        )
+    ):
+        return "UNRESOLVED"
+    if observation.container is not None and not (
+        _run_tests_container_observation_matches(observation.container, binding)
+    ):
+        return "UNRESOLVED"
+
+    container = observation.container
+    if container is None:
+        if observation.started is not None or observation.result is not None:
+            return "UNRESOLVED"
+        if receipt_matches:
+            return "CLEAN_COMMITTED"
+        if journal_state == "STARTED_UNCONFIRMED":
+            return "UNRESOLVED"
+        if all(resource is None for resource in resources):
+            return "SAFE_TO_RETRY"
+        return "CLEAN_PRESTART"
+
+    if (
+        observation.workspace_volume is None
+        or observation.output_volume is None
+        or observation.staging_container is not None
+    ):
+        return "UNRESOLVED"
+
+    status = container["status"]
+    ever_started = container["ever_started"]
+    contract_digest = container["execution_contract_digest"]
+    started = observation.started
+    result = observation.result
+
+    if started is not None and not _valid_run_tests_started_observation(
+        started,
+        execution_id=binding.execution_id,
+        contract_digest=contract_digest,
+    ):
+        return "UNRESOLVED"
+    if result is not None and not _valid_run_tests_result_observation(
+        result,
+        execution_id=binding.execution_id,
+        contract_digest=contract_digest,
+    ):
+        return "UNRESOLVED"
+    if result is not None and started is None:
+        return "UNRESOLVED"
+
+    if status == "created":
+        if ever_started or started is not None or result is not None:
+            return "UNRESOLVED"
+        if receipt_matches:
+            return "CLEAN_COMMITTED"
+        return "CLEAN_PRESTART"
+
+    if not ever_started:
+        return "UNRESOLVED"
+    if status in {"running", "paused", "restarting"}:
+        if result is not None:
+            return "UNRESOLVED"
+        if receipt_matches:
+            return "CLEAN_COMMITTED"
+        return "WAIT_RUNNING"
+    if status == "dead":
+        if receipt_matches:
+            return "CLEAN_COMMITTED"
+        return "UNRESOLVED"
+    if receipt_matches:
+        return "CLEAN_COMMITTED"
+    if started is not None and result is not None:
+        return "RESUME_RESULT"
+    return "UNRESOLVED"
 
 
 def _docker_volume_plan(

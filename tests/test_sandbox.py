@@ -1246,6 +1246,464 @@ def _docker_plan(
     )
 
 
+def _run_tests_container_observation(
+    binding: repo_tools.RunTestsDockerBinding,
+    *,
+    status: str,
+    ever_started: bool,
+    contract_digest: str = "c" * 64,
+) -> dict[str, object]:
+    return {
+        "name": binding.container_name,
+        "ownership_token": binding.ownership_token,
+        "execution_id": binding.execution_id,
+        "execution_contract_digest": contract_digest,
+        "status": status,
+        "ever_started": ever_started,
+        "immutable_image_matches": True,
+        "config_matches": True,
+        "mounts_match": True,
+    }
+
+
+def _run_tests_resource_observation(
+    *,
+    name: str,
+    binding: repo_tools.RunTestsDockerBinding,
+) -> dict[str, object]:
+    return {
+        "name": name,
+        "ownership_token": binding.ownership_token,
+        "configuration_matches": True,
+    }
+
+
+def _run_tests_started(
+    binding: repo_tools.RunTestsDockerBinding,
+    *,
+    contract_digest: str = "c" * 64,
+) -> repo_tools.RunTestsStartedEnvelope:
+    return repo_tools.RunTestsStartedEnvelope(
+        execution_id=binding.execution_id,
+        execution_contract_digest=contract_digest,
+    )
+
+
+def _run_tests_result(
+    binding: repo_tools.RunTestsDockerBinding,
+    *,
+    contract_digest: str = "c" * 64,
+) -> repo_tools.RunTestsResultEnvelope:
+    empty_digest = hashlib.sha256(b"").hexdigest()
+    return repo_tools.RunTestsResultEnvelope(
+        execution_id=binding.execution_id,
+        execution_contract_digest=contract_digest,
+        actual_exit_code=0,
+        failure_code=None,
+        stdout_bytes=0,
+        stdout_sha256=empty_digest,
+        stderr_bytes=0,
+        stderr_sha256=empty_digest,
+    )
+
+
+def _run_tests_observation(
+    binding: repo_tools.RunTestsDockerBinding,
+    *,
+    status: str | None = None,
+    ever_started: bool = False,
+    started: repo_tools.RunTestsStartedEnvelope | None = None,
+    result: repo_tools.RunTestsResultEnvelope | object | None = None,
+    staging: bool = False,
+    workspace: bool = False,
+    output: bool = False,
+) -> repo_tools.RunTestsDockerObservation:
+    return repo_tools.RunTestsDockerObservation(
+        staging_container=(
+            _run_tests_resource_observation(
+                name=binding.staging_container_name,
+                binding=binding,
+            )
+            if staging
+            else None
+        ),
+        container=(
+            _run_tests_container_observation(
+                binding,
+                status=status,
+                ever_started=ever_started,
+            )
+            if status is not None
+            else None
+        ),
+        workspace_volume=(
+            _run_tests_resource_observation(
+                name=binding.workspace_volume_name,
+                binding=binding,
+            )
+            if workspace
+            else None
+        ),
+        output_volume=(
+            _run_tests_resource_observation(
+                name=binding.output_volume_name,
+                binding=binding,
+            )
+            if output
+            else None
+        ),
+        started=started,
+        result=result,
+    )
+
+
+def test_derive_run_tests_docker_binding_is_stable_and_closed() -> None:
+    binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
+
+    assert binding.execution_id == "a" * 64
+    assert binding.container_name == "owp-run-" + "a" * 32
+    assert binding.staging_container_name == "owp-stage-" + "a" * 32
+    assert binding.workspace_volume_name == "owp-workspace-" + "a" * 32
+    assert binding.output_volume_name == "owp-output-" + "a" * 32
+    assert binding.ownership_token == hashlib.sha256(
+        b"openworkproof/docker-run/v0.1\x00" + b"a" * 64
+    ).hexdigest()
+    assert max(
+        len(name.encode("ascii"))
+        for name in (
+            binding.container_name,
+            binding.staging_container_name,
+            binding.workspace_volume_name,
+            binding.output_volume_name,
+        )
+    ) < 64
+
+
+@pytest.mark.parametrize("execution_id", ("", "a" * 63, "A" * 64, True))
+def test_derive_run_tests_docker_binding_rejects_invalid_execution_id(
+    execution_id: object,
+) -> None:
+    with pytest.raises(ValueError, match="execution id"):
+        repo_tools.derive_run_tests_docker_binding(execution_id)
+
+
+@pytest.mark.parametrize(
+    ("journal_state", "observation_factory", "receipt_matches", "expected"),
+    (
+        ("RESERVED", lambda b: _run_tests_observation(b), False, "SAFE_TO_RETRY"),
+        (
+            "RESERVED",
+            lambda b: _run_tests_observation(b, staging=True, workspace=True),
+            False,
+            "CLEAN_PRESTART",
+        ),
+        (
+            "RESERVED",
+            lambda b: _run_tests_observation(
+                b, status="created", workspace=True, output=True
+            ),
+            False,
+            "CLEAN_PRESTART",
+        ),
+        (
+            "STARTED_UNCONFIRMED",
+            lambda b: _run_tests_observation(
+                b, status="created", workspace=True, output=True
+            ),
+            False,
+            "CLEAN_PRESTART",
+        ),
+        (
+            "RESERVED",
+            lambda b: _run_tests_observation(
+                b,
+                status="running",
+                ever_started=True,
+                workspace=True,
+                output=True,
+            ),
+            False,
+            "WAIT_RUNNING",
+        ),
+        (
+            "STARTED_UNCONFIRMED",
+            lambda b: _run_tests_observation(
+                b,
+                status="paused",
+                ever_started=True,
+                started=_run_tests_started(b),
+                workspace=True,
+                output=True,
+            ),
+            False,
+            "WAIT_RUNNING",
+        ),
+        (
+            "STARTED_UNCONFIRMED",
+            lambda b: _run_tests_observation(
+                b,
+                status="restarting",
+                ever_started=True,
+                started=_run_tests_started(b),
+                workspace=True,
+                output=True,
+            ),
+            False,
+            "WAIT_RUNNING",
+        ),
+        (
+            "STARTED_UNCONFIRMED",
+            lambda b: _run_tests_observation(
+                b,
+                status="dead",
+                ever_started=True,
+                started=_run_tests_started(b),
+                workspace=True,
+                output=True,
+            ),
+            False,
+            "UNRESOLVED",
+        ),
+        (
+            "STARTED_UNCONFIRMED",
+            lambda b: _run_tests_observation(
+                b,
+                status="exited",
+                ever_started=True,
+                started=_run_tests_started(b),
+                result=_run_tests_result(b),
+                workspace=True,
+                output=True,
+            ),
+            False,
+            "RESUME_RESULT",
+        ),
+        (
+            "RESERVED",
+            lambda b: _run_tests_observation(
+                b,
+                status="exited",
+                ever_started=True,
+                started=_run_tests_started(b),
+                result=_run_tests_result(b),
+                workspace=True,
+                output=True,
+            ),
+            False,
+            "RESUME_RESULT",
+        ),
+        (
+            "STARTED_UNCONFIRMED",
+            lambda b: _run_tests_observation(
+                b,
+                status="exited",
+                ever_started=True,
+                started=_run_tests_started(b),
+                workspace=True,
+                output=True,
+            ),
+            False,
+            "UNRESOLVED",
+        ),
+        (
+            "STARTED_UNCONFIRMED",
+            lambda b: _run_tests_observation(
+                b,
+                status="exited",
+                ever_started=True,
+                started=_run_tests_started(b),
+                result={"malformed": True},
+                workspace=True,
+                output=True,
+            ),
+            False,
+            "UNRESOLVED",
+        ),
+        (
+            "STARTED_UNCONFIRMED",
+            lambda b: _run_tests_observation(
+                b,
+                status="exited",
+                ever_started=True,
+                started=_run_tests_started(b, contract_digest="d" * 64),
+                result=_run_tests_result(b, contract_digest="d" * 64),
+                workspace=True,
+                output=True,
+            ),
+            False,
+            "UNRESOLVED",
+        ),
+        (
+            "STARTED_UNCONFIRMED",
+            lambda b: _run_tests_observation(
+                b,
+                status="exited",
+                ever_started=True,
+                started=_run_tests_started(b),
+                result=_run_tests_result(b),
+                workspace=True,
+                output=True,
+            ),
+            True,
+            "CLEAN_COMMITTED",
+        ),
+        (
+            "RESERVED",
+            lambda b: _run_tests_observation(b),
+            True,
+            "CLEAN_COMMITTED",
+        ),
+    ),
+)
+def test_reconcile_run_tests_returns_exact_pure_state_table_action(
+    journal_state: str,
+    observation_factory: object,
+    receipt_matches: bool,
+    expected: str,
+) -> None:
+    binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
+    observation = observation_factory(binding)
+
+    action = repo_tools.reconcile_run_tests_docker_execution(
+        journal_state,
+        binding,
+        observation,
+        receipt_matches=receipt_matches,
+    )
+
+    assert action == expected
+    assert action in {
+        "SAFE_TO_RETRY",
+        "CLEAN_PRESTART",
+        "WAIT_RUNNING",
+        "RESUME_RESULT",
+        "CLEAN_COMMITTED",
+        "UNRESOLVED",
+    }
+    assert not hasattr(action, "commands")
+
+
+@pytest.mark.parametrize(
+    ("resource", "field", "value"),
+    (
+        ("staging_container", "ownership_token", "d" * 64),
+        ("container", "name", "owp-run-replacement"),
+        ("container", "execution_id", "d" * 64),
+        ("container", "immutable_image_matches", False),
+        ("container", "config_matches", False),
+        ("container", "mounts_match", False),
+        ("workspace_volume", "configuration_matches", False),
+        ("output_volume", "ownership_token", "d" * 64),
+    ),
+)
+def test_reconcile_run_tests_rejects_unowned_or_mismatched_resources(
+    resource: str,
+    field: str,
+    value: object,
+) -> None:
+    binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
+    observation = _run_tests_observation(
+        binding,
+        status="exited",
+        ever_started=True,
+        started=_run_tests_started(binding),
+        result=_run_tests_result(binding),
+        staging=True,
+        workspace=True,
+        output=True,
+    )
+    changed = dict(getattr(observation, resource))
+    changed[field] = value
+    observation = repo_tools.RunTestsDockerObservation(
+        staging_container=changed if resource == "staging_container" else observation.staging_container,
+        container=changed if resource == "container" else observation.container,
+        workspace_volume=changed if resource == "workspace_volume" else observation.workspace_volume,
+        output_volume=changed if resource == "output_volume" else observation.output_volume,
+        started=observation.started,
+        result=observation.result,
+    )
+
+    assert repo_tools.reconcile_run_tests_docker_execution(
+        "STARTED_UNCONFIRMED",
+        binding,
+        observation,
+        receipt_matches=True,
+    ) == "UNRESOLVED"
+
+
+def test_reconcile_run_tests_rejects_multiple_resource_mismatches() -> None:
+    binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
+    observation = _run_tests_observation(
+        binding,
+        status="exited",
+        ever_started=True,
+        started=_run_tests_started(binding),
+        result=_run_tests_result(binding),
+        workspace=True,
+        output=True,
+    )
+    container = dict(observation.container)
+    container["config_matches"] = False
+    output = dict(observation.output_volume)
+    output["ownership_token"] = "d" * 64
+
+    assert repo_tools.reconcile_run_tests_docker_execution(
+        "STARTED_UNCONFIRMED",
+        binding,
+        repo_tools.RunTestsDockerObservation(
+            staging_container=None,
+            container=container,
+            workspace_volume=observation.workspace_volume,
+            output_volume=output,
+            started=observation.started,
+            result=observation.result,
+        ),
+        receipt_matches=True,
+    ) == "UNRESOLVED"
+
+
+@pytest.mark.parametrize(
+    "observation_factory",
+    (
+        lambda b: _run_tests_observation(
+            b,
+            status="created",
+            ever_started=True,
+            workspace=True,
+            output=True,
+        ),
+        lambda b: _run_tests_observation(
+            b,
+            status="exited",
+            ever_started=False,
+            started=_run_tests_started(b),
+            result=_run_tests_result(b),
+            workspace=True,
+            output=True,
+        ),
+        lambda b: _run_tests_observation(
+            b,
+            status="running",
+            ever_started=True,
+            result=_run_tests_result(b),
+            workspace=True,
+            output=True,
+        ),
+    ),
+)
+def test_reconcile_run_tests_rejects_contradictory_facts(
+    observation_factory: object,
+) -> None:
+    binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
+
+    assert repo_tools.reconcile_run_tests_docker_execution(
+        "STARTED_UNCONFIRMED",
+        binding,
+        observation_factory(binding),
+        receipt_matches=True,
+    ) == "UNRESOLVED"
+
+
 def test_derive_docker_execution_plan_is_exact_and_deterministic() -> None:
     first = _docker_plan()
     second = _docker_plan()
