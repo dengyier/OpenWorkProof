@@ -1282,7 +1282,6 @@ def _validated_candidate_files(
     validated: list[SourceFile] = []
     seen: set[str] = set()
     directories: set[str] = set()
-    total_size = 0
     for source_file in file_tuple:
         if not isinstance(source_file, SourceFile):
             raise SourceArchiveError("candidate entry is invalid")
@@ -1294,12 +1293,6 @@ def _validated_candidate_files(
             raise SourceArchiveError("candidate mode is not allowed")
         if type(source_file.content) is not bytes:
             raise SourceArchiveError("candidate file content must be bytes")
-        content_size = len(source_file.content)
-        if content_size > _MAX_SOURCE_FILE_BYTES:
-            raise SourceArchiveError("candidate file exceeds 1 MiB")
-        if content_size > _MAX_SOURCE_BYTES - total_size:
-            raise SourceArchiveError("candidate files exceed 8 MiB")
-        total_size += content_size
         if source_file.path in seen:
             raise SourceArchiveError("candidate path is duplicated")
         seen.add(source_file.path)
