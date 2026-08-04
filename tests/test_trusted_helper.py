@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
 import hashlib
 import io
 import json
@@ -59,6 +60,111 @@ def _candidate(
             source=source,
         )
     )
+
+
+def _rebound_snapshot_candidate(
+    candidate: repo_tools.CandidateWorkspace,
+    files: tuple[repo_tools.SourceFile, ...],
+) -> repo_tools.CandidateWorkspace:
+    (candidate.worktree / "README.md").unlink()
+    for source_file in files:
+        target = candidate.worktree / source_file.path
+        target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        target.write_bytes(source_file.content)
+        target.chmod(0o755 if source_file.mode == "100755" else 0o644)
+    environment = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "OpenWorkProof",
+        "GIT_AUTHOR_EMAIL": "owp@example.invalid",
+        "GIT_AUTHOR_DATE": "1970-01-01T00:00:01Z",
+        "GIT_COMMITTER_NAME": "OpenWorkProof",
+        "GIT_COMMITTER_EMAIL": "owp@example.invalid",
+        "GIT_COMMITTER_DATE": "1970-01-01T00:00:01Z",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+    }
+
+    def git(*arguments: str, input_bytes: bytes | None = None) -> bytes:
+        return subprocess.run(
+            [
+                "/usr/bin/git",
+                f"--git-dir={candidate.git_dir}",
+                f"--work-tree={candidate.worktree}",
+                "-c",
+                "core.hooksPath=/dev/null",
+                *arguments,
+            ],
+            input=input_bytes,
+            check=True,
+            capture_output=True,
+            env=environment,
+            cwd=candidate.worktree,
+        ).stdout
+
+    git("add", "-A")
+    tree_oid = git("write-tree").decode("ascii").strip()
+    head_commit = git(
+        "commit-tree",
+        tree_oid,
+        "-p",
+        candidate.head_commit,
+        input_bytes=b"snapshot byte boundary\n",
+    ).decode("ascii").strip()
+    git("update-ref", "refs/heads/candidate", head_commit)
+    git("reset", "--hard", head_commit)
+    worktree_fd = os.open(
+        candidate.worktree,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        manifest = repo_tools.scan_workspace_manifest(
+            worktree_fd,
+            head_commit,
+        )
+    finally:
+        os.close(worktree_fd)
+    manifest_digest = repo_tools.workspace_manifest_digest(manifest)
+    control = rfc8785.dumps(
+        {
+            "schema_version": "openworkproof-candidate-control/0.1",
+            "workspace_id": candidate.workspace_id,
+            "source_artifact_sha256": candidate.source_artifact_sha256,
+            "head_commit": head_commit,
+            "workspace_manifest_digest": manifest_digest,
+            "worktree_inode": candidate.worktree.stat().st_ino,
+            "git_inode": candidate.git_dir.stat().st_ino,
+        }
+    )
+    control_path = candidate.candidate_root / "control.json"
+    control_path.write_bytes(control)
+    control_path.chmod(0o600)
+    return replace(
+        candidate,
+        head_commit=head_commit,
+        workspace_manifest_digest=manifest_digest,
+    )
+
+
+def _snapshot_files_with_total_size(
+    total_size: int,
+) -> tuple[repo_tools.SourceFile, ...]:
+    files: list[repo_tools.SourceFile] = []
+    remaining = total_size
+    index = 0
+    while remaining:
+        size = min(remaining, 1_048_576)
+        files.append(
+            repo_tools.SourceFile(
+                f"file-{index:02d}.bin",
+                "100644",
+                bytes([index]) * size,
+            )
+        )
+        remaining -= size
+        index += 1
+    return tuple(files)
 
 
 def _request(
@@ -1329,6 +1435,58 @@ def test_prepare_candidate_execution_snapshot_returns_exact_one_mib_file(
     )
 
 
+def test_prepare_candidate_execution_snapshot_accepts_exact_eight_mib(
+    tmp_path: Path,
+) -> None:
+    files = _snapshot_files_with_total_size(8_388_608)
+    candidate = _rebound_snapshot_candidate(
+        _candidate(tmp_path, b"base\n"),
+        files,
+    )
+
+    result = repo_tools.prepare_candidate_execution_snapshot(
+        _snapshot_request(candidate)
+    )
+
+    assert result.plan.files == files
+    assert sum(len(source_file.content) for source_file in result.plan.files) == (
+        8_388_608
+    )
+
+
+def test_prepare_candidate_execution_snapshot_rejects_eight_mib_plus_one_before_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _rebound_snapshot_candidate(
+        _candidate(tmp_path, b"base\n"),
+        _snapshot_files_with_total_size(8_388_609),
+    )
+    real_capture = repo_tools._read_candidate_execution_snapshot_file
+    capture_calls: list[str] = []
+    hook_calls: list[str] = []
+
+    def observe_capture(checkpoint, entry):
+        capture_calls.append(entry.path_bytes_b64url)
+        return real_capture(checkpoint, entry)
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_read_candidate_execution_snapshot_file",
+        observe_capture,
+    )
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_file_hook",
+        hook_calls.append,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+    assert capture_calls == []
+    assert hook_calls == []
+
+
 def test_prepare_candidate_execution_snapshot_normalizes_checkpoint_file_changed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1639,6 +1797,114 @@ def test_prepare_candidate_execution_snapshot_rejects_git_drift(
     _assert_snapshot_recovery(candidate)
 
 
+def test_prepare_candidate_execution_snapshot_rejects_external_git_alternates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    external_objects = tmp_path / "external-objects"
+    (candidate.git_dir / "objects").rename(external_objects)
+    internal_objects = candidate.git_dir / "objects"
+    (internal_objects / "info").mkdir(parents=True)
+    (internal_objects / "pack").mkdir()
+    (internal_objects / "info" / "alternates").write_text(
+        f"{external_objects}\n",
+        encoding="ascii",
+    )
+    git_environment = {
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+    }
+    resolved = subprocess.run(
+        [
+            "/usr/bin/git",
+            f"--git-dir={candidate.git_dir}",
+            f"--work-tree={candidate.worktree}",
+            "cat-file",
+            "-e",
+            "HEAD^{commit}",
+        ],
+        check=False,
+        capture_output=True,
+        env=git_environment,
+        cwd=candidate.worktree,
+    )
+    assert resolved.returncode == 0
+    hook_calls: list[str] = []
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_file_hook",
+        hook_calls.append,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+    assert hook_calls == []
+
+
+def test_prepare_candidate_execution_snapshot_reruns_git_semantics_after_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    real_git_read_only = repo_tools._run_git_read_only
+    after_files = False
+    final_git_calls: list[tuple[str, ...]] = []
+
+    def change_cached_index() -> None:
+        nonlocal after_files
+        subprocess.run(
+            [
+                "/usr/bin/git",
+                f"--git-dir={candidate.git_dir}",
+                f"--work-tree={candidate.worktree}",
+                "update-index",
+                "--chmod=+x",
+                "README.md",
+            ],
+            check=True,
+            capture_output=True,
+            env={
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "LC_ALL": "C",
+                "PATH": "/usr/bin:/bin",
+            },
+        )
+        after_files = True
+
+    def observe_git_read_only(*args, **kwargs):
+        if after_files:
+            final_git_calls.append(kwargs["arguments"])
+        return real_git_read_only(*args, **kwargs)
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_after_files_hook",
+        change_cached_index,
+    )
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_read_authority_matches",
+        lambda unused: True,
+    )
+    monkeypatch.setattr(
+        repo_tools,
+        "_run_git_read_only",
+        observe_git_read_only,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+    assert final_git_calls == [
+        ("rev-parse", "HEAD"),
+        ("cat-file", "-e", "HEAD^{commit}"),
+        ("diff-index", "--cached", "--quiet", "HEAD", "--"),
+    ]
+
+
 def test_prepare_candidate_execution_snapshot_closes_every_fd_on_file_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1740,6 +2006,50 @@ def test_prepare_candidate_execution_snapshot_closes_checkpoint_fds_on_failure(
     for descriptor in captured_descriptors:
         with pytest.raises(OSError):
             os.fstat(descriptor)
+
+
+@pytest.mark.parametrize("failure_type", (KeyboardInterrupt, SystemExit))
+def test_prepare_candidate_execution_snapshot_closes_checkpoint_fds_on_base_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[BaseException],
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    real_anchor = repo_tools._candidate_read_anchor
+    captured_descriptors: list[int] = []
+
+    def capture_anchor(*args, **kwargs):
+        anchor = real_anchor(*args, **kwargs)
+        captured_descriptors.append(anchor.descriptor)
+        return anchor
+
+    def interrupt_scan(
+        unused_root_fd: int,
+        unused_head_commit: str,
+    ) -> repo_tools.WorkspaceManifest:
+        raise failure_type("injected base exception")
+
+    monkeypatch.setattr(repo_tools, "_candidate_read_anchor", capture_anchor)
+    monkeypatch.setattr(repo_tools, "scan_workspace_manifest", interrupt_scan)
+
+    leaked_descriptors: list[int] = []
+    with pytest.raises(failure_type) as raised:
+        try:
+            repo_tools.prepare_candidate_execution_snapshot(
+                _snapshot_request(candidate)
+            )
+        finally:
+            for descriptor in captured_descriptors:
+                try:
+                    os.fstat(descriptor)
+                except OSError:
+                    continue
+                leaked_descriptors.append(descriptor)
+                os.close(descriptor)
+
+    assert raised.value.args == ("injected base exception",)
+    assert len(captured_descriptors) == 5
+    assert leaked_descriptors == []
 
 
 @pytest.mark.parametrize(

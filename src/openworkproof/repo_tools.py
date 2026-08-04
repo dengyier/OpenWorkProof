@@ -481,16 +481,21 @@ def prepare_candidate_execution_snapshot(
             != request.expected_head_commit
             or checkpoint_manifest_digest
             != request.expected_workspace_manifest_digest
-            or not _candidate_read_authority_matches(checkpoint)
+            or not _candidate_read_semantic_authority_matches(
+                checkpoint,
+                workspace,
+            )
         ):
             raise CandidateReadError("RECOVERY_REQUIRED")
+        regular_entries = _candidate_execution_snapshot_regular_entries(
+            checkpoint.manifest
+        )
         files = tuple(
             _read_candidate_execution_snapshot_file(
                 checkpoint,
                 entry,
             )
-            for entry in checkpoint.manifest.entries
-            if entry.type == "regular"
+            for entry in regular_entries
         )
         _candidate_execution_snapshot_after_files_hook()
         workspace_snapshot_before = _scan_candidate_workspace_identity(
@@ -508,7 +513,10 @@ def prepare_candidate_execution_snapshot(
             or workspace_snapshot_after != checkpoint.workspace_snapshot
             or workspace_manifest_digest(fresh_manifest)
             != checkpoint_manifest_digest
-            or not _candidate_read_authority_matches(checkpoint)
+            or not _candidate_read_semantic_authority_matches(
+                checkpoint,
+                workspace,
+            )
         ):
             raise CandidateReadError("RECOVERY_REQUIRED")
         plan = derive_execution_snapshot_plan(checkpoint.manifest, files)
@@ -1215,6 +1223,7 @@ def _validated_candidate_files(
     validated: list[SourceFile] = []
     seen: set[str] = set()
     directories: set[str] = set()
+    total_size = 0
     for source_file in file_tuple:
         if not isinstance(source_file, SourceFile):
             raise SourceArchiveError("candidate entry is invalid")
@@ -1226,6 +1235,12 @@ def _validated_candidate_files(
             raise SourceArchiveError("candidate mode is not allowed")
         if type(source_file.content) is not bytes:
             raise SourceArchiveError("candidate file content must be bytes")
+        content_size = len(source_file.content)
+        if content_size > _MAX_SOURCE_FILE_BYTES:
+            raise SourceArchiveError("candidate file exceeds 1 MiB")
+        if content_size > _MAX_SOURCE_BYTES - total_size:
+            raise SourceArchiveError("candidate files exceed 8 MiB")
+        total_size += content_size
         if source_file.path in seen:
             raise SourceArchiveError("candidate path is duplicated")
         seen.add(source_file.path)
@@ -2565,6 +2580,7 @@ def _verify_candidate_checkpoint_read_only(
     path: str | None,
 ) -> _VerifiedCandidateReadCheckpoint:
     descriptors: list[int] = []
+    ownership_transferred = False
     try:
         _validate_candidate_layout(workspace)
         nofollow = getattr(os, "O_NOFOLLOW", None)
@@ -2753,40 +2769,6 @@ def _verify_candidate_checkpoint_read_only(
                 "candidate control identity mismatches"
             )
         git_authority_before = _scan_candidate_git_authority(git_descriptor)
-        actual_head_result = _run_git_read_only(
-            git_dir=workspace.git_dir,
-            worktree=workspace.worktree,
-            arguments=("rev-parse", "HEAD"),
-        )
-        if actual_head_result.returncode != 0:
-            raise CandidateWorkspaceError("candidate HEAD is unavailable")
-        actual_head = actual_head_result.stdout.decode("ascii").strip()
-        commit_result = _run_git_read_only(
-            git_dir=workspace.git_dir,
-            worktree=workspace.worktree,
-            arguments=(
-                "cat-file",
-                "-e",
-                "HEAD^{commit}",
-            ),
-        )
-        index_result = _run_git_read_only(
-            git_dir=workspace.git_dir,
-            worktree=workspace.worktree,
-            arguments=(
-                "diff-index",
-                "--cached",
-                "--quiet",
-                "HEAD",
-                "--",
-            ),
-        )
-        if (
-            actual_head != workspace.head_commit
-            or commit_result.returncode != 0
-            or index_result.returncode != 0
-        ):
-            raise CandidateWorkspaceError("candidate Git checkpoint mismatches")
         workspace_snapshot_before = _scan_candidate_workspace_identity(
             worktree_descriptor
         )
@@ -2820,15 +2802,22 @@ def _verify_candidate_checkpoint_read_only(
             control_sha256=hashlib.sha256(control_raw).hexdigest(),
             git_authority_snapshot=git_authority_after,
         )
-        if not _candidate_read_authority_matches(checkpoint):
-            raise CandidateReadError("FILE_CHANGED")
+        if not _candidate_read_semantic_authority_matches(
+            checkpoint,
+            workspace,
+        ):
+            raise CandidateWorkspaceError(
+                "candidate Git checkpoint mismatches"
+            )
+        ownership_transferred = True
         return checkpoint
     except CandidateReadError:
-        _close_candidate_read_descriptors(descriptors)
         raise
     except Exception as error:
-        _close_candidate_read_descriptors(descriptors)
         raise CandidateReadError("RECOVERY_REQUIRED") from error
+    finally:
+        if not ownership_transferred:
+            _close_candidate_read_descriptors(descriptors)
 
 
 def _candidate_read_anchor(
@@ -3149,6 +3138,13 @@ def _scan_candidate_git_authority(
                     raise CandidateWorkspaceError(
                         "candidate Git authority path is invalid"
                     )
+                if path_bytes in {
+                    b"objects/info/alternates",
+                    b"objects/info/http-alternates",
+                }:
+                    raise CandidateWorkspaceError(
+                        "candidate Git authority cannot use alternates"
+                    )
                 try:
                     before = os.stat(
                         name,
@@ -3311,6 +3307,48 @@ def _candidate_read_authority_matches(
         return False
 
 
+def _candidate_read_semantic_authority_matches(
+    checkpoint: _VerifiedCandidateReadCheckpoint,
+    workspace: CandidateWorkspace,
+) -> bool:
+    if not _candidate_read_authority_matches(checkpoint):
+        return False
+    semantic_matches = False
+    try:
+        actual_head_result = _run_git_read_only(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=("rev-parse", "HEAD"),
+        )
+        commit_result = _run_git_read_only(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=("cat-file", "-e", "HEAD^{commit}"),
+        )
+        index_result = _run_git_read_only(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=(
+                "diff-index",
+                "--cached",
+                "--quiet",
+                "HEAD",
+                "--",
+            ),
+        )
+        semantic_matches = (
+            actual_head_result.returncode == 0
+            and actual_head_result.stdout.decode("ascii").strip()
+            == workspace.head_commit
+            and commit_result.returncode == 0
+            and index_result.returncode == 0
+        )
+    except (CandidateWorkspaceError, OSError, UnicodeDecodeError):
+        semantic_matches = False
+    authority_matches_after = _candidate_read_authority_matches(checkpoint)
+    return semantic_matches and authority_matches_after
+
+
 def _close_candidate_read_checkpoint(
     checkpoint: _VerifiedCandidateReadCheckpoint,
 ) -> None:
@@ -3434,6 +3472,27 @@ def _read_candidate_execution_snapshot_file(
         return SourceFile(path, entry.posix_mode, content)
     finally:
         _close_candidate_read_descriptors(descriptors)
+
+
+def _candidate_execution_snapshot_regular_entries(
+    manifest: WorkspaceManifest,
+) -> tuple[WorkspaceManifestEntry, ...]:
+    _workspace_manifest_json(manifest)
+    regular_entries: list[WorkspaceManifestEntry] = []
+    total_size = 0
+    for entry in manifest.entries:
+        if entry.type != "regular":
+            continue
+        size = entry.size_bytes
+        if (
+            type(size) is not int
+            or not 0 <= size <= _MAX_SOURCE_FILE_BYTES
+            or size > _MAX_SOURCE_BYTES - total_size
+        ):
+            raise ManifestError("snapshot regular files exceed the byte limit")
+        total_size += size
+        regular_entries.append(entry)
+    return tuple(regular_entries)
 
 
 def _read_verified_candidate_path(
