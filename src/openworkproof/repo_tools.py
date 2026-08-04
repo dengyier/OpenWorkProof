@@ -434,6 +434,38 @@ class _VerifiedCandidateReadCheckpoint:
     git_authority_snapshot: tuple[_GitAuthoritySnapshotEntry, ...]
 
 
+class _CandidateReadDescriptorOwner:
+    def __init__(self) -> None:
+        self._descriptors: list[int] = []
+
+    def open(
+        self,
+        path: str | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(path, flags, mode, dir_fd=dir_fd)
+            self._descriptors.append(descriptor)
+        except BaseException:
+            if descriptor is not None:
+                try:
+                    self._descriptors.remove(descriptor)
+                except ValueError:
+                    pass
+                _close_candidate_read_descriptors([descriptor])
+            raise
+        return descriptor
+
+    def close(self) -> None:
+        descriptors = self._descriptors
+        self._descriptors = []
+        _close_candidate_read_descriptors(descriptors)
+
+
 def _candidate_read_checkpoint_hook() -> None:
     """Provide a deterministic test seam after checkpoint verification."""
 
@@ -2131,34 +2163,40 @@ def scan_workspace_manifest(
             if stat.S_ISDIR(before.st_mode):
                 entry_type = "directory"
                 size = None
+                descriptor_owner = _CandidateReadDescriptorOwner()
                 try:
-                    child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
-                except OSError as error:
-                    raise ManifestError(
-                        "workspace directory cannot be opened safely"
-                    ) from error
-                try:
+                    try:
+                        child_fd = descriptor_owner.open(
+                            name,
+                            directory_flags,
+                            dir_fd=directory_fd,
+                        )
+                    except OSError as error:
+                        raise ManifestError(
+                            "workspace directory cannot be opened safely"
+                        ) from error
                     if not os.path.samestat(before, os.fstat(child_fd)):
                         raise ManifestError(
                             "workspace directory changed before traversal"
                         )
                     scan(child_fd, path_bytes + b"/")
                 finally:
-                    os.close(child_fd)
+                    descriptor_owner.close()
             elif stat.S_ISREG(before.st_mode):
                 entry_type = "regular"
                 size = before.st_size
+                descriptor_owner = _CandidateReadDescriptorOwner()
                 try:
-                    descriptor = os.open(
-                        name,
-                        os.O_RDONLY | nofollow,
-                        dir_fd=directory_fd,
-                    )
-                except OSError as error:
-                    raise ManifestError(
-                        "workspace regular file cannot be opened safely"
-                    ) from error
-                try:
+                    try:
+                        descriptor = descriptor_owner.open(
+                            name,
+                            os.O_RDONLY | nofollow,
+                            dir_fd=directory_fd,
+                        )
+                    except OSError as error:
+                        raise ManifestError(
+                            "workspace regular file cannot be opened safely"
+                        ) from error
                     opened = os.fstat(descriptor)
                     if not os.path.samestat(before, opened):
                         raise ManifestError(
@@ -2170,7 +2208,7 @@ def scan_workspace_manifest(
                             "workspace regular file changed during read"
                         )
                 finally:
-                    os.close(descriptor)
+                    descriptor_owner.close()
             elif stat.S_ISLNK(before.st_mode):
                 entry_type = "symlink"
                 try:
@@ -2597,7 +2635,7 @@ def _with_verified_candidate_checkpoint_read_only(
         _CheckpointOperationResult,
     ],
 ) -> _CheckpointOperationResult:
-    descriptors: list[int] = []
+    descriptor_owner = _CandidateReadDescriptorOwner()
     verification_complete = False
     try:
         _validate_candidate_layout(workspace)
@@ -2613,26 +2651,25 @@ def _with_verified_candidate_checkpoint_read_only(
                 "candidate scan requires directory no-follow support"
             )
         directory_flags = os.O_RDONLY | directory | nofollow
-        root_descriptor = os.open(workspace.runtime_root, directory_flags)
-        descriptors.append(root_descriptor)
-        candidate_descriptor = os.open(
+        root_descriptor = descriptor_owner.open(
+            workspace.runtime_root,
+            directory_flags,
+        )
+        candidate_descriptor = descriptor_owner.open(
             workspace.workspace_id,
             directory_flags,
             dir_fd=root_descriptor,
         )
-        descriptors.append(candidate_descriptor)
-        worktree_descriptor = os.open(
+        worktree_descriptor = descriptor_owner.open(
             "worktree",
             directory_flags,
             dir_fd=candidate_descriptor,
         )
-        descriptors.append(worktree_descriptor)
-        git_descriptor = os.open(
+        git_descriptor = descriptor_owner.open(
             "git",
             directory_flags,
             dir_fd=candidate_descriptor,
         )
-        descriptors.append(git_descriptor)
         anchors: list[_CandidateReadAnchor] = [
             _candidate_read_anchor(
                 root_descriptor,
@@ -2687,12 +2724,11 @@ def _with_verified_candidate_checkpoint_read_only(
             raise CandidateWorkspaceError(
                 "candidate control record is invalid"
             )
-        control_descriptor = os.open(
+        control_descriptor = descriptor_owner.open(
             "control.json",
             os.O_RDONLY | nofollow,
             dir_fd=candidate_descriptor,
         )
-        descriptors.append(control_descriptor)
         control_anchor = _candidate_read_anchor(
             control_descriptor,
             parent_descriptor=candidate_descriptor,
@@ -2722,14 +2758,13 @@ def _with_verified_candidate_checkpoint_read_only(
             segments = path.split("/")
             for segment in segments[:-1]:
                 try:
-                    child_descriptor = os.open(
+                    child_descriptor = descriptor_owner.open(
                         segment,
                         directory_flags,
                         dir_fd=current_descriptor,
                     )
                 except OSError as error:
                     raise CandidateReadError("PATH_DENIED") from error
-                descriptors.append(child_descriptor)
                 try:
                     anchor = _candidate_read_anchor(
                         child_descriptor,
@@ -2758,7 +2793,7 @@ def _with_verified_candidate_checkpoint_read_only(
             ):
                 raise CandidateReadError("PATH_DENIED")
             try:
-                leaf_descriptor = os.open(
+                leaf_descriptor = descriptor_owner.open(
                     leaf_name,
                     os.O_RDONLY | nofollow,
                     dir_fd=current_descriptor,
@@ -2767,7 +2802,6 @@ def _with_verified_candidate_checkpoint_read_only(
                 raise CandidateWorkspaceError(
                     "candidate leaf cannot be opened for checkpoint scan"
                 ) from error
-            descriptors.append(leaf_descriptor)
             leaf_anchor = _candidate_read_anchor(
                 leaf_descriptor,
                 parent_descriptor=current_descriptor,
@@ -2837,7 +2871,7 @@ def _with_verified_candidate_checkpoint_read_only(
             raise
         raise CandidateReadError("RECOVERY_REQUIRED") from error
     finally:
-        _close_candidate_read_descriptors(descriptors)
+        descriptor_owner.close()
 
 
 def _candidate_read_anchor(
@@ -2983,17 +3017,18 @@ def _scan_candidate_workspace_identity(
             token = _workspace_read_token(before)
             entries_seen += 1
             if stat.S_ISDIR(before.st_mode):
+                descriptor_owner = _CandidateReadDescriptorOwner()
                 try:
-                    child_descriptor = os.open(
-                        name,
-                        directory_flags,
-                        dir_fd=directory_descriptor,
-                    )
-                except OSError as error:
-                    raise CandidateWorkspaceError(
-                        "candidate workspace identity directory cannot be opened"
-                    ) from error
-                try:
+                    try:
+                        child_descriptor = descriptor_owner.open(
+                            name,
+                            directory_flags,
+                            dir_fd=directory_descriptor,
+                        )
+                    except OSError as error:
+                        raise CandidateWorkspaceError(
+                            "candidate workspace identity directory cannot be opened"
+                        ) from error
                     if (
                         _workspace_read_token(os.fstat(child_descriptor))
                         != token
@@ -3031,23 +3066,24 @@ def _scan_candidate_workspace_identity(
                         "candidate workspace identity directory changed"
                     ) from error
                 finally:
-                    _close_candidate_read_descriptors([child_descriptor])
+                    descriptor_owner.close()
                 continue
             if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
                 raise CandidateWorkspaceError(
                     "candidate workspace identity entry type is unsupported"
                 )
+            descriptor_owner = _CandidateReadDescriptorOwner()
             try:
-                file_descriptor = os.open(
-                    name,
-                    os.O_RDONLY | nofollow,
-                    dir_fd=directory_descriptor,
-                )
-            except OSError as error:
-                raise CandidateWorkspaceError(
-                    "candidate workspace identity file cannot be opened"
-                ) from error
-            try:
+                try:
+                    file_descriptor = descriptor_owner.open(
+                        name,
+                        os.O_RDONLY | nofollow,
+                        dir_fd=directory_descriptor,
+                    )
+                except OSError as error:
+                    raise CandidateWorkspaceError(
+                        "candidate workspace identity file cannot be opened"
+                    ) from error
                 if _workspace_read_token(os.fstat(file_descriptor)) != token:
                     raise CandidateWorkspaceError(
                         "candidate workspace identity file changed"
@@ -3069,7 +3105,7 @@ def _scan_candidate_workspace_identity(
                     "candidate workspace identity file changed"
                 ) from error
             finally:
-                _close_candidate_read_descriptors([file_descriptor])
+                descriptor_owner.close()
             entries.append(
                 _WorkspaceIdentitySnapshotEntry(
                     path_bytes=path_bytes,
@@ -3178,17 +3214,18 @@ def _scan_candidate_git_authority(
                 token = _workspace_read_token(before)
                 entries_seen += 1
                 if stat.S_ISDIR(before.st_mode):
+                    descriptor_owner = _CandidateReadDescriptorOwner()
                     try:
-                        child_descriptor = os.open(
-                            name,
-                            directory_flags,
-                            dir_fd=directory_descriptor,
-                        )
-                    except OSError as error:
-                        raise CandidateWorkspaceError(
-                            "candidate Git authority directory cannot be opened"
-                        ) from error
-                    try:
+                        try:
+                            child_descriptor = descriptor_owner.open(
+                                name,
+                                directory_flags,
+                                dir_fd=directory_descriptor,
+                            )
+                        except OSError as error:
+                            raise CandidateWorkspaceError(
+                                "candidate Git authority directory cannot be opened"
+                            ) from error
                         if (
                             _workspace_read_token(os.fstat(child_descriptor))
                             != token
@@ -3224,7 +3261,7 @@ def _scan_candidate_git_authority(
                                 "candidate Git authority directory changed"
                             )
                     finally:
-                        _close_candidate_read_descriptors([child_descriptor])
+                        descriptor_owner.close()
                     continue
                 if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
                     raise CandidateWorkspaceError(
@@ -3238,17 +3275,18 @@ def _scan_candidate_git_authority(
                     raise CandidateWorkspaceError(
                         "candidate Git authority exceeds byte limit"
                     )
+                descriptor_owner = _CandidateReadDescriptorOwner()
                 try:
-                    file_descriptor = os.open(
-                        name,
-                        os.O_RDONLY | nofollow,
-                        dir_fd=directory_descriptor,
-                    )
-                except OSError as error:
-                    raise CandidateWorkspaceError(
-                        "candidate Git authority file cannot be opened"
-                    ) from error
-                try:
+                    try:
+                        file_descriptor = descriptor_owner.open(
+                            name,
+                            os.O_RDONLY | nofollow,
+                            dir_fd=directory_descriptor,
+                        )
+                    except OSError as error:
+                        raise CandidateWorkspaceError(
+                            "candidate Git authority file cannot be opened"
+                        ) from error
                     if (
                         _workspace_read_token(os.fstat(file_descriptor))
                         != token
@@ -3287,7 +3325,7 @@ def _scan_candidate_git_authority(
                             "candidate Git authority file changed"
                         )
                 finally:
-                    _close_candidate_read_descriptors([file_descriptor])
+                    descriptor_owner.close()
                 total_bytes += before.st_size
                 entries.append(
                     _GitAuthoritySnapshotEntry(
@@ -3410,7 +3448,7 @@ def _read_candidate_execution_snapshot_file(
         raise CandidateWorkspaceError(
             "candidate snapshot requires directory no-follow support"
         )
-    descriptors: list[int] = []
+    descriptor_owner = _CandidateReadDescriptorOwner()
     parent_descriptor = checkpoint.worktree_descriptor
     try:
         for segment in path.split("/")[:-1]:
@@ -3424,12 +3462,11 @@ def _read_candidate_execution_snapshot_file(
                     "candidate snapshot ancestor is not a directory"
                 )
             token = _workspace_read_token(named)
-            child_descriptor = os.open(
+            child_descriptor = descriptor_owner.open(
                 segment,
                 os.O_RDONLY | directory | nofollow,
                 dir_fd=parent_descriptor,
             )
-            descriptors.append(child_descriptor)
             if _workspace_read_token(os.fstat(child_descriptor)) != token:
                 raise CandidateWorkspaceError(
                     "candidate snapshot ancestor changed before open"
@@ -3452,12 +3489,11 @@ def _read_candidate_execution_snapshot_file(
             raise CandidateWorkspaceError(
                 "candidate snapshot regular file metadata mismatches"
             )
-        file_descriptor = os.open(
+        file_descriptor = descriptor_owner.open(
             leaf_name,
             os.O_RDONLY | nofollow,
             dir_fd=parent_descriptor,
         )
-        descriptors.append(file_descriptor)
         opened = os.fstat(file_descriptor)
         if _workspace_read_token(opened) != token_before:
             raise CandidateWorkspaceError(
@@ -3483,7 +3519,7 @@ def _read_candidate_execution_snapshot_file(
             )
         return SourceFile(path, entry.posix_mode, content)
     finally:
-        _close_candidate_read_descriptors(descriptors)
+        descriptor_owner.close()
 
 
 def _candidate_execution_snapshot_regular_entries(
@@ -3592,8 +3628,12 @@ def _read_candidate_control(workspace: CandidateWorkspace) -> dict[str, Any]:
         or not 1 <= metadata.st_size <= 4_096
     ):
         raise CandidateWorkspaceError("candidate control record is invalid")
-    descriptor = os.open(control_path, os.O_RDONLY | nofollow)
+    descriptor_owner = _CandidateReadDescriptorOwner()
     try:
+        descriptor = descriptor_owner.open(
+            control_path,
+            os.O_RDONLY | nofollow,
+        )
         opened = os.fstat(descriptor)
         if not os.path.samestat(metadata, opened):
             raise CandidateWorkspaceError("candidate control record changed")
@@ -3603,7 +3643,7 @@ def _read_candidate_control(workspace: CandidateWorkspace) -> dict[str, Any]:
         ):
             raise CandidateWorkspaceError("candidate control record changed")
     finally:
-        os.close(descriptor)
+        descriptor_owner.close()
     return _parse_candidate_control(raw, workspace)
 
 

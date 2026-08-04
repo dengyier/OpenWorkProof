@@ -2189,6 +2189,139 @@ def test_snapshot_closes_checkpoint_fds_when_owner_return_is_interrupted(
     assert raised.value is failure
 
 
+@pytest.mark.parametrize("failure_type", (KeyboardInterrupt, SystemExit))
+@pytest.mark.parametrize("site", ("checkpoint_root", "snapshot_file"))
+def test_snapshot_closes_fd_when_open_registration_is_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[BaseException],
+    site: str,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    real_open = repo_tools.os.open
+    real_close = repo_tools.os.close
+    opened_descriptors: list[int] = []
+    close_calls: list[int] = []
+    snapshot_file_armed = False
+    if site == "checkpoint_root":
+        target_path = candidate.runtime_root
+    else:
+        target_path = "README.md"
+    target = repo_tools._CandidateReadDescriptorOwner.open
+    source_lines, first_line = inspect.getsourcelines(target)
+    boundary_line = next(
+        first_line + offset
+        for offset, source_line in enumerate(source_lines)
+        if source_line.strip() == "self._descriptors.append(descriptor)"
+    )
+    failure = failure_type(f"injected {site} registration interruption")
+
+    def arm_snapshot_file(unused_path: str) -> None:
+        nonlocal snapshot_file_armed
+        close_calls.clear()
+        snapshot_file_armed = True
+
+    def observe_open(path, flags, mode=0o777, *, dir_fd=None):
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if (
+            (site == "checkpoint_root" and path == target_path)
+            or (
+                site == "snapshot_file"
+                and snapshot_file_armed
+                and path == target_path
+            )
+        ):
+            if site == "checkpoint_root":
+                close_calls.clear()
+            opened_descriptors.append(descriptor)
+        return descriptor
+
+    def observe_close(descriptor: int) -> None:
+        close_calls.append(descriptor)
+        real_close(descriptor)
+
+    def interrupt_registration(frame, event, unused_argument):
+        if (
+            event == "line"
+            and frame.f_code is target.__code__
+            and frame.f_lineno == boundary_line
+            and frame.f_locals["path"] == target_path
+            and (site == "checkpoint_root" or snapshot_file_armed)
+        ):
+            raise failure
+        return interrupt_registration
+
+    monkeypatch.setattr(repo_tools.os, "open", observe_open)
+    monkeypatch.setattr(repo_tools.os, "close", observe_close)
+    if site == "snapshot_file":
+        monkeypatch.setattr(
+            repo_tools,
+            "_candidate_execution_snapshot_file_hook",
+            arm_snapshot_file,
+        )
+
+    leaked_descriptors: list[int] = []
+    with pytest.raises(failure_type) as raised:
+        try:
+            sys.settrace(interrupt_registration)
+            repo_tools.prepare_candidate_execution_snapshot(
+                _snapshot_request(candidate)
+            )
+        finally:
+            sys.settrace(None)
+            for descriptor in opened_descriptors:
+                try:
+                    os.fstat(descriptor)
+                except OSError:
+                    continue
+                leaked_descriptors.append(descriptor)
+                real_close(descriptor)
+
+    assert len(opened_descriptors) == 1
+    assert leaked_descriptors == []
+    assert close_calls.count(opened_descriptors[0]) == 1
+    assert raised.value is failure
+
+
+def test_candidate_snapshot_and_read_route_all_descriptor_opens_through_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = b"base\n"
+    candidate = _candidate(
+        tmp_path,
+        content,
+        source_path="nested/README.md",
+    )
+    real_open = repo_tools.os.open
+    owner_code = repo_tools._CandidateReadDescriptorOwner.open.__code__
+    direct_open_callers: list[str] = []
+
+    def observe_open(path, flags, mode=0o777, *, dir_fd=None):
+        caller = sys._getframe(1)
+        if (
+            caller.f_globals.get("__name__") == repo_tools.__name__
+            and caller.f_code is not owner_code
+        ):
+            direct_open_callers.append(caller.f_code.co_name)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(repo_tools.os, "open", observe_open)
+
+    snapshot = repo_tools.prepare_candidate_execution_snapshot(
+        _snapshot_request(candidate)
+    )
+    read = repo_tools.read_candidate_file(
+        _request(candidate, path="nested/README.md")
+    )
+
+    assert snapshot.plan.files == (
+        repo_tools.SourceFile("nested/README.md", "100644", content),
+    )
+    assert read.content == content
+    assert direct_open_callers == []
+
+
 @pytest.mark.parametrize(
     ("field", "wrong_value"),
     (
