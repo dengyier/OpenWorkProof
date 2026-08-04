@@ -177,6 +177,14 @@ container, and execution container. The staging container is removed before
 the execution container becomes start-eligible; its attempted identity remains
 part of cleanup and crash recovery until absence is proven.
 
+The Docker execution driver is configured with one absolute canonical
+controller-owned candidate runtime root. This host path is not accepted from an
+AgentRequest and is not mounted into the execution container. The contract
+stores `candidate_workspace_id` and `source_artifact_sha256`, allowing recovery
+to derive the candidate path under the configured root and re-run the existing
+control/Git/workspace checkpoint verification. A restart configured with a
+different or unavailable runtime root remains `RECOVERY_REQUIRED`.
+
 No second execution-truth table is introduced.
 
 ## 6. Canonical Internal Contracts
@@ -189,12 +197,14 @@ No second execution-truth table is introduced.
 {
   "arguments_digest": "<sha256>",
   "candidate_commit": "<git-object-id>",
+  "candidate_workspace_id": "<sha256>",
   "command_digest": "<sha256>",
   "container_image_digest": "sha256:<digest>",
   "execution_id": "<sha256>",
   "fixed_test_source_digest": "<sha256>",
   "request_digest": "<sha256>",
   "schema_version": "openworkproof-run-contract/0.1",
+  "source_artifact_sha256": "<sha256>",
   "source_commit": "<git-object-id>",
   "test_mode": "verifier",
   "tool_name": "owp.run_tests",
