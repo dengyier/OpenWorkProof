@@ -678,6 +678,71 @@ def test_handler_journal_persists_and_loads_exact_recovery_fields(
     )
 
 
+def test_handler_journal_recovery_fields_reject_mixed_tool_rows(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    lock_descriptor = evidence._acquire_target_lock(case["ledger_path"])
+    try:
+        mcp_server._reserve_handler_execution(
+            case["ledger_path"],
+            lock_descriptor,
+            case["context"],
+            case["request"],
+            case["facts"],
+            _run_tests_contract(case),
+        )
+        connection = evidence.connect_ledger(case["ledger_path"])
+        try:
+            connection.execute(
+                """
+                INSERT INTO handler_executions (
+                    execution_id, work_order_digest, request_digest, nonce,
+                    grant_id, tool_name, arguments_digest,
+                    execution_context_id, container_instance_id_digest,
+                    controller_id, reserved_at, state,
+                    request_json, execution_contract_json,
+                    execution_contract_digest
+                ) VALUES (
+                    ?, ?, ?, ?, ?, 'owp.rollback_patch', ?, ?, ?, ?, ?,
+                    'RESERVED', NULL, NULL, NULL
+                )
+                """,
+                (
+                    "d" * 64,
+                    case["work_order"].digest,
+                    "e" * 64,
+                    "f" * 64,
+                    case["developer"].grant_id,
+                    "0" * 64,
+                    "3" * 64,
+                    "4" * 64,
+                    case["facts"].controller_id,
+                    fixed_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                ),
+            )
+        finally:
+            connection.close()
+        with pytest.raises(
+            HandlerCoordinationError, match="RECOVERY_REQUIRED"
+        ):
+            mcp_server._load_stored_run_tests_execution(
+                case["ledger_path"], lock_descriptor
+            )
+    finally:
+        evidence._release_target_lock(lock_descriptor)
+
+
 @pytest.mark.parametrize(
     "tamper",
     (

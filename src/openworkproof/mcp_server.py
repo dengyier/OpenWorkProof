@@ -581,7 +581,6 @@ def _load_stored_run_tests_execution(
                 execution_contract_json,
                 execution_contract_digest
             FROM handler_executions
-            WHERE tool_name = 'owp.run_tests'
             ORDER BY execution_id
             LIMIT 2
             """
@@ -589,7 +588,9 @@ def _load_stored_run_tests_execution(
         if not rows:
             return None
         if len(rows) != 1:
-            raise ValueError("multiple run-tests executions are unresolved")
+            raise ValueError("multiple handler executions are unresolved")
+        if rows[0][5] == "owp.rollback_patch":
+            return None
         (
             execution_id,
             work_order_digest,
