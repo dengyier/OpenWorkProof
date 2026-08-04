@@ -460,6 +460,21 @@ class _CandidateReadDescriptorOwner:
             raise
         return descriptor
 
+    def dup(self, descriptor: int) -> int:
+        duplicate: int | None = None
+        try:
+            duplicate = os.dup(descriptor)
+            self._descriptors.append(duplicate)
+        except BaseException:
+            if duplicate is not None:
+                try:
+                    self._descriptors.remove(duplicate)
+                except ValueError:
+                    pass
+                _close_candidate_read_descriptors([duplicate])
+            raise
+        return duplicate
+
     def close(self) -> None:
         descriptors = self._descriptors
         self._descriptors = []
@@ -2243,15 +2258,16 @@ def scan_workspace_manifest(
                 )
             )
 
-    duplicate = os.dup(root_fd)
+    descriptor_owner = _CandidateReadDescriptorOwner()
     try:
+        duplicate = descriptor_owner.dup(root_fd)
         scan(duplicate, b"")
         if _workspace_read_token(os.fstat(root_fd)) != root_token:
             raise ManifestError("workspace root changed during scan")
     except OSError as error:
         raise ManifestError("workspace scan failed") from error
     finally:
-        os.close(duplicate)
+        descriptor_owner.close()
     manifest = build_workspace_manifest(head_commit, records)
     _workspace_manifest_json(manifest)
     return manifest

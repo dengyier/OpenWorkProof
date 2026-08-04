@@ -2283,7 +2283,91 @@ def test_snapshot_closes_fd_when_open_registration_is_interrupted(
     assert raised.value is failure
 
 
-def test_candidate_snapshot_and_read_route_all_descriptor_opens_through_owner(
+@pytest.mark.parametrize("failure_type", (KeyboardInterrupt, SystemExit))
+def test_snapshot_closes_duplicate_when_dup_registration_is_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[BaseException],
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    real_dup = repo_tools.os.dup
+    real_close = repo_tools.os.close
+    duplicated_descriptors: list[int] = []
+    close_calls: list[int] = []
+    target = repo_tools._CandidateReadDescriptorOwner.dup
+    source_lines, first_line = inspect.getsourcelines(target)
+    boundary_line = next(
+        first_line + offset
+        for offset, source_line in enumerate(source_lines)
+        if source_line.strip() == "self._descriptors.append(duplicate)"
+    )
+    failure = failure_type("injected duplicate registration interruption")
+
+    def observe_dup(descriptor: int) -> int:
+        duplicate = real_dup(descriptor)
+        close_calls.clear()
+        duplicated_descriptors.append(duplicate)
+        return duplicate
+
+    def observe_close(descriptor: int) -> None:
+        close_calls.append(descriptor)
+        real_close(descriptor)
+
+    def interrupt_registration(frame, event, unused_argument):
+        if (
+            event == "line"
+            and frame.f_code is target.__code__
+            and frame.f_lineno == boundary_line
+        ):
+            raise failure
+        return interrupt_registration
+
+    monkeypatch.setattr(repo_tools.os, "dup", observe_dup)
+    monkeypatch.setattr(repo_tools.os, "close", observe_close)
+
+    leaked_descriptors: list[int] = []
+    with pytest.raises(failure_type) as raised:
+        try:
+            sys.settrace(interrupt_registration)
+            repo_tools.prepare_candidate_execution_snapshot(
+                _snapshot_request(candidate)
+            )
+        finally:
+            sys.settrace(None)
+            for descriptor in duplicated_descriptors:
+                try:
+                    os.fstat(descriptor)
+                except OSError:
+                    continue
+                leaked_descriptors.append(descriptor)
+                real_close(descriptor)
+
+    assert len(duplicated_descriptors) == 1
+    assert leaked_descriptors == []
+    assert close_calls.count(duplicated_descriptors[0]) == 1
+    assert raised.value is failure
+
+
+def test_candidate_descriptor_owner_does_not_close_recycled_duplicate() -> None:
+    source = os.open("/dev/null", os.O_RDONLY)
+    owner = repo_tools._CandidateReadDescriptorOwner()
+    recycled: int | None = None
+    try:
+        duplicate = owner.dup(source)
+        owner.close()
+        recycled = os.dup(source)
+        assert recycled == duplicate
+
+        owner.close()
+
+        os.fstat(recycled)
+    finally:
+        if recycled is not None:
+            os.close(recycled)
+        os.close(source)
+
+
+def test_candidate_snapshot_and_read_route_all_descriptor_acquisitions_through_owner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2294,19 +2378,31 @@ def test_candidate_snapshot_and_read_route_all_descriptor_opens_through_owner(
         source_path="nested/README.md",
     )
     real_open = repo_tools.os.open
-    owner_code = repo_tools._CandidateReadDescriptorOwner.open.__code__
-    direct_open_callers: list[str] = []
+    real_dup = repo_tools.os.dup
+    owner_open_code = repo_tools._CandidateReadDescriptorOwner.open.__code__
+    owner_dup_code = repo_tools._CandidateReadDescriptorOwner.dup.__code__
+    direct_acquisition_callers: list[tuple[str, str]] = []
 
     def observe_open(path, flags, mode=0o777, *, dir_fd=None):
         caller = sys._getframe(1)
         if (
             caller.f_globals.get("__name__") == repo_tools.__name__
-            and caller.f_code is not owner_code
+            and caller.f_code is not owner_open_code
         ):
-            direct_open_callers.append(caller.f_code.co_name)
+            direct_acquisition_callers.append(("open", caller.f_code.co_name))
         return real_open(path, flags, mode, dir_fd=dir_fd)
 
+    def observe_dup(descriptor: int) -> int:
+        caller = sys._getframe(1)
+        if (
+            caller.f_globals.get("__name__") == repo_tools.__name__
+            and caller.f_code is not owner_dup_code
+        ):
+            direct_acquisition_callers.append(("dup", caller.f_code.co_name))
+        return real_dup(descriptor)
+
     monkeypatch.setattr(repo_tools.os, "open", observe_open)
+    monkeypatch.setattr(repo_tools.os, "dup", observe_dup)
 
     snapshot = repo_tools.prepare_candidate_execution_snapshot(
         _snapshot_request(candidate)
@@ -2319,7 +2415,7 @@ def test_candidate_snapshot_and_read_route_all_descriptor_opens_through_owner(
         repo_tools.SourceFile("nested/README.md", "100644", content),
     )
     assert read.content == content
-    assert direct_open_callers == []
+    assert direct_acquisition_callers == []
 
 
 @pytest.mark.parametrize(
