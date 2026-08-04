@@ -378,6 +378,22 @@ class CandidateReadResult:
 
 
 @dataclass(frozen=True, slots=True)
+class CandidateExecutionSnapshotRequest:
+    runtime_root: Path
+    workspace_id: str
+    source_artifact_sha256: str
+    expected_head_commit: str
+    expected_workspace_manifest_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateExecutionSnapshot:
+    head_commit: str
+    workspace_manifest_digest: str
+    plan: ExecutionSnapshotPlan
+
+
+@dataclass(frozen=True, slots=True)
 class _CandidateReadAnchor:
     descriptor: int
     token: str
@@ -408,7 +424,7 @@ class _VerifiedCandidateReadCheckpoint:
     anchors: tuple[_CandidateReadAnchor, ...]
     worktree_descriptor: int
     git_descriptor: int
-    leaf_descriptor: int
+    leaf_descriptor: int | None
     control_descriptor: int
     control_size_bytes: int
     control_sha256: str
@@ -417,6 +433,14 @@ class _VerifiedCandidateReadCheckpoint:
 
 def _candidate_read_checkpoint_hook() -> None:
     """Provide a deterministic test seam after checkpoint verification."""
+
+
+def _candidate_execution_snapshot_file_hook(path: str) -> None:
+    """Provide a deterministic test seam immediately before one file read."""
+
+
+def _candidate_execution_snapshot_after_files_hook() -> None:
+    """Provide a deterministic test seam after every snapshot byte is read."""
 
 
 def read_candidate_file(request: CandidateReadRequest) -> CandidateReadResult:
@@ -436,6 +460,66 @@ def read_candidate_file(request: CandidateReadRequest) -> CandidateReadResult:
                 ),
             ),
         )
+    finally:
+        _close_candidate_read_checkpoint(checkpoint)
+
+
+def prepare_candidate_execution_snapshot(
+    request: CandidateExecutionSnapshotRequest,
+) -> CandidateExecutionSnapshot:
+    """Capture exact candidate worktree bytes for one verifier execution."""
+
+    workspace = _candidate_from_execution_snapshot_request(request)
+    checkpoint = _verify_candidate_checkpoint_read_only(workspace, None)
+    try:
+        checkpoint_manifest_digest = workspace_manifest_digest(
+            checkpoint.manifest
+        )
+        if (
+            checkpoint.manifest.head_commit
+            != request.expected_head_commit
+            or checkpoint_manifest_digest
+            != request.expected_workspace_manifest_digest
+            or not _candidate_read_authority_matches(checkpoint)
+        ):
+            raise CandidateReadError("RECOVERY_REQUIRED")
+        files = tuple(
+            _read_candidate_execution_snapshot_file(
+                checkpoint,
+                entry,
+            )
+            for entry in checkpoint.manifest.entries
+            if entry.type == "regular"
+        )
+        _candidate_execution_snapshot_after_files_hook()
+        workspace_snapshot_before = _scan_candidate_workspace_identity(
+            checkpoint.worktree_descriptor
+        )
+        fresh_manifest = scan_workspace_manifest(
+            checkpoint.worktree_descriptor,
+            checkpoint.manifest.head_commit,
+        )
+        workspace_snapshot_after = _scan_candidate_workspace_identity(
+            checkpoint.worktree_descriptor
+        )
+        if (
+            workspace_snapshot_before != workspace_snapshot_after
+            or workspace_snapshot_after != checkpoint.workspace_snapshot
+            or workspace_manifest_digest(fresh_manifest)
+            != checkpoint_manifest_digest
+            or not _candidate_read_authority_matches(checkpoint)
+        ):
+            raise CandidateReadError("RECOVERY_REQUIRED")
+        plan = derive_execution_snapshot_plan(checkpoint.manifest, files)
+        return CandidateExecutionSnapshot(
+            head_commit=checkpoint.manifest.head_commit,
+            workspace_manifest_digest=checkpoint_manifest_digest,
+            plan=plan,
+        )
+    except CandidateReadError:
+        raise
+    except (CandidateWorkspaceError, ManifestError, OSError) as error:
+        raise CandidateReadError("RECOVERY_REQUIRED") from error
     finally:
         _close_candidate_read_checkpoint(checkpoint)
 
@@ -2409,40 +2493,71 @@ def _candidate_from_read_request(
         validate_canonical_relative_path(request.path)
     except (PathError, TypeError, ValueError):
         raise CandidateReadError("PATH_DENIED") from None
-    runtime_root = request.runtime_root
+    return _candidate_from_request_binding(
+        runtime_root=request.runtime_root,
+        workspace_id=request.workspace_id,
+        source_artifact_sha256=request.source_artifact_sha256,
+        expected_head_commit=request.expected_head_commit,
+        expected_workspace_manifest_digest=(
+            request.expected_workspace_manifest_digest
+        ),
+    )
+
+
+def _candidate_from_execution_snapshot_request(
+    request: CandidateExecutionSnapshotRequest,
+) -> CandidateWorkspace:
+    if type(request) is not CandidateExecutionSnapshotRequest:
+        raise CandidateReadError("RECOVERY_REQUIRED")
+    return _candidate_from_request_binding(
+        runtime_root=request.runtime_root,
+        workspace_id=request.workspace_id,
+        source_artifact_sha256=request.source_artifact_sha256,
+        expected_head_commit=request.expected_head_commit,
+        expected_workspace_manifest_digest=(
+            request.expected_workspace_manifest_digest
+        ),
+    )
+
+
+def _candidate_from_request_binding(
+    *,
+    runtime_root: Path,
+    workspace_id: str,
+    source_artifact_sha256: str,
+    expected_head_commit: str,
+    expected_workspace_manifest_digest: str,
+) -> CandidateWorkspace:
     if (
         type(runtime_root) is not type(Path())
         or not runtime_root.is_absolute()
         or runtime_root != Path(os.path.abspath(runtime_root))
-        or type(request.workspace_id) is not str
-        or _DIGEST_PATTERN.fullmatch(request.workspace_id) is None
-        or type(request.source_artifact_sha256) is not str
-        or _DIGEST_PATTERN.fullmatch(request.source_artifact_sha256) is None
-        or type(request.expected_head_commit) is not str
-        or _OID_PATTERN.fullmatch(request.expected_head_commit) is None
-        or type(request.expected_workspace_manifest_digest) is not str
-        or _DIGEST_PATTERN.fullmatch(
-            request.expected_workspace_manifest_digest
-        )
-        is None
+        or type(workspace_id) is not str
+        or _DIGEST_PATTERN.fullmatch(workspace_id) is None
+        or type(source_artifact_sha256) is not str
+        or _DIGEST_PATTERN.fullmatch(source_artifact_sha256) is None
+        or type(expected_head_commit) is not str
+        or _OID_PATTERN.fullmatch(expected_head_commit) is None
+        or type(expected_workspace_manifest_digest) is not str
+        or _DIGEST_PATTERN.fullmatch(expected_workspace_manifest_digest) is None
     ):
         raise CandidateReadError("RECOVERY_REQUIRED")
-    candidate_root = runtime_root / request.workspace_id
+    candidate_root = runtime_root / workspace_id
     return CandidateWorkspace(
         runtime_root=runtime_root,
         candidate_root=candidate_root,
         worktree=candidate_root / "worktree",
         git_dir=candidate_root / "git",
-        workspace_id=request.workspace_id,
-        source_artifact_sha256=request.source_artifact_sha256,
-        head_commit=request.expected_head_commit,
-        workspace_manifest_digest=request.expected_workspace_manifest_digest,
+        workspace_id=workspace_id,
+        source_artifact_sha256=source_artifact_sha256,
+        head_commit=expected_head_commit,
+        workspace_manifest_digest=expected_workspace_manifest_digest,
     )
 
 
 def _verify_candidate_checkpoint_read_only(
     workspace: CandidateWorkspace,
-    path: str,
+    path: str | None,
 ) -> _VerifiedCandidateReadCheckpoint:
     descriptors: list[int] = []
     try:
@@ -2562,66 +2677,68 @@ def _verify_candidate_checkpoint_read_only(
             raise CandidateWorkspaceError(
                 "candidate Git metadata entered worktree"
             )
-        current_descriptor = worktree_descriptor
-        segments = path.split("/")
-        for segment in segments[:-1]:
+        leaf_descriptor: int | None = None
+        if path is not None:
+            current_descriptor = worktree_descriptor
+            segments = path.split("/")
+            for segment in segments[:-1]:
+                try:
+                    child_descriptor = os.open(
+                        segment,
+                        directory_flags,
+                        dir_fd=current_descriptor,
+                    )
+                except OSError as error:
+                    raise CandidateReadError("PATH_DENIED") from error
+                descriptors.append(child_descriptor)
+                try:
+                    anchor = _candidate_read_anchor(
+                        child_descriptor,
+                        parent_descriptor=current_descriptor,
+                        name=segment,
+                    )
+                except OSError as error:
+                    raise CandidateWorkspaceError(
+                        "candidate ancestor changed before checkpoint scan"
+                    ) from error
+                anchors.append(anchor)
+                current_descriptor = child_descriptor
+            leaf_name = segments[-1]
             try:
-                child_descriptor = os.open(
-                    segment,
-                    directory_flags,
+                leaf_named = os.stat(
+                    leaf_name,
                     dir_fd=current_descriptor,
+                    follow_symlinks=False,
                 )
             except OSError as error:
                 raise CandidateReadError("PATH_DENIED") from error
-            descriptors.append(child_descriptor)
+            if (
+                not stat.S_ISREG(leaf_named.st_mode)
+                or leaf_named.st_nlink != 1
+                or leaf_named.st_size > _MAX_MANIFEST_BYTES
+            ):
+                raise CandidateReadError("PATH_DENIED")
             try:
-                anchor = _candidate_read_anchor(
-                    child_descriptor,
-                    parent_descriptor=current_descriptor,
-                    name=segment,
+                leaf_descriptor = os.open(
+                    leaf_name,
+                    os.O_RDONLY | nofollow,
+                    dir_fd=current_descriptor,
                 )
             except OSError as error:
                 raise CandidateWorkspaceError(
-                    "candidate ancestor changed before checkpoint scan"
+                    "candidate leaf cannot be opened for checkpoint scan"
                 ) from error
-            anchors.append(anchor)
-            current_descriptor = child_descriptor
-        leaf_name = segments[-1]
-        try:
-            leaf_named = os.stat(
-                leaf_name,
-                dir_fd=current_descriptor,
-                follow_symlinks=False,
+            descriptors.append(leaf_descriptor)
+            leaf_anchor = _candidate_read_anchor(
+                leaf_descriptor,
+                parent_descriptor=current_descriptor,
+                name=leaf_name,
             )
-        except OSError as error:
-            raise CandidateReadError("PATH_DENIED") from error
-        if (
-            not stat.S_ISREG(leaf_named.st_mode)
-            or leaf_named.st_nlink != 1
-            or leaf_named.st_size > _MAX_MANIFEST_BYTES
-        ):
-            raise CandidateReadError("PATH_DENIED")
-        try:
-            leaf_descriptor = os.open(
-                leaf_name,
-                os.O_RDONLY | nofollow,
-                dir_fd=current_descriptor,
-            )
-        except OSError as error:
-            raise CandidateWorkspaceError(
-                "candidate leaf cannot be opened for checkpoint scan"
-            ) from error
-        descriptors.append(leaf_descriptor)
-        leaf_anchor = _candidate_read_anchor(
-            leaf_descriptor,
-            parent_descriptor=current_descriptor,
-            name=leaf_name,
-        )
-        if leaf_anchor.token != _workspace_read_token(leaf_named):
-            raise CandidateWorkspaceError(
-                "candidate leaf changed before checkpoint scan"
-            )
-        anchors.append(leaf_anchor)
+            if leaf_anchor.token != _workspace_read_token(leaf_named):
+                raise CandidateWorkspaceError(
+                    "candidate leaf changed before checkpoint scan"
+                )
+            anchors.append(leaf_anchor)
         if (
             control["worktree_inode"]
             != os.fstat(worktree_descriptor).st_ino
@@ -3205,6 +3322,115 @@ def _close_candidate_read_descriptors(descriptors: Sequence[int]) -> None:
             pass
 
 
+def _read_candidate_execution_snapshot_file(
+    checkpoint: _VerifiedCandidateReadCheckpoint,
+    entry: WorkspaceManifestEntry,
+) -> SourceFile:
+    if (
+        not isinstance(entry, WorkspaceManifestEntry)
+        or entry.type != "regular"
+        or entry.posix_mode not in _ALLOWED_MODES
+        or type(entry.size_bytes) is not int
+        or not 0 <= entry.size_bytes <= _MAX_SOURCE_FILE_BYTES
+        or type(entry.sha256) is not str
+        or _DIGEST_PATTERN.fullmatch(entry.sha256) is None
+    ):
+        raise ManifestError("snapshot regular file binding is invalid")
+    raw_path = _decode_unpadded_path(entry.path_bytes_b64url)
+    try:
+        path = raw_path.decode("ascii")
+        validate_canonical_relative_path(path)
+    except (PathError, UnicodeDecodeError) as error:
+        raise ManifestError("snapshot path is not canonical") from error
+
+    _candidate_execution_snapshot_file_hook(path)
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if (
+        type(nofollow) is not int
+        or nofollow <= 0
+        or type(directory) is not int
+        or directory <= 0
+    ):
+        raise CandidateWorkspaceError(
+            "candidate snapshot requires directory no-follow support"
+        )
+    descriptors: list[int] = []
+    parent_descriptor = checkpoint.worktree_descriptor
+    try:
+        for segment in path.split("/")[:-1]:
+            named = os.stat(
+                segment,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if not stat.S_ISDIR(named.st_mode):
+                raise CandidateWorkspaceError(
+                    "candidate snapshot ancestor is not a directory"
+                )
+            token = _workspace_read_token(named)
+            child_descriptor = os.open(
+                segment,
+                os.O_RDONLY | directory | nofollow,
+                dir_fd=parent_descriptor,
+            )
+            descriptors.append(child_descriptor)
+            if _workspace_read_token(os.fstat(child_descriptor)) != token:
+                raise CandidateWorkspaceError(
+                    "candidate snapshot ancestor changed before open"
+                )
+            parent_descriptor = child_descriptor
+
+        leaf_name = path.split("/")[-1]
+        named_before = os.stat(
+            leaf_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        token_before = _workspace_read_token(named_before)
+        if (
+            not stat.S_ISREG(named_before.st_mode)
+            or named_before.st_nlink != 1
+            or f"{named_before.st_mode:06o}" != entry.posix_mode
+            or named_before.st_size != entry.size_bytes
+        ):
+            raise CandidateWorkspaceError(
+                "candidate snapshot regular file metadata mismatches"
+            )
+        file_descriptor = os.open(
+            leaf_name,
+            os.O_RDONLY | nofollow,
+            dir_fd=parent_descriptor,
+        )
+        descriptors.append(file_descriptor)
+        opened = os.fstat(file_descriptor)
+        if _workspace_read_token(opened) != token_before:
+            raise CandidateWorkspaceError(
+                "candidate snapshot regular file changed before read"
+            )
+        content = _read_workspace_file(file_descriptor, entry.size_bytes)
+        named_after = os.stat(
+            leaf_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            _workspace_read_token(os.fstat(file_descriptor)) != token_before
+            or _workspace_read_token(named_after) != token_before
+            or not stat.S_ISREG(named_after.st_mode)
+            or named_after.st_nlink != 1
+            or f"{named_after.st_mode:06o}" != entry.posix_mode
+            or named_after.st_size != entry.size_bytes
+            or hashlib.sha256(content).hexdigest() != entry.sha256
+        ):
+            raise CandidateWorkspaceError(
+                "candidate snapshot regular file changed during read"
+            )
+        return SourceFile(path, entry.posix_mode, content)
+    finally:
+        _close_candidate_read_descriptors(descriptors)
+
+
 def _read_verified_candidate_path(
     checkpoint: _VerifiedCandidateReadCheckpoint,
     path: str,
@@ -3225,6 +3451,8 @@ def _read_verified_candidate_path(
         raise CandidateReadError("PATH_DENIED")
     try:
         if not _candidate_read_authority_matches(checkpoint):
+            raise CandidateReadError("FILE_CHANGED")
+        if type(checkpoint.leaf_descriptor) is not int:
             raise CandidateReadError("FILE_CHANGED")
         opened = os.fstat(checkpoint.leaf_descriptor)
         if (

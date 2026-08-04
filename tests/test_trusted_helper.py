@@ -91,6 +91,45 @@ def _request(
     )
 
 
+def _snapshot_request(
+    candidate: repo_tools.CandidateWorkspace,
+    *,
+    source_artifact_sha256: str | None = None,
+    expected_head_commit: str | None = None,
+    expected_workspace_manifest_digest: str | None = None,
+) -> repo_tools.CandidateExecutionSnapshotRequest:
+    return repo_tools.CandidateExecutionSnapshotRequest(
+        runtime_root=candidate.runtime_root,
+        workspace_id=candidate.workspace_id,
+        source_artifact_sha256=(
+            candidate.source_artifact_sha256
+            if source_artifact_sha256 is None
+            else source_artifact_sha256
+        ),
+        expected_head_commit=(
+            candidate.head_commit
+            if expected_head_commit is None
+            else expected_head_commit
+        ),
+        expected_workspace_manifest_digest=(
+            candidate.workspace_manifest_digest
+            if expected_workspace_manifest_digest is None
+            else expected_workspace_manifest_digest
+        ),
+    )
+
+
+def _assert_snapshot_recovery(
+    candidate: repo_tools.CandidateWorkspace,
+    request: object | None = None,
+) -> None:
+    with pytest.raises(repo_tools.CandidateReadError) as raised:
+        repo_tools.prepare_candidate_execution_snapshot(
+            _snapshot_request(candidate) if request is None else request
+        )
+    assert raised.value.code == "RECOVERY_REQUIRED"
+
+
 def _dispatcher_request(
     candidate: repo_tools.CandidateWorkspace,
     *,
@@ -1143,6 +1182,599 @@ def test_read_candidate_file_returns_exact_closed_result(tmp_path: Path) -> None
         size_bytes=5,
         workspace_manifest_digest=candidate.workspace_manifest_digest,
     )
+
+
+def test_prepare_candidate_execution_snapshot_returns_exact_files(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+
+    result = repo_tools.prepare_candidate_execution_snapshot(
+        repo_tools.CandidateExecutionSnapshotRequest(
+            runtime_root=candidate.runtime_root,
+            workspace_id=candidate.workspace_id,
+            source_artifact_sha256=candidate.source_artifact_sha256,
+            expected_head_commit=candidate.head_commit,
+            expected_workspace_manifest_digest=(
+                candidate.workspace_manifest_digest
+            ),
+        )
+    )
+
+    assert result.head_commit == candidate.head_commit
+    assert (
+        result.workspace_manifest_digest
+        == candidate.workspace_manifest_digest
+    )
+    assert result.plan.files == (
+        repo_tools.SourceFile("README.md", "100644", b"base\n"),
+    )
+
+
+def test_prepare_candidate_execution_snapshot_reads_every_file_in_order(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"readme\n",
+        additional_files=(
+            repo_tools.SourceFile("z-last.txt", "100644", b"last\n"),
+            repo_tools.SourceFile("bin/run", "100755", b"#!/bin/sh\n"),
+            repo_tools.SourceFile("a-first.txt", "100644", b"first\n"),
+        ),
+    )
+
+    result = repo_tools.prepare_candidate_execution_snapshot(
+        _snapshot_request(candidate)
+    )
+
+    assert result.plan.files == (
+        repo_tools.SourceFile("README.md", "100644", b"readme\n"),
+        repo_tools.SourceFile("a-first.txt", "100644", b"first\n"),
+        repo_tools.SourceFile("bin/run", "100755", b"#!/bin/sh\n"),
+        repo_tools.SourceFile("z-last.txt", "100644", b"last\n"),
+    )
+
+
+def test_prepare_candidate_execution_snapshot_returns_exact_one_mib_file(
+    tmp_path: Path,
+) -> None:
+    content = b"x" * 1_048_576
+    candidate = _candidate(tmp_path, content)
+
+    result = repo_tools.prepare_candidate_execution_snapshot(
+        _snapshot_request(candidate)
+    )
+
+    assert result.plan.files == (
+        repo_tools.SourceFile("README.md", "100644", content),
+    )
+
+
+def test_prepare_candidate_execution_snapshot_rejects_sibling_change_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"base\n",
+        additional_files=(
+            repo_tools.SourceFile("z-last.txt", "100644", b"last\n"),
+        ),
+    )
+    sibling = candidate.worktree / "README.md"
+    sibling_inode = sibling.stat().st_ino
+
+    def change_previously_read_sibling(path: str) -> None:
+        if path == "z-last.txt":
+            with sibling.open("r+b") as stream:
+                stream.write(b"evil\n")
+            assert sibling.stat().st_ino == sibling_inode
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_file_hook",
+        change_previously_read_sibling,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+
+def test_prepare_candidate_execution_snapshot_rejects_nested_sibling_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"base\n",
+        additional_files=(
+            repo_tools.SourceFile("nested/a.txt", "100644", b"alpha\n"),
+            repo_tools.SourceFile("z-last.txt", "100644", b"last\n"),
+        ),
+    )
+    sibling = candidate.worktree / "nested" / "a.txt"
+    sibling_inode = sibling.stat().st_ino
+
+    def change_nested_sibling(path: str) -> None:
+        if path == "z-last.txt":
+            with sibling.open("r+b") as stream:
+                stream.write(b"evil!\n")
+            assert sibling.stat().st_ino == sibling_inode
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_file_hook",
+        change_nested_sibling,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+
+def test_prepare_candidate_execution_snapshot_rejects_globally_woven_aba(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"base\n",
+        additional_files=(
+            repo_tools.SourceFile("a.txt", "100644", b"alpha\n"),
+            repo_tools.SourceFile("b.txt", "100644", b"bravo\n"),
+        ),
+    )
+    a_path = candidate.worktree / "a.txt"
+    b_path = candidate.worktree / "b.txt"
+    real_scan = repo_tools.scan_workspace_manifest
+    real_stat = repo_tools.os.stat
+    scan_calls = 0
+    woven_a_stats = 0
+    weaving = False
+
+    def interleave_file_reads(path: str) -> None:
+        if path == "a.txt":
+            b_path.write_bytes(b"evil!\n")
+        elif path == "b.txt":
+            a_path.write_bytes(b"evil!\n")
+            b_path.write_bytes(b"bravo\n")
+
+    def weave_manifest_scan(
+        root_fd: int,
+        head_commit: str,
+    ) -> repo_tools.WorkspaceManifest:
+        nonlocal scan_calls, weaving
+        scan_calls += 1
+        weaving = scan_calls == 2
+        try:
+            return real_scan(root_fd, head_commit)
+        finally:
+            weaving = False
+
+    def weave_siblings(
+        path,
+        *,
+        dir_fd=None,
+        follow_symlinks=True,
+    ) -> os.stat_result:
+        nonlocal woven_a_stats
+        if weaving and path == "a.txt":
+            woven_a_stats += 1
+            if woven_a_stats == 1:
+                a_path.write_bytes(b"alpha\n")
+                return real_stat(
+                    path,
+                    dir_fd=dir_fd,
+                    follow_symlinks=follow_symlinks,
+                )
+            if woven_a_stats == 2:
+                metadata = real_stat(
+                    path,
+                    dir_fd=dir_fd,
+                    follow_symlinks=follow_symlinks,
+                )
+                a_path.write_bytes(b"evil!\n")
+                return metadata
+        return real_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_file_hook",
+        interleave_file_reads,
+    )
+    monkeypatch.setattr(
+        repo_tools,
+        "scan_workspace_manifest",
+        weave_manifest_scan,
+    )
+    monkeypatch.setattr(repo_tools.os, "stat", weave_siblings)
+
+    _assert_snapshot_recovery(candidate)
+
+    assert scan_calls == 2
+    assert woven_a_stats == 2
+    assert a_path.read_bytes() == b"evil!\n"
+    assert b_path.read_bytes() == b"bravo\n"
+
+
+def test_prepare_candidate_execution_snapshot_rejects_513th_entry_before_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    for index in range(512):
+        (candidate.worktree / f"extra-{index:03d}.txt").write_bytes(b"")
+    last_name = "extra-511.txt"
+    real_stat = repo_tools.os.stat
+    real_open = repo_tools.os.open
+    last_entry_io: list[str] = []
+
+    def observe_stat(path, *, dir_fd=None, follow_symlinks=True):
+        if path == last_name and dir_fd is not None:
+            last_entry_io.append("stat")
+        return real_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    def observe_open(path, flags, mode=0o777, *, dir_fd=None):
+        if path == last_name and dir_fd is not None:
+            last_entry_io.append("open")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(repo_tools.os, "stat", observe_stat)
+    monkeypatch.setattr(repo_tools.os, "open", observe_open)
+
+    _assert_snapshot_recovery(candidate)
+    assert last_entry_io == []
+
+
+def test_prepare_candidate_execution_snapshot_rejects_symlink(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    target = candidate.worktree / "README.md"
+    target.unlink()
+    target.symlink_to("missing")
+
+    _assert_snapshot_recovery(candidate)
+
+
+def test_prepare_candidate_execution_snapshot_rejects_hardlink(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    target = candidate.worktree / "README.md"
+    target.unlink()
+    external = tmp_path / "external"
+    external.write_bytes(b"base\n")
+    os.link(external, target)
+
+    _assert_snapshot_recovery(candidate)
+
+
+def test_prepare_candidate_execution_snapshot_rejects_fifo(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    target = candidate.worktree / "README.md"
+    target.unlink()
+    os.mkfifo(target)
+
+    _assert_snapshot_recovery(candidate)
+
+
+def test_prepare_candidate_execution_snapshot_rejects_oversize_regular_file(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    (candidate.worktree / "README.md").write_bytes(
+        b"x" * (1_048_576 + 1)
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+
+def test_prepare_candidate_execution_snapshot_rejects_wrong_source_digest(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+
+    _assert_snapshot_recovery(
+        candidate,
+        _snapshot_request(candidate, source_artifact_sha256="c" * 64),
+    )
+
+
+def test_prepare_candidate_execution_snapshot_rejects_wrong_head(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+
+    _assert_snapshot_recovery(
+        candidate,
+        _snapshot_request(candidate, expected_head_commit="0" * 40),
+    )
+
+
+def test_prepare_candidate_execution_snapshot_rejects_wrong_manifest_digest(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+
+    _assert_snapshot_recovery(
+        candidate,
+        _snapshot_request(
+            candidate,
+            expected_workspace_manifest_digest="0" * 64,
+        ),
+    )
+
+
+@pytest.mark.parametrize("mutation", ("replace", "drift"))
+def test_prepare_candidate_execution_snapshot_rejects_control_replacement_or_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    control = candidate.candidate_root / "control.json"
+    original = control.read_bytes()
+
+    def mutate_control() -> None:
+        if mutation == "replace":
+            replacement = candidate.candidate_root / "replacement"
+            replacement.write_bytes(original)
+            replacement.chmod(0o600)
+            replacement.replace(control)
+        else:
+            with control.open("r+b") as stream:
+                stream.write(b" " + original[1:])
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_after_files_hook",
+        mutate_control,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+
+@pytest.mark.parametrize("mutation", ("index", "authority"))
+def test_prepare_candidate_execution_snapshot_rejects_git_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+
+    def mutate_git() -> None:
+        if mutation == "index":
+            subprocess.run(
+                [
+                    "/usr/bin/git",
+                    f"--git-dir={candidate.git_dir}",
+                    f"--work-tree={candidate.worktree}",
+                    "update-index",
+                    "--chmod=+x",
+                    "README.md",
+                ],
+                check=True,
+                capture_output=True,
+                env={
+                    "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "LC_ALL": "C",
+                    "PATH": "/usr/bin:/bin",
+                },
+            )
+        else:
+            head = candidate.git_dir / "HEAD"
+            original = head.read_bytes()
+            head.write_bytes(b"x" * len(original))
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_after_files_hook",
+        mutate_git,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+
+def test_prepare_candidate_execution_snapshot_closes_every_fd_on_file_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"base\n",
+        source_path="nested/README.md",
+    )
+    real_verify = repo_tools._verify_candidate_checkpoint_read_only
+    real_open = repo_tools.os.open
+    real_read_workspace_file = repo_tools._read_workspace_file
+    checkpoint_descriptors: tuple[int, ...] = ()
+    file_descriptors: list[int] = []
+    file_read_armed = False
+
+    def capture_checkpoint(*args, **kwargs):
+        nonlocal checkpoint_descriptors
+        checkpoint = real_verify(*args, **kwargs)
+        checkpoint_descriptors = tuple(
+            anchor.descriptor for anchor in checkpoint.anchors
+        )
+        return checkpoint
+
+    def arm_file_failure(path: str) -> None:
+        nonlocal file_read_armed
+        assert path == "nested/README.md"
+        file_read_armed = True
+
+    def capture_open(path, flags, mode=0o777, *, dir_fd=None):
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if file_read_armed:
+            file_descriptors.append(descriptor)
+        return descriptor
+
+    def fail_file_read(descriptor: int, size_bytes: int) -> bytes:
+        if file_read_armed:
+            raise OSError("injected snapshot read failure")
+        return real_read_workspace_file(descriptor, size_bytes)
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_verify_candidate_checkpoint_read_only",
+        capture_checkpoint,
+    )
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_file_hook",
+        arm_file_failure,
+    )
+    monkeypatch.setattr(repo_tools.os, "open", capture_open)
+    monkeypatch.setattr(repo_tools, "_read_workspace_file", fail_file_read)
+
+    _assert_snapshot_recovery(candidate)
+    assert len(checkpoint_descriptors) == 5
+    assert len(file_descriptors) == 2
+    for descriptor in (*checkpoint_descriptors, *file_descriptors):
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+def test_prepare_candidate_execution_snapshot_closes_checkpoint_fds_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    real_anchor = repo_tools._candidate_read_anchor
+    captured_descriptors: list[int] = []
+
+    def capture_anchor(*args, **kwargs):
+        anchor = real_anchor(*args, **kwargs)
+        captured_descriptors.append(anchor.descriptor)
+        return anchor
+
+    def fail_scan(
+        unused_root_fd: int,
+        unused_head_commit: str,
+    ) -> repo_tools.WorkspaceManifest:
+        raise repo_tools.ManifestError("injected checkpoint failure")
+
+    monkeypatch.setattr(repo_tools, "_candidate_read_anchor", capture_anchor)
+    monkeypatch.setattr(repo_tools, "scan_workspace_manifest", fail_scan)
+
+    _assert_snapshot_recovery(candidate)
+    assert len(captured_descriptors) == 5
+    for descriptor in captured_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    (
+        ("runtime_root", Path("relative-runtime")),
+        ("workspace_id", "B" * 64),
+        ("source_artifact_sha256", "A" * 64),
+        ("expected_head_commit", "A" * 40),
+        ("expected_workspace_manifest_digest", "A" * 64),
+    ),
+)
+def test_prepare_candidate_execution_snapshot_requires_canonical_request_fields(
+    tmp_path: Path,
+    field: str,
+    wrong_value: object,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    values = {
+        "runtime_root": candidate.runtime_root,
+        "workspace_id": candidate.workspace_id,
+        "source_artifact_sha256": candidate.source_artifact_sha256,
+        "expected_head_commit": candidate.head_commit,
+        "expected_workspace_manifest_digest": (
+            candidate.workspace_manifest_digest
+        ),
+    }
+    values[field] = wrong_value
+    request = repo_tools.CandidateExecutionSnapshotRequest(**values)
+
+    _assert_snapshot_recovery(candidate, request)
+
+
+def test_prepare_candidate_execution_snapshot_requires_exact_request_type(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    request = _snapshot_request(candidate)
+
+    _assert_snapshot_recovery(
+        candidate,
+        {
+            "runtime_root": request.runtime_root,
+            "workspace_id": request.workspace_id,
+        },
+    )
+
+
+def test_prepare_candidate_execution_snapshot_requires_private_owned_runtime(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    candidate.runtime_root.chmod(0o755)
+
+    _assert_snapshot_recovery(candidate)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing_file",
+        "missing_directory",
+        "extra_file",
+        "extra_directory",
+        "reserved_path",
+        "invalid_path",
+    ),
+)
+def test_prepare_candidate_execution_snapshot_rejects_workspace_shape_changes(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    source_path = (
+        "nested/README.md" if mutation == "missing_directory" else "README.md"
+    )
+    candidate = _candidate(tmp_path, b"base\n", source_path=source_path)
+    if mutation == "missing_file":
+        (candidate.worktree / "README.md").unlink()
+    elif mutation == "missing_directory":
+        (candidate.worktree / "nested" / "README.md").unlink()
+        (candidate.worktree / "nested").rmdir()
+    elif mutation == "extra_file":
+        (candidate.worktree / "extra.txt").write_bytes(b"extra\n")
+    elif mutation == "extra_directory":
+        (candidate.worktree / "extra").mkdir()
+    elif mutation == "reserved_path":
+        (candidate.worktree / ".git").mkdir()
+    else:
+        (candidate.worktree / "invalid name.txt").write_bytes(b"invalid\n")
+
+    _assert_snapshot_recovery(candidate)
+
+
+@pytest.mark.parametrize("mode", (0o600, 0o777))
+def test_prepare_candidate_execution_snapshot_rejects_noncanonical_file_mode(
+    tmp_path: Path,
+    mode: int,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    (candidate.worktree / "README.md").chmod(mode)
+
+    _assert_snapshot_recovery(candidate)
 
 
 def test_read_candidate_file_returns_empty_file(tmp_path: Path) -> None:
