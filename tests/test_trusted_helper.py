@@ -130,6 +130,84 @@ def _assert_snapshot_recovery(
     assert raised.value.code == "RECOVERY_REQUIRED"
 
 
+def _install_snapshot_aba_weave(
+    candidate: repo_tools.CandidateWorkspace,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    directory: str = "",
+) -> tuple[Path, Path, dict[str, int | bool]]:
+    prefix = f"{directory}/" if directory else ""
+    a_path = candidate.worktree / prefix / "a.txt"
+    b_path = candidate.worktree / prefix / "b.txt"
+    real_scan = repo_tools.scan_workspace_manifest
+    real_stat = repo_tools.os.stat
+    state: dict[str, int | bool] = {
+        "scan_calls": 0,
+        "woven_a_stats": 0,
+        "weaving": False,
+    }
+
+    def interleave_file_reads(path: str) -> None:
+        if path == f"{prefix}a.txt":
+            b_path.write_bytes(b"evil!\n")
+        elif path == f"{prefix}b.txt":
+            a_path.write_bytes(b"evil!\n")
+            b_path.write_bytes(b"bravo\n")
+
+    def weave_manifest_scan(
+        root_fd: int,
+        head_commit: str,
+    ) -> repo_tools.WorkspaceManifest:
+        state["scan_calls"] = int(state["scan_calls"]) + 1
+        state["weaving"] = state["scan_calls"] == 2
+        try:
+            return real_scan(root_fd, head_commit)
+        finally:
+            state["weaving"] = False
+
+    def weave_siblings(
+        path,
+        *,
+        dir_fd=None,
+        follow_symlinks=True,
+    ) -> os.stat_result:
+        if state["weaving"] and path == "a.txt":
+            state["woven_a_stats"] = int(state["woven_a_stats"]) + 1
+            if state["woven_a_stats"] == 1:
+                a_path.write_bytes(b"alpha\n")
+                return real_stat(
+                    path,
+                    dir_fd=dir_fd,
+                    follow_symlinks=follow_symlinks,
+                )
+            if state["woven_a_stats"] == 2:
+                metadata = real_stat(
+                    path,
+                    dir_fd=dir_fd,
+                    follow_symlinks=follow_symlinks,
+                )
+                a_path.write_bytes(b"evil!\n")
+                return metadata
+        return real_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_file_hook",
+        interleave_file_reads,
+    )
+    monkeypatch.setattr(
+        repo_tools,
+        "scan_workspace_manifest",
+        weave_manifest_scan,
+    )
+    monkeypatch.setattr(repo_tools.os, "stat", weave_siblings)
+    return a_path, b_path, state
+
+
 def _dispatcher_request(
     candidate: repo_tools.CandidateWorkspace,
     *,
@@ -1251,6 +1329,20 @@ def test_prepare_candidate_execution_snapshot_returns_exact_one_mib_file(
     )
 
 
+def test_prepare_candidate_execution_snapshot_normalizes_checkpoint_file_changed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_read_authority_matches",
+        lambda unused: False,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+
 def test_prepare_candidate_execution_snapshot_rejects_sibling_change_during_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1322,79 +1414,41 @@ def test_prepare_candidate_execution_snapshot_rejects_globally_woven_aba(
             repo_tools.SourceFile("b.txt", "100644", b"bravo\n"),
         ),
     )
-    a_path = candidate.worktree / "a.txt"
-    b_path = candidate.worktree / "b.txt"
-    real_scan = repo_tools.scan_workspace_manifest
-    real_stat = repo_tools.os.stat
-    scan_calls = 0
-    woven_a_stats = 0
-    weaving = False
-
-    def interleave_file_reads(path: str) -> None:
-        if path == "a.txt":
-            b_path.write_bytes(b"evil!\n")
-        elif path == "b.txt":
-            a_path.write_bytes(b"evil!\n")
-            b_path.write_bytes(b"bravo\n")
-
-    def weave_manifest_scan(
-        root_fd: int,
-        head_commit: str,
-    ) -> repo_tools.WorkspaceManifest:
-        nonlocal scan_calls, weaving
-        scan_calls += 1
-        weaving = scan_calls == 2
-        try:
-            return real_scan(root_fd, head_commit)
-        finally:
-            weaving = False
-
-    def weave_siblings(
-        path,
-        *,
-        dir_fd=None,
-        follow_symlinks=True,
-    ) -> os.stat_result:
-        nonlocal woven_a_stats
-        if weaving and path == "a.txt":
-            woven_a_stats += 1
-            if woven_a_stats == 1:
-                a_path.write_bytes(b"alpha\n")
-                return real_stat(
-                    path,
-                    dir_fd=dir_fd,
-                    follow_symlinks=follow_symlinks,
-                )
-            if woven_a_stats == 2:
-                metadata = real_stat(
-                    path,
-                    dir_fd=dir_fd,
-                    follow_symlinks=follow_symlinks,
-                )
-                a_path.write_bytes(b"evil!\n")
-                return metadata
-        return real_stat(
-            path,
-            dir_fd=dir_fd,
-            follow_symlinks=follow_symlinks,
-        )
-
-    monkeypatch.setattr(
-        repo_tools,
-        "_candidate_execution_snapshot_file_hook",
-        interleave_file_reads,
+    a_path, b_path, state = _install_snapshot_aba_weave(
+        candidate,
+        monkeypatch,
     )
-    monkeypatch.setattr(
-        repo_tools,
-        "scan_workspace_manifest",
-        weave_manifest_scan,
-    )
-    monkeypatch.setattr(repo_tools.os, "stat", weave_siblings)
 
     _assert_snapshot_recovery(candidate)
 
-    assert scan_calls == 2
-    assert woven_a_stats == 2
+    assert state["scan_calls"] == 2
+    assert state["woven_a_stats"] == 2
+    assert a_path.read_bytes() == b"evil!\n"
+    assert b_path.read_bytes() == b"bravo\n"
+
+
+def test_prepare_candidate_execution_snapshot_rejects_nested_woven_aba(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"base\n",
+        additional_files=(
+            repo_tools.SourceFile("nested/a.txt", "100644", b"alpha\n"),
+            repo_tools.SourceFile("nested/b.txt", "100644", b"bravo\n"),
+        ),
+    )
+    a_path, b_path, state = _install_snapshot_aba_weave(
+        candidate,
+        monkeypatch,
+        directory="nested",
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+    assert state["scan_calls"] == 2
+    assert state["woven_a_stats"] == 2
     assert a_path.read_bytes() == b"evil!\n"
     assert b_path.read_bytes() == b"bravo\n"
 
@@ -1595,11 +1649,13 @@ def test_prepare_candidate_execution_snapshot_closes_every_fd_on_file_failure(
         source_path="nested/README.md",
     )
     real_verify = repo_tools._verify_candidate_checkpoint_read_only
+    real_close = repo_tools._close_candidate_read_checkpoint
     real_open = repo_tools.os.open
     real_read_workspace_file = repo_tools._read_workspace_file
     checkpoint_descriptors: tuple[int, ...] = ()
     file_descriptors: list[int] = []
     file_read_armed = False
+    close_calls = 0
 
     def capture_checkpoint(*args, **kwargs):
         nonlocal checkpoint_descriptors
@@ -1613,6 +1669,11 @@ def test_prepare_candidate_execution_snapshot_closes_every_fd_on_file_failure(
         nonlocal file_read_armed
         assert path == "nested/README.md"
         file_read_armed = True
+
+    def capture_close(checkpoint) -> None:
+        nonlocal close_calls
+        close_calls += 1
+        real_close(checkpoint)
 
     def capture_open(path, flags, mode=0o777, *, dir_fd=None):
         descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
@@ -1635,10 +1696,16 @@ def test_prepare_candidate_execution_snapshot_closes_every_fd_on_file_failure(
         "_candidate_execution_snapshot_file_hook",
         arm_file_failure,
     )
+    monkeypatch.setattr(
+        repo_tools,
+        "_close_candidate_read_checkpoint",
+        capture_close,
+    )
     monkeypatch.setattr(repo_tools.os, "open", capture_open)
     monkeypatch.setattr(repo_tools, "_read_workspace_file", fail_file_read)
 
     _assert_snapshot_recovery(candidate)
+    assert close_calls == 1
     assert len(checkpoint_descriptors) == 5
     assert len(file_descriptors) == 2
     for descriptor in (*checkpoint_descriptors, *file_descriptors):

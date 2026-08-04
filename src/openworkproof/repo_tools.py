@@ -469,9 +469,10 @@ def prepare_candidate_execution_snapshot(
 ) -> CandidateExecutionSnapshot:
     """Capture exact candidate worktree bytes for one verifier execution."""
 
-    workspace = _candidate_from_execution_snapshot_request(request)
-    checkpoint = _verify_candidate_checkpoint_read_only(workspace, None)
+    checkpoint: _VerifiedCandidateReadCheckpoint | None = None
     try:
+        workspace = _candidate_from_execution_snapshot_request(request)
+        checkpoint = _verify_candidate_checkpoint_read_only(workspace, None)
         checkpoint_manifest_digest = workspace_manifest_digest(
             checkpoint.manifest
         )
@@ -516,12 +517,16 @@ def prepare_candidate_execution_snapshot(
             workspace_manifest_digest=checkpoint_manifest_digest,
             plan=plan,
         )
-    except CandidateReadError:
-        raise
-    except (CandidateWorkspaceError, ManifestError, OSError) as error:
+    except (
+        CandidateReadError,
+        CandidateWorkspaceError,
+        ManifestError,
+        OSError,
+    ) as error:
         raise CandidateReadError("RECOVERY_REQUIRED") from error
     finally:
-        _close_candidate_read_checkpoint(checkpoint)
+        if checkpoint is not None:
+            _close_candidate_read_checkpoint(checkpoint)
 
 
 @dataclass(frozen=True, slots=True)
