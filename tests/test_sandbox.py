@@ -1359,6 +1359,20 @@ def _run_tests_observation(
     )
 
 
+class _RunTestsAlwaysEqual:
+    def __eq__(self, other: object) -> bool:
+        return True
+
+
+class _RunTestsExplodingEquality:
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("adversarial equality was dispatched")
+
+
+class _RunTestsStrSubclass(str):
+    pass
+
+
 def test_derive_run_tests_docker_binding_is_stable_and_closed() -> None:
     binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
 
@@ -1730,6 +1744,58 @@ def test_reconcile_run_tests_exited_result_resumes_with_complete_resources(
     ) == "RESUME_RESULT"
 
 
+@pytest.mark.parametrize(
+    "observation_factory",
+    (
+        lambda b: _run_tests_observation(b),
+        lambda b: _run_tests_observation(b, staging=True),
+        lambda b: _run_tests_observation(b, workspace=True),
+        lambda b: _run_tests_observation(b, output=True),
+        lambda b: _run_tests_observation(b, status="created"),
+        lambda b: _run_tests_observation(
+            b, status="running", ever_started=True
+        ),
+        lambda b: _run_tests_observation(
+            b,
+            status="paused",
+            ever_started=True,
+            staging=True,
+            workspace=True,
+        ),
+        lambda b: _run_tests_observation(
+            b, status="dead", ever_started=True, output=True
+        ),
+        lambda b: _run_tests_observation(
+            b,
+            status="exited",
+            ever_started=True,
+            started=_run_tests_started(b),
+            result=_run_tests_result(b),
+            staging=True,
+            output=True,
+        ),
+    ),
+)
+@pytest.mark.parametrize(
+    ("receipt_state", "expected"),
+    (("MATCH", "CLEAN_COMMITTED"), ("MISMATCH", "UNRESOLVED")),
+)
+def test_reconcile_run_tests_receipt_truth_wins_after_identity_validation(
+    observation_factory: object,
+    receipt_state: str,
+    expected: str,
+) -> None:
+    binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
+
+    assert repo_tools.reconcile_run_tests_docker_execution(
+        "STARTED_UNCONFIRMED",
+        binding,
+        observation_factory(binding),
+        expected_execution_contract_digest="c" * 64,
+        receipt_state=receipt_state,
+    ) == expected
+
+
 @pytest.mark.parametrize("status", ("running", "paused", "restarting"))
 def test_reconcile_run_tests_active_partial_resources_fail_closed(
     status: str,
@@ -1875,6 +1941,93 @@ def test_reconcile_run_tests_rejects_multiple_resource_mismatches() -> None:
 
 
 @pytest.mark.parametrize(
+    ("resource", "field", "value"),
+    (
+        ("workspace_volume", "name", _RunTestsAlwaysEqual()),
+        (
+            "workspace_volume",
+            "name",
+            _RunTestsStrSubclass("owp-workspace-" + "a" * 32),
+        ),
+        ("container", "name", _RunTestsAlwaysEqual()),
+        (
+            "container",
+            "execution_id",
+            _RunTestsStrSubclass("a" * 64),
+        ),
+    ),
+)
+def test_reconcile_run_tests_rejects_adversarial_observed_identity_types(
+    resource: str,
+    field: str,
+    value: object,
+) -> None:
+    binding = repo_tools.derive_run_tests_docker_binding("a" * 64)
+    observation = _run_tests_observation(
+        binding,
+        status="created",
+        workspace=True,
+        output=True,
+    )
+    changed = dict(getattr(observation, resource))
+    changed[field] = value
+    observation = repo_tools.RunTestsDockerObservation(
+        staging_container=observation.staging_container,
+        container=changed if resource == "container" else observation.container,
+        workspace_volume=(
+            changed
+            if resource == "workspace_volume"
+            else observation.workspace_volume
+        ),
+        output_volume=observation.output_volume,
+        started=None,
+        result=None,
+    )
+
+    assert repo_tools.reconcile_run_tests_docker_execution(
+        "RESERVED",
+        binding,
+        observation,
+        expected_execution_contract_digest="c" * 64,
+        receipt_state="MATCH",
+    ) == "UNRESOLVED"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("execution_id", _RunTestsExplodingEquality()),
+        ("ownership_token", _RunTestsExplodingEquality()),
+        ("container_name", _RunTestsStrSubclass("owp-run-" + "a" * 32)),
+    ),
+)
+def test_reconcile_run_tests_rejects_adversarial_binding_without_equality(
+    field: str,
+    value: object,
+) -> None:
+    valid = repo_tools.derive_run_tests_docker_binding("a" * 64)
+    values = {
+        "execution_id": valid.execution_id,
+        "ownership_token": valid.ownership_token,
+        "staging_container_name": valid.staging_container_name,
+        "container_name": valid.container_name,
+        "workspace_volume_name": valid.workspace_volume_name,
+        "output_volume_name": valid.output_volume_name,
+    }
+    values[field] = value
+    binding = repo_tools.RunTestsDockerBinding(**values)
+
+    with pytest.raises(ValueError, match="binding"):
+        repo_tools.reconcile_run_tests_docker_execution(
+            "RESERVED",
+            binding,
+            _run_tests_observation(valid),
+            expected_execution_contract_digest="c" * 64,
+            receipt_state="ABSENT",
+        )
+
+
+@pytest.mark.parametrize(
     "observation_factory",
     (
         lambda b: _run_tests_observation(
@@ -1913,7 +2066,7 @@ def test_reconcile_run_tests_rejects_contradictory_facts(
         binding,
         observation_factory(binding),
         expected_execution_contract_digest="c" * 64,
-        receipt_state="MATCH",
+        receipt_state="ABSENT",
     ) == "UNRESOLVED"
 
 

@@ -4552,7 +4552,9 @@ def _run_tests_resource_observation_matches(
         type(observation) is dict
         and frozenset(observation)
         == {"name", "ownership_token", "configuration_matches"}
+        and type(observation.get("name")) is str
         and observation.get("name") == name
+        and type(observation.get("ownership_token")) is str
         and observation.get("ownership_token") == ownership_token
         and observation.get("configuration_matches") is True
     )
@@ -4578,8 +4580,11 @@ def _run_tests_container_observation_matches(
             "config_matches",
             "mounts_match",
         }
+        and type(observation.get("name")) is str
         and observation.get("name") == binding.container_name
+        and type(observation.get("ownership_token")) is str
         and observation.get("ownership_token") == binding.ownership_token
+        and type(observation.get("execution_id")) is str
         and observation.get("execution_id") == binding.execution_id
         and type(observation.get("execution_contract_digest")) is str
         and _DIGEST_PATTERN.fullmatch(
@@ -4649,9 +4654,23 @@ def reconcile_run_tests_docker_execution(
         "STARTED_UNCONFIRMED",
     }:
         raise ValueError("run-tests journal state is invalid")
-    if (
-        type(binding) is not RunTestsDockerBinding
-        or derive_run_tests_docker_binding(binding.execution_id) != binding
+    binding_fields = (
+        "execution_id",
+        "ownership_token",
+        "staging_container_name",
+        "container_name",
+        "workspace_volume_name",
+        "output_volume_name",
+    )
+    if type(binding) is not RunTestsDockerBinding or any(
+        type(getattr(binding, field_name)) is not str
+        for field_name in binding_fields
+    ):
+        raise ValueError("run-tests Docker binding is invalid")
+    expected_binding = derive_run_tests_docker_binding(binding.execution_id)
+    if any(
+        getattr(binding, field_name) != getattr(expected_binding, field_name)
+        for field_name in binding_fields
     ):
         raise ValueError("run-tests Docker binding is invalid")
     if type(observation) is not RunTestsDockerObservation:
@@ -4710,14 +4729,15 @@ def reconcile_run_tests_docker_execution(
     ):
         return "UNRESOLVED"
 
+    if receipt_state == "MISMATCH":
+        return "UNRESOLVED"
+    if receipt_state == "MATCH":
+        return "CLEAN_COMMITTED"
+
     container = observation.container
     if container is None:
         if observation.started is not None or observation.result is not None:
             return "UNRESOLVED"
-        if receipt_state == "MISMATCH":
-            return "UNRESOLVED"
-        if receipt_state == "MATCH":
-            return "CLEAN_COMMITTED"
         if journal_state == "STARTED_UNCONFIRMED":
             return "UNRESOLVED"
         if all(resource is None for resource in resources):
@@ -4747,10 +4767,6 @@ def reconcile_run_tests_docker_execution(
     if status == "created":
         if ever_started or started is not None or result is not None:
             return "UNRESOLVED"
-        if receipt_state == "MISMATCH":
-            return "UNRESOLVED"
-        if receipt_state == "MATCH":
-            return "CLEAN_COMMITTED"
         return "CLEAN_PRESTART"
 
     if not ever_started:
@@ -4764,21 +4780,9 @@ def reconcile_run_tests_docker_execution(
     if status in {"running", "paused", "restarting"}:
         if result is not None:
             return "UNRESOLVED"
-        if receipt_state == "MISMATCH":
-            return "UNRESOLVED"
-        if receipt_state == "MATCH":
-            return "CLEAN_COMMITTED"
         return "WAIT_RUNNING"
     if status == "dead":
-        if receipt_state == "MISMATCH":
-            return "UNRESOLVED"
-        if receipt_state == "MATCH":
-            return "CLEAN_COMMITTED"
         return "UNRESOLVED"
-    if receipt_state == "MISMATCH":
-        return "UNRESOLVED"
-    if receipt_state == "MATCH":
-        return "CLEAN_COMMITTED"
     if started is not None and result is not None:
         return "RESUME_RESULT"
     return "UNRESOLVED"
