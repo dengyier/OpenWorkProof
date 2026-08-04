@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import copy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -14,6 +15,7 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 
 import pytest
 import rfc8785
@@ -2082,6 +2084,13 @@ def _run_tests_result_envelope() -> repo_tools.RunTestsResultEnvelope:
     )
 
 
+def _run_tests_started_envelope() -> repo_tools.RunTestsStartedEnvelope:
+    return repo_tools.RunTestsStartedEnvelope(
+        execution_id="1" * 64,
+        execution_contract_digest="2" * 64,
+    )
+
+
 def test_run_tests_execution_contract_round_trips_canonical_bytes() -> None:
     contract = _run_tests_execution_contract()
     encoded = repo_tools.encode_run_tests_execution_contract(contract)
@@ -2108,15 +2117,36 @@ def test_run_tests_execution_contract_round_trips_canonical_bytes() -> None:
 
 
 def test_run_tests_started_and_result_round_trip_canonical_bytes() -> None:
-    started = repo_tools.RunTestsStartedEnvelope(
-        execution_id="1" * 64,
-        execution_contract_digest="2" * 64,
-    )
+    started = _run_tests_started_envelope()
     result = _run_tests_result_envelope()
 
     assert repo_tools.decode_run_tests_started_envelope(
         repo_tools.encode_run_tests_started_envelope(started)
     ) == started
+    assert repo_tools.decode_run_tests_result_envelope(
+        repo_tools.encode_run_tests_result_envelope(result)
+    ) == result
+
+
+@pytest.mark.parametrize(
+    ("actual_exit_code", "failure_code"),
+    (
+        (255, None),
+        (None, "OUTPUT_LIMIT"),
+        (None, "TIMEOUT"),
+        (None, "DISK_LIMIT"),
+    ),
+)
+def test_run_tests_result_round_trips_each_closed_outcome(
+    actual_exit_code: int | None,
+    failure_code: str | None,
+) -> None:
+    result = replace(
+        _run_tests_result_envelope(),
+        actual_exit_code=actual_exit_code,
+        failure_code=failure_code,
+    )
+
     assert repo_tools.decode_run_tests_result_envelope(
         repo_tools.encode_run_tests_result_envelope(result)
     ) == result
@@ -2134,6 +2164,113 @@ def test_run_tests_result_requires_one_closed_outcome() -> None:
             stderr_bytes=0,
             stderr_sha256=hashlib.sha256(b"").hexdigest(),
         )
+
+
+RunTestsEncoder = Callable[[object], bytes]
+RunTestsDecoder = Callable[[bytes], object]
+
+
+@pytest.mark.parametrize(
+    ("factory", "encoder", "decoder", "field"),
+    (
+        (
+            _run_tests_execution_contract,
+            repo_tools.encode_run_tests_execution_contract,
+            repo_tools.decode_run_tests_execution_contract,
+            "request_digest",
+        ),
+        (
+            _run_tests_started_envelope,
+            repo_tools.encode_run_tests_started_envelope,
+            repo_tools.decode_run_tests_started_envelope,
+            "execution_contract_digest",
+        ),
+        (
+            _run_tests_result_envelope,
+            repo_tools.encode_run_tests_result_envelope,
+            repo_tools.decode_run_tests_result_envelope,
+            "stdout_sha256",
+        ),
+    ),
+)
+@pytest.mark.parametrize("invalid_digest", ("a" * 63, "A" * 64, "g" * 64))
+def test_run_tests_codecs_reject_malformed_digests(
+    factory: Callable[[], object],
+    encoder: RunTestsEncoder,
+    decoder: RunTestsDecoder,
+    field: str,
+    invalid_digest: str,
+) -> None:
+    with pytest.raises(ValueError):
+        encoder(replace(factory(), **{field: invalid_digest}))
+
+    value = json.loads(encoder(factory()))
+    value[field] = invalid_digest
+    with pytest.raises(ValueError):
+        decoder(rfc8785.dumps(value))
+
+
+@pytest.mark.parametrize("field", ("source_commit", "candidate_commit"))
+@pytest.mark.parametrize("invalid_oid", ("a" * 39, "g" * 40))
+def test_run_tests_contract_codec_rejects_malformed_git_oids(
+    field: str,
+    invalid_oid: str,
+) -> None:
+    contract = _run_tests_execution_contract()
+    with pytest.raises(ValueError):
+        repo_tools.encode_run_tests_execution_contract(
+            replace(contract, **{field: invalid_oid})
+        )
+
+    value = json.loads(repo_tools.encode_run_tests_execution_contract(contract))
+    value[field] = invalid_oid
+    with pytest.raises(ValueError):
+        repo_tools.decode_run_tests_execution_contract(rfc8785.dumps(value))
+
+
+@pytest.mark.parametrize(
+    "invalid_image_digest",
+    (
+        "a" * 64,
+        "sha256:" + "a" * 63,
+        "sha256:" + "A" * 64,
+        "sha256:" + "g" * 64,
+    ),
+)
+def test_run_tests_contract_codec_rejects_malformed_image_digest(
+    invalid_image_digest: str,
+) -> None:
+    contract = _run_tests_execution_contract()
+    with pytest.raises(ValueError):
+        repo_tools.encode_run_tests_execution_contract(
+            replace(contract, container_image_digest=invalid_image_digest)
+        )
+
+    value = json.loads(repo_tools.encode_run_tests_execution_contract(contract))
+    value["container_image_digest"] = invalid_image_digest
+    with pytest.raises(ValueError):
+        repo_tools.decode_run_tests_execution_contract(rfc8785.dumps(value))
+
+
+@pytest.mark.parametrize("field", ("stdout_bytes", "stderr_bytes"))
+@pytest.mark.parametrize(
+    "invalid_size",
+    (-1, True, 9_007_199_254_740_992),
+)
+def test_run_tests_result_codec_rejects_invalid_stream_sizes(
+    field: str,
+    invalid_size: int | bool,
+) -> None:
+    result = _run_tests_result_envelope()
+    with pytest.raises(ValueError):
+        repo_tools.encode_run_tests_result_envelope(
+            replace(result, **{field: invalid_size})
+        )
+
+    value = json.loads(repo_tools.encode_run_tests_result_envelope(result))
+    value[field] = invalid_size
+    with pytest.raises(ValueError):
+        repo_tools.decode_run_tests_result_envelope(rfc8785.dumps(value))
 
 
 @pytest.mark.parametrize(
