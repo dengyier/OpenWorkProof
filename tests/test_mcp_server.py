@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 
 import pytest
 import rfc8785
@@ -16,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 
 import openworkproof.evidence as evidence
 import openworkproof.mcp_server as mcp_server
+import openworkproof.repo_tools as repo_tools
 from openworkproof.mcp_server import (
     HandlerCoordinationError,
     ToolCallDenied,
@@ -364,6 +366,27 @@ def _run_tests_case(
     }
 
 
+def _run_tests_contract(case) -> repo_tools.RunTestsExecutionContract:
+    arguments = case["arguments"]
+    return repo_tools.RunTestsExecutionContract(
+        execution_id=mcp_server._handler_execution_id(
+            case["request"], case["facts"]
+        ),
+        request_digest=case["request"].digest,
+        arguments_digest=case["request"].arguments_digest,
+        candidate_workspace_id="c" * 64,
+        source_artifact_sha256=(
+            case["work_order"].replay_profile.source_artifact_sha256
+        ),
+        source_commit=arguments.source_commit,
+        candidate_commit=arguments.candidate_commit,
+        workspace_manifest_digest=arguments.workspace_manifest_digest,
+        container_image_digest=arguments.container_image_digest,
+        command_digest=arguments.command_digest,
+        fixed_test_source_digest=arguments.fixed_test_source_digest,
+    )
+
+
 def _request_for_grant(case, grant, role_keys) -> AgentRequest:
     binding = next(
         item
@@ -398,6 +421,383 @@ def _request_for_grant(case, grant, role_keys) -> AgentRequest:
     )
 
 
+def test_handler_journal_schema_includes_run_tests_recovery_fields(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        columns = connection.execute(
+            "PRAGMA table_info(handler_executions)"
+        ).fetchall()
+    finally:
+        connection.close()
+    assert {row[1] for row in columns} >= {
+        "request_json",
+        "execution_contract_json",
+        "execution_contract_digest",
+    }
+
+
+def test_handler_journal_recovery_fields_are_closed_by_tool(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    insert = """
+        INSERT INTO handler_executions (
+            execution_id, work_order_digest, request_digest, nonce,
+            grant_id, tool_name, arguments_digest, execution_context_id,
+            container_instance_id_digest, controller_id, reserved_at, state,
+            request_json, execution_contract_json,
+            execution_contract_digest
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?)
+    """
+    common = (
+        "0" * 64,
+        case["work_order"].digest,
+        "1" * 64,
+        "2" * 64,
+        case["verifier"].grant_id,
+        "owp.run_tests",
+        "3" * 64,
+        "4" * 64,
+        "5" * 64,
+        case["facts"].controller_id,
+        fixed_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(insert, (*common, None, None, None))
+        rollback = (
+            "6" * 64,
+            case["work_order"].digest,
+            "7" * 64,
+            "8" * 64,
+            case["developer"].grant_id,
+            "owp.rollback_patch",
+            "9" * 64,
+            "a" * 64,
+            "b" * 64,
+            case["facts"].controller_id,
+            fixed_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(insert, (*rollback, "{}", "{}", "c" * 64))
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "predecessor",
+    (
+        evidence._HANDLER_EXECUTION_SCHEMA_V1,
+        evidence._LEGACY_HANDLER_EXECUTION_SCHEMA,
+    ),
+)
+def test_handler_journal_schema_migrates_empty_predecessors(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+    predecessor: str,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        connection.execute("DROP TABLE handler_executions")
+        connection.execute(predecessor)
+    finally:
+        connection.close()
+    lock_descriptor = evidence._acquire_target_lock(case["ledger_path"])
+    try:
+        mcp_server._ensure_handler_execution_schema(
+            case["ledger_path"], lock_descriptor
+        )
+    finally:
+        evidence._release_target_lock(lock_descriptor)
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        stored = connection.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'table' AND name = 'handler_executions'
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+    assert stored is not None
+    assert mcp_server._normalized_sql(stored[0]) == mcp_server._normalized_sql(
+        evidence._HANDLER_EXECUTION_SCHEMA
+    )
+
+
+@pytest.mark.parametrize(
+    "predecessor",
+    (
+        evidence._HANDLER_EXECUTION_SCHEMA_V1,
+        evidence._LEGACY_HANDLER_EXECUTION_SCHEMA,
+    ),
+)
+def test_handler_journal_schema_rejects_nonempty_predecessors(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+    predecessor: str,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        connection.execute("DROP TABLE handler_executions")
+        connection.execute(predecessor)
+        connection.execute(
+            """
+            INSERT INTO handler_executions (
+                execution_id, work_order_digest, request_digest, nonce,
+                grant_id, tool_name, arguments_digest,
+                execution_context_id, container_instance_id_digest,
+                controller_id, reserved_at, state
+            ) VALUES (?, ?, ?, ?, ?, 'owp.run_tests', ?, ?, ?, ?, ?, 'RESERVED')
+            """,
+            (
+                "0" * 64,
+                case["work_order"].digest,
+                case["request"].digest,
+                case["request"].nonce,
+                case["verifier"].grant_id,
+                case["request"].arguments_digest,
+                case["facts"].execution_context_id,
+                case["facts"].container_instance_id_digest,
+                case["facts"].controller_id,
+                fixed_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            ),
+        )
+    finally:
+        connection.close()
+    lock_descriptor = evidence._acquire_target_lock(case["ledger_path"])
+    try:
+        with pytest.raises(
+            HandlerCoordinationError, match="RECOVERY_REQUIRED"
+        ):
+            mcp_server._ensure_handler_execution_schema(
+                case["ledger_path"], lock_descriptor
+            )
+    finally:
+        evidence._release_target_lock(lock_descriptor)
+
+
+def test_handler_journal_persists_and_loads_exact_recovery_fields(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    contract = _run_tests_contract(case)
+    lock_descriptor = evidence._acquire_target_lock(case["ledger_path"])
+    try:
+        execution_id = mcp_server._reserve_handler_execution(
+            case["ledger_path"],
+            lock_descriptor,
+            case["context"],
+            case["request"],
+            case["facts"],
+            contract,
+        )
+        stored = mcp_server._load_stored_run_tests_execution(
+            case["ledger_path"], lock_descriptor
+        )
+    finally:
+        evidence._release_target_lock(lock_descriptor)
+    assert stored == mcp_server._StoredRunTestsExecution(
+        execution_id=execution_id,
+        request=case["request"],
+        contract=contract,
+        reserved_at=fixed_now,
+        state="RESERVED",
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        row = connection.execute(
+            """
+            SELECT request_json, execution_contract_json,
+                   execution_contract_digest
+            FROM handler_executions
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+    request_bytes = rfc8785.dumps(case["request"].model_dump(mode="json"))
+    contract_bytes = repo_tools.encode_run_tests_execution_contract(contract)
+    assert row == (
+        request_bytes.decode("utf-8"),
+        contract_bytes.decode("utf-8"),
+        hashlib.sha256(contract_bytes).hexdigest(),
+    )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        "duplicate_request_key",
+        "noncanonical_request",
+        "request_signature",
+        "contract_digest",
+        "contract_arguments",
+        "journal_arguments_digest",
+        "developer_contract",
+        "reserved_at",
+    ),
+)
+def test_handler_journal_recovery_fields_reject_tampering(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+    tamper: str,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    contract = _run_tests_contract(case)
+    lock_descriptor = evidence._acquire_target_lock(case["ledger_path"])
+    try:
+        mcp_server._reserve_handler_execution(
+            case["ledger_path"],
+            lock_descriptor,
+            case["context"],
+            case["request"],
+            case["facts"],
+            contract,
+        )
+        connection = evidence.connect_ledger(case["ledger_path"])
+        try:
+            if tamper == "duplicate_request_key":
+                original = connection.execute(
+                    "SELECT request_json FROM handler_executions"
+                ).fetchone()[0]
+                value = '{"actor_id":"duplicate",' + original[1:]
+                connection.execute(
+                    "UPDATE handler_executions SET request_json = ?", (value,)
+                )
+            elif tamper == "noncanonical_request":
+                connection.execute(
+                    "UPDATE handler_executions SET request_json = request_json || ' '"
+                )
+            elif tamper == "request_signature":
+                raw = connection.execute(
+                    "SELECT request_json FROM handler_executions"
+                ).fetchone()[0]
+                value = json.loads(raw)
+                value["model_id"] = "tampered"
+                connection.execute(
+                    "UPDATE handler_executions SET request_json = ?",
+                    (rfc8785.dumps(value).decode("utf-8"),),
+                )
+            elif tamper == "contract_digest":
+                connection.execute(
+                    "UPDATE handler_executions SET execution_contract_digest = ?",
+                    ("0" * 64,),
+                )
+            elif tamper == "contract_arguments":
+                raw = connection.execute(
+                    "SELECT execution_contract_json FROM handler_executions"
+                ).fetchone()[0]
+                value = json.loads(raw)
+                value["candidate_commit"] = "0" * 40
+                changed = rfc8785.dumps(value)
+                connection.execute(
+                    """
+                    UPDATE handler_executions
+                    SET execution_contract_json = ?, execution_contract_digest = ?
+                    """,
+                    (
+                        changed.decode("utf-8"),
+                        hashlib.sha256(changed).hexdigest(),
+                    ),
+                )
+            elif tamper == "journal_arguments_digest":
+                connection.execute(
+                    "UPDATE handler_executions SET arguments_digest = ?",
+                    ("0" * 64,),
+                )
+            elif tamper == "developer_contract":
+                raw = connection.execute(
+                    "SELECT execution_contract_json FROM handler_executions"
+                ).fetchone()[0].replace(
+                    '"test_mode":"verifier"', '"test_mode":"developer"'
+                )
+                connection.execute(
+                    """
+                    UPDATE handler_executions
+                    SET execution_contract_json = ?, execution_contract_digest = ?
+                    """,
+                    (raw, hashlib.sha256(raw.encode("utf-8")).hexdigest()),
+                )
+            else:
+                connection.execute(
+                    "UPDATE handler_executions SET reserved_at = ?",
+                    ("2026-01-01T00:00:05.1Z",),
+                )
+        finally:
+            connection.close()
+        with pytest.raises(
+            HandlerCoordinationError, match="RECOVERY_REQUIRED"
+        ):
+            mcp_server._load_stored_run_tests_execution(
+                case["ledger_path"], lock_descriptor
+            )
+    finally:
+        evidence._release_target_lock(lock_descriptor)
+
+
 def test_execute_run_tests_completes_authorize_handler_publish_loop(
     tmp_path: Path,
     signed_work_order: WorkOrder,
@@ -424,6 +824,7 @@ def test_execute_run_tests_completes_authorize_handler_publish_loop(
         context=case["context"],
         request=case["request"],
         request_arguments=case["arguments"],
+        execution_contract=_run_tests_contract(case),
         execution_facts=case["facts"],
         sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
         handler=handler,
@@ -485,6 +886,7 @@ def test_execute_run_tests_commits_started_handler_failure_without_evidence(
         context=case["context"],
         request=case["request"],
         request_arguments=case["arguments"],
+        execution_contract=_run_tests_contract(case),
         execution_facts=case["facts"],
         sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
         handler=handler,
@@ -545,6 +947,7 @@ def test_execute_run_tests_denial_never_starts_handler_or_writes(
             context=case["context"],
             request=request,
             request_arguments=case["arguments"],
+            execution_contract=_run_tests_contract(case),
             execution_facts=case["facts"],
             sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
             handler=lambda _: pytest.fail("denied handler started"),
@@ -581,6 +984,7 @@ def test_execute_run_tests_rejects_stale_context_before_second_handler(
         context=case["context"],
         request=case["request"],
         request_arguments=case["arguments"],
+        execution_contract=_run_tests_contract(case),
         execution_facts=case["facts"],
         sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
         handler=lambda _: 0,
@@ -597,6 +1001,7 @@ def test_execute_run_tests_rejects_stale_context_before_second_handler(
             context=case["context"],
             request=case["request"],
             request_arguments=case["arguments"],
+            execution_contract=_run_tests_contract(case),
             execution_facts=case["facts"],
             sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
             handler=lambda _: pytest.fail("stale handler started"),
@@ -646,6 +1051,7 @@ def test_execute_run_tests_rejects_missing_evidence_capacity_before_handler(
             context=case["context"],
             request=case["request"],
             request_arguments=case["arguments"],
+            execution_contract=_run_tests_contract(case),
             execution_facts=case["facts"],
             sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
             handler=lambda _: pytest.fail("unreserved handler started"),
@@ -675,6 +1081,7 @@ def test_execute_run_tests_blocks_after_started_handler_process_crash(
             context=case["context"],
             request=case["request"],
             request_arguments=case["arguments"],
+            execution_contract=_run_tests_contract(case),
             execution_facts=case["facts"],
             sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
             handler=lambda _: os._exit(73),
@@ -710,6 +1117,7 @@ def test_execute_run_tests_blocks_after_started_handler_process_crash(
             context=case["context"],
             request=case["request"],
             request_arguments=case["arguments"],
+            execution_contract=_run_tests_contract(case),
             execution_facts=case["facts"],
             sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
             handler=lambda _: pytest.fail("uncertain handler restarted"),
@@ -757,6 +1165,7 @@ def test_execute_run_tests_retries_after_reserved_only_process_crash(
             context=case["context"],
             request=case["request"],
             request_arguments=case["arguments"],
+            execution_contract=_run_tests_contract(case),
             execution_facts=case["facts"],
             sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
             handler=lambda _: os._exit(76),
@@ -789,6 +1198,7 @@ def test_execute_run_tests_retries_after_reserved_only_process_crash(
         context=case["context"],
         request=case["request"],
         request_arguments=case["arguments"],
+        execution_contract=_run_tests_contract(case),
         execution_facts=case["facts"],
         sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
         handler=lambda _: 0,
@@ -845,6 +1255,7 @@ def test_execute_run_tests_recovers_committed_receipt_after_cleanup_crash(
             context=case["context"],
             request=case["request"],
             request_arguments=case["arguments"],
+            execution_contract=_run_tests_contract(case),
             execution_facts=case["facts"],
             sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
             handler=lambda _: 0,
@@ -892,6 +1303,7 @@ def test_execute_run_tests_recovers_committed_receipt_after_cleanup_crash(
             context=case["context"],
             request=case["request"],
             request_arguments=case["arguments"],
+            execution_contract=_run_tests_contract(case),
             execution_facts=case["facts"],
             sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
             handler=lambda _: pytest.fail("committed handler restarted"),
@@ -936,6 +1348,7 @@ def test_execute_run_tests_migrates_ledger_without_handler_journal(
         context=case["context"],
         request=case["request"],
         request_arguments=case["arguments"],
+        execution_contract=_run_tests_contract(case),
         execution_facts=case["facts"],
         sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
         handler=lambda _: 0,
@@ -980,6 +1393,7 @@ def _rollback_case(
         context=case["context"],
         request=case["request"],
         request_arguments=case["arguments"],
+        execution_contract=_run_tests_contract(case),
         execution_facts=case["facts"],
         sidecar_private_key=role_keys["Sidecar"][0],
         handler=lambda _: 1,
@@ -1238,10 +1652,17 @@ def test_execute_rollback_handler_exception_requires_recovery(
             "SELECT COUNT(*), MAX(sequence) FROM receipts"
         ).fetchone() == before
         assert connection.execute(
-            "SELECT tool_name, state FROM handler_executions"
+            """
+            SELECT tool_name, state, request_json,
+                   execution_contract_json, execution_contract_digest
+            FROM handler_executions
+            """
         ).fetchone() == (
             "owp.rollback_patch",
             "STARTED_UNCONFIRMED",
+            None,
+            None,
+            None,
         )
     finally:
         connection.close()

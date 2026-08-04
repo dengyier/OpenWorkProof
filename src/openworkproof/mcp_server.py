@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -25,6 +26,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 import openworkproof.evidence as evidence
+import openworkproof.repo_tools as repo_tools
 from openworkproof.models import (
     ACTION_RECEIPT_ADAPTER,
     AgentRequest,
@@ -35,6 +37,7 @@ from openworkproof.models import (
     RunTestsArguments,
     TestResultEvidence,
     ToolCallReceipt,
+    request_arguments_digest,
 )
 from openworkproof.policy import (
     AuthorizationContext,
@@ -54,7 +57,7 @@ from openworkproof.repo_tools import (
     RollbackRequest as WorkspaceRollbackRequest,
     rollback_candidate_workspace,
 )
-from openworkproof.signing import key_id, sign_payload
+from openworkproof.signing import key_id, sign_payload, verify_nested_claim
 
 
 class ToolCallDenied(RuntimeError):
@@ -184,6 +187,7 @@ def make_candidate_rollback_handler(
 
 
 _MAX_RECEIPT_BYTES = 64 * 1024
+_MAX_AGENT_REQUEST_BYTES = 8_192
 
 
 def _digest(value: object) -> str:
@@ -241,6 +245,72 @@ def _handler_execution_id(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _StoredRunTestsExecution:
+    execution_id: str
+    request: AgentRequest
+    contract: repo_tools.RunTestsExecutionContract
+    reserved_at: datetime
+    state: Literal["RESERVED", "STARTED_UNCONFIRMED"]
+
+
+def _canonical_agent_request(request: AgentRequest) -> bytes:
+    if type(request) is not AgentRequest:
+        raise ValueError("stored AgentRequest is invalid")
+    encoded = rfc8785.dumps(request.model_dump(mode="json"))
+    if not 1 <= len(encoded) <= _MAX_AGENT_REQUEST_BYTES:
+        raise ValueError("stored AgentRequest exceeds its byte limit")
+    return encoded
+
+
+def _decode_canonical_agent_request(raw: object) -> AgentRequest:
+    if type(raw) is not str:
+        raise ValueError("stored AgentRequest JSON is invalid")
+    encoded = raw.encode("utf-8")
+    if not 1 <= len(encoded) <= _MAX_AGENT_REQUEST_BYTES:
+        raise ValueError("stored AgentRequest exceeds its byte limit")
+
+    def reject_duplicates(
+        pairs: list[tuple[str, object]],
+    ) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("stored AgentRequest has duplicate keys")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"invalid JSON constant: {value}")
+
+    value = json.loads(
+        raw,
+        object_pairs_hook=reject_duplicates,
+        parse_constant=reject_constant,
+    )
+    if rfc8785.dumps(value) != encoded:
+        raise ValueError("stored AgentRequest is not canonical")
+    request = AgentRequest.model_validate(value)
+    if _canonical_agent_request(request) != encoded:
+        raise ValueError("stored AgentRequest does not round trip")
+    return request
+
+
+def _contract_arguments_digest(
+    contract: repo_tools.RunTestsExecutionContract,
+) -> str:
+    arguments = RunTestsArguments(
+        test_mode="verifier",
+        command_digest=contract.command_digest,
+        source_commit=contract.source_commit,
+        candidate_commit=contract.candidate_commit,
+        workspace_manifest_digest=contract.workspace_manifest_digest,
+        container_image_digest=contract.container_image_digest,
+        fixed_test_source_digest=contract.fixed_test_source_digest,
+    )
+    return request_arguments_digest("owp.run_tests", arguments)
+
+
 def _normalized_sql(value: str) -> str:
     return " ".join(value.split()).casefold()
 
@@ -267,9 +337,13 @@ def _ensure_handler_execution_schema(
         actual = _normalized_sql(row[0])
         if actual == _normalized_sql(expected):
             return
-        if actual == _normalized_sql(
-            evidence._LEGACY_HANDLER_EXECUTION_SCHEMA
-        ):
+        predecessors = (
+            evidence._LEGACY_HANDLER_EXECUTION_SCHEMA,
+            evidence._HANDLER_EXECUTION_SCHEMA_V1,
+        )
+        if actual in {
+            _normalized_sql(predecessor) for predecessor in predecessors
+        }:
             if connection.execute(
                 "SELECT COUNT(*) FROM handler_executions"
             ).fetchone() != (0,):
@@ -399,8 +473,40 @@ def _reserve_handler_execution(
     context: AuthorizationContext,
     request: AgentRequest,
     execution_facts: ProspectiveExecutionFacts,
+    execution_contract: repo_tools.RunTestsExecutionContract | None,
 ) -> str:
     execution_id = _handler_execution_id(request, execution_facts)
+    request_json: str | None = None
+    contract_json: str | None = None
+    contract_digest: str | None = None
+    if request.tool_name == "owp.run_tests":
+        if type(execution_contract) is not repo_tools.RunTestsExecutionContract:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        if (
+            execution_contract.execution_id != execution_id
+            or execution_contract.request_digest != request.digest
+            or execution_contract.arguments_digest != request.arguments_digest
+            or _contract_arguments_digest(execution_contract)
+            != request.arguments_digest
+        ):
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        try:
+            request_bytes = _canonical_agent_request(request)
+            contract_bytes = repo_tools.encode_run_tests_execution_contract(
+                execution_contract
+            )
+        except (TypeError, ValueError) as error:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+        if not 1 <= len(contract_bytes) <= 8_192:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        request_json = request_bytes.decode("utf-8")
+        contract_json = contract_bytes.decode("utf-8")
+        contract_digest = hashlib.sha256(contract_bytes).hexdigest()
+    elif request.tool_name == "owp.rollback_patch":
+        if execution_contract is not None:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+    else:
+        raise HandlerCoordinationError("RECOVERY_REQUIRED")
 
     def reserve(connection: sqlite3.Connection) -> None:
         if connection.execute(
@@ -421,8 +527,11 @@ def _reserve_handler_execution(
                 container_instance_id_digest,
                 controller_id,
                 reserved_at,
-                state
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED')
+                state,
+                request_json,
+                execution_contract_json,
+                execution_contract_digest
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?)
             """,
             (
                 execution_id,
@@ -436,11 +545,125 @@ def _reserve_handler_execution(
                 execution_facts.container_instance_id_digest,
                 execution_facts.controller_id,
                 context.transaction_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                request_json,
+                contract_json,
+                contract_digest,
             ),
         )
 
     _journal_transaction(ledger_path, lock_descriptor, reserve)
     return execution_id
+
+
+def _load_stored_run_tests_execution(
+    ledger_path: Path,
+    lock_descriptor: int,
+) -> _StoredRunTestsExecution | None:
+    def load(
+        connection: sqlite3.Connection,
+    ) -> _StoredRunTestsExecution | None:
+        rows = connection.execute(
+            """
+            SELECT
+                execution_id,
+                work_order_digest,
+                request_digest,
+                nonce,
+                grant_id,
+                tool_name,
+                arguments_digest,
+                execution_context_id,
+                container_instance_id_digest,
+                controller_id,
+                reserved_at,
+                state,
+                request_json,
+                execution_contract_json,
+                execution_contract_digest
+            FROM handler_executions
+            WHERE tool_name = 'owp.run_tests'
+            ORDER BY execution_id
+            LIMIT 2
+            """
+        ).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise ValueError("multiple run-tests executions are unresolved")
+        (
+            execution_id,
+            work_order_digest,
+            request_digest,
+            nonce,
+            grant_id,
+            tool_name,
+            arguments_digest,
+            execution_context_id,
+            container_instance_id_digest,
+            controller_id,
+            reserved_at_raw,
+            state,
+            request_json,
+            contract_json,
+            contract_digest,
+        ) = rows[0]
+        request = _decode_canonical_agent_request(request_json)
+        work_order = evidence.load_authoritative_work_order(connection)
+        if type(contract_json) is not str:
+            raise ValueError("stored execution contract JSON is invalid")
+        contract_bytes = contract_json.encode("utf-8")
+        if not 1 <= len(contract_bytes) <= 8_192:
+            raise ValueError("stored execution contract exceeds its byte limit")
+        contract = repo_tools.decode_run_tests_execution_contract(
+            contract_bytes
+        )
+        if (
+            type(contract_digest) is not str
+            or hashlib.sha256(contract_bytes).hexdigest() != contract_digest
+        ):
+            raise ValueError("stored execution contract digest is invalid")
+        if type(reserved_at_raw) is not str:
+            raise ValueError("stored reservation time is invalid")
+        reserved_at = datetime.strptime(
+            reserved_at_raw, "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+        if reserved_at.strftime("%Y-%m-%dT%H:%M:%SZ") != reserved_at_raw:
+            raise ValueError("stored reservation time is not a UTC second")
+        if state not in {"RESERVED", "STARTED_UNCONFIRMED"}:
+            raise ValueError("stored execution state is invalid")
+        facts = ProspectiveExecutionFacts(
+            execution_context_id=execution_context_id,
+            container_instance_id_digest=container_instance_id_digest,
+            controller_id=controller_id,
+        )
+        if (
+            tool_name != "owp.run_tests"
+            or not verify_nested_claim(request, work_order)
+            or request.work_order_digest != work_order_digest
+            or request.digest != request_digest
+            or request.nonce != nonce
+            or request.grant_id != grant_id
+            or request.tool_name != tool_name
+            or request.arguments_digest != arguments_digest
+            or _handler_execution_id(request, facts) != execution_id
+            or contract.execution_id != execution_id
+            or contract.request_digest != request_digest
+            or contract.arguments_digest != arguments_digest
+            or _contract_arguments_digest(contract) != arguments_digest
+        ):
+            raise ValueError("stored run-tests execution fields disagree")
+        return _StoredRunTestsExecution(
+            execution_id=execution_id,
+            request=request,
+            contract=contract,
+            reserved_at=reserved_at,
+            state=state,
+        )
+
+    result = _journal_transaction(ledger_path, lock_descriptor, load)
+    if result is None or type(result) is _StoredRunTestsExecution:
+        return result
+    raise HandlerCoordinationError("RECOVERY_REQUIRED")
 
 
 def _mark_handler_started(
@@ -971,6 +1194,7 @@ def execute_run_tests(
     request: AgentRequest,
     request_arguments: RunTestsArguments,
     execution_facts: ProspectiveExecutionFacts,
+    execution_contract: repo_tools.RunTestsExecutionContract,
     sidecar_private_key: Ed25519PrivateKey,
     handler: Callable[[RunTestsArguments], int],
     clock: Callable[[], datetime],
@@ -1024,6 +1248,7 @@ def execute_run_tests(
             context,
             request,
             execution_facts,
+            execution_contract,
         )
         _mark_handler_started(
             path,
@@ -1309,6 +1534,7 @@ def execute_rollback(
             context,
             request,
             execution_facts,
+            None,
         )
         _mark_handler_started(path, lock_descriptor, execution_id)
         try:
