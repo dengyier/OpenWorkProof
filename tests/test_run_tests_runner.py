@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib.util
 import io
@@ -217,11 +218,15 @@ def test_runner_constants_and_import_surface_are_frozen() -> None:
     ).casefold()
     assert ".communicate(" not in source
     assert "shell=True" not in source
+    assert "close_fds=True" in source
+    assert "pass_fds" not in source
+    assert "preexec_fn=preexec" in source
 
 
 def test_stage_writes_snapshot_and_exact_canonical_summary(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    os.utime(workspace, ns=(1_000_000_000, 2_000_000_000))
     files = {
         "README.md": ("100644", b"candidate\n"),
         "src/test_sample.py": ("100755", b"def test_ok():\n    assert True\n"),
@@ -238,7 +243,6 @@ def test_stage_writes_snapshot_and_exact_canonical_summary(tmp_path: Path) -> No
 
     assert result == 0
     normalized_paths = (
-        workspace,
         workspace / "README.md",
         workspace / "src",
         workspace / "src/test_sample.py",
@@ -248,6 +252,9 @@ def test_stage_writes_snapshot_and_exact_canonical_summary(tmp_path: Path) -> No
         metadata = path.lstat()
         assert metadata.st_atime_ns == 0
         assert metadata.st_mtime_ns == 0
+    root_metadata = workspace.lstat()
+    assert root_metadata.st_atime_ns != 0
+    assert root_metadata.st_mtime_ns != 0
     assert (workspace / "README.md").read_bytes() == files["README.md"][1]
     assert (workspace / "src/test_sample.py").read_bytes() == files["src/test_sample.py"][1]
     assert (workspace / "run-contract.json").read_bytes() == _canonical(contract)
@@ -465,8 +472,300 @@ def test_stage_failure_cleans_every_new_file_and_directory_immediately(
     assert not list(workspace.iterdir())
 
 
+def test_stage_never_normalizes_mount_root_timestamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    files = {"nested/candidate.py": ("100644", b"candidate bytes")}
+    contract = _contract(files)
+    real_utime = runner.os.utime
+
+    def reject_mount_root(path, *args, **kwargs) -> None:
+        if Path(path) == workspace:
+            raise PermissionError(errno.EPERM, "root-owned mount")
+        real_utime(path, *args, **kwargs)
+
+    monkeypatch.setattr(runner.os, "utime", reject_mount_root)
+
+    result = runner.main(
+        ("stage",),
+        workspace_root=workspace,
+        input_stream=io.BytesIO(_stream(files, contract)),
+        output_stream=io.BytesIO(),
+    )
+
+    assert result == 0
+    for path in (
+        workspace / "nested",
+        workspace / "nested/candidate.py",
+        workspace / "run-contract.json",
+    ):
+        metadata = path.lstat()
+        assert metadata.st_atime_ns == 0
+        assert metadata.st_mtime_ns == 0
+
+
 def _no_descendant_cleanup() -> None:
     return None
+
+
+def _no_child_preexec() -> None:
+    return None
+
+
+def test_landlock_policy_requires_linux_and_supported_abi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner.sys, "platform", "darwin")
+    with pytest.raises(runner.RunnerError, match="Linux"):
+        runner._production_child_preexec()
+
+    monkeypatch.setattr(runner.sys, "platform", "linux")
+    for abi in (2, runner._LANDLOCK_MAX_KNOWN_ABI + 1):
+        with pytest.raises(runner.RunnerError, match="ABI"):
+            runner._production_child_preexec(
+                syscall=lambda number, *args, abi=abi: abi,
+                prctl=lambda *args: 0,
+            )
+
+
+@pytest.mark.parametrize("failure_stage", ["query", "create", "add", "restrict"])
+def test_landlock_syscall_failures_are_controlled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
+) -> None:
+    calls: list[int] = []
+
+    def syscall(number: int, *args) -> int:
+        calls.append(number)
+        stage_by_call = {
+            runner._SYS_LANDLOCK_CREATE_RULESET: (
+                "query" if len(calls) == 1 else "create"
+            ),
+            runner._SYS_LANDLOCK_ADD_RULE: "add",
+            runner._SYS_LANDLOCK_RESTRICT_SELF: "restrict",
+        }
+        if stage_by_call[number] == failure_stage:
+            return -1
+        if number == runner._SYS_LANDLOCK_CREATE_RULESET:
+            return 5 if len(calls) == 1 else 71
+        return 0
+
+    monkeypatch.setattr(runner.sys, "platform", "linux")
+    if failure_stage == "query":
+        with pytest.raises(runner.RunnerError, match="ABI"):
+            runner._production_child_preexec(
+                writable_root=tmp_path,
+                syscall=syscall,
+                prctl=lambda *args: 0,
+            )
+        return
+
+    preexec = runner._production_child_preexec(
+        writable_root=tmp_path,
+        syscall=syscall,
+        prctl=lambda *args: 0,
+        opener=lambda *args: 72,
+        closer=lambda descriptor: None,
+    )
+    with pytest.raises(runner.RunnerError, match="Landlock"):
+        preexec()
+
+
+def test_landlock_policy_handles_every_supported_write_right(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    masks: list[int] = []
+    prctls: list[tuple[int, ...]] = []
+
+    def syscall(number: int, *args) -> int:
+        if number == runner._SYS_LANDLOCK_CREATE_RULESET:
+            if not args[0]:
+                return 5
+            masks.append(args[0]._obj.handled_access_fs)
+            return 71
+        if number == runner._SYS_LANDLOCK_ADD_RULE:
+            masks.append(args[2]._obj.allowed_access)
+        return 0
+
+    monkeypatch.setattr(runner.sys, "platform", "linux")
+    preexec = runner._production_child_preexec(
+        writable_root=tmp_path,
+        syscall=syscall,
+        prctl=lambda *args: prctls.append(args) or 0,
+        opener=lambda *args: 72,
+        closer=lambda descriptor: None,
+    )
+    preexec()
+
+    expected = runner._landlock_write_access(5)
+    assert masks == [expected, expected]
+    assert prctls == [
+        (runner._PR_SET_DUMPABLE, 0, 0, 0, 0),
+        (runner._PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0),
+    ]
+
+
+@pytest.mark.parametrize("failure_stage", ["dumpable", "no_new_privs"])
+def test_landlock_prctl_failures_are_controlled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
+) -> None:
+    calls = 0
+
+    def prctl(*args) -> int:
+        nonlocal calls
+        calls += 1
+        expected_call = 1 if failure_stage == "dumpable" else 2
+        return -1 if calls == expected_call else 0
+
+    monkeypatch.setattr(runner.sys, "platform", "linux")
+    if failure_stage == "dumpable":
+        with pytest.raises(runner.RunnerError, match="dumpability"):
+            runner._production_child_preexec(
+                writable_root=tmp_path,
+                syscall=lambda number, *args: 5,
+                prctl=prctl,
+            )
+        return
+
+    preexec = runner._production_child_preexec(
+        writable_root=tmp_path,
+        syscall=lambda number, *args: 5 if calls == 0 else 0,
+        prctl=prctl,
+        opener=lambda *args: 72,
+        closer=lambda descriptor: None,
+    )
+    with pytest.raises(runner.RunnerError, match="no_new_privs"):
+        preexec()
+
+
+def test_landlock_preflight_failure_never_starts_candidate_or_publishes_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, output, _, _ = _write_workspace(tmp_path)
+    started_candidate = False
+
+    monkeypatch.setattr(runner, "_production_descendant_cleaner", lambda: lambda: None)
+    monkeypatch.setattr(
+        runner,
+        "_production_child_preexec",
+        lambda: (_ for _ in ()).throw(runner.RunnerError("Landlock unavailable")),
+    )
+
+    def unexpected_popen(*args, **kwargs):
+        nonlocal started_candidate
+        started_candidate = True
+        raise AssertionError("candidate must not start")
+
+    monkeypatch.setattr(runner.subprocess, "Popen", unexpected_popen)
+
+    result = runner.main(
+        ("execute",),
+        workspace_root=workspace,
+        output_root=output,
+    )
+
+    assert result != 0
+    assert not started_candidate
+    assert (output / "started.json").is_file()
+    assert not (output / "result.json").exists()
+
+
+def test_landlock_child_setup_failure_never_executes_candidate_or_publishes_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, output, _, _ = _write_workspace(tmp_path)
+
+    monkeypatch.setattr(runner, "_production_descendant_cleaner", lambda: lambda: None)
+    monkeypatch.setattr(
+        runner,
+        "_production_child_preexec",
+        lambda: lambda: (_ for _ in ()).throw(
+            runner.RunnerError("Landlock restrict_self failed")
+        ),
+    )
+    result = runner.main(
+        ("execute",),
+        workspace_root=workspace,
+        output_root=output,
+    )
+
+    assert result != 0
+    assert (output / "started.json").is_file()
+    assert not (output / "result.json").exists()
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="real Landlock enforcement requires Linux",
+)
+def test_landlock_blocks_forged_markers_aliases_and_workspace_writes(
+    tmp_path: Path,
+) -> None:
+    workspace, output, _, contract = _write_workspace(tmp_path)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    forged = _canonical(
+        {
+            "actual_exit_code": 0,
+            "execution_contract_digest": "0" * 64,
+            "execution_id": contract["execution_id"],
+            "failure_code": None,
+            "schema_version": "openworkproof-run-result/0.1",
+            "stderr_bytes": 0,
+            "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+            "stdout_bytes": 0,
+            "stdout_sha256": hashlib.sha256(b"").hexdigest(),
+        }
+    )
+    attack = (
+        "import os\n"
+        "from pathlib import Path\n"
+        f"workspace=Path({str(workspace)!r})\n"
+        f"output=Path({str(output)!r})\n"
+        f"scratch=Path({str(scratch)!r})\n"
+        f"forged={forged!r}\n"
+        "source=scratch/'forged'\n"
+        "source.write_bytes(forged)\n"
+        "attempts=[\n"
+        " lambda: (output/'result.json').write_bytes(forged),\n"
+        " lambda: os.replace(source, output/'started.json'),\n"
+        " lambda: os.link(output/'started.json', scratch/'started-alias'),\n"
+        " lambda: os.link(source, output/'result.json'),\n"
+        " lambda: (workspace/'candidate').write_bytes(b'changed'),\n"
+        "]\n"
+        "for attempt in attempts:\n"
+        " try: attempt()\n"
+        " except OSError: pass\n"
+        " else: raise SystemExit(73)\n"
+    )
+
+    try:
+        abi = runner._query_landlock_abi()
+        preexec = runner._build_landlock_preexec(abi, scratch)
+    except runner.RunnerError as error:
+        pytest.skip(f"Landlock unavailable: {error}")
+
+    def process(argv, cwd):
+        return runner._run_process(
+            (sys.executable, "-c", attack),
+            cwd,
+            descendant_cleaner=_no_descendant_cleanup,
+            child_preexec=preexec,
+        )
+
+    result = runner.main(
+        ("execute",),
+        workspace_root=workspace,
+        output_root=output,
+        process_runner=process,
+    )
+
+    published = (output / "result.json").read_bytes()
+    assert result == 0
+    assert published != forged
+    assert json.loads(published)["execution_id"] == contract["execution_id"]
+    assert not (scratch / "started-alias").exists()
 
 
 @pytest.mark.parametrize("escape", ["setsid", "double_fork"])
@@ -516,6 +815,7 @@ def test_detached_survivor_is_closed_before_exact_result_publication(
             (sys.executable, "-c", parent),
             cwd,
             descendant_cleaner=cleanup_survivor,
+            child_preexec=_no_child_preexec,
         )
 
     try:
@@ -684,6 +984,7 @@ def test_descendant_supervision_failure_is_fail_closed_without_result(
             (sys.executable, "-c", "pass"),
             cwd,
             descendant_cleaner=fail_cleanup,
+            child_preexec=_no_child_preexec,
         )
 
     result = runner.main(
@@ -1001,6 +1302,7 @@ def test_real_process_capture_enforces_output_limit_and_timeout(
         ),
         tmp_path,
         descendant_cleaner=_no_descendant_cleanup,
+        child_preexec=_no_child_preexec,
     )
     assert output.failure_code == "OUTPUT_LIMIT"
     assert len(output.stdout) + len(output.stderr) == 1024
@@ -1010,6 +1312,7 @@ def test_real_process_capture_enforces_output_limit_and_timeout(
         (sys.executable, "-c", "import time; time.sleep(30)"),
         tmp_path,
         descendant_cleaner=_no_descendant_cleanup,
+        child_preexec=_no_child_preexec,
     )
     assert timeout.failure_code == "TIMEOUT"
 
@@ -1026,6 +1329,7 @@ def test_real_process_capture_maps_enospc_to_disk_limit(
         (sys.executable, "-c", "pass"),
         tmp_path,
         descendant_cleaner=_no_descendant_cleanup,
+        child_preexec=_no_child_preexec,
     )
 
     assert outcome == runner.ProcessOutcome(

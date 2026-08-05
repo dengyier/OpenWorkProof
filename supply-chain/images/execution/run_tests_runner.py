@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 from dataclasses import dataclass
 import errno
 import hashlib
@@ -47,6 +48,27 @@ _PATH_PATTERN = re.compile(r"^[A-Za-z0-9._/-]+$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _OID = re.compile(r"^[0-9a-f]{40}$")
 _IMAGE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SYS_LANDLOCK_CREATE_RULESET = 444
+_SYS_LANDLOCK_ADD_RULE = 445
+_SYS_LANDLOCK_RESTRICT_SELF = 446
+_LANDLOCK_CREATE_RULESET_VERSION = 1
+_LANDLOCK_RULE_PATH_BENEATH = 1
+_LANDLOCK_MAX_KNOWN_ABI = 10
+_PR_SET_DUMPABLE = 4
+_PR_SET_NO_NEW_PRIVS = 38
+_LANDLOCK_ACCESS_FS_WRITE_FILE = 1 << 1
+_LANDLOCK_ACCESS_FS_REMOVE_DIR = 1 << 4
+_LANDLOCK_ACCESS_FS_REMOVE_FILE = 1 << 5
+_LANDLOCK_ACCESS_FS_MAKE_CHAR = 1 << 6
+_LANDLOCK_ACCESS_FS_MAKE_DIR = 1 << 7
+_LANDLOCK_ACCESS_FS_MAKE_REG = 1 << 8
+_LANDLOCK_ACCESS_FS_MAKE_SOCK = 1 << 9
+_LANDLOCK_ACCESS_FS_MAKE_FIFO = 1 << 10
+_LANDLOCK_ACCESS_FS_MAKE_BLOCK = 1 << 11
+_LANDLOCK_ACCESS_FS_MAKE_SYM = 1 << 12
+_LANDLOCK_ACCESS_FS_REFER = 1 << 13
+_LANDLOCK_ACCESS_FS_TRUNCATE = 1 << 14
+_LANDLOCK_ACCESS_FS_IOCTL_DEV = 1 << 15
 _CONTRACT_KEYS = frozenset(
     {
         "arguments_digest",
@@ -77,6 +99,18 @@ class ProcessOutcome:
     failure_code: str | None
     stdout: bytes
     stderr: bytes
+
+
+class _LandlockRulesetAttr(ctypes.Structure):
+    _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+
+
+class _LandlockPathBeneathAttr(ctypes.Structure):
+    _fields_ = [
+        ("allowed_access", ctypes.c_uint64),
+        ("parent_fd", ctypes.c_int32),
+        ("reserved", ctypes.c_uint32),
+    ]
 
 
 def _canonical(value: object) -> bytes:
@@ -511,13 +545,22 @@ def _stage(root: Path, input_stream: BinaryIO, output_stream: BinaryIO) -> int:
             raise RunnerError("staged workspace manifest does not match contract")
         for path in created_files:
             os.utime(path, ns=(0, 0), follow_symlinks=False)
-        for directory in sorted({root, *created_directories}, key=lambda item: len(item.parts), reverse=True):
+        for directory in sorted(
+            created_directories,
+            key=lambda item: len(item.parts),
+            reverse=True,
+        ):
             os.utime(directory, ns=(0, 0), follow_symlinks=False)
             descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
             try:
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
+        descriptor = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
         summary = _canonical(
             {
                 "execution_contract_digest": hashlib.sha256(contract_raw).hexdigest(),
@@ -636,16 +679,151 @@ def _production_descendant_cleaner() -> Callable[[], None]:
     return _close_pid_namespace
 
 
+def _linux_syscall(number: int, *args: object) -> int:
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    return int(libc.syscall(ctypes.c_long(number), *args))
+
+
+def _linux_prctl(option: int, argument: int, *remaining: int) -> int:
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.restype = ctypes.c_int
+    return int(libc.prctl(option, argument, *remaining))
+
+
+def _query_landlock_abi(
+    syscall: Callable[..., int] = _linux_syscall,
+) -> int:
+    if not sys.platform.startswith("linux"):
+        raise RunnerError("verifier output authority requires Linux Landlock")
+    abi = syscall(
+        _SYS_LANDLOCK_CREATE_RULESET,
+        None,
+        0,
+        _LANDLOCK_CREATE_RULESET_VERSION,
+    )
+    if not 3 <= abi <= _LANDLOCK_MAX_KNOWN_ABI:
+        raise RunnerError("verifier output authority has an unsupported Landlock ABI")
+    return abi
+
+
+def _landlock_write_access(abi: int) -> int:
+    if not 3 <= abi <= _LANDLOCK_MAX_KNOWN_ABI:
+        raise RunnerError("verifier output authority has an unsupported Landlock ABI")
+    access = (
+        _LANDLOCK_ACCESS_FS_WRITE_FILE
+        | _LANDLOCK_ACCESS_FS_REMOVE_DIR
+        | _LANDLOCK_ACCESS_FS_REMOVE_FILE
+        | _LANDLOCK_ACCESS_FS_MAKE_CHAR
+        | _LANDLOCK_ACCESS_FS_MAKE_DIR
+        | _LANDLOCK_ACCESS_FS_MAKE_REG
+        | _LANDLOCK_ACCESS_FS_MAKE_SOCK
+        | _LANDLOCK_ACCESS_FS_MAKE_FIFO
+        | _LANDLOCK_ACCESS_FS_MAKE_BLOCK
+        | _LANDLOCK_ACCESS_FS_MAKE_SYM
+        | _LANDLOCK_ACCESS_FS_REFER
+        | _LANDLOCK_ACCESS_FS_TRUNCATE
+    )
+    if abi >= 5:
+        access |= _LANDLOCK_ACCESS_FS_IOCTL_DEV
+    return access
+
+
+def _build_landlock_preexec(
+    abi: int,
+    writable_root: Path,
+    *,
+    syscall: Callable[..., int] = _linux_syscall,
+    prctl: Callable[..., int] = _linux_prctl,
+    opener: Callable[..., int] = os.open,
+    closer: Callable[[int], None] = os.close,
+) -> Callable[[], None]:
+    access = _landlock_write_access(abi)
+    writable_root = writable_root.absolute()
+    metadata = writable_root.lstat()
+    if writable_root.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+        raise RunnerError("Landlock writable root is not a regular directory")
+
+    def restrict_child() -> None:
+        if prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+            raise RunnerError("Landlock no_new_privs failed")
+        ruleset = _LandlockRulesetAttr(handled_access_fs=access)
+        ruleset_fd = syscall(
+            _SYS_LANDLOCK_CREATE_RULESET,
+            ctypes.byref(ruleset),
+            ctypes.sizeof(ruleset),
+            0,
+        )
+        if ruleset_fd < 0:
+            raise RunnerError("Landlock ruleset creation failed")
+        path_fd = -1
+        try:
+            path_fd = opener(
+                writable_root,
+                getattr(os, "O_PATH", 0)
+                | os.O_CLOEXEC
+                | getattr(os, "O_DIRECTORY", 0),
+            )
+            path_rule = _LandlockPathBeneathAttr(
+                allowed_access=access,
+                parent_fd=path_fd,
+                reserved=0,
+            )
+            if syscall(
+                _SYS_LANDLOCK_ADD_RULE,
+                ruleset_fd,
+                _LANDLOCK_RULE_PATH_BENEATH,
+                ctypes.byref(path_rule),
+                0,
+            ) != 0:
+                raise RunnerError("Landlock path rule failed")
+            if syscall(_SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0) != 0:
+                raise RunnerError("Landlock restrict_self failed")
+        finally:
+            if path_fd >= 0:
+                closer(path_fd)
+            closer(ruleset_fd)
+
+    return restrict_child
+
+
+def _production_child_preexec(
+    writable_root: Path = Path("/tmp"),
+    *,
+    syscall: Callable[..., int] = _linux_syscall,
+    prctl: Callable[..., int] = _linux_prctl,
+    opener: Callable[..., int] = os.open,
+    closer: Callable[[int], None] = os.close,
+) -> Callable[[], None]:
+    abi = _query_landlock_abi(syscall)
+    if prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+        raise RunnerError("verifier PID 1 could not disable dumpability")
+    return _build_landlock_preexec(
+        abi,
+        writable_root,
+        syscall=syscall,
+        prctl=prctl,
+        opener=opener,
+        closer=closer,
+    )
+
+
 def _run_process(
     argv: tuple[str, ...],
     cwd: Path,
     *,
     descendant_cleaner: Callable[[], None] | None = None,
+    child_preexec: Callable[[], None] | None = None,
 ) -> ProcessOutcome:
     cleaner = (
         _production_descendant_cleaner()
         if descendant_cleaner is None
         else descendant_cleaner
+    )
+    preexec = (
+        _production_child_preexec()
+        if child_preexec is None
+        else child_preexec
     )
     try:
         process = subprocess.Popen(
@@ -663,11 +841,13 @@ def _run_process(
             stderr=subprocess.PIPE,
             close_fds=True,
             start_new_session=True,
+            preexec_fn=preexec,
         )
-    except OSError as error:
-        if error.errno == errno.ENOSPC:
+    except (OSError, subprocess.SubprocessError) as error:
+        if isinstance(error, OSError) and error.errno == errno.ENOSPC:
             cleaner()
             return ProcessOutcome(None, "DISK_LIMIT", b"", b"")
+        cleaner()
         raise RunnerError("verifier process could not start") from error
     if process.stdout is None or process.stderr is None:
         _terminate_process_group(process)

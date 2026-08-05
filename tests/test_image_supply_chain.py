@@ -747,6 +747,8 @@ def test_supply_chain_record_keeps_day0_and_acceptor_claims_closed() -> None:
     assert "PID 1" in record
     assert "同为 UID/GID 65532" in record
     assert "零后代" in record
+    assert "Landlock ABI" in record
+    assert "只允许在 `/tmp` 下写入" in record
 
 
 @pytest.mark.parametrize("inventory_path", CANDIDATE_PATHS, ids=lambda path: path.stem)
