@@ -6962,10 +6962,20 @@ def _terminate_process_group(
         process.wait(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
     except subprocess.TimeoutExpired:
         pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    while True:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            break
+        except PermissionError as error:
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining == 0:
+                raise ProcessExecutionError(
+                    "bounded process cleanup exceeded its grace period"
+                ) from error
+            time.sleep(min(0.01, remaining))
+        else:
+            break
     remaining = max(0.0, deadline - time.monotonic())
     try:
         process.wait(timeout=remaining)

@@ -6,6 +6,7 @@ import base64
 import copy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import errno
 import hashlib
 import io
 import json
@@ -1052,6 +1053,75 @@ def _process_request(
         working_directory=tmp_path,
         environment={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
     )
+
+
+class _FinishedProcess:
+    pid = 4242
+    returncode = -15
+
+    def __init__(self) -> None:
+        self.wait_timeouts: list[float] = []
+
+    def wait(self, timeout: float) -> int:
+        self.wait_timeouts.append(timeout)
+        return self.returncode
+
+
+def test_process_group_cleanup_retries_transient_post_wait_eperm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _FinishedProcess()
+    signals: list[int] = []
+
+    def killpg(_pgid: int, sent_signal: int) -> None:
+        signals.append(sent_signal)
+        if sent_signal == repo_tools.signal.SIGKILL:
+            if signals.count(repo_tools.signal.SIGKILL) == 1:
+                raise PermissionError(errno.EPERM, "process group is exiting")
+            raise ProcessLookupError(errno.ESRCH, "process group exited")
+
+    monkeypatch.setattr(repo_tools.os, "killpg", killpg)
+    monkeypatch.setattr(repo_tools.time, "sleep", lambda _seconds: None)
+
+    repo_tools._terminate_process_group(process, cleanup_grace_seconds=1)
+
+    assert signals == [
+        repo_tools.signal.SIGTERM,
+        repo_tools.signal.SIGKILL,
+        repo_tools.signal.SIGKILL,
+    ]
+    assert len(process.wait_timeouts) == 2
+
+
+def test_process_group_cleanup_rejects_persistent_post_wait_eperm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _FinishedProcess()
+    now = 0.0
+
+    def monotonic() -> float:
+        nonlocal now
+        value = now
+        now += 0.25
+        return value
+
+    def killpg(_pgid: int, sent_signal: int) -> None:
+        if sent_signal == repo_tools.signal.SIGKILL:
+            raise PermissionError(errno.EPERM, "process group remains inaccessible")
+
+    monkeypatch.setattr(repo_tools.os, "killpg", killpg)
+    monkeypatch.setattr(repo_tools.time, "monotonic", monotonic)
+    monkeypatch.setattr(repo_tools.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(
+        repo_tools.ProcessExecutionError,
+        match="cleanup exceeded its grace period",
+    ) as captured:
+        repo_tools._terminate_process_group(process, cleanup_grace_seconds=1)
+
+    assert isinstance(captured.value.__cause__, PermissionError)
+    assert captured.value.__cause__.errno == errno.EPERM
+    assert len(process.wait_timeouts) == 1
 
 
 def test_run_bounded_process_returns_exact_small_stdout_and_stderr(
