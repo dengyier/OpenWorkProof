@@ -128,6 +128,13 @@ def _contract(files: dict[str, tuple[str, bytes]]) -> dict[str, object]:
     }
 
 
+def _nested_files(depth: int, branches: str) -> dict[str, tuple[str, bytes]]:
+    return {
+        "/".join([branch] * depth + ["f"]): ("100644", branch.encode("ascii"))
+        for branch in branches
+    }
+
+
 def _write_workspace(
     tmp_path: Path,
 ) -> tuple[Path, Path, dict[str, tuple[str, bytes]], dict[str, object]]:
@@ -237,6 +244,62 @@ def test_stage_writes_snapshot_and_exact_canonical_summary(tmp_path: Path) -> No
             "workspace_manifest_digest": contract["workspace_manifest_digest"],
         }
     ) + b"\n"
+
+
+def test_manifest_entry_limit_accepts_512_and_rejects_513() -> None:
+    boundary = _nested_files(255, "ab")
+    assert len(boundary) + 510 == 512
+
+    assert len(runner._manifest_digest(boundary, "2" * 40)) == 64
+
+    above = {**boundary, "root-file": ("100644", b"c")}
+    assert len(above) + 510 == 513
+    with pytest.raises(runner.RunnerError, match="512"):
+        runner._manifest_digest(above, "2" * 40)
+
+
+@pytest.mark.parametrize("mode", ["stage", "execute"])
+def test_runner_rejects_528_entry_manifest_before_success_or_marker(
+    tmp_path: Path, mode: str
+) -> None:
+    files = _nested_files(175, "abc")
+    assert len(files) + 525 == 528
+    contract = _contract(files)
+    workspace = tmp_path / "workspace"
+    output = tmp_path / "output"
+    workspace.mkdir()
+    output.mkdir()
+    stdout = io.BytesIO()
+    if mode == "stage":
+        result = runner.main(
+            ("stage",),
+            workspace_root=workspace,
+            input_stream=io.BytesIO(_stream(files, contract)),
+            output_stream=stdout,
+        )
+        assert not list(workspace.iterdir())
+    else:
+        for path, (file_mode, content) in files.items():
+            destination = workspace / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(content)
+            destination.chmod(int(file_mode[-3:], 8))
+        (workspace / "run-contract.json").write_bytes(_canonical(contract))
+        result = runner.main(
+            ("execute",),
+            workspace_root=workspace,
+            output_root=output,
+            process_runner=lambda argv, cwd: runner.ProcessOutcome(
+                exit_code=0,
+                failure_code=None,
+                stdout=b"",
+                stderr=b"",
+            ),
+        )
+
+    assert result != 0
+    assert stdout.getvalue() == b""
+    assert not list(output.iterdir())
 
 
 @pytest.mark.parametrize("bad_argv", [(), ("unknown",), ("execute", "extra")])

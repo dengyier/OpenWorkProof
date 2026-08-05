@@ -40,6 +40,7 @@ _MAX_FILES = 126
 _MAX_PATH_BYTES = 512
 _MAX_FILE_BYTES = 1_048_576
 _MAX_CANDIDATE_BYTES = 8_388_608
+_MAX_MANIFEST_ENTRIES = 512
 _MAX_SUMMARY_BYTES = 512
 _ALLOWED_MODES = frozenset({"100644", "100755"})
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -280,6 +281,8 @@ def _manifest_digest(
         for path in files
         for index in range(1, len(path.split("/")))
     }
+    if len(files) + len(directories) > _MAX_MANIFEST_ENTRIES:
+        raise RunnerError("workspace manifest exceeds 512 entries")
     entries: list[dict[str, object]] = []
     for path in directories:
         entries.append(

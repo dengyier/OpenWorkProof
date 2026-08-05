@@ -407,7 +407,11 @@ def _locked_packages(lock_text: str) -> tuple[str, ...]:
     )
 
 
-def _assert_fixed_helper_process_config(dockerfile: str) -> None:
+def _assert_fixed_process_config(
+    dockerfile: str,
+    expected_entrypoint: list[str],
+    expected_cmd: list[str],
+) -> None:
     instructions: dict[str, list[object]] = {"ENTRYPOINT": [], "CMD": []}
     in_continuation = False
     for raw_line in dockerfile.splitlines():
@@ -436,13 +440,33 @@ def _assert_fixed_helper_process_config(dockerfile: str) -> None:
             in_continuation = True
 
     assert not in_continuation, "unterminated Dockerfile continuation"
-    assert instructions["ENTRYPOINT"] == [[
-        "/opt/venv/bin/python",
-        "-I",
-        "-m",
-        "openworkproof.trusted_helper",
-    ]]
-    assert instructions["CMD"] == [[]]
+    assert instructions["ENTRYPOINT"] == [expected_entrypoint]
+    assert instructions["CMD"] == [expected_cmd]
+
+
+def _assert_fixed_helper_process_config(dockerfile: str) -> None:
+    _assert_fixed_process_config(
+        dockerfile,
+        [
+            "/opt/venv/bin/python",
+            "-I",
+            "-m",
+            "openworkproof.trusted_helper",
+        ],
+        [],
+    )
+
+
+def _assert_fixed_execution_process_config(dockerfile: str) -> None:
+    _assert_fixed_process_config(
+        dockerfile,
+        [
+            "/opt/venv/bin/python",
+            "-I",
+            "/opt/openworkproof/run_tests_runner.py",
+        ],
+        ["execute"],
+    )
 
 
 def test_supplychain_test_contract_is_portable_and_registered() -> None:
@@ -475,13 +499,7 @@ def test_execution_image_contract_is_minimal_and_offline() -> None:
     assert stat.S_ISREG(runner_mode) and not runner_path.is_symlink()
     assert runner_path.read_bytes()
     assert "COPY run_tests_runner.py /opt/openworkproof/run_tests_runner.py" in dockerfile
-    assert dockerfile.count("ENTRYPOINT ") == 1
-    assert dockerfile.count("CMD ") == 1
-    assert (
-        'ENTRYPOINT ["/opt/venv/bin/python", "-I", '
-        '"/opt/openworkproof/run_tests_runner.py"]'
-    ) in dockerfile
-    assert 'CMD ["execute"]' in dockerfile
+    _assert_fixed_execution_process_config(dockerfile)
     assert 'ENTRYPOINT ["/usr/bin/env", "--"]' not in dockerfile
     assert "openworkproof.trusted_helper" not in dockerfile
     assert "pip install openworkproof" not in dockerfile.casefold()
@@ -497,6 +515,25 @@ def test_execution_image_contract_is_minimal_and_offline() -> None:
         "pygments",
         "pytest",
     )
+
+
+@pytest.mark.parametrize(
+    "shadow",
+    (
+        '\nentrypoint ["/bin/false"]\n',
+        '\nEnTrYpOiNt ["/bin/false"]\n',
+        "\nentrypoint /bin/sh -c 'exit 0'\n",
+        '\ncmd ["shadow"]\n',
+        "\nCmD /bin/sh -c 'exit 0'\n",
+    ),
+)
+def test_execution_candidate_rejects_case_or_shell_form_process_shadow(
+    shadow: str,
+) -> None:
+    dockerfile = _read("execution/Dockerfile")
+
+    with pytest.raises(AssertionError):
+        _assert_fixed_execution_process_config(dockerfile + shadow)
 
 
 def test_trusted_helper_candidate_has_a_closed_package_surface() -> None:
