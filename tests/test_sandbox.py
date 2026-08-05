@@ -5481,8 +5481,44 @@ def test_docker_run_tests_driver_required_live_detached_execution(
             capture_output=True,
             timeout=10,
         )
-        image_id = json.loads(inspected.stdout)[0]["Id"]
+        image_inspections = json.loads(inspected.stdout)
+        if (
+            type(image_inspections) is not list
+            or len(image_inspections) != 1
+            or type(image_inspections[0]) is not dict
+        ):
+            pytest.fail("live driver image inspection is invalid")
+        image_inspection = image_inspections[0]
+        image_id = image_inspection.get("Id")
         assert isinstance(image_id, str) and image_id.startswith("sha256:")
+        repo_digests = image_inspection.get("RepoDigests")
+        if type(repo_digests) is not list:
+            pytest.fail("live driver image RepoDigests are unavailable")
+        canonical_repo_digests = [
+            repo_tools._canonical_observed_repo_digest(reference)
+            for reference in repo_digests
+        ]
+        if None in canonical_repo_digests:
+            pytest.fail("live driver image RepoDigests are invalid")
+        qualified_repository = f"docker.io/{tag.rsplit(':', 1)[0]}"
+        matching_repo_digests = [
+            reference
+            for reference in canonical_repo_digests
+            if reference is not None
+            and reference.rsplit("@", 1)[0] == qualified_repository
+        ]
+        if len(matching_repo_digests) != 1:
+            pytest.fail(
+                "live driver image must have exactly one matching RepoDigest"
+            )
+        image_reference = matching_repo_digests[0]
+        reference_inspected = subprocess.run(
+            (str(docker_binary), "image", "inspect", image_reference),
+            capture_output=True,
+            timeout=10,
+        )
+        assert reference_inspected.returncode == 0, reference_inspected.stderr
+        assert json.loads(reference_inspected.stdout)[0]["Id"] == image_id
 
         fixed_test = subprocess.run(
             (
@@ -5525,7 +5561,7 @@ def test_docker_run_tests_driver_required_live_detached_execution(
         executor = repo_tools.DockerRunTestsExecutor(
             docker_binary=docker_binary,
             candidate_runtime_root=tmp_path.resolve(),
-            image_reference=image_id,
+            image_reference=image_reference,
         )
         for regex, execution_digit, candidate_digit, expected_exit in (
             (br"\s*\S+\s*", "1", "7", 1),
