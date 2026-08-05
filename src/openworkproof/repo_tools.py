@@ -5387,18 +5387,9 @@ def _validated_docker_image_id(
             and _IMAGE_DIGEST_PATTERN.fullmatch(image_id) is not None
             and type(image_config) is dict
             and image_config.get("Volumes") in (None, {})
-            and (
-                (
-                    _IMAGE_DIGEST_PATTERN.fullmatch(plan.image_reference)
-                    is not None
-                    and image_id == plan.image_reference
-                )
-                or (
-                    type(repo_digests) is list
-                    and None not in canonical_repo_digests
-                    and plan.image_reference in canonical_repo_digests
-                )
-            )
+            and type(repo_digests) is list
+            and None not in canonical_repo_digests
+            and plan.image_reference in canonical_repo_digests
         )
     except (KeyError, TypeError, AttributeError):
         valid = False
@@ -5607,31 +5598,15 @@ def _run_tests_driver_plan(
     ):
         raise ValueError("run-tests execution contract does not match executor")
     binding = derive_run_tests_docker_binding(contract.execution_id)
-    derivation_reference = executor._image_reference
-    if _IMAGE_DIGEST_PATTERN.fullmatch(derivation_reference) is not None:
-        derivation_reference = (
-            "registry.invalid/openworkproof/execution@" + derivation_reference
-        )
     plan = derive_docker_execution_plan(
         docker_binary=executor._docker_binary,
-        image_reference=derivation_reference,
+        image_reference=executor._image_reference,
         container_name=binding.container_name,
         workspace_volume_name=binding.workspace_volume_name,
         output_volume_name=binding.output_volume_name,
         ownership_token=binding.ownership_token,
         command=("execute",),
     )
-    if derivation_reference != executor._image_reference:
-        plan = replace(
-            plan,
-            image_reference=executor._image_reference,
-            create_container_argv=tuple(
-                executor._image_reference
-                if value == derivation_reference
-                else value
-                for value in plan.create_container_argv
-            ),
-        )
     return binding, plan, contract_digest
 
 
@@ -6565,6 +6540,11 @@ def _reconcile_run_tests_docker(
     }:
         raise ValueError("run-tests Receipt observation is invalid")
     try:
+        if receipt_state == "MATCH":
+            executor.cleanup(contract)
+            return RunTestsExecutionOutcome("CLOSED_RESULT", None)
+        if receipt_state == "MISMATCH":
+            return RunTestsExecutionOutcome("UNRESOLVED")
         prepare_candidate_execution_snapshot(
             CandidateExecutionSnapshotRequest(
                 runtime_root=executor._candidate_runtime_root,
@@ -6580,11 +6560,6 @@ def _reconcile_run_tests_docker(
         binding = commands.binding
         plan = commands.execution_plan
         contract_digest = commands.contract_digest
-        if receipt_state == "MATCH":
-            executor.cleanup(contract)
-            return RunTestsExecutionOutcome("CLOSED_RESULT", None)
-        if receipt_state == "MISMATCH":
-            return RunTestsExecutionOutcome("UNRESOLVED")
         staging_raw = _inspect_optional(
             executor, commands.inspect_staging_container_argv
         )
@@ -6837,14 +6812,7 @@ class DockerRunTestsExecutor:
             or not candidate_runtime_root.is_absolute()
             or candidate_runtime_root
             != Path(os.path.abspath(candidate_runtime_root))
-            or not (
-                _valid_immutable_image_reference(image_reference)
-                or (
-                    type(image_reference) is str
-                    and _IMAGE_DIGEST_PATTERN.fullmatch(image_reference)
-                    is not None
-                )
-            )
+            or not _valid_immutable_image_reference(image_reference)
             or (run is not None and not callable(run))
         ):
             raise ValueError("Docker run-tests executor configuration is invalid")

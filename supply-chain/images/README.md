@@ -140,9 +140,11 @@ docker buildx build --platform linux/arm64 --network none --pull=false \
   /path/to/revision-bound-context
 ```
 
-项目代码/文档许可证仍待权利人确认：
-清单固定记录 `status=PENDING`、`spdx=NOASSERTION`，镜像中不添加 license
-OCI label。
+当前 `main` 仓库的 `LICENSE` 明确采用 Apache-2.0。该状态不追溯改变历史
+candidate，也不改变 source revision 中尚无 `LICENSE` 的已冻结 artifact：这些
+历史/冻结记录仍保持 `status=PENDING`、`spdx=NOASSERTION`，镜像中不添加
+license OCI label。不得据此改写既有或 current candidate inventory 的 license
+字段。
 
 本地构建、断网 smoke、`docker save` 和 archive SHA-256 只证明本机 candidate
 产物可复核；它们不构成 Acceptor access，不构成 clean-cache reacquisition，

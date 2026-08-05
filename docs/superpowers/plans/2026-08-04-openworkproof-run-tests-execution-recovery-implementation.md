@@ -1186,15 +1186,22 @@ digest. Keep these claims false:
 }
 ```
 
-Keep license approval `PENDING`, SPDX `NOASSERTION`, and Acceptor path null.
+The current `main` repository is licensed under Apache-2.0. That does not
+retroactively change this candidate's frozen source revision, which contains
+no `LICENSE`; keep this artifact record at `PENDING` / `NOASSERTION`, without
+an OCI license label, and keep the Acceptor path null.
 Copy the inventory to the external archive directory and create its digest
 sidecar without overwriting prior revisions.
 
 - [ ] **Step 7: Run required-live focused and full gates**
 
 ```bash
+OWP_EXECUTION_IMAGE_ID=$(docker image inspect \
+  "openworkproof/execution-test:$OWP_SOURCE_REVISION" \
+  --format '{{.Id}}')
 OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-day0 \
 OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 \
+OPENWORKPROOF_DOCKER_TEST_IMAGE="docker.io/openworkproof/execution-test@$OWP_EXECUTION_IMAGE_ID" \
 ./.venv/bin/python -m pytest \
   tests/test_run_tests_runner.py \
   tests/test_sandbox.py \
@@ -1204,9 +1211,6 @@ OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 \
   tests/test_prepare_image_context.py \
   tests/test_candidate_supplychain_integration.py -q
 
-OWP_EXECUTION_IMAGE_ID=$(docker image inspect \
-  "openworkproof/execution-test:$OWP_SOURCE_REVISION" \
-  --format '{{.Id}}')
 OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-day0 \
 OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 \
 OPENWORKPROOF_DOCKER_TEST_IMAGE="docker.io/openworkproof/execution-test@$OWP_EXECUTION_IMAGE_ID" \

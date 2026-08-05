@@ -3652,6 +3652,15 @@ def _docker_driver_contract_and_snapshot(
     return contract, snapshot
 
 
+def _docker_driver_image_reference(
+    contract: repo_tools.RunTestsExecutionContract,
+) -> str:
+    return (
+        "registry.example/openworkproof/test-runner@"
+        + contract.container_image_digest
+    )
+
+
 def _rich_wrap_driver_contract_and_snapshot(
     regex: bytes,
     *,
@@ -4148,23 +4157,39 @@ def test_docker_run_tests_driver_rejects_data_after_tar_termination(
         repo_tools._extract_run_tests_output_tar(contract, raw)
 
 
-def test_docker_run_tests_driver_accepts_inspected_immutable_image_id(
+def test_docker_run_tests_driver_rejects_bare_image_id(
     tmp_path: Path,
 ) -> None:
     contract, _ = _docker_driver_contract_and_snapshot()
-    executor = repo_tools.DockerRunTestsExecutor(
-        docker_binary=Path("/usr/local/bin/docker"),
-        candidate_runtime_root=tmp_path.resolve(),
-        image_reference=contract.container_image_digest,
-        run=lambda command, input_bytes, timeout: subprocess.CompletedProcess(
-            command, 1, b"", b"unused"
-        ),
+
+    with pytest.raises(ValueError, match="executor configuration"):
+        repo_tools.DockerRunTestsExecutor(
+            docker_binary=Path("/usr/local/bin/docker"),
+            candidate_runtime_root=tmp_path.resolve(),
+            image_reference=contract.container_image_digest,
+            run=lambda command, input_bytes, timeout: subprocess.CompletedProcess(
+                command, 1, b"", b"unused"
+            ),
+        )
+
+
+def test_docker_image_id_without_matching_repo_digest_is_not_authority() -> None:
+    digest = "sha256:" + "a" * 64
+    plan = _docker_plan(
+        image_reference=f"registry.example/openworkproof/test@{digest}",
     )
+    image = _docker_image_inspection(plan, image_id=digest)
+    image["RepoDigests"] = []
 
-    binding, plan, _ = repo_tools._run_tests_driver_plan(executor, contract)
-
-    assert plan.image_reference == contract.container_image_digest
-    assert binding.execution_id == contract.execution_id
+    with pytest.raises(ValueError, match="image inspection"):
+        repo_tools.derive_ready_docker_start(
+            plan,
+            _complete_docker_lifecycle(plan),
+            image,
+            _docker_container_inspection(plan),
+            _docker_volume_inspection(plan, "workspace_volume"),
+            _docker_volume_inspection(plan, "output_volume"),
+        )
 
 
 def test_docker_run_tests_driver_cleans_owned_partial_after_staging_timeout(
@@ -4308,7 +4333,7 @@ def test_docker_run_tests_driver_cleans_every_partial_create_position(
     executor = repo_tools.DockerRunTestsExecutor(
         docker_binary=docker_binary,
         candidate_runtime_root=tmp_path.resolve(),
-        image_reference=contract.container_image_digest,
+        image_reference=_docker_driver_image_reference(contract),
         run=lambda command, input_bytes, timeout: None,
     )
     commands = repo_tools._run_tests_docker_command_plan(executor, contract)
@@ -4468,7 +4493,7 @@ def test_docker_run_tests_driver_rejects_unowned_workspace_volume_create_race(
     executor = repo_tools.DockerRunTestsExecutor(
         docker_binary=Path("/usr/local/bin/docker"),
         candidate_runtime_root=tmp_path.resolve(),
-        image_reference=contract.container_image_digest,
+        image_reference=_docker_driver_image_reference(contract),
         run=lambda command, input_bytes, timeout: None,
     )
     commands = repo_tools._run_tests_docker_command_plan(executor, contract)
@@ -4644,7 +4669,7 @@ def test_docker_run_tests_driver_match_closes_without_pruned_image_or_result(
     executor = repo_tools.DockerRunTestsExecutor(
         docker_binary=Path("/usr/local/bin/docker"),
         candidate_runtime_root=tmp_path.resolve(),
-        image_reference=contract.container_image_digest,
+        image_reference=_docker_driver_image_reference(contract),
         run=run,
     )
     commands = repo_tools._run_tests_docker_command_plan(executor, contract)
@@ -4658,6 +4683,95 @@ def test_docker_run_tests_driver_match_closes_without_pruned_image_or_result(
         commands.inspect_staging_container_argv,
         commands.inspect_workspace_volume_argv,
     ]
+
+
+@pytest.mark.parametrize(
+    ("receipt_state", "expected_action", "expected_cleanup_inspections"),
+    (
+        ("MATCH", "CLOSED_RESULT", 4),
+        ("MISMATCH", "UNRESOLVED", 0),
+    ),
+)
+def test_docker_run_tests_driver_receipt_authority_precedes_candidate_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    receipt_state: str,
+    expected_action: str,
+    expected_cleanup_inspections: int,
+) -> None:
+    contract, _ = _docker_driver_contract_and_snapshot()
+    snapshot_requests = []
+
+    def unavailable_snapshot(request):
+        snapshot_requests.append(request)
+        raise repo_tools.CandidateReadError("WORKSPACE_MISSING")
+
+    monkeypatch.setattr(
+        repo_tools,
+        "prepare_candidate_execution_snapshot",
+        unavailable_snapshot,
+    )
+    observed = []
+
+    def run(command, input_bytes, timeout):
+        observed.append(tuple(command))
+        return _docker_driver_absent(command)
+
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=Path("/usr/local/bin/docker"),
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=_docker_driver_image_reference(contract),
+        run=run,
+    )
+
+    outcome = executor.reconcile(
+        contract,
+        "STARTED_UNCONFIRMED",
+        receipt_state,
+    )
+
+    assert outcome.action == expected_action
+    assert snapshot_requests == []
+    assert len(observed) == expected_cleanup_inspections
+
+
+def test_docker_run_tests_driver_receipt_match_cleanup_error_is_unresolved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract, _ = _docker_driver_contract_and_snapshot()
+    snapshot_requests = []
+
+    monkeypatch.setattr(
+        repo_tools,
+        "prepare_candidate_execution_snapshot",
+        lambda request: snapshot_requests.append(request),
+    )
+    observed = []
+
+    def run(command, input_bytes, timeout):
+        observed.append(tuple(command))
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            b"",
+            b"Cannot connect to the Docker daemon",
+        )
+
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=Path("/usr/local/bin/docker"),
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=_docker_driver_image_reference(contract),
+        run=run,
+    )
+
+    assert executor.reconcile(
+        contract,
+        "STARTED_UNCONFIRMED",
+        "MATCH",
+    ) == repo_tools.RunTestsExecutionOutcome("UNRESOLVED")
+    assert snapshot_requests == []
+    assert len(observed) == 1
 
 
 def test_docker_run_tests_driver_match_cleans_stopped_container_without_cp(
@@ -4797,7 +4911,7 @@ def test_docker_run_tests_driver_daemon_error_is_not_absence(
     executor = repo_tools.DockerRunTestsExecutor(
         docker_binary=Path("/usr/local/bin/docker"),
         candidate_runtime_root=tmp_path.resolve(),
-        image_reference=contract.container_image_digest,
+        image_reference=_docker_driver_image_reference(contract),
         run=lambda command, input_bytes, timeout: subprocess.CompletedProcess(
             command, 1, b"", b"Cannot connect to the Docker daemon"
         ),
@@ -4827,7 +4941,7 @@ def test_docker_run_tests_driver_rejects_container_result_contradiction(
         repo_tools.DockerRunTestsExecutor(
             docker_binary=docker_binary,
             candidate_runtime_root=tmp_path.resolve(),
-            image_reference=contract.container_image_digest,
+            image_reference=_docker_driver_image_reference(contract),
             run=lambda command, input_bytes, timeout: None,
         ),
         contract,
@@ -4874,7 +4988,7 @@ def test_docker_run_tests_driver_rejects_container_result_contradiction(
     executor = repo_tools.DockerRunTestsExecutor(
         docker_binary=docker_binary,
         candidate_runtime_root=tmp_path.resolve(),
-        image_reference=contract.container_image_digest,
+        image_reference=_docker_driver_image_reference(contract),
         run=run,
     )
 
@@ -4911,7 +5025,7 @@ def test_docker_run_tests_driver_rejects_container_image_id_mismatch(
     executor = repo_tools.DockerRunTestsExecutor(
         docker_binary=Path("/usr/local/bin/docker"),
         candidate_runtime_root=tmp_path.resolve(),
-        image_reference=contract.container_image_digest,
+        image_reference=_docker_driver_image_reference(contract),
         run=run,
     )
 
@@ -4963,7 +5077,7 @@ def test_docker_run_tests_driver_recovery_maps_clean_prestart_and_committed(
     executor = repo_tools.DockerRunTestsExecutor(
         docker_binary=Path("/usr/local/bin/docker"),
         candidate_runtime_root=tmp_path.resolve(),
-        image_reference=contract.container_image_digest,
+        image_reference=_docker_driver_image_reference(contract),
         run=run,
     )
 
@@ -4994,7 +5108,7 @@ def test_docker_run_tests_driver_reconcile_running_and_result_uncertainty(
     executor = repo_tools.DockerRunTestsExecutor(
         docker_binary=Path("/usr/local/bin/docker"),
         candidate_runtime_root=tmp_path.resolve(),
-        image_reference=contract.container_image_digest,
+        image_reference=_docker_driver_image_reference(contract),
         run=lambda command, input_bytes, timeout: None,
     )
     commands = repo_tools._run_tests_docker_command_plan(executor, contract)
@@ -5056,7 +5170,7 @@ def test_docker_run_tests_cleanup_removes_only_exact_owned_names_in_reverse_orde
     executor = repo_tools.DockerRunTestsExecutor(
         docker_binary=Path("/usr/local/bin/docker"),
         candidate_runtime_root=tmp_path.resolve(),
-        image_reference=contract.container_image_digest,
+        image_reference=_docker_driver_image_reference(contract),
         run=lambda command, input_bytes, timeout: None,
     )
     commands = repo_tools._run_tests_docker_command_plan(executor, contract)
@@ -5146,7 +5260,7 @@ def test_docker_run_tests_cleanup_retains_unowned_resource(
     executor = repo_tools.DockerRunTestsExecutor(
         docker_binary=Path("/usr/local/bin/docker"),
         candidate_runtime_root=tmp_path.resolve(),
-        image_reference=contract.container_image_digest,
+        image_reference=_docker_driver_image_reference(contract),
         run=lambda command, input_bytes, timeout: None,
     )
     commands = repo_tools._run_tests_docker_command_plan(executor, contract)

@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import copy
+import gzip
 import hashlib
 import io
 import json
@@ -17,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 
 import pytest
 
@@ -68,6 +70,7 @@ MAX_JSON_BYTES = 1024 * 1024
 MAX_IMAGE_LAYERS = 64
 MAX_IMAGE_HISTORY = 256
 MAX_SNAPSHOT_ENTRIES = 4096
+MAX_LAYER_SPOOL_MEMORY_BYTES = 8 * 1024 * 1024
 MAX_SNAPSHOT_DEPTH = 64
 MAX_SNAPSHOT_FILE_BYTES = 512 * 1024 * 1024
 MAX_SNAPSHOT_TOTAL_BYTES = 1024 * 1024 * 1024
@@ -581,6 +584,72 @@ def _verify_descriptor_blob(
     )
 
 
+def _verify_layer_blob(
+    archive: tarfile.TarFile,
+    members: Mapping[str, tarfile.TarInfo],
+    descriptor: Mapping[str, object],
+    *,
+    expected_diff_id: str,
+) -> None:
+    digest = descriptor["digest"]
+    assert isinstance(digest, str)
+    name = f"blobs/sha256/{digest[7:]}"
+    _verify_descriptor_blob(archive, members, descriptor)
+    stream = archive.extractfile(members[name])
+    assert stream is not None
+    uncompressed_digest = hashlib.sha256()
+    uncompressed_size = 0
+    with tempfile.SpooledTemporaryFile(
+        max_size=MAX_LAYER_SPOOL_MEMORY_BYTES,
+        mode="w+b",
+    ) as uncompressed:
+        try:
+            with gzip.GzipFile(fileobj=stream, mode="rb") as compressed:
+                while True:
+                    chunk = compressed.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    uncompressed_size += len(chunk)
+                    assert uncompressed_size <= MAX_ARCHIVE_BYTES, (
+                        "uncompressed layer exceeds its limit"
+                    )
+                    uncompressed_digest.update(chunk)
+                    uncompressed.write(chunk)
+        except (gzip.BadGzipFile, EOFError, OSError) as error:
+            raise AssertionError("invalid gzip layer") from error
+        assert (
+            f"sha256:{uncompressed_digest.hexdigest()}" == expected_diff_id
+        ), "layer diff_id does not match uncompressed bytes"
+        assert (
+            uncompressed_size >= 1024 and uncompressed_size % 512 == 0
+        ), "invalid layer tar framing"
+        uncompressed.seek(-1024, os.SEEK_END)
+        assert uncompressed.read(1024) == b"\0" * 1024, (
+            "invalid layer tar termination"
+        )
+        uncompressed.seek(0)
+        member_count = 0
+        try:
+            with tarfile.open(fileobj=uncompressed, mode="r:") as layer_archive:
+                for member in layer_archive:
+                    member_count += 1
+                    assert member_count <= MAX_SNAPSHOT_ENTRIES, (
+                        "layer tar member count exceeds its limit"
+                    )
+                    name = member.name.rstrip("/")
+                    member_path = PurePosixPath(name)
+                    assert (
+                        name
+                        and not member_path.is_absolute()
+                        and ".." not in member_path.parts
+                    ), "invalid layer tar member path"
+                    assert not member.issparse(), (
+                        "sparse layer tar members are forbidden"
+                    )
+        except (tarfile.TarError, EOFError, OSError) as error:
+            raise AssertionError("invalid layer tar") from error
+
+
 def _config_identity(
     raw: bytes,
     *,
@@ -689,13 +758,18 @@ def _image_manifest_identity(
         for layer in layers
     ]
     config_raw = _descriptor_bytes(archive, members, config_descriptor)
-    for layer in layer_descriptors:
-        _verify_descriptor_blob(archive, members, layer)
     diff_ids, semantics = _config_identity(
         config_raw,
         layer_count=len(layer_descriptors),
         expected_image=expected_image,
     )
+    for layer, diff_id in zip(layer_descriptors, diff_ids, strict=True):
+        _verify_layer_blob(
+            archive,
+            members,
+            layer,
+            expected_diff_id=diff_id,
+        )
     return _ImageIdentity(
         config_digest=config_descriptor["digest"],
         layer_digests=tuple(layer["digest"] for layer in layer_descriptors),
@@ -855,10 +929,18 @@ def _write_test_archive(path: Path, files: Mapping[str, bytes]) -> None:
 
 
 def _synthetic_image_config(
-    *, layer_count: int = 1, history_count: int | None = None
+    *,
+    layer_count: int = 1,
+    history_count: int | None = None,
+    diff_ids: tuple[str, ...] | None = None,
 ) -> bytes:
     if history_count is None:
         history_count = layer_count
+    if diff_ids is None:
+        diff_ids = tuple(
+            f"sha256:{index:064x}" for index in range(layer_count)
+        )
+    assert len(diff_ids) == layer_count
     history = [
         {"created_by": f"layer-{index}", "empty_layer": index >= layer_count}
         for index in range(history_count)
@@ -878,19 +960,43 @@ def _synthetic_image_config(
         "os": "linux",
         "rootfs": {
             "type": "layers",
-            "diff_ids": [f"sha256:{index:064x}" for index in range(layer_count)],
+            "diff_ids": list(diff_ids),
         },
     }
     return json.dumps(value, separators=(",", ":")).encode()
 
 
+def _synthetic_gzip_layer() -> tuple[bytes, str]:
+    raw = io.BytesIO()
+    payload = b"layer\n"
+    with tarfile.open(fileobj=raw, mode="w") as layer:
+        member = tarfile.TarInfo("payload.txt")
+        member.size = len(payload)
+        member.mode = 0o644
+        layer.addfile(member, io.BytesIO(payload))
+    uncompressed = raw.getvalue()
+    return (
+        gzip.compress(uncompressed, mtime=0),
+        f"sha256:{_sha256_bytes(uncompressed)}",
+    )
+
+
 def _synthetic_oci_files(
-    *, descriptor_media_type: bool = True, config: bytes | None = None
+    *,
+    descriptor_media_type: bool = True,
+    config: bytes | None = None,
+    layer: bytes | None = None,
+    layer_diff_id: str | None = None,
 ) -> tuple[dict[str, bytes], str]:
+    if layer is None:
+        layer, actual_diff_id = _synthetic_gzip_layer()
+        if layer_diff_id is None:
+            layer_diff_id = actual_diff_id
+    if layer_diff_id is None:
+        layer_diff_id = f"sha256:{'0' * 64}"
     if config is None:
-        config = _synthetic_image_config()
+        config = _synthetic_image_config(diff_ids=(layer_diff_id,))
     config_digest = _sha256_bytes(config)
-    layer = b"layer"
     layer_digest = _sha256_bytes(layer)
     manifest = {
         "schemaVersion": 2,
@@ -940,9 +1046,12 @@ def _synthetic_docker_files(
     revision = "a" * 40
     tag = f"openworkproof/execution-test:{revision}"
     layer_count = MAX_IMAGE_LAYERS + 1 if mutation == "layer-count" else 1
-    config = _synthetic_image_config(layer_count=layer_count)
+    layer, layer_diff_id = _synthetic_gzip_layer()
+    config = _synthetic_image_config(
+        layer_count=layer_count,
+        diff_ids=(layer_diff_id,) * layer_count,
+    )
     config_hex = _sha256_bytes(config)
-    layer = b"layer"
     layer_hex = _sha256_bytes(layer)
     config_media_type = DOCKER_CONFIG
     if mutation == "config-media-type":
@@ -1162,6 +1271,62 @@ def test_oci_archive_rejects_empty_config_object(tmp_path: Path) -> None:
     _write_test_archive(path, files)
 
     with pytest.raises(AssertionError, match="config"):
+        _verify_oci_archive(path, manifest_digest)
+
+
+def test_oci_archive_rejects_plain_bytes_for_gzip_layer(tmp_path: Path) -> None:
+    path = tmp_path / "candidate.oci-archive.tar"
+    files, manifest_digest = _synthetic_oci_files(layer=b"layer")
+    _write_test_archive(path, files)
+
+    with pytest.raises(AssertionError, match="gzip"):
+        _verify_oci_archive(path, manifest_digest)
+
+
+def test_oci_archive_rejects_layer_with_wrong_diff_id(tmp_path: Path) -> None:
+    path = tmp_path / "candidate.oci-archive.tar"
+    layer, _ = _synthetic_gzip_layer()
+    files, manifest_digest = _synthetic_oci_files(
+        layer=layer,
+        layer_diff_id=f"sha256:{'f' * 64}",
+    )
+    _write_test_archive(path, files)
+
+    with pytest.raises(AssertionError, match="diff_id"):
+        _verify_oci_archive(path, manifest_digest)
+
+
+def test_oci_archive_accepts_layer_with_matching_diff_id(tmp_path: Path) -> None:
+    path = tmp_path / "candidate.oci-archive.tar"
+    files, manifest_digest = _synthetic_oci_files()
+    _write_test_archive(path, files)
+
+    _verify_oci_archive(path, manifest_digest)
+
+
+def test_oci_archive_rejects_truncated_gzip_layer(tmp_path: Path) -> None:
+    path = tmp_path / "candidate.oci-archive.tar"
+    layer, layer_diff_id = _synthetic_gzip_layer()
+    files, manifest_digest = _synthetic_oci_files(
+        layer=layer[:-1],
+        layer_diff_id=layer_diff_id,
+    )
+    _write_test_archive(path, files)
+
+    with pytest.raises(AssertionError, match="gzip"):
+        _verify_oci_archive(path, manifest_digest)
+
+
+def test_oci_archive_rejects_gzip_layer_with_invalid_tar(tmp_path: Path) -> None:
+    path = tmp_path / "candidate.oci-archive.tar"
+    uncompressed = b"not a tar archive"
+    files, manifest_digest = _synthetic_oci_files(
+        layer=gzip.compress(uncompressed, mtime=0),
+        layer_diff_id=f"sha256:{_sha256_bytes(uncompressed)}",
+    )
+    _write_test_archive(path, files)
+
+    with pytest.raises(AssertionError, match="tar"):
         _verify_oci_archive(path, manifest_digest)
 
 
