@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import copy
+import gzip
 import hashlib
 import io
 import json
@@ -16,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 
 import pytest
 
@@ -30,6 +33,8 @@ ALL_TRACKED_DEFINITION_PATHS = (
     "requirements-lock.txt",
     "supply-chain/images/execution/Dockerfile",
     "supply-chain/images/execution/requirements.lock",
+    "supply-chain/images/execution/run_tests_runner.py",
+    "supply-chain/images/execution/verifier_test.py",
     "supply-chain/images/trusted-helper/Dockerfile",
     "supply-chain/images/trusted-helper/requirements.lock",
     "supply-chain/images/trusted-helper/debian-packages.lock",
@@ -54,9 +59,9 @@ OCI_INDEX = "application/vnd.oci.image.index.v1+json"
 OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 OCI_CONFIG = "application/vnd.oci.image.config.v1+json"
 OCI_LAYER = "application/vnd.oci.image.layer.v1.tar+gzip"
-IN_TOTO = "application/vnd.in-toto+json"
-IN_TOTO_STATEMENT = "https://in-toto.io/Statement/v0.1"
-SLSA_V1 = "https://slsa.dev/provenance/v1"
+DOCKER_MANIFEST = "application/vnd.docker.distribution.manifest.v2+json"
+DOCKER_CONFIG = "application/vnd.docker.container.image.v1+json"
+DOCKER_LAYER = "application/vnd.docker.image.rootfs.diff.tar.gzip"
 OCI_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 BLOB_PATH_PATTERN = re.compile(r"^blobs/sha256/([0-9a-f]{64})$")
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
@@ -64,11 +69,8 @@ MAX_ARCHIVE_MEMBERS = 128
 MAX_JSON_BYTES = 1024 * 1024
 MAX_IMAGE_LAYERS = 64
 MAX_IMAGE_HISTORY = 256
-MAX_ATTESTATION_LAYERS = 8
-MAX_INDEX_DESCRIPTORS = 4
-MAX_INDEX_DEPTH = 1
-MAX_TOTAL_INDEX_DESCRIPTORS = 8
 MAX_SNAPSHOT_ENTRIES = 4096
+MAX_LAYER_SPOOL_MEMORY_BYTES = 8 * 1024 * 1024
 MAX_SNAPSHOT_DEPTH = 64
 MAX_SNAPSHOT_FILE_BYTES = 512 * 1024 * 1024
 MAX_SNAPSHOT_TOTAL_BYTES = 1024 * 1024 * 1024
@@ -582,54 +584,70 @@ def _verify_descriptor_blob(
     )
 
 
-def _index_leaf_descriptors(
+def _verify_layer_blob(
     archive: tarfile.TarFile,
     members: Mapping[str, tarfile.TarInfo],
-    index_descriptor: Mapping[str, object],
+    descriptor: Mapping[str, object],
     *,
-    depth: int = 0,
-    seen: set[str] | None = None,
-    budget: list[int] | None = None,
-) -> list[dict[str, object]]:
-    assert depth <= MAX_INDEX_DEPTH, "OCI index nesting is too deep"
-    digest = index_descriptor["digest"]
+    expected_diff_id: str,
+) -> None:
+    digest = descriptor["digest"]
     assert isinstance(digest, str)
-    if seen is None:
-        seen = set()
-    assert digest not in seen, "OCI index descriptor cycle"
-    seen.add(digest)
-    if budget is None:
-        budget = [0]
-    raw = _descriptor_bytes(archive, members, index_descriptor)
-    index = _archive_json(raw, "nested image index")
-    assert set(index) == {"schemaVersion", "mediaType", "manifests"}
-    assert index["schemaVersion"] == 2 and index["mediaType"] == OCI_INDEX
-    manifests = index["manifests"]
-    assert type(manifests) is list and 1 <= len(manifests) <= MAX_INDEX_DESCRIPTORS
-    budget[0] += len(manifests)
-    assert budget[0] <= MAX_TOTAL_INDEX_DESCRIPTORS
-    leaves: list[dict[str, object]] = []
-    for raw_descriptor in manifests:
-        descriptor = _descriptor(
-            raw_descriptor,
-            label="nested manifest",
-            allow_annotations=True,
-            allow_platform=True,
+    name = f"blobs/sha256/{digest[7:]}"
+    _verify_descriptor_blob(archive, members, descriptor)
+    stream = archive.extractfile(members[name])
+    assert stream is not None
+    uncompressed_digest = hashlib.sha256()
+    uncompressed_size = 0
+    with tempfile.SpooledTemporaryFile(
+        max_size=MAX_LAYER_SPOOL_MEMORY_BYTES,
+        mode="w+b",
+    ) as uncompressed:
+        try:
+            with gzip.GzipFile(fileobj=stream, mode="rb") as compressed:
+                while True:
+                    chunk = compressed.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    uncompressed_size += len(chunk)
+                    assert uncompressed_size <= MAX_ARCHIVE_BYTES, (
+                        "uncompressed layer exceeds its limit"
+                    )
+                    uncompressed_digest.update(chunk)
+                    uncompressed.write(chunk)
+        except (gzip.BadGzipFile, EOFError, OSError) as error:
+            raise AssertionError("invalid gzip layer") from error
+        assert (
+            f"sha256:{uncompressed_digest.hexdigest()}" == expected_diff_id
+        ), "layer diff_id does not match uncompressed bytes"
+        assert (
+            uncompressed_size >= 1024 and uncompressed_size % 512 == 0
+        ), "invalid layer tar framing"
+        uncompressed.seek(-1024, os.SEEK_END)
+        assert uncompressed.read(1024) == b"\0" * 1024, (
+            "invalid layer tar termination"
         )
-        if descriptor["mediaType"] == OCI_INDEX:
-            leaves.extend(
-                _index_leaf_descriptors(
-                    archive,
-                    members,
-                    descriptor,
-                    depth=depth + 1,
-                    seen=seen,
-                    budget=budget,
-                )
-            )
-        else:
-            leaves.append(descriptor)
-    return leaves
+        uncompressed.seek(0)
+        member_count = 0
+        try:
+            with tarfile.open(fileobj=uncompressed, mode="r:") as layer_archive:
+                for member in layer_archive:
+                    member_count += 1
+                    assert member_count <= MAX_SNAPSHOT_ENTRIES, (
+                        "layer tar member count exceeds its limit"
+                    )
+                    name = member.name.rstrip("/")
+                    member_path = PurePosixPath(name)
+                    assert (
+                        name
+                        and not member_path.is_absolute()
+                        and ".." not in member_path.parts
+                    ), "invalid layer tar member path"
+                    assert not member.issparse(), (
+                        "sparse layer tar members are forbidden"
+                    )
+        except (tarfile.TarError, EOFError, OSError) as error:
+            raise AssertionError("invalid layer tar") from error
 
 
 def _config_identity(
@@ -719,88 +737,45 @@ def _image_manifest_identity(
     members: Mapping[str, tarfile.TarInfo],
     manifest_raw: bytes,
     *,
+    manifest_media_type: str,
+    config_media_type: str,
+    layer_media_type: str,
     expected_image: Mapping[str, object] | None,
 ) -> _ImageIdentity:
     manifest = _archive_json(manifest_raw, "image manifest")
     assert set(manifest) == {"schemaVersion", "mediaType", "config", "layers"}
-    assert manifest["schemaVersion"] == 2 and manifest["mediaType"] == OCI_MANIFEST
+    assert manifest["schemaVersion"] == 2
+    assert manifest["mediaType"] == manifest_media_type
     config_descriptor = _descriptor(
-        manifest["config"], label="config", media_type=OCI_CONFIG
+        manifest["config"], label="config", media_type=config_media_type
     )
     layers = manifest["layers"]
     assert type(layers) is list and 1 <= len(layers) <= MAX_IMAGE_LAYERS, (
         "image layers must be bounded"
     )
     layer_descriptors = [
-        _descriptor(layer, label="layer", media_type=OCI_LAYER) for layer in layers
+        _descriptor(layer, label="layer", media_type=layer_media_type)
+        for layer in layers
     ]
     config_raw = _descriptor_bytes(archive, members, config_descriptor)
-    for layer in layer_descriptors:
-        _verify_descriptor_blob(archive, members, layer)
     diff_ids, semantics = _config_identity(
         config_raw,
         layer_count=len(layer_descriptors),
         expected_image=expected_image,
     )
+    for layer, diff_id in zip(layer_descriptors, diff_ids, strict=True):
+        _verify_layer_blob(
+            archive,
+            members,
+            layer,
+            expected_diff_id=diff_id,
+        )
     return _ImageIdentity(
         config_digest=config_descriptor["digest"],
         layer_digests=tuple(layer["digest"] for layer in layer_descriptors),
         rootfs_diff_ids=diff_ids,
         config_semantics=semantics,
     )
-
-
-def _verify_attestation_manifest(
-    archive: tarfile.TarFile,
-    members: Mapping[str, tarfile.TarInfo],
-    manifest_raw: bytes,
-    selected_manifest_digest: str,
-    expected_tag: str,
-) -> None:
-    manifest = _archive_json(manifest_raw, "attestation manifest")
-    assert set(manifest) == {"schemaVersion", "mediaType", "config", "layers"}
-    assert manifest["schemaVersion"] == 2 and manifest["mediaType"] == OCI_MANIFEST
-    config = _descriptor(
-        manifest["config"], label="attestation config", media_type=OCI_CONFIG
-    )
-    config_raw = _descriptor_bytes(archive, members, config)
-    layers = manifest["layers"]
-    assert type(layers) is list and 1 <= len(layers) <= MAX_ATTESTATION_LAYERS
-    assert len(layers) == 1, "Docker 29.5 attestation must have one layer"
-    descriptor = _descriptor(
-        layers[0],
-        label="attestation layer",
-        media_type=IN_TOTO,
-        allow_annotations=True,
-    )
-    assert descriptor["annotations"] == {"in-toto.io/predicate-type": SLSA_V1}
-    statement_raw = _descriptor_bytes(archive, members, descriptor)
-    config_value = _archive_json(config_raw, "attestation config")
-    assert config_value == {
-        "architecture": "unknown",
-        "config": {},
-        "os": "unknown",
-        "rootfs": {
-            "diff_ids": [descriptor["digest"]],
-            "type": "layers",
-        },
-    }
-    statement = _archive_json(statement_raw, "in-toto statement")
-    assert set(statement) == {"_type", "predicate", "predicateType", "subject"}
-    assert statement["_type"] == IN_TOTO_STATEMENT
-    assert statement["predicateType"] == SLSA_V1
-    assert type(statement["predicate"]) is dict
-    subject = statement["subject"]
-    assert type(subject) is list and len(subject) == 1
-    assert type(subject[0]) is dict and set(subject[0]) == {"digest", "name"}
-    repository, separator, revision = expected_tag.rpartition(":")
-    assert separator == ":" and repository and ":" not in repository
-    assert re.fullmatch(r"[0-9a-f]{40}", revision)
-    expected_subject_name = (
-        f"pkg:docker/{repository}@{revision}?platform=linux%2Farm64"
-    )
-    assert subject[0]["name"] == expected_subject_name
-    assert subject[0]["digest"] == {"sha256": selected_manifest_digest[7:]}
 
 
 def _verify_docker_archive(
@@ -831,7 +806,7 @@ def _verify_docker_archive(
         config_match = BLOB_PATH_PATTERN.fullmatch(record["Config"])
         assert config_match, "Docker Config path is not canonical"
         layer_paths = record["Layers"]
-        assert type(layer_paths) is list and layer_paths
+        assert type(layer_paths) is list and 1 <= len(layer_paths) <= MAX_IMAGE_LAYERS
         layer_matches = [BLOB_PATH_PATTERN.fullmatch(item) for item in layer_paths]
         assert all(layer_matches), "Docker Layer path is not canonical"
         assert record["Config"] in members, (
@@ -864,60 +839,26 @@ def _verify_docker_archive(
         assert type(index["manifests"]) is list and len(index["manifests"]) == 1
         top = _descriptor(
             index["manifests"][0],
-            label="Docker index",
-            media_type=OCI_INDEX,
+            label="Docker manifest",
+            media_type=DOCKER_MANIFEST,
             allow_annotations=True,
         )
+        if expected_image is not None:
+            assert top["digest"] == expected_image["local_image_id"]
+        identity = _image_manifest_identity(
+            archive,
+            members,
+            _descriptor_bytes(archive, members, top),
+            manifest_media_type=DOCKER_MANIFEST,
+            config_media_type=DOCKER_CONFIG,
+            layer_media_type=DOCKER_LAYER,
+            expected_image=expected_image,
+        )
         assert top["annotations"] == {
+            "config.digest": identity.config_digest,
             "io.containerd.image.name": f"docker.io/{expected_tag}",
             "org.opencontainers.image.ref.name": expected_tag.rsplit(":", 1)[1],
         }
-        if expected_image is not None:
-            assert top["digest"] == expected_image["local_image_id"]
-        nested_descriptors = _index_leaf_descriptors(archive, members, top)
-        identities: list[tuple[dict[str, object], _ImageIdentity]] = []
-        attestations: list[tuple[dict[str, object], bytes]] = []
-        for descriptor in nested_descriptors:
-            manifest_raw = _descriptor_bytes(archive, members, descriptor)
-            if descriptor.get("platform") == {"architecture": "arm64", "os": "linux"}:
-                assert descriptor["mediaType"] == OCI_MANIFEST
-                assert set(descriptor) == {"digest", "mediaType", "platform", "size"}
-                identities.append(
-                    (
-                        descriptor,
-                        _image_manifest_identity(
-                            archive,
-                            members,
-                            manifest_raw,
-                            expected_image=expected_image,
-                        ),
-                    )
-                )
-            else:
-                attestations.append((descriptor, manifest_raw))
-        assert len(identities) == 1
-        image_descriptor, identity = identities[0]
-        assert len(attestations) == 1
-        attestation_descriptor, attestation_raw = attestations[0]
-        assert attestation_descriptor == {
-            "annotations": {
-                "vnd.docker.reference.digest": image_descriptor["digest"],
-                "vnd.docker.reference.type": "attestation-manifest",
-            },
-            "digest": attestation_descriptor["digest"],
-            "mediaType": OCI_MANIFEST,
-            "platform": {"architecture": "unknown", "os": "unknown"},
-            "size": attestation_descriptor["size"],
-        }
-        _verify_attestation_manifest(
-            archive,
-            members,
-            attestation_raw,
-            str(image_descriptor["digest"]),
-            expected_tag,
-        )
-        if expected_image is not None:
-            assert image_descriptor["digest"] == expected_image["oci_manifest_digest"]
         assert identity.config_digest == f"sha256:{config_match.group(1)}"
         assert identity.layer_digests == tuple(
             f"sha256:{match.group(1)}" for match in layer_matches if match is not None
@@ -930,6 +871,8 @@ def _verify_oci_archive(
     path: Path,
     expected_manifest_digest: str,
     expected_image: Mapping[str, object] | None = None,
+    *,
+    expected_created: str | None = None,
 ) -> _ImageIdentity:
     _verify_archive_path(path)
     with tarfile.open(path, mode="r") as archive:
@@ -952,12 +895,19 @@ def _verify_oci_archive(
             platform=("arm64", "linux"),
             allow_annotations=True,
         )
+        if expected_created is not None:
+            assert descriptor["annotations"] == {
+                "org.opencontainers.image.created": expected_created
+            }, "OCI manifest descriptor created annotation is not revision-bound"
         assert descriptor["digest"] == expected_manifest_digest
         manifest_raw = _descriptor_bytes(archive, members, descriptor)
         identity = _image_manifest_identity(
             archive,
             members,
             manifest_raw,
+            manifest_media_type=OCI_MANIFEST,
+            config_media_type=OCI_CONFIG,
+            layer_media_type=OCI_LAYER,
             expected_image=expected_image,
         )
         _assert_archive_closed(members)
@@ -979,10 +929,18 @@ def _write_test_archive(path: Path, files: Mapping[str, bytes]) -> None:
 
 
 def _synthetic_image_config(
-    *, layer_count: int = 1, history_count: int | None = None
+    *,
+    layer_count: int = 1,
+    history_count: int | None = None,
+    diff_ids: tuple[str, ...] | None = None,
 ) -> bytes:
     if history_count is None:
         history_count = layer_count
+    if diff_ids is None:
+        diff_ids = tuple(
+            f"sha256:{index:064x}" for index in range(layer_count)
+        )
+    assert len(diff_ids) == layer_count
     history = [
         {"created_by": f"layer-{index}", "empty_layer": index >= layer_count}
         for index in range(history_count)
@@ -1002,19 +960,43 @@ def _synthetic_image_config(
         "os": "linux",
         "rootfs": {
             "type": "layers",
-            "diff_ids": [f"sha256:{index:064x}" for index in range(layer_count)],
+            "diff_ids": list(diff_ids),
         },
     }
     return json.dumps(value, separators=(",", ":")).encode()
 
 
+def _synthetic_gzip_layer() -> tuple[bytes, str]:
+    raw = io.BytesIO()
+    payload = b"layer\n"
+    with tarfile.open(fileobj=raw, mode="w") as layer:
+        member = tarfile.TarInfo("payload.txt")
+        member.size = len(payload)
+        member.mode = 0o644
+        layer.addfile(member, io.BytesIO(payload))
+    uncompressed = raw.getvalue()
+    return (
+        gzip.compress(uncompressed, mtime=0),
+        f"sha256:{_sha256_bytes(uncompressed)}",
+    )
+
+
 def _synthetic_oci_files(
-    *, descriptor_media_type: bool = True, config: bytes | None = None
+    *,
+    descriptor_media_type: bool = True,
+    config: bytes | None = None,
+    layer: bytes | None = None,
+    layer_diff_id: str | None = None,
 ) -> tuple[dict[str, bytes], str]:
+    if layer is None:
+        layer, actual_diff_id = _synthetic_gzip_layer()
+        if layer_diff_id is None:
+            layer_diff_id = actual_diff_id
+    if layer_diff_id is None:
+        layer_diff_id = f"sha256:{'0' * 64}"
     if config is None:
-        config = _synthetic_image_config()
+        config = _synthetic_image_config(diff_ids=(layer_diff_id,))
     config_digest = _sha256_bytes(config)
-    layer = b"layer"
     layer_digest = _sha256_bytes(layer)
     manifest = {
         "schemaVersion": 2,
@@ -1063,131 +1045,128 @@ def _synthetic_docker_files(
 ) -> tuple[dict[str, bytes], str, str]:
     revision = "a" * 40
     tag = f"openworkproof/execution-test:{revision}"
-    files, selected_digest = _synthetic_oci_files()
-    selected_hex = selected_digest[7:]
-    selected_raw = files[f"blobs/sha256/{selected_hex}"]
-    image_manifest = json.loads(selected_raw)
-
-    statement = {
-        "_type": "https://in-toto.io/Statement/v0.1",
-        "predicate": {"buildDefinition": {}, "runDetails": {}},
-        "predicateType": "https://slsa.dev/provenance/v1",
-        "subject": [
-            {
-                "digest": {"sha256": selected_hex},
-                "name": (
-                    "pkg:docker/openworkproof/execution-test@"
-                    f"{revision}?platform=linux%2Farm64"
-                ),
-            }
-        ],
-    }
-    if mutation == "statement-predicate-type":
-        statement["predicateType"] = "https://example.invalid/predicate"
-    elif mutation == "statement-subject":
-        statement["subject"][0]["digest"]["sha256"] = "f" * 64
-    elif mutation == "statement-subject-name":
-        statement["subject"][0]["name"] = "arbitrary-but-nonempty"
-    statement_raw = json.dumps(statement, separators=(",", ":")).encode()
-    statement_hex = _sha256_bytes(statement_raw)
-
-    attestation_config = {
-        "architecture": "unknown",
-        "config": {},
-        "os": "unknown",
-        "rootfs": {"diff_ids": [f"sha256:{statement_hex}"], "type": "layers"},
-    }
-    if mutation == "config-semantics":
-        attestation_config["architecture"] = "arm64"
-    config_raw = json.dumps(attestation_config, separators=(",", ":")).encode()
-    config_hex = _sha256_bytes(config_raw)
-    config_media_type = OCI_CONFIG
+    layer_count = MAX_IMAGE_LAYERS + 1 if mutation == "layer-count" else 1
+    layer, layer_diff_id = _synthetic_gzip_layer()
+    config = _synthetic_image_config(
+        layer_count=layer_count,
+        diff_ids=(layer_diff_id,) * layer_count,
+    )
+    config_hex = _sha256_bytes(config)
+    layer_hex = _sha256_bytes(layer)
+    config_media_type = DOCKER_CONFIG
     if mutation == "config-media-type":
-        config_media_type = "application/octet-stream"
-    layer_media_type = "application/vnd.in-toto+json"
-    if mutation == "in-toto-media-type":
+        config_media_type = OCI_CONFIG
+    layer_media_type = DOCKER_LAYER
+    if mutation == "layer-media-type":
         layer_media_type = OCI_LAYER
-    layer_annotations = {"in-toto.io/predicate-type": "https://slsa.dev/provenance/v1"}
-    if mutation == "predicate-annotation":
-        layer_annotations["in-toto.io/predicate-type"] = "https://example.invalid"
-    layer = {
-        "annotations": layer_annotations,
-        "digest": f"sha256:{statement_hex}",
-        "mediaType": layer_media_type,
-        "size": len(statement_raw),
-    }
-    layers = [layer]
-    if mutation == "attestation-layers":
-        layers = [layer] * (MAX_ATTESTATION_LAYERS + 1)
-    attestation_manifest = {
+    manifest = {
         "config": {
             "digest": f"sha256:{config_hex}",
             "mediaType": config_media_type,
-            "size": len(config_raw),
+            "size": len(config),
         },
-        "layers": layers,
-        "mediaType": OCI_MANIFEST,
+        "layers": [
+            {
+                "digest": f"sha256:{layer_hex}",
+                "mediaType": layer_media_type,
+                "size": len(layer),
+            }
+        ]
+        * layer_count,
+        "mediaType": DOCKER_MANIFEST,
         "schemaVersion": 2,
     }
-    attestation_raw = json.dumps(attestation_manifest, separators=(",", ":")).encode()
-    attestation_hex = _sha256_bytes(attestation_raw)
+    if mutation == "manifest-media-type":
+        manifest["mediaType"] = OCI_MANIFEST
+    manifest_raw = json.dumps(manifest, separators=(",", ":")).encode()
+    manifest_hex = _sha256_bytes(manifest_raw)
     annotations = {
-        "vnd.docker.reference.digest": selected_digest,
-        "vnd.docker.reference.type": "attestation-manifest",
+        "config.digest": f"sha256:{config_hex}",
+        "io.containerd.image.name": f"docker.io/{tag}",
+        "org.opencontainers.image.ref.name": revision,
     }
-    platform = {"architecture": "unknown", "os": "unknown"}
-    if mutation == "descriptor-platform":
-        platform = {"architecture": "amd64", "os": "linux"}
-    elif mutation == "descriptor-annotations":
+    if mutation == "missing-config-annotation":
+        annotations.pop("config.digest")
+    elif mutation == "wrong-config-annotation":
+        annotations["config.digest"] = f"sha256:{'f' * 64}"
+    elif mutation == "extra-annotation":
         annotations["unexpected"] = "value"
-    elif mutation == "reference-digest":
-        annotations["vnd.docker.reference.digest"] = f"sha256:{'f' * 64}"
-    attestation_descriptor = {
+    elif mutation == "image-name":
+        annotations["io.containerd.image.name"] = "docker.io/unexpected/name:tag"
+    elif mutation == "ref-name":
+        annotations["org.opencontainers.image.ref.name"] = "unexpected"
+    descriptor = {
         "annotations": annotations,
-        "digest": f"sha256:{attestation_hex}",
-        "mediaType": OCI_MANIFEST,
-        "platform": platform,
-        "size": len(attestation_raw),
+        "digest": f"sha256:{manifest_hex}",
+        "mediaType": DOCKER_MANIFEST,
+        "size": len(manifest_raw),
     }
-    selected_descriptor = {
-        "digest": selected_digest,
-        "mediaType": OCI_MANIFEST,
-        "platform": {"architecture": "arm64", "os": "linux"},
-        "size": len(selected_raw),
-    }
-    descriptors = [selected_descriptor, attestation_descriptor]
-    if mutation == "index-descriptors":
-        descriptors.extend([attestation_descriptor] * (MAX_INDEX_DESCRIPTORS - 1))
-    nested = {
+    if mutation == "top-media-type":
+        descriptor["mediaType"] = OCI_MANIFEST
+    elif mutation == "top-size":
+        descriptor["size"] += 1
+    descriptors = [descriptor]
+    if mutation == "extra-descriptor":
+        descriptors.append(copy.deepcopy(descriptor))
+    index = {
         "manifests": descriptors,
         "mediaType": OCI_INDEX,
         "schemaVersion": 2,
     }
-    nested_raw = json.dumps(nested, separators=(",", ":")).encode()
-    nested_hex = _sha256_bytes(nested_raw)
-    nested_blobs = {f"blobs/sha256/{nested_hex}": nested_raw}
-    if mutation == "index-depth":
-        child_hex = nested_hex
-        child_raw = nested_raw
-        for _ in range(MAX_INDEX_DEPTH + 1):
-            wrapper = {
+    legacy = [
+        {
+            "Config": f"blobs/sha256/{config_hex}",
+            "Layers": [f"blobs/sha256/{layer_hex}"] * layer_count,
+            "RepoTags": [tag],
+        }
+    ]
+    if mutation == "legacy-config":
+        legacy[0]["Config"] = f"blobs/sha256/{layer_hex}"
+    elif mutation == "legacy-layers":
+        legacy[0]["Layers"] = [f"blobs/sha256/{config_hex}"]
+    files = {
+        "oci-layout": b'{"imageLayoutVersion":"1.0.0"}',
+        "index.json": json.dumps(index, separators=(",", ":")).encode(),
+        "manifest.json": json.dumps(legacy, separators=(",", ":")).encode(),
+        f"blobs/sha256/{manifest_hex}": manifest_raw,
+        f"blobs/sha256/{config_hex}": config,
+        f"blobs/sha256/{layer_hex}": layer,
+    }
+    if mutation == "unreferenced-blob":
+        files[f"blobs/sha256/{'f' * 64}"] = b"unreferenced"
+    if mutation == "provenance-attestation":
+        attestation_raw = (
+            b'{"schemaVersion":2,"mediaType":"application/vnd.oci.image.'
+            b'manifest.v1+json","config":{},"layers":[]}'
+        )
+        attestation_hex = _sha256_bytes(attestation_raw)
+        nested_raw = json.dumps(
+            {
                 "manifests": [
                     {
-                        "digest": f"sha256:{child_hex}",
-                        "mediaType": OCI_INDEX,
-                        "size": len(child_raw),
-                    }
+                        "digest": descriptor["digest"],
+                        "mediaType": OCI_MANIFEST,
+                        "platform": {"architecture": "arm64", "os": "linux"},
+                        "size": descriptor["size"],
+                    },
+                    {
+                        "annotations": {
+                            "vnd.docker.reference.digest": descriptor["digest"],
+                            "vnd.docker.reference.type": "attestation-manifest",
+                        },
+                        "digest": f"sha256:{attestation_hex}",
+                        "mediaType": OCI_MANIFEST,
+                        "platform": {"architecture": "unknown", "os": "unknown"},
+                        "size": len(attestation_raw),
+                    },
                 ],
                 "mediaType": OCI_INDEX,
                 "schemaVersion": 2,
-            }
-            child_raw = json.dumps(wrapper, separators=(",", ":")).encode()
-            child_hex = _sha256_bytes(child_raw)
-            nested_blobs[f"blobs/sha256/{child_hex}"] = child_raw
-        nested_hex = child_hex
-        nested_raw = child_raw
-    index = {
-        "manifests": [
+            },
+            separators=(",", ":"),
+        ).encode()
+        nested_hex = _sha256_bytes(nested_raw)
+        index["manifests"] = [
             {
                 "annotations": {
                     "io.containerd.image.name": f"docker.io/{tag}",
@@ -1197,32 +1176,11 @@ def _synthetic_docker_files(
                 "mediaType": OCI_INDEX,
                 "size": len(nested_raw),
             }
-        ],
-        "mediaType": OCI_INDEX,
-        "schemaVersion": 2,
-    }
-    legacy = [
-        {
-            "Config": f"blobs/sha256/{image_manifest['config']['digest'][7:]}",
-            "Layers": [
-                f"blobs/sha256/{descriptor['digest'][7:]}"
-                for descriptor in image_manifest["layers"]
-            ],
-            "RepoTags": [tag],
-        }
-    ]
-    files.pop("index.json")
-    files.update(
-        {
-            "index.json": json.dumps(index, separators=(",", ":")).encode(),
-            "manifest.json": json.dumps(legacy, separators=(",", ":")).encode(),
-            f"blobs/sha256/{attestation_hex}": attestation_raw,
-            f"blobs/sha256/{config_hex}": config_raw,
-            f"blobs/sha256/{statement_hex}": statement_raw,
-        }
-    )
-    files.update(nested_blobs)
-    return files, tag, selected_digest
+        ]
+        files["index.json"] = json.dumps(index, separators=(",", ":")).encode()
+        files[f"blobs/sha256/{nested_hex}"] = nested_raw
+        files[f"blobs/sha256/{attestation_hex}"] = attestation_raw
+    return files, tag, f"sha256:{manifest_hex}"
 
 
 @pytest.mark.parametrize("unsafe_kind", ["directory", "symlink"])
@@ -1316,6 +1274,62 @@ def test_oci_archive_rejects_empty_config_object(tmp_path: Path) -> None:
         _verify_oci_archive(path, manifest_digest)
 
 
+def test_oci_archive_rejects_plain_bytes_for_gzip_layer(tmp_path: Path) -> None:
+    path = tmp_path / "candidate.oci-archive.tar"
+    files, manifest_digest = _synthetic_oci_files(layer=b"layer")
+    _write_test_archive(path, files)
+
+    with pytest.raises(AssertionError, match="gzip"):
+        _verify_oci_archive(path, manifest_digest)
+
+
+def test_oci_archive_rejects_layer_with_wrong_diff_id(tmp_path: Path) -> None:
+    path = tmp_path / "candidate.oci-archive.tar"
+    layer, _ = _synthetic_gzip_layer()
+    files, manifest_digest = _synthetic_oci_files(
+        layer=layer,
+        layer_diff_id=f"sha256:{'f' * 64}",
+    )
+    _write_test_archive(path, files)
+
+    with pytest.raises(AssertionError, match="diff_id"):
+        _verify_oci_archive(path, manifest_digest)
+
+
+def test_oci_archive_accepts_layer_with_matching_diff_id(tmp_path: Path) -> None:
+    path = tmp_path / "candidate.oci-archive.tar"
+    files, manifest_digest = _synthetic_oci_files()
+    _write_test_archive(path, files)
+
+    _verify_oci_archive(path, manifest_digest)
+
+
+def test_oci_archive_rejects_truncated_gzip_layer(tmp_path: Path) -> None:
+    path = tmp_path / "candidate.oci-archive.tar"
+    layer, layer_diff_id = _synthetic_gzip_layer()
+    files, manifest_digest = _synthetic_oci_files(
+        layer=layer[:-1],
+        layer_diff_id=layer_diff_id,
+    )
+    _write_test_archive(path, files)
+
+    with pytest.raises(AssertionError, match="gzip"):
+        _verify_oci_archive(path, manifest_digest)
+
+
+def test_oci_archive_rejects_gzip_layer_with_invalid_tar(tmp_path: Path) -> None:
+    path = tmp_path / "candidate.oci-archive.tar"
+    uncompressed = b"not a tar archive"
+    files, manifest_digest = _synthetic_oci_files(
+        layer=gzip.compress(uncompressed, mtime=0),
+        layer_diff_id=f"sha256:{_sha256_bytes(uncompressed)}",
+    )
+    _write_test_archive(path, files)
+
+    with pytest.raises(AssertionError, match="tar"):
+        _verify_oci_archive(path, manifest_digest)
+
+
 def test_oci_archive_rejects_unreferenced_regular_payload(tmp_path: Path) -> None:
     path = tmp_path / "candidate.oci-archive.tar"
     files, manifest_digest = _synthetic_oci_files()
@@ -1326,35 +1340,68 @@ def test_oci_archive_rejects_unreferenced_regular_payload(tmp_path: Path) -> Non
         _verify_oci_archive(path, manifest_digest)
 
 
-def test_synthetic_docker_archive_matches_actual_attestation_shape(
+def test_oci_archive_rejects_nonrevision_descriptor_created_time(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "candidate.oci-archive.tar"
+    files, manifest_digest = _synthetic_oci_files()
+    index = json.loads(files["index.json"])
+    index["manifests"][0]["annotations"] = {
+        "org.opencontainers.image.created": "2026-08-04T00:00:01Z"
+    }
+    files["index.json"] = json.dumps(index, separators=(",", ":")).encode()
+    _write_test_archive(path, files)
+
+    with pytest.raises(AssertionError, match="created"):
+        _verify_oci_archive(
+            path,
+            manifest_digest,
+            expected_created="2026-08-04T00:00:00Z",
+        )
+
+
+def test_synthetic_docker_archive_matches_provenance_free_docker_save_shape(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "candidate.docker-archive.tar"
-    files, tag, _ = _synthetic_docker_files()
+    files, tag, local_image_id = _synthetic_docker_files()
     _write_test_archive(path, files)
 
-    _verify_docker_archive(path, tag)
+    _verify_docker_archive(
+        path,
+        tag,
+        {
+            "cmd": None,
+            "entrypoint": ["/usr/bin/env", "--"],
+            "labels": {},
+            "local_image_id": local_image_id,
+            "user": "65532:65532",
+        },
+    )
 
 
 @pytest.mark.parametrize(
     "mutation",
     (
-        "index-descriptors",
-        "index-depth",
-        "attestation-layers",
-        "descriptor-platform",
-        "descriptor-annotations",
-        "reference-digest",
+        "provenance-attestation",
+        "top-media-type",
+        "extra-descriptor",
+        "missing-config-annotation",
+        "wrong-config-annotation",
+        "extra-annotation",
+        "image-name",
+        "ref-name",
+        "top-size",
         "config-media-type",
-        "config-semantics",
-        "in-toto-media-type",
-        "predicate-annotation",
-        "statement-predicate-type",
-        "statement-subject",
-        "statement-subject-name",
+        "layer-media-type",
+        "manifest-media-type",
+        "legacy-config",
+        "legacy-layers",
+        "layer-count",
+        "unreferenced-blob",
     ),
 )
-def test_docker_archive_rejects_nonactual_attestation_shape(
+def test_docker_archive_rejects_nonactual_provenance_free_shape(
     tmp_path: Path,
     mutation: str,
 ) -> None:
@@ -1475,19 +1522,6 @@ def test_archive_path_must_be_regular_nonsymlink_and_bounded(
 
     with pytest.raises(AssertionError):
         _verify_archive_path(candidate)
-
-
-def test_recursive_index_rejects_a_seen_descriptor_cycle() -> None:
-    digest = f"sha256:{'a' * 64}"
-    descriptor = {"digest": digest, "mediaType": OCI_INDEX, "size": 1}
-
-    with pytest.raises(AssertionError, match="cycle"):
-        _index_leaf_descriptors(  # type: ignore[arg-type]
-            None,
-            {},
-            descriptor,
-            seen={digest},
-        )
 
 
 def test_image_config_rejects_more_than_64_layers() -> None:
@@ -1713,18 +1747,32 @@ def test_context_manifest_binding_rejects_an_arbitrary_inventory_digest(
         _verify_context_manifest_bindings(execution, helper, inventory)
 
 
-def test_current_candidate_inventory_is_selected_by_tracked_definition() -> None:
+def test_current_candidate_inventory_binds_execution_runner() -> None:
     path, inventory = _select_current_inventory()
+    revision = inventory["source_revision"]
 
-    assert path.name == f"{inventory['source_revision']}.json"
-
-
-def test_current_candidate_selector_chooses_full_workspace_source_revision() -> None:
-    _, inventory = _select_current_inventory()
-
-    assert inventory["source_revision"] == (
-        "4460abf3615252077bd37f182c8b69acf5c9da70"
+    assert path.name == f"{revision}.json"
+    assert inventory["schema_version"] == (
+        "openworkproof-image-candidate-inventory/0.2"
     )
+    assert inventory["build_inputs"]["execution"]["runner_sha256"] == (
+        _sha256_bytes(_git_bytes(
+            revision,
+            "supply-chain/images/execution/run_tests_runner.py",
+        ))
+    )
+
+
+def test_current_candidate_inventory_binds_fixed_test_source() -> None:
+    _, inventory = _select_current_inventory()
+    revision = inventory["source_revision"]
+
+    assert inventory["build_inputs"]["execution"][
+        "fixed_test_source_sha256"
+    ] == _sha256_bytes(_git_bytes(
+        revision,
+        "supply-chain/images/execution/verifier_test.py",
+    ))
 
 
 def test_candidate_inventory_selector_rejects_zero_matches() -> None:
@@ -1732,13 +1780,22 @@ def test_candidate_inventory_selector_rejects_zero_matches() -> None:
         _select_inventory_for_definition([], {})
 
 
-def test_candidate_inventory_selector_rejects_multiple_matches() -> None:
-    current_path, current = _select_current_inventory()
-    revision = current["source_revision"]
+def test_candidate_inventory_selector_rejects_multiple_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_path = INVENTORY_ROOT / (
+        "4460abf3615252077bd37f182c8b69acf5c9da70.json"
+    )
+    current = _load_candidate_inventory(current_path)
     definition = {
-        relative_path: _git_bytes(revision, relative_path)
+        relative_path: (ROOT / relative_path).read_bytes()
         for relative_path in CURRENT_DEFINITION_PATHS
     }
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_git_bytes",
+        lambda revision, relative_path: definition[relative_path],
+    )
 
     with pytest.raises(AssertionError, match="matched 2"):
         _select_inventory_for_definition(
@@ -1767,7 +1824,9 @@ def test_candidate_inventory_selector_covers_every_tracked_definition() -> None:
 def test_candidate_inventory_selector_rejects_other_revision_alias(
     tmp_path: Path,
 ) -> None:
-    _, current = _select_current_inventory()
+    current = _load_candidate_inventory(
+        INVENTORY_ROOT / "4460abf3615252077bd37f182c8b69acf5c9da70.json"
+    )
     alias_revision = subprocess.run(
         ["git", "rev-parse", f"{current['source_revision']}^"],
         cwd=ROOT,
@@ -1876,8 +1935,9 @@ def _verify_live_docker(inventory: dict[str, object]) -> None:
         names["execution"],
         "--user",
         str(execution["user"]),
-        str(execution["local_image_id"]),
+        "--entrypoint",
         "/opt/venv/bin/python",
+        str(execution["local_image_id"]),
         "-I",
         "-c",
         execution_check,
@@ -1952,16 +2012,180 @@ def _verify_live_docker(inventory: dict[str, object]) -> None:
         assert _docker(docker, "container", "inspect", name, check=False).returncode != 0
 
 
-def _build_context_identity(
-    docker: str,
+def test_live_execution_probe_overrides_frozen_runner_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution = {
+        "candidate_name": "openworkproof/execution-test:revision",
+        "local_image_id": "sha256:" + "a" * 64,
+        "local_repo_digests": ["openworkproof/execution-test@sha256:" + "a" * 64],
+        "platform": "linux/arm64",
+        "user": "65532:65532",
+        "entrypoint": [
+            "/opt/venv/bin/python",
+            "-I",
+            "/opt/openworkproof/run_tests_runner.py",
+        ],
+        "cmd": ["execute"],
+        "labels": {"org.openworkproof.image.role": "execution-test"},
+    }
+    helper = {
+        "candidate_name": "openworkproof/trusted-helper-candidate:revision",
+        "local_image_id": "sha256:" + "b" * 64,
+        "local_repo_digests": [
+            "openworkproof/trusted-helper-candidate@sha256:" + "b" * 64
+        ],
+        "platform": "linux/arm64",
+        "user": "65532:65532",
+        "entrypoint": ["/opt/venv/bin/python", "-I", "/opt/openworkproof/dispatch.py"],
+        "cmd": None,
+        "labels": {"org.openworkproof.image.role": "trusted-helper"},
+    }
+    details = {
+        image["candidate_name"]: {
+            "Id": image["local_image_id"],
+            "RepoDigests": image["local_repo_digests"],
+            "Os": "linux",
+            "Architecture": "arm64",
+            "Config": {
+                "User": image["user"],
+                "Entrypoint": image["entrypoint"],
+                "Cmd": image["cmd"],
+                "Labels": image["labels"],
+            },
+        }
+        for image in (execution, helper)
+    }
+    commands: list[tuple[str, ...]] = []
+
+    def fake_docker(executable: str, *args: str, check: bool = True):
+        assert executable == "/usr/bin/docker"
+        commands.append(args)
+        if args == ("info",):
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:2] == ("image", "inspect"):
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                json.dumps([details[args[2]]]),
+                "",
+            )
+        if args[:2] == ("container", "inspect"):
+            return subprocess.CompletedProcess(args, 1, "", "missing")
+        assert args[0] == "run"
+        name = args[args.index("--name") + 1]
+        if name.endswith(("helper-empty", "helper-argv")):
+            return subprocess.CompletedProcess(args, 64, REQUEST_INVALID_RESPONSE, "")
+        if name.endswith("helper-git"):
+            return subprocess.CompletedProcess(args, 0, "git version 2.47.3\n", "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setenv("OPENWORKPROOF_DOCKER", "/usr/bin/docker")
+    monkeypatch.setattr(sys.modules[__name__], "_docker", fake_docker)
+
+    _verify_live_docker({"images": {"execution": execution, "trusted_helper": helper}})
+
+    execution_probe = next(
+        command
+        for command in commands
+        if command[:2] == ("run", "--rm")
+        and command[command.index("--name") + 1].endswith("-execution")
+    )
+    assert execution_probe == (
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--name",
+        f"owp-supplychain-{os.getpid()}-execution",
+        "--user",
+        "65532:65532",
+        "--entrypoint",
+        "/opt/venv/bin/python",
+        execution["local_image_id"],
+        "-I",
+        "-c",
+        (
+            "import importlib.util as u; import pytest; "
+            "assert pytest.__version__ == '9.1.1'; "
+            "assert u.find_spec('rich') is None; "
+            "assert u.find_spec('openworkproof') is None; "
+            "assert u.find_spec('mcp') is None"
+        ),
+    )
+
+
+def test_rebuild_command_binds_single_revision_descriptor_created_annotation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    revision_epoch = int(subprocess.run(
+        ("git", "show", "-s", "--format=%ct", revision),
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip())
+    expected = (
+        "manifest-descriptor:org.opencontainers.image.created="
+        + datetime.fromtimestamp(revision_epoch, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    )
+    captured: list[tuple[str, ...]] = []
+
+    class CommandCaptured(RuntimeError):
+        pass
+
+    def capture(*args: str, **_: object) -> subprocess.CompletedProcess[str]:
+        captured.append(args)
+        raise CommandCaptured
+
+    monkeypatch.setattr(sys.modules[__name__], "_docker", capture)
+    with pytest.raises(CommandCaptured):
+        _build_context_identity(
+            "/usr/bin/docker",
+            tmp_path / "context",
+            revision,
+            tmp_path / "rebuilt.oci.tar",
+            {},
+        )
+
+    command = captured[0]
+    assert command.count("--annotation") == 1
+    annotation_index = command.index("--annotation")
+    assert command[annotation_index + 1] == expected
+
+
+def _revision_created(revision: str) -> str:
+    epoch = subprocess.run(
+        ("git", "show", "-s", "--format=%ct", revision),
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert re.fullmatch(r"[0-9]+", epoch)
+    return datetime.fromtimestamp(int(epoch), timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def _build_context_argv(
     context: Path,
     revision: str,
     output: Path,
-    expected_image: Mapping[str, object],
-) -> _ImageIdentity:
-    assert not output.exists()
-    result = _docker(
-        docker,
+) -> tuple[str, ...]:
+    created = _revision_created(revision)
+    return (
         "buildx",
         "build",
         "--platform",
@@ -1972,9 +2196,25 @@ def _build_context_identity(
         "--provenance=false",
         "--build-arg",
         f"OWP_SOURCE_REVISION={revision}",
+        "--annotation",
+        f"manifest-descriptor:org.opencontainers.image.created={created}",
         "--output",
         f"type=oci,dest={output}",
         str(context),
+    )
+
+
+def _build_context_identity(
+    docker: str,
+    context: Path,
+    revision: str,
+    output: Path,
+    expected_image: Mapping[str, object],
+) -> _ImageIdentity:
+    assert not output.exists()
+    result = _docker(
+        docker,
+        *_build_context_argv(context, revision, output),
         check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -1983,6 +2223,7 @@ def _build_context_identity(
         output,
         str(expected_image["oci_manifest_digest"]),
         expected_image,
+        expected_created=_revision_created(revision),
     )
 
 
@@ -2100,7 +2341,10 @@ def test_candidate_artifact_chain(tmp_path: Path) -> None:
             image,
         )
         oci_identity = _verify_oci_archive(
-            archives / oci["filename"], image["oci_manifest_digest"], image
+            archives / oci["filename"],
+            image["oci_manifest_digest"],
+            image,
+            expected_created=_revision_created(revision),
         )
         _assert_image_identity_chain(docker_identity, oci_identity)
         identities[image_name] = (docker_identity, oci_identity)

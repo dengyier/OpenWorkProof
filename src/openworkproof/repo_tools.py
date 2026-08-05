@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import base64
 import calendar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -17,8 +18,9 @@ import signal
 import stat
 import struct
 import subprocess
+import tarfile
 import time
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Protocol, Sequence, TypeVar
 import zlib
 
 import rfc8785
@@ -33,6 +35,9 @@ from openworkproof.models import (
     TestResultEvidence,
     WorkOrder,
 )
+
+
+_CheckpointOperationResult = TypeVar("_CheckpointOperationResult")
 
 
 _LOCAL_SIGNATURE = 0x04034B50
@@ -121,6 +126,12 @@ _MAX_GIT_AUTHORITY_DEPTH = 64
 _MAX_GIT_AUTHORITY_PATH_BYTES = 1_024
 _MAX_GIT_AUTHORITY_FILE_BYTES = 8_388_608
 _MAX_GIT_AUTHORITY_TOTAL_BYTES = 16_777_216
+_MAX_RUN_TESTS_ENVELOPE_BYTES = 8_192
+_MAX_RUN_TESTS_SNAPSHOT_STREAM_BYTES = 8_527_872
+_MAX_DOCKER_COMMAND_OUTPUT_BYTES = 16_777_216
+_MAX_DOCKER_OUTPUT_ARCHIVE_BYTES = 65_536
+_DOCKER_EXECUTION_ID_LABEL = "openworkproof.execution-id"
+_DOCKER_CONTRACT_DIGEST_LABEL = "openworkproof.execution-contract-digest"
 
 OPENAT2_RESOLVE_FLAGS = (
     "RESOLVE_BENEATH",
@@ -377,6 +388,22 @@ class CandidateReadResult:
 
 
 @dataclass(frozen=True, slots=True)
+class CandidateExecutionSnapshotRequest:
+    runtime_root: Path
+    workspace_id: str
+    source_artifact_sha256: str
+    expected_head_commit: str
+    expected_workspace_manifest_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateExecutionSnapshot:
+    head_commit: str
+    workspace_manifest_digest: str
+    plan: ExecutionSnapshotPlan
+
+
+@dataclass(frozen=True, slots=True)
 class _CandidateReadAnchor:
     descriptor: int
     token: str
@@ -407,21 +434,76 @@ class _VerifiedCandidateReadCheckpoint:
     anchors: tuple[_CandidateReadAnchor, ...]
     worktree_descriptor: int
     git_descriptor: int
-    leaf_descriptor: int
+    leaf_descriptor: int | None
     control_descriptor: int
     control_size_bytes: int
     control_sha256: str
     git_authority_snapshot: tuple[_GitAuthoritySnapshotEntry, ...]
 
 
+class _CandidateReadDescriptorOwner:
+    def __init__(self) -> None:
+        self._descriptors: list[int] = []
+
+    def open(
+        self,
+        path: str | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(path, flags, mode, dir_fd=dir_fd)
+            self._descriptors.append(descriptor)
+        except BaseException:
+            if descriptor is not None:
+                try:
+                    self._descriptors.remove(descriptor)
+                except ValueError:
+                    pass
+                _close_candidate_read_descriptors([descriptor])
+            raise
+        return descriptor
+
+    def dup(self, descriptor: int) -> int:
+        duplicate: int | None = None
+        try:
+            duplicate = os.dup(descriptor)
+            self._descriptors.append(duplicate)
+        except BaseException:
+            if duplicate is not None:
+                try:
+                    self._descriptors.remove(duplicate)
+                except ValueError:
+                    pass
+                _close_candidate_read_descriptors([duplicate])
+            raise
+        return duplicate
+
+    def close(self) -> None:
+        descriptors = self._descriptors
+        self._descriptors = []
+        _close_candidate_read_descriptors(descriptors)
+
+
 def _candidate_read_checkpoint_hook() -> None:
     """Provide a deterministic test seam after checkpoint verification."""
 
 
+def _candidate_execution_snapshot_file_hook(path: str) -> None:
+    """Provide a deterministic test seam immediately before one file read."""
+
+
+def _candidate_execution_snapshot_after_files_hook() -> None:
+    """Provide a deterministic test seam after every snapshot byte is read."""
+
+
 def read_candidate_file(request: CandidateReadRequest) -> CandidateReadResult:
     workspace = _candidate_from_read_request(request)
-    checkpoint = _verify_candidate_checkpoint_read_only(workspace, request.path)
-    try:
+
+    def read(checkpoint: _VerifiedCandidateReadCheckpoint) -> CandidateReadResult:
         _candidate_read_checkpoint_hook()
         content = _read_verified_candidate_path(checkpoint, request.path)
         return CandidateReadResult(
@@ -435,8 +517,90 @@ def read_candidate_file(request: CandidateReadRequest) -> CandidateReadResult:
                 ),
             ),
         )
-    finally:
-        _close_candidate_read_checkpoint(checkpoint)
+
+    return _with_verified_candidate_checkpoint_read_only(
+        workspace,
+        request.path,
+        read,
+    )
+
+
+def prepare_candidate_execution_snapshot(
+    request: CandidateExecutionSnapshotRequest,
+) -> CandidateExecutionSnapshot:
+    """Capture exact candidate worktree bytes for one verifier execution."""
+
+    try:
+        workspace = _candidate_from_execution_snapshot_request(request)
+
+        def capture(
+            checkpoint: _VerifiedCandidateReadCheckpoint,
+        ) -> CandidateExecutionSnapshot:
+            checkpoint_manifest_digest = workspace_manifest_digest(
+                checkpoint.manifest
+            )
+            if (
+                checkpoint.manifest.head_commit
+                != request.expected_head_commit
+                or checkpoint_manifest_digest
+                != request.expected_workspace_manifest_digest
+                or not _candidate_read_semantic_authority_matches(
+                    checkpoint,
+                    workspace,
+                )
+            ):
+                raise CandidateReadError("RECOVERY_REQUIRED")
+            regular_entries = _candidate_execution_snapshot_regular_entries(
+                checkpoint.manifest
+            )
+            files = tuple(
+                _read_candidate_execution_snapshot_file(
+                    checkpoint,
+                    entry,
+                )
+                for entry in regular_entries
+            )
+            _candidate_execution_snapshot_after_files_hook()
+            workspace_snapshot_before = _scan_candidate_workspace_identity(
+                checkpoint.worktree_descriptor
+            )
+            fresh_manifest = scan_workspace_manifest(
+                checkpoint.worktree_descriptor,
+                checkpoint.manifest.head_commit,
+            )
+            workspace_snapshot_after = _scan_candidate_workspace_identity(
+                checkpoint.worktree_descriptor
+            )
+            if (
+                workspace_snapshot_before != workspace_snapshot_after
+                or workspace_snapshot_after != checkpoint.workspace_snapshot
+                or workspace_manifest_digest(fresh_manifest)
+                != checkpoint_manifest_digest
+                or not _candidate_read_semantic_authority_matches(
+                    checkpoint,
+                    workspace,
+                )
+            ):
+                raise CandidateReadError("RECOVERY_REQUIRED")
+            plan = derive_execution_snapshot_plan(checkpoint.manifest, files)
+            return CandidateExecutionSnapshot(
+                head_commit=checkpoint.manifest.head_commit,
+                workspace_manifest_digest=checkpoint_manifest_digest,
+                plan=plan,
+            )
+
+        return _with_verified_candidate_checkpoint_read_only(
+            workspace,
+            None,
+            capture,
+        )
+    except (
+        CandidateReadError,
+        CandidateWorkspaceError,
+        ManifestError,
+        OSError,
+    ) as error:
+        raise CandidateReadError("RECOVERY_REQUIRED") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,7 +700,6 @@ class BoundedProcessResult:
 @dataclass(frozen=True, slots=True)
 class DockerVolumePlan:
     name: str
-    size_bytes: int
     mount_path: str
     read_only: bool
     create_argv: tuple[str, ...]
@@ -592,6 +755,469 @@ class DockerObservedResult:
     timed_out: bool
     workspace_volume_exhausted: bool
     output_volume_exhausted: bool
+
+
+RunTestsFailureCode = Literal["OUTPUT_LIMIT", "TIMEOUT", "DISK_LIMIT"]
+
+
+@dataclass(frozen=True, slots=True)
+class RunTestsExecutionContract:
+    execution_id: str
+    request_digest: str
+    arguments_digest: str
+    candidate_workspace_id: str
+    source_artifact_sha256: str
+    source_commit: str
+    candidate_commit: str
+    workspace_manifest_digest: str
+    container_image_digest: str
+    command_digest: str
+    fixed_test_source_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class RunTestsStartedEnvelope:
+    execution_id: str
+    execution_contract_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class RunTestsResultEnvelope:
+    execution_id: str
+    execution_contract_digest: str
+    actual_exit_code: int | None
+    failure_code: RunTestsFailureCode | None
+    stdout_bytes: int
+    stdout_sha256: str
+    stderr_bytes: int
+    stderr_sha256: str
+
+    def __post_init__(self) -> None:
+        completed = (
+            type(self.actual_exit_code) is int
+            and 0 <= self.actual_exit_code <= 255
+            and self.failure_code is None
+        )
+        failed = (
+            self.actual_exit_code is None
+            and type(self.failure_code) is str
+            and self.failure_code in {"OUTPUT_LIMIT", "TIMEOUT", "DISK_LIMIT"}
+        )
+        if not completed and not failed:
+            raise ValueError("run-tests result does not contain one closed outcome")
+
+
+@dataclass(frozen=True, slots=True)
+class RunTestsDockerBinding:
+    execution_id: str
+    ownership_token: str
+    staging_container_name: str
+    container_name: str
+    workspace_volume_name: str
+    output_volume_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class RunTestsDockerCommandPlan:
+    binding: RunTestsDockerBinding
+    execution_plan: DockerExecutionPlan
+    contract_digest: str
+    preflight_absent_argv: tuple[tuple[str, ...], tuple[str, ...]]
+    create_workspace_volume_argv: tuple[str, ...]
+    create_staging_container_argv: tuple[str, ...]
+    start_staging_container_argv: tuple[str, ...]
+    inspect_staging_container_argv: tuple[str, ...]
+    remove_staging_container_argv: tuple[str, ...]
+    create_output_volume_argv: tuple[str, ...]
+    create_execution_container_argv: tuple[str, ...]
+    inspect_image_argv: tuple[str, ...]
+    inspect_execution_container_argv: tuple[str, ...]
+    inspect_workspace_volume_argv: tuple[str, ...]
+    inspect_output_volume_argv: tuple[str, ...]
+    start_execution_container_argv: tuple[str, ...]
+    wait_execution_container_argv: tuple[str, ...]
+    copy_output_envelopes_argv: tuple[str, ...]
+    remove_execution_container_argv: tuple[str, ...]
+    remove_output_volume_argv: tuple[str, ...]
+    remove_staging_container_force_argv: tuple[str, ...]
+    remove_workspace_volume_argv: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RunTestsDockerObservation:
+    staging_container: Mapping[str, Any] | None
+    container: Mapping[str, Any] | None
+    workspace_volume: Mapping[str, Any] | None
+    output_volume: Mapping[str, Any] | None
+    started: RunTestsStartedEnvelope | None
+    result: RunTestsResultEnvelope | None
+
+
+RunTestsRecoveryAction = Literal[
+    "SAFE_TO_RETRY",
+    "CLEAN_PRESTART",
+    "WAIT_RUNNING",
+    "RESUME_RESULT",
+    "CLEAN_COMMITTED",
+    "UNRESOLVED",
+]
+RunTestsJournalState = Literal["RESERVED", "STARTED_UNCONFIRMED"]
+RunTestsReceiptState = Literal["ABSENT", "MATCH", "MISMATCH"]
+
+
+@dataclass(frozen=True, slots=True)
+class RunTestsExecutionOutcome:
+    action: Literal[
+        "SAFE_TO_RETRY",
+        "WAIT_RUNNING",
+        "CLOSED_RESULT",
+        "UNRESOLVED",
+    ]
+    result: RunTestsResultEnvelope | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RunTestsPreparationOutcome:
+    action: Literal["READY_TO_START", "UNRESOLVED"]
+
+
+DockerCommandRunner = Callable[
+    [tuple[str, ...], bytes | None, float],
+    subprocess.CompletedProcess[bytes],
+]
+
+
+class RunTestsExecutionDriver(Protocol):
+    def prepare(
+        self,
+        contract: RunTestsExecutionContract,
+        snapshot: CandidateExecutionSnapshot,
+    ) -> RunTestsPreparationOutcome: ...
+
+    def start_and_wait(
+        self,
+        contract: RunTestsExecutionContract,
+    ) -> RunTestsExecutionOutcome: ...
+
+    def reconcile(
+        self,
+        contract: RunTestsExecutionContract,
+        journal_state: RunTestsJournalState,
+        receipt_state: RunTestsReceiptState,
+    ) -> RunTestsExecutionOutcome: ...
+
+    def cleanup(self, contract: RunTestsExecutionContract) -> None: ...
+
+
+FROZEN_VERIFIER_ARGV = (
+    "/opt/venv/bin/python",
+    "-I",
+    "-m",
+    "pytest",
+    "-q",
+    "-c",
+    "/dev/null",
+    "--rootdir=/fixed-tests",
+    "--confcutdir=/fixed-tests",
+    "/fixed-tests/verifier_test.py",
+)
+FROZEN_VERIFIER_COMMAND = {
+    "argv": list(FROZEN_VERIFIER_ARGV),
+    "working_directory": "/workspace",
+    "env": {
+        "HOME": "/nonexistent",
+        "LC_ALL": "C.UTF-8",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "TZ": "UTC",
+    },
+}
+
+
+def frozen_verifier_command_digest() -> str:
+    return hashlib.sha256(
+        rfc8785.dumps(
+            {
+                "domain": "openworkproof/test-command/v0.1",
+                "command": FROZEN_VERIFIER_COMMAND,
+            }
+        )
+    ).hexdigest()
+
+
+def _run_tests_digest(value: object) -> str:
+    if type(value) is not str or _DIGEST_PATTERN.fullmatch(value) is None:
+        raise ValueError("run-tests digest is invalid")
+    return value
+
+
+def _run_tests_oid(value: object) -> str:
+    if type(value) is not str or _OID_PATTERN.fullmatch(value) is None:
+        raise ValueError("run-tests object id is invalid")
+    return value
+
+
+def _run_tests_image_digest(value: object) -> str:
+    if type(value) is not str or _IMAGE_DIGEST_PATTERN.fullmatch(value) is None:
+        raise ValueError("run-tests image digest is invalid")
+    return value
+
+
+def _run_tests_safe_size(value: object) -> int:
+    if type(value) is not int or not 0 <= value <= _MAX_SAFE_INTEGER:
+        raise ValueError("run-tests stream size is invalid")
+    return value
+
+
+def _run_tests_execution_contract_json(
+    contract: RunTestsExecutionContract,
+) -> dict[str, str]:
+    if type(contract) is not RunTestsExecutionContract:
+        raise ValueError("run-tests execution contract is invalid")
+    return {
+        "arguments_digest": _run_tests_digest(contract.arguments_digest),
+        "candidate_commit": _run_tests_oid(contract.candidate_commit),
+        "candidate_workspace_id": _run_tests_digest(
+            contract.candidate_workspace_id
+        ),
+        "command_digest": _run_tests_digest(contract.command_digest),
+        "container_image_digest": _run_tests_image_digest(
+            contract.container_image_digest
+        ),
+        "execution_id": _run_tests_digest(contract.execution_id),
+        "fixed_test_source_digest": _run_tests_digest(
+            contract.fixed_test_source_digest
+        ),
+        "request_digest": _run_tests_digest(contract.request_digest),
+        "schema_version": "openworkproof-run-contract/0.1",
+        "source_artifact_sha256": _run_tests_digest(
+            contract.source_artifact_sha256
+        ),
+        "source_commit": _run_tests_oid(contract.source_commit),
+        "test_mode": "verifier",
+        "tool_name": "owp.run_tests",
+        "workspace_manifest_digest": _run_tests_digest(
+            contract.workspace_manifest_digest
+        ),
+    }
+
+
+def encode_run_tests_execution_contract(
+    contract: RunTestsExecutionContract,
+) -> bytes:
+    return rfc8785.dumps(_run_tests_execution_contract_json(contract))
+
+
+def _run_tests_started_envelope_json(
+    envelope: RunTestsStartedEnvelope,
+) -> dict[str, str]:
+    if type(envelope) is not RunTestsStartedEnvelope:
+        raise ValueError("run-tests started envelope is invalid")
+    return {
+        "execution_contract_digest": _run_tests_digest(
+            envelope.execution_contract_digest
+        ),
+        "execution_id": _run_tests_digest(envelope.execution_id),
+        "schema_version": "openworkproof-run-started/0.1",
+    }
+
+
+def encode_run_tests_started_envelope(
+    envelope: RunTestsStartedEnvelope,
+) -> bytes:
+    return rfc8785.dumps(_run_tests_started_envelope_json(envelope))
+
+
+def _run_tests_result_envelope_json(
+    envelope: RunTestsResultEnvelope,
+) -> dict[str, str | int | None]:
+    if type(envelope) is not RunTestsResultEnvelope:
+        raise ValueError("run-tests result envelope is invalid")
+    actual_exit_code = envelope.actual_exit_code
+    failure_code = envelope.failure_code
+    completed = (
+        type(actual_exit_code) is int
+        and 0 <= actual_exit_code <= 255
+        and failure_code is None
+    )
+    failed = (
+        actual_exit_code is None
+        and type(failure_code) is str
+        and failure_code in {"OUTPUT_LIMIT", "TIMEOUT", "DISK_LIMIT"}
+    )
+    if not completed and not failed:
+        raise ValueError("run-tests result does not contain one closed outcome")
+    return {
+        "actual_exit_code": actual_exit_code,
+        "execution_contract_digest": _run_tests_digest(
+            envelope.execution_contract_digest
+        ),
+        "execution_id": _run_tests_digest(envelope.execution_id),
+        "failure_code": failure_code,
+        "schema_version": "openworkproof-run-result/0.1",
+        "stderr_bytes": _run_tests_safe_size(envelope.stderr_bytes),
+        "stderr_sha256": _run_tests_digest(envelope.stderr_sha256),
+        "stdout_bytes": _run_tests_safe_size(envelope.stdout_bytes),
+        "stdout_sha256": _run_tests_digest(envelope.stdout_sha256),
+    }
+
+
+def encode_run_tests_result_envelope(
+    envelope: RunTestsResultEnvelope,
+) -> bytes:
+    return rfc8785.dumps(_run_tests_result_envelope_json(envelope))
+
+
+def _decode_run_tests_json(
+    raw: bytes,
+    expected_keys: frozenset[str],
+) -> dict[str, Any]:
+    if (
+        type(raw) is not bytes
+        or not 1 <= len(raw) <= _MAX_RUN_TESTS_ENVELOPE_BYTES
+    ):
+        raise ValueError("run-tests envelope size is invalid")
+    try:
+        text = raw.decode("utf-8")
+
+        def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            value: dict[str, Any] = {}
+            for key, item in pairs:
+                if key in value:
+                    raise ValueError("run-tests envelope has duplicate keys")
+                value[key] = item
+            return value
+
+        def reject_constant(constant: str) -> None:
+            raise ValueError(f"invalid JSON constant: {constant}")
+
+        value = json.loads(
+            text,
+            object_pairs_hook=reject_duplicates,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError("run-tests envelope cannot be parsed") from error
+    if type(value) is not dict or frozenset(value) != expected_keys:
+        raise ValueError("run-tests envelope has invalid keys")
+    return value
+
+
+def decode_run_tests_execution_contract(raw: bytes) -> RunTestsExecutionContract:
+    value = _decode_run_tests_json(
+        raw,
+        frozenset(
+            {
+                "arguments_digest",
+                "candidate_commit",
+                "candidate_workspace_id",
+                "command_digest",
+                "container_image_digest",
+                "execution_id",
+                "fixed_test_source_digest",
+                "request_digest",
+                "schema_version",
+                "source_artifact_sha256",
+                "source_commit",
+                "test_mode",
+                "tool_name",
+                "workspace_manifest_digest",
+            }
+        ),
+    )
+    if (
+        value["schema_version"] != "openworkproof-run-contract/0.1"
+        or value["test_mode"] != "verifier"
+        or value["tool_name"] != "owp.run_tests"
+    ):
+        raise ValueError("run-tests execution contract constants are invalid")
+    contract = RunTestsExecutionContract(
+        execution_id=_run_tests_digest(value["execution_id"]),
+        request_digest=_run_tests_digest(value["request_digest"]),
+        arguments_digest=_run_tests_digest(value["arguments_digest"]),
+        candidate_workspace_id=_run_tests_digest(value["candidate_workspace_id"]),
+        source_artifact_sha256=_run_tests_digest(
+            value["source_artifact_sha256"]
+        ),
+        source_commit=_run_tests_oid(value["source_commit"]),
+        candidate_commit=_run_tests_oid(value["candidate_commit"]),
+        workspace_manifest_digest=_run_tests_digest(
+            value["workspace_manifest_digest"]
+        ),
+        container_image_digest=_run_tests_image_digest(
+            value["container_image_digest"]
+        ),
+        command_digest=_run_tests_digest(value["command_digest"]),
+        fixed_test_source_digest=_run_tests_digest(
+            value["fixed_test_source_digest"]
+        ),
+    )
+    if encode_run_tests_execution_contract(contract) != raw:
+        raise ValueError("run-tests execution contract is not canonical")
+    return contract
+
+
+def decode_run_tests_started_envelope(raw: bytes) -> RunTestsStartedEnvelope:
+    value = _decode_run_tests_json(
+        raw,
+        frozenset(
+            {
+                "execution_contract_digest",
+                "execution_id",
+                "schema_version",
+            }
+        ),
+    )
+    if value["schema_version"] != "openworkproof-run-started/0.1":
+        raise ValueError("run-tests started envelope schema is invalid")
+    envelope = RunTestsStartedEnvelope(
+        execution_id=_run_tests_digest(value["execution_id"]),
+        execution_contract_digest=_run_tests_digest(
+            value["execution_contract_digest"]
+        ),
+    )
+    if encode_run_tests_started_envelope(envelope) != raw:
+        raise ValueError("run-tests started envelope is not canonical")
+    return envelope
+
+
+def decode_run_tests_result_envelope(raw: bytes) -> RunTestsResultEnvelope:
+    value = _decode_run_tests_json(
+        raw,
+        frozenset(
+            {
+                "actual_exit_code",
+                "execution_contract_digest",
+                "execution_id",
+                "failure_code",
+                "schema_version",
+                "stderr_bytes",
+                "stderr_sha256",
+                "stdout_bytes",
+                "stdout_sha256",
+            }
+        ),
+    )
+    if value["schema_version"] != "openworkproof-run-result/0.1":
+        raise ValueError("run-tests result envelope schema is invalid")
+    try:
+        envelope = RunTestsResultEnvelope(
+            execution_id=_run_tests_digest(value["execution_id"]),
+            execution_contract_digest=_run_tests_digest(
+                value["execution_contract_digest"]
+            ),
+            actual_exit_code=value["actual_exit_code"],
+            failure_code=value["failure_code"],
+            stdout_bytes=_run_tests_safe_size(value["stdout_bytes"]),
+            stdout_sha256=_run_tests_digest(value["stdout_sha256"]),
+            stderr_bytes=_run_tests_safe_size(value["stderr_bytes"]),
+            stderr_sha256=_run_tests_digest(value["stderr_sha256"]),
+        )
+        _run_tests_result_envelope_json(envelope)
+    except ValueError as error:
+        raise ValueError("run-tests result envelope is invalid") from error
+    if encode_run_tests_result_envelope(envelope) != raw:
+        raise ValueError("run-tests result envelope is not canonical")
+    return envelope
 
 
 @dataclass(frozen=True, slots=True)
@@ -1668,34 +2294,40 @@ def scan_workspace_manifest(
             if stat.S_ISDIR(before.st_mode):
                 entry_type = "directory"
                 size = None
+                descriptor_owner = _CandidateReadDescriptorOwner()
                 try:
-                    child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
-                except OSError as error:
-                    raise ManifestError(
-                        "workspace directory cannot be opened safely"
-                    ) from error
-                try:
+                    try:
+                        child_fd = descriptor_owner.open(
+                            name,
+                            directory_flags,
+                            dir_fd=directory_fd,
+                        )
+                    except OSError as error:
+                        raise ManifestError(
+                            "workspace directory cannot be opened safely"
+                        ) from error
                     if not os.path.samestat(before, os.fstat(child_fd)):
                         raise ManifestError(
                             "workspace directory changed before traversal"
                         )
                     scan(child_fd, path_bytes + b"/")
                 finally:
-                    os.close(child_fd)
+                    descriptor_owner.close()
             elif stat.S_ISREG(before.st_mode):
                 entry_type = "regular"
                 size = before.st_size
+                descriptor_owner = _CandidateReadDescriptorOwner()
                 try:
-                    descriptor = os.open(
-                        name,
-                        os.O_RDONLY | nofollow,
-                        dir_fd=directory_fd,
-                    )
-                except OSError as error:
-                    raise ManifestError(
-                        "workspace regular file cannot be opened safely"
-                    ) from error
-                try:
+                    try:
+                        descriptor = descriptor_owner.open(
+                            name,
+                            os.O_RDONLY | nofollow,
+                            dir_fd=directory_fd,
+                        )
+                    except OSError as error:
+                        raise ManifestError(
+                            "workspace regular file cannot be opened safely"
+                        ) from error
                     opened = os.fstat(descriptor)
                     if not os.path.samestat(before, opened):
                         raise ManifestError(
@@ -1707,7 +2339,7 @@ def scan_workspace_manifest(
                             "workspace regular file changed during read"
                         )
                 finally:
-                    os.close(descriptor)
+                    descriptor_owner.close()
             elif stat.S_ISLNK(before.st_mode):
                 entry_type = "symlink"
                 try:
@@ -1742,15 +2374,16 @@ def scan_workspace_manifest(
                 )
             )
 
-    duplicate = os.dup(root_fd)
+    descriptor_owner = _CandidateReadDescriptorOwner()
     try:
+        duplicate = descriptor_owner.dup(root_fd)
         scan(duplicate, b"")
         if _workspace_read_token(os.fstat(root_fd)) != root_token:
             raise ManifestError("workspace root changed during scan")
     except OSError as error:
         raise ManifestError("workspace scan failed") from error
     finally:
-        os.close(duplicate)
+        descriptor_owner.close()
     manifest = build_workspace_manifest(head_commit, records)
     _workspace_manifest_json(manifest)
     return manifest
@@ -1828,6 +2461,8 @@ def _run_git_read_only(
             "core.filemode=true",
             "-c",
             "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
         )
     )
     command.extend(arguments)
@@ -2062,42 +2697,78 @@ def _candidate_from_read_request(
         validate_canonical_relative_path(request.path)
     except (PathError, TypeError, ValueError):
         raise CandidateReadError("PATH_DENIED") from None
-    runtime_root = request.runtime_root
+    return _candidate_from_request_binding(
+        runtime_root=request.runtime_root,
+        workspace_id=request.workspace_id,
+        source_artifact_sha256=request.source_artifact_sha256,
+        expected_head_commit=request.expected_head_commit,
+        expected_workspace_manifest_digest=(
+            request.expected_workspace_manifest_digest
+        ),
+    )
+
+
+def _candidate_from_execution_snapshot_request(
+    request: CandidateExecutionSnapshotRequest,
+) -> CandidateWorkspace:
+    if type(request) is not CandidateExecutionSnapshotRequest:
+        raise CandidateReadError("RECOVERY_REQUIRED")
+    return _candidate_from_request_binding(
+        runtime_root=request.runtime_root,
+        workspace_id=request.workspace_id,
+        source_artifact_sha256=request.source_artifact_sha256,
+        expected_head_commit=request.expected_head_commit,
+        expected_workspace_manifest_digest=(
+            request.expected_workspace_manifest_digest
+        ),
+    )
+
+
+def _candidate_from_request_binding(
+    *,
+    runtime_root: Path,
+    workspace_id: str,
+    source_artifact_sha256: str,
+    expected_head_commit: str,
+    expected_workspace_manifest_digest: str,
+) -> CandidateWorkspace:
     if (
         type(runtime_root) is not type(Path())
         or not runtime_root.is_absolute()
         or runtime_root != Path(os.path.abspath(runtime_root))
-        or type(request.workspace_id) is not str
-        or _DIGEST_PATTERN.fullmatch(request.workspace_id) is None
-        or type(request.source_artifact_sha256) is not str
-        or _DIGEST_PATTERN.fullmatch(request.source_artifact_sha256) is None
-        or type(request.expected_head_commit) is not str
-        or _OID_PATTERN.fullmatch(request.expected_head_commit) is None
-        or type(request.expected_workspace_manifest_digest) is not str
-        or _DIGEST_PATTERN.fullmatch(
-            request.expected_workspace_manifest_digest
-        )
-        is None
+        or type(workspace_id) is not str
+        or _DIGEST_PATTERN.fullmatch(workspace_id) is None
+        or type(source_artifact_sha256) is not str
+        or _DIGEST_PATTERN.fullmatch(source_artifact_sha256) is None
+        or type(expected_head_commit) is not str
+        or _OID_PATTERN.fullmatch(expected_head_commit) is None
+        or type(expected_workspace_manifest_digest) is not str
+        or _DIGEST_PATTERN.fullmatch(expected_workspace_manifest_digest) is None
     ):
         raise CandidateReadError("RECOVERY_REQUIRED")
-    candidate_root = runtime_root / request.workspace_id
+    candidate_root = runtime_root / workspace_id
     return CandidateWorkspace(
         runtime_root=runtime_root,
         candidate_root=candidate_root,
         worktree=candidate_root / "worktree",
         git_dir=candidate_root / "git",
-        workspace_id=request.workspace_id,
-        source_artifact_sha256=request.source_artifact_sha256,
-        head_commit=request.expected_head_commit,
-        workspace_manifest_digest=request.expected_workspace_manifest_digest,
+        workspace_id=workspace_id,
+        source_artifact_sha256=source_artifact_sha256,
+        head_commit=expected_head_commit,
+        workspace_manifest_digest=expected_workspace_manifest_digest,
     )
 
 
-def _verify_candidate_checkpoint_read_only(
+def _with_verified_candidate_checkpoint_read_only(
     workspace: CandidateWorkspace,
-    path: str,
-) -> _VerifiedCandidateReadCheckpoint:
-    descriptors: list[int] = []
+    path: str | None,
+    operation: Callable[
+        [_VerifiedCandidateReadCheckpoint],
+        _CheckpointOperationResult,
+    ],
+) -> _CheckpointOperationResult:
+    descriptor_owner = _CandidateReadDescriptorOwner()
+    verification_complete = False
     try:
         _validate_candidate_layout(workspace)
         nofollow = getattr(os, "O_NOFOLLOW", None)
@@ -2112,26 +2783,25 @@ def _verify_candidate_checkpoint_read_only(
                 "candidate scan requires directory no-follow support"
             )
         directory_flags = os.O_RDONLY | directory | nofollow
-        root_descriptor = os.open(workspace.runtime_root, directory_flags)
-        descriptors.append(root_descriptor)
-        candidate_descriptor = os.open(
+        root_descriptor = descriptor_owner.open(
+            workspace.runtime_root,
+            directory_flags,
+        )
+        candidate_descriptor = descriptor_owner.open(
             workspace.workspace_id,
             directory_flags,
             dir_fd=root_descriptor,
         )
-        descriptors.append(candidate_descriptor)
-        worktree_descriptor = os.open(
+        worktree_descriptor = descriptor_owner.open(
             "worktree",
             directory_flags,
             dir_fd=candidate_descriptor,
         )
-        descriptors.append(worktree_descriptor)
-        git_descriptor = os.open(
+        git_descriptor = descriptor_owner.open(
             "git",
             directory_flags,
             dir_fd=candidate_descriptor,
         )
-        descriptors.append(git_descriptor)
         anchors: list[_CandidateReadAnchor] = [
             _candidate_read_anchor(
                 root_descriptor,
@@ -2186,12 +2856,11 @@ def _verify_candidate_checkpoint_read_only(
             raise CandidateWorkspaceError(
                 "candidate control record is invalid"
             )
-        control_descriptor = os.open(
+        control_descriptor = descriptor_owner.open(
             "control.json",
             os.O_RDONLY | nofollow,
             dir_fd=candidate_descriptor,
         )
-        descriptors.append(control_descriptor)
         control_anchor = _candidate_read_anchor(
             control_descriptor,
             parent_descriptor=candidate_descriptor,
@@ -2215,66 +2884,66 @@ def _verify_candidate_checkpoint_read_only(
             raise CandidateWorkspaceError(
                 "candidate Git metadata entered worktree"
             )
-        current_descriptor = worktree_descriptor
-        segments = path.split("/")
-        for segment in segments[:-1]:
+        leaf_descriptor: int | None = None
+        if path is not None:
+            current_descriptor = worktree_descriptor
+            segments = path.split("/")
+            for segment in segments[:-1]:
+                try:
+                    child_descriptor = descriptor_owner.open(
+                        segment,
+                        directory_flags,
+                        dir_fd=current_descriptor,
+                    )
+                except OSError as error:
+                    raise CandidateReadError("PATH_DENIED") from error
+                try:
+                    anchor = _candidate_read_anchor(
+                        child_descriptor,
+                        parent_descriptor=current_descriptor,
+                        name=segment,
+                    )
+                except OSError as error:
+                    raise CandidateWorkspaceError(
+                        "candidate ancestor changed before checkpoint scan"
+                    ) from error
+                anchors.append(anchor)
+                current_descriptor = child_descriptor
+            leaf_name = segments[-1]
             try:
-                child_descriptor = os.open(
-                    segment,
-                    directory_flags,
+                leaf_named = os.stat(
+                    leaf_name,
                     dir_fd=current_descriptor,
+                    follow_symlinks=False,
                 )
             except OSError as error:
                 raise CandidateReadError("PATH_DENIED") from error
-            descriptors.append(child_descriptor)
+            if (
+                not stat.S_ISREG(leaf_named.st_mode)
+                or leaf_named.st_nlink != 1
+                or leaf_named.st_size > _MAX_MANIFEST_BYTES
+            ):
+                raise CandidateReadError("PATH_DENIED")
             try:
-                anchor = _candidate_read_anchor(
-                    child_descriptor,
-                    parent_descriptor=current_descriptor,
-                    name=segment,
+                leaf_descriptor = descriptor_owner.open(
+                    leaf_name,
+                    os.O_RDONLY | nofollow,
+                    dir_fd=current_descriptor,
                 )
             except OSError as error:
                 raise CandidateWorkspaceError(
-                    "candidate ancestor changed before checkpoint scan"
+                    "candidate leaf cannot be opened for checkpoint scan"
                 ) from error
-            anchors.append(anchor)
-            current_descriptor = child_descriptor
-        leaf_name = segments[-1]
-        try:
-            leaf_named = os.stat(
-                leaf_name,
-                dir_fd=current_descriptor,
-                follow_symlinks=False,
+            leaf_anchor = _candidate_read_anchor(
+                leaf_descriptor,
+                parent_descriptor=current_descriptor,
+                name=leaf_name,
             )
-        except OSError as error:
-            raise CandidateReadError("PATH_DENIED") from error
-        if (
-            not stat.S_ISREG(leaf_named.st_mode)
-            or leaf_named.st_nlink != 1
-            or leaf_named.st_size > _MAX_MANIFEST_BYTES
-        ):
-            raise CandidateReadError("PATH_DENIED")
-        try:
-            leaf_descriptor = os.open(
-                leaf_name,
-                os.O_RDONLY | nofollow,
-                dir_fd=current_descriptor,
-            )
-        except OSError as error:
-            raise CandidateWorkspaceError(
-                "candidate leaf cannot be opened for checkpoint scan"
-            ) from error
-        descriptors.append(leaf_descriptor)
-        leaf_anchor = _candidate_read_anchor(
-            leaf_descriptor,
-            parent_descriptor=current_descriptor,
-            name=leaf_name,
-        )
-        if leaf_anchor.token != _workspace_read_token(leaf_named):
-            raise CandidateWorkspaceError(
-                "candidate leaf changed before checkpoint scan"
-            )
-        anchors.append(leaf_anchor)
+            if leaf_anchor.token != _workspace_read_token(leaf_named):
+                raise CandidateWorkspaceError(
+                    "candidate leaf changed before checkpoint scan"
+                )
+            anchors.append(leaf_anchor)
         if (
             control["worktree_inode"]
             != os.fstat(worktree_descriptor).st_ino
@@ -2284,40 +2953,6 @@ def _verify_candidate_checkpoint_read_only(
                 "candidate control identity mismatches"
             )
         git_authority_before = _scan_candidate_git_authority(git_descriptor)
-        actual_head_result = _run_git_read_only(
-            git_dir=workspace.git_dir,
-            worktree=workspace.worktree,
-            arguments=("rev-parse", "HEAD"),
-        )
-        if actual_head_result.returncode != 0:
-            raise CandidateWorkspaceError("candidate HEAD is unavailable")
-        actual_head = actual_head_result.stdout.decode("ascii").strip()
-        commit_result = _run_git_read_only(
-            git_dir=workspace.git_dir,
-            worktree=workspace.worktree,
-            arguments=(
-                "cat-file",
-                "-e",
-                "HEAD^{commit}",
-            ),
-        )
-        index_result = _run_git_read_only(
-            git_dir=workspace.git_dir,
-            worktree=workspace.worktree,
-            arguments=(
-                "diff-index",
-                "--cached",
-                "--quiet",
-                "HEAD",
-                "--",
-            ),
-        )
-        if (
-            actual_head != workspace.head_commit
-            or commit_result.returncode != 0
-            or index_result.returncode != 0
-        ):
-            raise CandidateWorkspaceError("candidate Git checkpoint mismatches")
         workspace_snapshot_before = _scan_candidate_workspace_identity(
             worktree_descriptor
         )
@@ -2351,15 +2986,24 @@ def _verify_candidate_checkpoint_read_only(
             control_sha256=hashlib.sha256(control_raw).hexdigest(),
             git_authority_snapshot=git_authority_after,
         )
-        if not _candidate_read_authority_matches(checkpoint):
-            raise CandidateReadError("FILE_CHANGED")
-        return checkpoint
+        if not _candidate_read_semantic_authority_matches(
+            checkpoint,
+            workspace,
+        ):
+            raise CandidateWorkspaceError(
+                "candidate Git checkpoint mismatches"
+            )
+        verification_complete = True
+        operation_result = operation(checkpoint)
+        return operation_result
     except CandidateReadError:
-        _close_candidate_read_descriptors(descriptors)
         raise
     except Exception as error:
-        _close_candidate_read_descriptors(descriptors)
+        if verification_complete:
+            raise
         raise CandidateReadError("RECOVERY_REQUIRED") from error
+    finally:
+        descriptor_owner.close()
 
 
 def _candidate_read_anchor(
@@ -2505,17 +3149,18 @@ def _scan_candidate_workspace_identity(
             token = _workspace_read_token(before)
             entries_seen += 1
             if stat.S_ISDIR(before.st_mode):
+                descriptor_owner = _CandidateReadDescriptorOwner()
                 try:
-                    child_descriptor = os.open(
-                        name,
-                        directory_flags,
-                        dir_fd=directory_descriptor,
-                    )
-                except OSError as error:
-                    raise CandidateWorkspaceError(
-                        "candidate workspace identity directory cannot be opened"
-                    ) from error
-                try:
+                    try:
+                        child_descriptor = descriptor_owner.open(
+                            name,
+                            directory_flags,
+                            dir_fd=directory_descriptor,
+                        )
+                    except OSError as error:
+                        raise CandidateWorkspaceError(
+                            "candidate workspace identity directory cannot be opened"
+                        ) from error
                     if (
                         _workspace_read_token(os.fstat(child_descriptor))
                         != token
@@ -2553,23 +3198,24 @@ def _scan_candidate_workspace_identity(
                         "candidate workspace identity directory changed"
                     ) from error
                 finally:
-                    _close_candidate_read_descriptors([child_descriptor])
+                    descriptor_owner.close()
                 continue
             if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
                 raise CandidateWorkspaceError(
                     "candidate workspace identity entry type is unsupported"
                 )
+            descriptor_owner = _CandidateReadDescriptorOwner()
             try:
-                file_descriptor = os.open(
-                    name,
-                    os.O_RDONLY | nofollow,
-                    dir_fd=directory_descriptor,
-                )
-            except OSError as error:
-                raise CandidateWorkspaceError(
-                    "candidate workspace identity file cannot be opened"
-                ) from error
-            try:
+                try:
+                    file_descriptor = descriptor_owner.open(
+                        name,
+                        os.O_RDONLY | nofollow,
+                        dir_fd=directory_descriptor,
+                    )
+                except OSError as error:
+                    raise CandidateWorkspaceError(
+                        "candidate workspace identity file cannot be opened"
+                    ) from error
                 if _workspace_read_token(os.fstat(file_descriptor)) != token:
                     raise CandidateWorkspaceError(
                         "candidate workspace identity file changed"
@@ -2591,7 +3237,7 @@ def _scan_candidate_workspace_identity(
                     "candidate workspace identity file changed"
                 ) from error
             finally:
-                _close_candidate_read_descriptors([file_descriptor])
+                descriptor_owner.close()
             entries.append(
                 _WorkspaceIdentitySnapshotEntry(
                     path_bytes=path_bytes,
@@ -2680,6 +3326,13 @@ def _scan_candidate_git_authority(
                     raise CandidateWorkspaceError(
                         "candidate Git authority path is invalid"
                     )
+                if path_bytes in {
+                    b"objects/info/alternates",
+                    b"objects/info/http-alternates",
+                }:
+                    raise CandidateWorkspaceError(
+                        "candidate Git authority cannot use alternates"
+                    )
                 try:
                     before = os.stat(
                         name,
@@ -2693,17 +3346,18 @@ def _scan_candidate_git_authority(
                 token = _workspace_read_token(before)
                 entries_seen += 1
                 if stat.S_ISDIR(before.st_mode):
+                    descriptor_owner = _CandidateReadDescriptorOwner()
                     try:
-                        child_descriptor = os.open(
-                            name,
-                            directory_flags,
-                            dir_fd=directory_descriptor,
-                        )
-                    except OSError as error:
-                        raise CandidateWorkspaceError(
-                            "candidate Git authority directory cannot be opened"
-                        ) from error
-                    try:
+                        try:
+                            child_descriptor = descriptor_owner.open(
+                                name,
+                                directory_flags,
+                                dir_fd=directory_descriptor,
+                            )
+                        except OSError as error:
+                            raise CandidateWorkspaceError(
+                                "candidate Git authority directory cannot be opened"
+                            ) from error
                         if (
                             _workspace_read_token(os.fstat(child_descriptor))
                             != token
@@ -2739,7 +3393,7 @@ def _scan_candidate_git_authority(
                                 "candidate Git authority directory changed"
                             )
                     finally:
-                        _close_candidate_read_descriptors([child_descriptor])
+                        descriptor_owner.close()
                     continue
                 if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
                     raise CandidateWorkspaceError(
@@ -2753,17 +3407,18 @@ def _scan_candidate_git_authority(
                     raise CandidateWorkspaceError(
                         "candidate Git authority exceeds byte limit"
                     )
+                descriptor_owner = _CandidateReadDescriptorOwner()
                 try:
-                    file_descriptor = os.open(
-                        name,
-                        os.O_RDONLY | nofollow,
-                        dir_fd=directory_descriptor,
-                    )
-                except OSError as error:
-                    raise CandidateWorkspaceError(
-                        "candidate Git authority file cannot be opened"
-                    ) from error
-                try:
+                    try:
+                        file_descriptor = descriptor_owner.open(
+                            name,
+                            os.O_RDONLY | nofollow,
+                            dir_fd=directory_descriptor,
+                        )
+                    except OSError as error:
+                        raise CandidateWorkspaceError(
+                            "candidate Git authority file cannot be opened"
+                        ) from error
                     if (
                         _workspace_read_token(os.fstat(file_descriptor))
                         != token
@@ -2802,7 +3457,7 @@ def _scan_candidate_git_authority(
                             "candidate Git authority file changed"
                         )
                 finally:
-                    _close_candidate_read_descriptors([file_descriptor])
+                    descriptor_owner.close()
                 total_bytes += before.st_size
                 entries.append(
                     _GitAuthoritySnapshotEntry(
@@ -2842,12 +3497,46 @@ def _candidate_read_authority_matches(
         return False
 
 
-def _close_candidate_read_checkpoint(
+def _candidate_read_semantic_authority_matches(
     checkpoint: _VerifiedCandidateReadCheckpoint,
-) -> None:
-    _close_candidate_read_descriptors(
-        [anchor.descriptor for anchor in checkpoint.anchors]
-    )
+    workspace: CandidateWorkspace,
+) -> bool:
+    if not _candidate_read_authority_matches(checkpoint):
+        return False
+    semantic_matches = False
+    try:
+        actual_head_result = _run_git_read_only(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=("rev-parse", "HEAD"),
+        )
+        commit_result = _run_git_read_only(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=("cat-file", "-e", "HEAD^{commit}"),
+        )
+        index_result = _run_git_read_only(
+            git_dir=workspace.git_dir,
+            worktree=workspace.worktree,
+            arguments=(
+                "diff-index",
+                "--cached",
+                "--quiet",
+                "HEAD",
+                "--",
+            ),
+        )
+        semantic_matches = (
+            actual_head_result.returncode == 0
+            and actual_head_result.stdout.decode("ascii").strip()
+            == workspace.head_commit
+            and commit_result.returncode == 0
+            and index_result.returncode == 0
+        )
+    except (CandidateWorkspaceError, OSError, UnicodeDecodeError):
+        semantic_matches = False
+    authority_matches_after = _candidate_read_authority_matches(checkpoint)
+    return semantic_matches and authority_matches_after
 
 
 def _close_candidate_read_descriptors(descriptors: Sequence[int]) -> None:
@@ -2856,6 +3545,134 @@ def _close_candidate_read_descriptors(descriptors: Sequence[int]) -> None:
             os.close(descriptor)
         except OSError:
             pass
+
+
+def _read_candidate_execution_snapshot_file(
+    checkpoint: _VerifiedCandidateReadCheckpoint,
+    entry: WorkspaceManifestEntry,
+) -> SourceFile:
+    if (
+        not isinstance(entry, WorkspaceManifestEntry)
+        or entry.type != "regular"
+        or entry.posix_mode not in _ALLOWED_MODES
+        or type(entry.size_bytes) is not int
+        or not 0 <= entry.size_bytes <= _MAX_SOURCE_FILE_BYTES
+        or type(entry.sha256) is not str
+        or _DIGEST_PATTERN.fullmatch(entry.sha256) is None
+    ):
+        raise ManifestError("snapshot regular file binding is invalid")
+    raw_path = _decode_unpadded_path(entry.path_bytes_b64url)
+    try:
+        path = raw_path.decode("ascii")
+        validate_canonical_relative_path(path)
+    except (PathError, UnicodeDecodeError) as error:
+        raise ManifestError("snapshot path is not canonical") from error
+
+    _candidate_execution_snapshot_file_hook(path)
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if (
+        type(nofollow) is not int
+        or nofollow <= 0
+        or type(directory) is not int
+        or directory <= 0
+    ):
+        raise CandidateWorkspaceError(
+            "candidate snapshot requires directory no-follow support"
+        )
+    descriptor_owner = _CandidateReadDescriptorOwner()
+    parent_descriptor = checkpoint.worktree_descriptor
+    try:
+        for segment in path.split("/")[:-1]:
+            named = os.stat(
+                segment,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if not stat.S_ISDIR(named.st_mode):
+                raise CandidateWorkspaceError(
+                    "candidate snapshot ancestor is not a directory"
+                )
+            token = _workspace_read_token(named)
+            child_descriptor = descriptor_owner.open(
+                segment,
+                os.O_RDONLY | directory | nofollow,
+                dir_fd=parent_descriptor,
+            )
+            if _workspace_read_token(os.fstat(child_descriptor)) != token:
+                raise CandidateWorkspaceError(
+                    "candidate snapshot ancestor changed before open"
+                )
+            parent_descriptor = child_descriptor
+
+        leaf_name = path.split("/")[-1]
+        named_before = os.stat(
+            leaf_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        token_before = _workspace_read_token(named_before)
+        if (
+            not stat.S_ISREG(named_before.st_mode)
+            or named_before.st_nlink != 1
+            or f"{named_before.st_mode:06o}" != entry.posix_mode
+            or named_before.st_size != entry.size_bytes
+        ):
+            raise CandidateWorkspaceError(
+                "candidate snapshot regular file metadata mismatches"
+            )
+        file_descriptor = descriptor_owner.open(
+            leaf_name,
+            os.O_RDONLY | nofollow,
+            dir_fd=parent_descriptor,
+        )
+        opened = os.fstat(file_descriptor)
+        if _workspace_read_token(opened) != token_before:
+            raise CandidateWorkspaceError(
+                "candidate snapshot regular file changed before read"
+            )
+        content = _read_workspace_file(file_descriptor, entry.size_bytes)
+        named_after = os.stat(
+            leaf_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            _workspace_read_token(os.fstat(file_descriptor)) != token_before
+            or _workspace_read_token(named_after) != token_before
+            or not stat.S_ISREG(named_after.st_mode)
+            or named_after.st_nlink != 1
+            or f"{named_after.st_mode:06o}" != entry.posix_mode
+            or named_after.st_size != entry.size_bytes
+            or hashlib.sha256(content).hexdigest() != entry.sha256
+        ):
+            raise CandidateWorkspaceError(
+                "candidate snapshot regular file changed during read"
+            )
+        return SourceFile(path, entry.posix_mode, content)
+    finally:
+        descriptor_owner.close()
+
+
+def _candidate_execution_snapshot_regular_entries(
+    manifest: WorkspaceManifest,
+) -> tuple[WorkspaceManifestEntry, ...]:
+    _workspace_manifest_json(manifest)
+    regular_entries: list[WorkspaceManifestEntry] = []
+    total_size = 0
+    for entry in manifest.entries:
+        if entry.type != "regular":
+            continue
+        size = entry.size_bytes
+        if (
+            type(size) is not int
+            or not 0 <= size <= _MAX_SOURCE_FILE_BYTES
+            or size > _MAX_SOURCE_BYTES - total_size
+        ):
+            raise ManifestError("snapshot regular files exceed the byte limit")
+        total_size += size
+        regular_entries.append(entry)
+    return tuple(regular_entries)
 
 
 def _read_verified_candidate_path(
@@ -2878,6 +3695,8 @@ def _read_verified_candidate_path(
         raise CandidateReadError("PATH_DENIED")
     try:
         if not _candidate_read_authority_matches(checkpoint):
+            raise CandidateReadError("FILE_CHANGED")
+        if type(checkpoint.leaf_descriptor) is not int:
             raise CandidateReadError("FILE_CHANGED")
         opened = os.fstat(checkpoint.leaf_descriptor)
         if (
@@ -2941,8 +3760,12 @@ def _read_candidate_control(workspace: CandidateWorkspace) -> dict[str, Any]:
         or not 1 <= metadata.st_size <= 4_096
     ):
         raise CandidateWorkspaceError("candidate control record is invalid")
-    descriptor = os.open(control_path, os.O_RDONLY | nofollow)
+    descriptor_owner = _CandidateReadDescriptorOwner()
     try:
+        descriptor = descriptor_owner.open(
+            control_path,
+            os.O_RDONLY | nofollow,
+        )
         opened = os.fstat(descriptor)
         if not os.path.samestat(metadata, opened):
             raise CandidateWorkspaceError("candidate control record changed")
@@ -2952,7 +3775,7 @@ def _read_candidate_control(workspace: CandidateWorkspace) -> dict[str, Any]:
         ):
             raise CandidateWorkspaceError("candidate control record changed")
     finally:
-        os.close(descriptor)
+        descriptor_owner.close()
     return _parse_candidate_control(raw, workspace)
 
 
@@ -3788,18 +4611,305 @@ def destroy_candidate_workspace(
     )
 
 
+def derive_run_tests_docker_binding(
+    execution_id: str,
+) -> RunTestsDockerBinding:
+    """Derive the only Docker names and owner token for one execution."""
+
+    if type(execution_id) is not str or _DIGEST_PATTERN.fullmatch(
+        execution_id
+    ) is None:
+        raise ValueError("run-tests execution id is invalid")
+    suffix = execution_id[:32]
+    return RunTestsDockerBinding(
+        execution_id=execution_id,
+        ownership_token=hashlib.sha256(
+            b"openworkproof/docker-run/v0.1\x00"
+            + execution_id.encode("ascii")
+        ).hexdigest(),
+        staging_container_name=f"owp-stage-{suffix}",
+        container_name=f"owp-run-{suffix}",
+        workspace_volume_name=f"owp-workspace-{suffix}",
+        output_volume_name=f"owp-output-{suffix}",
+    )
+
+
+def _run_tests_observation_has_exact_keys(
+    observation: object,
+    expected_keys: frozenset[str],
+) -> bool:
+    return (
+        type(observation) is dict
+        and all(type(key) is str for key in observation)
+        and frozenset(observation) == expected_keys
+    )
+
+
+def _run_tests_resource_observation_matches(
+    observation: object,
+    *,
+    name: str,
+    ownership_token: str,
+) -> bool:
+    return (
+        _run_tests_observation_has_exact_keys(
+            observation,
+            frozenset(
+                {"name", "ownership_token", "configuration_matches"}
+            ),
+        )
+        and type(observation.get("name")) is str
+        and observation.get("name") == name
+        and type(observation.get("ownership_token")) is str
+        and observation.get("ownership_token") == ownership_token
+        and observation.get("configuration_matches") is True
+    )
+
+
+def _run_tests_container_observation_matches(
+    observation: object,
+    binding: RunTestsDockerBinding,
+    *,
+    expected_execution_contract_digest: str,
+) -> bool:
+    return (
+        _run_tests_observation_has_exact_keys(
+            observation,
+            frozenset(
+                {
+                    "name",
+                    "ownership_token",
+                    "execution_id",
+                    "execution_contract_digest",
+                    "status",
+                    "ever_started",
+                    "immutable_image_matches",
+                    "config_matches",
+                    "mounts_match",
+                }
+            ),
+        )
+        and type(observation.get("name")) is str
+        and observation.get("name") == binding.container_name
+        and type(observation.get("ownership_token")) is str
+        and observation.get("ownership_token") == binding.ownership_token
+        and type(observation.get("execution_id")) is str
+        and observation.get("execution_id") == binding.execution_id
+        and type(observation.get("execution_contract_digest")) is str
+        and _DIGEST_PATTERN.fullmatch(
+            observation["execution_contract_digest"]
+        )
+        is not None
+        and observation.get("execution_contract_digest")
+        == expected_execution_contract_digest
+        and type(observation.get("status")) is str
+        and observation.get("status")
+        in {"created", "running", "paused", "restarting", "dead", "exited"}
+        and type(observation.get("ever_started")) is bool
+        and observation.get("immutable_image_matches") is True
+        and observation.get("config_matches") is True
+        and observation.get("mounts_match") is True
+    )
+
+
+def _valid_run_tests_started_observation(
+    started: object,
+    *,
+    execution_id: str,
+    contract_digest: str,
+) -> bool:
+    if type(started) is not RunTestsStartedEnvelope:
+        return False
+    try:
+        encode_run_tests_started_envelope(started)
+    except ValueError:
+        return False
+    return (
+        started.execution_id == execution_id
+        and started.execution_contract_digest == contract_digest
+    )
+
+
+def _valid_run_tests_result_observation(
+    result: object,
+    *,
+    execution_id: str,
+    contract_digest: str,
+) -> bool:
+    if type(result) is not RunTestsResultEnvelope:
+        return False
+    try:
+        encode_run_tests_result_envelope(result)
+    except ValueError:
+        return False
+    return (
+        result.execution_id == execution_id
+        and result.execution_contract_digest == contract_digest
+    )
+
+
+def reconcile_run_tests_docker_execution(
+    journal_state: RunTestsJournalState,
+    binding: RunTestsDockerBinding,
+    observation: RunTestsDockerObservation,
+    *,
+    expected_execution_contract_digest: str,
+    receipt_state: RunTestsReceiptState,
+) -> RunTestsRecoveryAction:
+    """Reduce closed Docker observations to one side-effect-free action."""
+
+    if type(journal_state) is not str or journal_state not in {
+        "RESERVED",
+        "STARTED_UNCONFIRMED",
+    }:
+        raise ValueError("run-tests journal state is invalid")
+    binding_fields = (
+        "execution_id",
+        "ownership_token",
+        "staging_container_name",
+        "container_name",
+        "workspace_volume_name",
+        "output_volume_name",
+    )
+    if type(binding) is not RunTestsDockerBinding or any(
+        type(getattr(binding, field_name)) is not str
+        for field_name in binding_fields
+    ):
+        raise ValueError("run-tests Docker binding is invalid")
+    expected_binding = derive_run_tests_docker_binding(binding.execution_id)
+    if any(
+        getattr(binding, field_name) != getattr(expected_binding, field_name)
+        for field_name in binding_fields
+    ):
+        raise ValueError("run-tests Docker binding is invalid")
+    if type(observation) is not RunTestsDockerObservation:
+        raise ValueError("run-tests Docker observation is invalid")
+    if (
+        type(expected_execution_contract_digest) is not str
+        or _DIGEST_PATTERN.fullmatch(expected_execution_contract_digest)
+        is None
+    ):
+        raise ValueError("run-tests execution contract digest is invalid")
+    if type(receipt_state) is not str or receipt_state not in {
+        "ABSENT",
+        "MATCH",
+        "MISMATCH",
+    }:
+        raise ValueError("run-tests Receipt observation is invalid")
+
+    resources = (
+        observation.staging_container,
+        observation.container,
+        observation.workspace_volume,
+        observation.output_volume,
+    )
+    if observation.staging_container is not None and not (
+        _run_tests_resource_observation_matches(
+            observation.staging_container,
+            name=binding.staging_container_name,
+            ownership_token=binding.ownership_token,
+        )
+    ):
+        return "UNRESOLVED"
+    if observation.workspace_volume is not None and not (
+        _run_tests_resource_observation_matches(
+            observation.workspace_volume,
+            name=binding.workspace_volume_name,
+            ownership_token=binding.ownership_token,
+        )
+    ):
+        return "UNRESOLVED"
+    if observation.output_volume is not None and not (
+        _run_tests_resource_observation_matches(
+            observation.output_volume,
+            name=binding.output_volume_name,
+            ownership_token=binding.ownership_token,
+        )
+    ):
+        return "UNRESOLVED"
+    if observation.container is not None and not (
+        _run_tests_container_observation_matches(
+            observation.container,
+            binding,
+            expected_execution_contract_digest=(
+                expected_execution_contract_digest
+            ),
+        )
+    ):
+        return "UNRESOLVED"
+
+    if receipt_state == "MISMATCH":
+        return "UNRESOLVED"
+    if receipt_state == "MATCH":
+        return "CLEAN_COMMITTED"
+
+    container = observation.container
+    if container is None:
+        if observation.started is not None or observation.result is not None:
+            return "UNRESOLVED"
+        if journal_state == "STARTED_UNCONFIRMED":
+            return "UNRESOLVED"
+        if all(resource is None for resource in resources):
+            return "SAFE_TO_RETRY"
+        return "CLEAN_PRESTART"
+
+    status = container["status"]
+    ever_started = container["ever_started"]
+    started = observation.started
+    result = observation.result
+
+    if started is not None and not _valid_run_tests_started_observation(
+        started,
+        execution_id=binding.execution_id,
+        contract_digest=expected_execution_contract_digest,
+    ):
+        return "UNRESOLVED"
+    if result is not None and not _valid_run_tests_result_observation(
+        result,
+        execution_id=binding.execution_id,
+        contract_digest=expected_execution_contract_digest,
+    ):
+        return "UNRESOLVED"
+    if result is not None and started is None:
+        return "UNRESOLVED"
+
+    if status == "created":
+        if ever_started or started is not None or result is not None:
+            return "UNRESOLVED"
+        return "CLEAN_PRESTART"
+
+    if not ever_started:
+        return "UNRESOLVED"
+    if (
+        observation.staging_container is not None
+        or observation.workspace_volume is None
+        or observation.output_volume is None
+    ):
+        return "UNRESOLVED"
+    if status in {"running", "paused", "restarting"}:
+        if result is not None:
+            return "UNRESOLVED"
+        return "WAIT_RUNNING"
+    if status == "dead":
+        return "UNRESOLVED"
+    if started is not None and result is not None:
+        return "RESUME_RESULT"
+    return "UNRESOLVED"
+
+
 def _docker_volume_plan(
     docker_binary: str,
     *,
     name: str,
-    size_mebibytes: int,
     mount_path: str,
     read_only: bool,
     ownership_token: str,
 ) -> DockerVolumePlan:
+    # Persistent named volumes carry lifecycle bytes between containers. Their
+    # bounds are logical protocol limits: 8 MiB total / 1 MiB per candidate
+    # file and 8 KiB runner envelopes, not a claimed filesystem quota.
     return DockerVolumePlan(
         name=name,
-        size_bytes=size_mebibytes * 1_024 * 1_024,
         mount_path=mount_path,
         read_only=read_only,
         create_argv=(
@@ -3808,12 +4918,6 @@ def _docker_volume_plan(
             "create",
             "--driver",
             "local",
-            "--opt",
-            "type=tmpfs",
-            "--opt",
-            "device=tmpfs",
-            "--opt",
-            f"o=size={size_mebibytes}m",
             "--label",
             f"{_DOCKER_OWNERSHIP_LABEL}={ownership_token}",
             name,
@@ -3936,7 +5040,6 @@ def derive_docker_execution_plan(
     workspace = _docker_volume_plan(
         docker,
         name=workspace_volume_name,
-        size_mebibytes=512,
         mount_path="/workspace",
         read_only=True,
         ownership_token=ownership_token,
@@ -3944,7 +5047,6 @@ def derive_docker_execution_plan(
     output = _docker_volume_plan(
         docker,
         name=output_volume_name,
-        size_mebibytes=64,
         mount_path="/output",
         read_only=False,
         ownership_token=ownership_token,
@@ -3980,13 +5082,10 @@ def derive_docker_execution_plan(
         "--mount",
         (
             f"type=volume,source={workspace.name},"
-            "target=/workspace,readonly,volume-nocopy"
+            "target=/workspace,readonly"
         ),
         "--mount",
-        (
-            f"type=volume,source={output.name},"
-            "target=/output,volume-nocopy"
-        ),
+        f"type=volume,source={output.name},target=/output",
         image_reference,
         *command,
     )
@@ -4182,12 +5281,12 @@ def _valid_docker_volume_inspection(
     *,
     resource: Literal["workspace_volume", "output_volume"],
 ) -> bool:
-    size = "512m" if resource == "workspace_volume" else "64m"
     return (
         _docker_resource_is_owned(plan, resource, inspection)
         and inspection.get("Driver") == "local"
-        and inspection.get("Options")
-        == {"type": "tmpfs", "device": "tmpfs", "o": f"size={size}"}
+        and inspection.get("Scope") == "local"
+        and "Options" in inspection
+        and inspection["Options"] is None
     )
 
 
@@ -4244,16 +5343,14 @@ def validate_docker_execution_inspections(
             and configured_workspace.get("Source")
             == plan.workspace_volume.name
             and configured_workspace.get("ReadOnly") is True
-            and configured_workspace.get("VolumeOptions", {}).get("NoCopy")
-            is True
+            and "VolumeOptions" not in configured_workspace
             and configured_output.get("Type") == "volume"
             and configured_output.get("Source") == plan.output_volume.name
             and (
                 "ReadOnly" not in configured_output
                 or configured_output.get("ReadOnly") is False
             )
-            and configured_output.get("VolumeOptions", {}).get("NoCopy")
-            is True
+            and "VolumeOptions" not in configured_output
             and _valid_docker_volume_inspection(
                 plan,
                 workspace_volume_inspection,
@@ -4271,6 +5368,34 @@ def validate_docker_execution_inspections(
         raise ValueError("Docker inspection does not match the frozen profile")
 
 
+def _validated_docker_image_id(
+    plan: DockerExecutionPlan,
+    image_inspection: Mapping[str, Any],
+) -> str | None:
+    image_id: object = None
+    try:
+        image_id = image_inspection["Id"]
+        image_config = image_inspection["Config"]
+        repo_digests = image_inspection["RepoDigests"]
+        canonical_repo_digests = [
+            _canonical_observed_repo_digest(reference)
+            for reference in repo_digests
+        ]
+        valid = (
+            type(image_inspection) is dict
+            and type(image_id) is str
+            and _IMAGE_DIGEST_PATTERN.fullmatch(image_id) is not None
+            and type(image_config) is dict
+            and image_config.get("Volumes") in (None, {})
+            and type(repo_digests) is list
+            and None not in canonical_repo_digests
+            and plan.image_reference in canonical_repo_digests
+        )
+    except (KeyError, TypeError, AttributeError):
+        valid = False
+    return image_id if valid and type(image_id) is str else None
+
+
 def derive_ready_docker_start(
     plan: DockerExecutionPlan,
     lifecycle: DockerLifecycleState,
@@ -4286,24 +5411,7 @@ def derive_ready_docker_start(
         or lifecycle.created_resources != _DOCKER_CREATION_ORDER
     ):
         raise ValueError("Docker lifecycle is not complete")
-    try:
-        image_config = image_inspection["Config"]
-        repo_digests = image_inspection["RepoDigests"]
-        canonical_repo_digests = [
-            _canonical_observed_repo_digest(reference)
-            for reference in repo_digests
-        ]
-        image_valid = (
-            type(image_inspection) is dict
-            and type(image_config) is dict
-            and image_config.get("Volumes") in (None, {})
-            and type(repo_digests) is list
-            and None not in canonical_repo_digests
-            and plan.image_reference in canonical_repo_digests
-        )
-    except (KeyError, TypeError, AttributeError):
-        image_valid = False
-    if not image_valid:
+    if _validated_docker_image_id(plan, image_inspection) is None:
         raise ValueError("Docker image inspection is invalid")
 
     validate_docker_execution_inspections(
@@ -4374,6 +5482,1379 @@ def classify_docker_execution_failure(
     if observed.workspace_volume_exhausted or observed.output_volume_exhausted:
         return "DISK_LIMIT"
     return None
+
+
+def _run_docker_command(
+    argv: tuple[str, ...],
+    input_bytes: bytes | None,
+    timeout: float,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run one exact Docker CLI command with closed process options."""
+
+    if (
+        type(argv) is not tuple
+        or not argv
+        or any(type(argument) is not str or not argument for argument in argv)
+        or (input_bytes is not None and type(input_bytes) is not bytes)
+        or type(timeout) not in {int, float}
+        or timeout <= 0
+    ):
+        raise ValueError("Docker command invocation is invalid")
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+        close_fds=True,
+        start_new_session=True,
+    )
+    if process.stdout is None or process.stderr is None:
+        _terminate_process_group(process, 2)
+        raise ValueError("Docker command pipes are unavailable")
+    selector = selectors.DefaultSelector()
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    input_view = memoryview(b"" if input_bytes is None else input_bytes)
+    input_offset = 0
+    deadline = time.monotonic() + timeout
+    try:
+        for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, name)
+        if process.stdin is not None:
+            os.set_blocking(process.stdin.fileno(), False)
+            if input_view:
+                selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+            else:
+                process.stdin.close()
+        while selector.get_map() or process.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_process_group(process, 2)
+                raise subprocess.TimeoutExpired(
+                    argv,
+                    timeout,
+                    output=bytes(buffers["stdout"]),
+                    stderr=bytes(buffers["stderr"]),
+                )
+            for key, _ in selector.select(min(remaining, 0.1)):
+                if key.data == "stdin":
+                    try:
+                        count = os.write(
+                            key.fd,
+                            input_view[input_offset : input_offset + 65_536],
+                        )
+                    except BrokenPipeError:
+                        count = len(input_view) - input_offset
+                    input_offset += count
+                    if input_offset == len(input_view):
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                    continue
+                try:
+                    data = os.read(key.fd, 65_536)
+                except BlockingIOError:
+                    continue
+                if not data:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                buffer = buffers[key.data]
+                if len(buffer) + len(data) > _MAX_DOCKER_COMMAND_OUTPUT_BYTES:
+                    _terminate_process_group(process, 2)
+                    raise ValueError("Docker command output exceeds its limit")
+                buffer.extend(data)
+        returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        return subprocess.CompletedProcess(
+            argv,
+            returncode,
+            bytes(buffers["stdout"]),
+            bytes(buffers["stderr"]),
+        )
+    except BaseException:
+        if process.poll() is None:
+            _terminate_process_group(process, 2)
+        raise
+    finally:
+        selector.close()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
+
+
+def _run_tests_contract_digest(contract: RunTestsExecutionContract) -> str:
+    return hashlib.sha256(encode_run_tests_execution_contract(contract)).hexdigest()
+
+
+def _run_tests_driver_plan(
+    executor: DockerRunTestsExecutor,
+    contract: RunTestsExecutionContract,
+) -> tuple[RunTestsDockerBinding, DockerExecutionPlan, str]:
+    contract_digest = _run_tests_contract_digest(contract)
+    if (
+        contract.container_image_digest
+        != executor._image_reference.rsplit("@", 1)[-1]
+        or contract.command_digest != frozen_verifier_command_digest()
+    ):
+        raise ValueError("run-tests execution contract does not match executor")
+    binding = derive_run_tests_docker_binding(contract.execution_id)
+    plan = derive_docker_execution_plan(
+        docker_binary=executor._docker_binary,
+        image_reference=executor._image_reference,
+        container_name=binding.container_name,
+        workspace_volume_name=binding.workspace_volume_name,
+        output_volume_name=binding.output_volume_name,
+        ownership_token=binding.ownership_token,
+        command=("execute",),
+    )
+    return binding, plan, contract_digest
+
+
+def _run_tests_snapshot_stream(
+    contract: RunTestsExecutionContract,
+    snapshot: CandidateExecutionSnapshot,
+) -> bytes:
+    if (
+        type(snapshot) is not CandidateExecutionSnapshot
+        or snapshot.head_commit != contract.candidate_commit
+        or snapshot.workspace_manifest_digest
+        != contract.workspace_manifest_digest
+        or type(snapshot.plan) is not ExecutionSnapshotPlan
+        or snapshot.plan.read_only is not True
+        or snapshot.plan.owner_uid != 65532
+        or snapshot.plan.owner_gid != 65532
+        or snapshot.plan.atime_unix_seconds != 0
+        or snapshot.plan.mtime_unix_seconds != 0
+        or snapshot.plan.clear_extended_attributes is not True
+        or snapshot.plan.clear_posix_acls is not True
+        or snapshot.plan.clear_file_capabilities is not True
+    ):
+        raise ValueError("run-tests snapshot does not match contract")
+    files = snapshot.plan.files
+    if (
+        type(files) is not tuple
+        or not 1 <= len(files) <= 126
+        or any(type(source_file) is not SourceFile for source_file in files)
+    ):
+        raise ValueError("run-tests snapshot files are invalid")
+    ordered = tuple(
+        sorted(files, key=lambda source_file: source_file.path.encode("ascii"))
+    )
+    if ordered != files or len({source_file.path for source_file in files}) != len(
+        files
+    ):
+        raise ValueError("run-tests snapshot files are not canonical")
+    rows: list[dict[str, object]] = []
+    payloads: list[bytes] = []
+    total = 0
+    for source_file in files:
+        try:
+            path = validate_canonical_relative_path(source_file.path)
+        except PathError as error:
+            raise ValueError("run-tests snapshot path is invalid") from error
+        if path == "run-contract.json" or source_file.mode not in _ALLOWED_MODES:
+            raise ValueError("run-tests snapshot file is reserved or invalid")
+        content = source_file.content
+        if type(content) is not bytes or len(content) > _MAX_SOURCE_FILE_BYTES:
+            raise ValueError("run-tests snapshot file content is invalid")
+        total += len(content)
+        if total > _MAX_SOURCE_BYTES:
+            raise ValueError("run-tests snapshot content exceeds its limit")
+        rows.append(
+            {
+                "mode": source_file.mode,
+                "path": path,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size_bytes": len(content),
+            }
+        )
+        payloads.append(content)
+    contract_bytes = encode_run_tests_execution_contract(contract)
+    header = rfc8785.dumps(
+        {
+            "contract": {
+                "sha256": hashlib.sha256(contract_bytes).hexdigest(),
+                "size_bytes": len(contract_bytes),
+            },
+            "files": rows,
+            "schema_version": "openworkproof-snapshot-stream/0.1",
+        }
+    )
+    if len(header) > 65_536:
+        raise ValueError("run-tests snapshot header exceeds its limit")
+    stream = (
+        b"openworkproof-snapshot-stream/0.1\n"
+        + len(header).to_bytes(4, "big")
+        + header
+        + b"".join(payloads)
+        + contract_bytes
+    )
+    if len(stream) > _MAX_RUN_TESTS_SNAPSHOT_STREAM_BYTES:
+        raise ValueError("run-tests snapshot stream exceeds its limit")
+    return stream
+
+
+def _docker_result(
+    executor: DockerRunTestsExecutor,
+    argv: tuple[str, ...],
+    *,
+    input_bytes: bytes | None = None,
+    timeout: float = 15.0,
+) -> subprocess.CompletedProcess[bytes]:
+    result = executor._run(argv, input_bytes, timeout)
+    if (
+        not isinstance(result, subprocess.CompletedProcess)
+        or type(result.returncode) is not int
+        or type(result.stdout) is not bytes
+        or type(result.stderr) is not bytes
+        or len(result.stdout) > _MAX_DOCKER_COMMAND_OUTPUT_BYTES
+        or len(result.stderr) > _MAX_DOCKER_COMMAND_OUTPUT_BYTES
+    ):
+        raise ValueError("Docker command runner returned an invalid result")
+    return result
+
+
+def _docker_checked(
+    executor: DockerRunTestsExecutor,
+    argv: tuple[str, ...],
+    *,
+    input_bytes: bytes | None = None,
+    timeout: float = 15.0,
+) -> subprocess.CompletedProcess[bytes]:
+    result = _docker_result(
+        executor,
+        argv,
+        input_bytes=input_bytes,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise ValueError("Docker command failed")
+    return result
+
+
+def _docker_lines(raw: bytes) -> tuple[str, ...]:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("Docker list output is invalid") from error
+    if "\0" in text:
+        raise ValueError("Docker list output is invalid")
+    return tuple(text.splitlines())
+
+
+def _docker_inspection(raw: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("Docker inspect output is invalid") from error
+    if type(value) is not list or len(value) != 1 or type(value[0]) is not dict:
+        raise ValueError("Docker inspect output is invalid")
+    return value[0]
+
+
+def _staging_create_argv(
+    executor: DockerRunTestsExecutor,
+    binding: RunTestsDockerBinding,
+    plan: DockerExecutionPlan,
+) -> tuple[str, ...]:
+    docker = str(executor._docker_binary)
+    return (
+        docker,
+        "create",
+        "--name",
+        binding.staging_container_name,
+        "--label",
+        f"{_DOCKER_OWNERSHIP_LABEL}={binding.ownership_token}",
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--user",
+        "65532:65532",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--interactive",
+        "--mount",
+        f"type=volume,source={plan.workspace_volume.name},target=/workspace",
+        plan.image_reference,
+        "stage",
+    )
+
+
+def _execution_create_argv(
+    plan: DockerExecutionPlan,
+    contract: RunTestsExecutionContract,
+    contract_digest: str,
+) -> tuple[str, ...]:
+    argv = list(plan.create_container_argv)
+    argv[8:8] = [
+        "--label",
+        f"{_DOCKER_EXECUTION_ID_LABEL}={contract.execution_id}",
+        "--label",
+        f"{_DOCKER_CONTRACT_DIGEST_LABEL}={contract_digest}",
+    ]
+    return tuple(argv)
+
+
+def _run_tests_docker_command_plan(
+    executor: DockerRunTestsExecutor,
+    contract: RunTestsExecutionContract,
+) -> RunTestsDockerCommandPlan:
+    binding, plan, contract_digest = _run_tests_driver_plan(executor, contract)
+    docker = str(executor._docker_binary)
+    return RunTestsDockerCommandPlan(
+        binding=binding,
+        execution_plan=plan,
+        contract_digest=contract_digest,
+        preflight_absent_argv=plan.preflight_absent_argv,
+        create_workspace_volume_argv=plan.workspace_volume.create_argv,
+        create_staging_container_argv=_staging_create_argv(
+            executor, binding, plan
+        ),
+        start_staging_container_argv=(
+            docker,
+            "start",
+            "--attach",
+            "--interactive",
+            binding.staging_container_name,
+        ),
+        inspect_staging_container_argv=(
+            docker,
+            "inspect",
+            binding.staging_container_name,
+        ),
+        remove_staging_container_argv=(
+            docker,
+            "rm",
+            binding.staging_container_name,
+        ),
+        create_output_volume_argv=plan.output_volume.create_argv,
+        create_execution_container_argv=_execution_create_argv(
+            plan, contract, contract_digest
+        ),
+        inspect_image_argv=(docker, "image", "inspect", plan.image_reference),
+        inspect_execution_container_argv=(
+            docker,
+            "inspect",
+            binding.container_name,
+        ),
+        inspect_workspace_volume_argv=(
+            docker,
+            "volume",
+            "inspect",
+            binding.workspace_volume_name,
+        ),
+        inspect_output_volume_argv=(
+            docker,
+            "volume",
+            "inspect",
+            binding.output_volume_name,
+        ),
+        start_execution_container_argv=(
+            docker,
+            "start",
+            binding.container_name,
+        ),
+        wait_execution_container_argv=(
+            docker,
+            "wait",
+            binding.container_name,
+        ),
+        copy_output_envelopes_argv=(
+            docker,
+            "cp",
+            f"{binding.container_name}:/output/.",
+            "-",
+        ),
+        remove_execution_container_argv=(
+            docker,
+            "rm",
+            "--force",
+            "--volumes",
+            binding.container_name,
+        ),
+        remove_output_volume_argv=(
+            docker,
+            "volume",
+            "rm",
+            binding.output_volume_name,
+        ),
+        remove_staging_container_force_argv=(
+            docker,
+            "rm",
+            "--force",
+            "--volumes",
+            binding.staging_container_name,
+        ),
+        remove_workspace_volume_argv=(
+            docker,
+            "volume",
+            "rm",
+            binding.workspace_volume_name,
+        ),
+    )
+
+
+def _docker_command_with_container_id(
+    argv: tuple[str, ...],
+    container_id: str,
+) -> tuple[str, ...]:
+    if (
+        type(argv) is not tuple
+        or len(argv) < 3
+        or type(container_id) is not str
+        or _DIGEST_PATTERN.fullmatch(container_id) is None
+    ):
+        raise ValueError("Docker container command is invalid")
+    if argv[1] == "cp":
+        if len(argv) != 4 or not argv[2].endswith(":/output/.") or argv[3] != "-":
+            raise ValueError("Docker container command is invalid")
+        return (argv[0], "cp", f"{container_id}:/output/.", "-")
+    if argv[1] not in {"inspect", "start", "wait", "rm"}:
+        raise ValueError("Docker container command is invalid")
+    return (*argv[:-1], container_id)
+
+
+def _docker_created_container_id(raw: bytes) -> str:
+    try:
+        container_id = raw.strip().decode("ascii")
+    except UnicodeDecodeError as error:
+        raise ValueError("Docker create container ID is invalid") from error
+    if (
+        raw != (container_id + "\n").encode()
+        or _DIGEST_PATTERN.fullmatch(container_id) is None
+    ):
+        raise ValueError("Docker create container ID is invalid")
+    return container_id
+
+
+def _docker_inspected_container_id(
+    inspection: object,
+    *,
+    expected: str | None = None,
+) -> str | None:
+    if type(inspection) is not dict:
+        return None
+    container_id = inspection.get("Id")
+    if (
+        type(container_id) is not str
+        or _DIGEST_PATTERN.fullmatch(container_id) is None
+        or (expected is not None and container_id != expected)
+    ):
+        return None
+    return container_id
+
+
+def _valid_staging_configuration(
+    inspection: object,
+    binding: RunTestsDockerBinding,
+    plan: DockerExecutionPlan,
+    expected_container_id: str,
+) -> bool:
+    try:
+        config = inspection["Config"]
+        host = inspection["HostConfig"]
+        mounts = inspection["Mounts"]
+        return (
+            _docker_inspected_container_id(
+                inspection, expected=expected_container_id
+            )
+            == expected_container_id
+            and inspection.get("Name") == f"/{binding.staging_container_name}"
+            and type(config) is dict
+            and config.get("Image") == plan.image_reference
+            and config.get("User") == "65532:65532"
+            and type(config.get("Labels")) is dict
+            and config["Labels"].get(_DOCKER_OWNERSHIP_LABEL)
+            == binding.ownership_token
+            and type(host) is dict
+            and host.get("NetworkMode") == "none"
+            and host.get("ReadonlyRootfs") is True
+            and type(mounts) is list
+            and len(mounts) == 1
+            and mounts[0].get("Destination") == "/workspace"
+            and mounts[0].get("Type") == "volume"
+            and mounts[0].get("Name") == binding.workspace_volume_name
+            and mounts[0].get("RW") is True
+        )
+    except (KeyError, TypeError, AttributeError):
+        return False
+
+
+def _valid_staging_prestart_inspection(
+    inspection: object,
+    binding: RunTestsDockerBinding,
+    plan: DockerExecutionPlan,
+    expected_container_id: str,
+) -> bool:
+    try:
+        state = inspection["State"]
+        return (
+            _valid_staging_configuration(
+                inspection, binding, plan, expected_container_id
+            )
+            and type(state) is dict
+            and state.get("Status") == "created"
+            and state.get("Running") is False
+            and state.get("Pid") == 0
+            and state.get("ExitCode") == 0
+            and state.get("StartedAt") == "0001-01-01T00:00:00Z"
+            and state.get("FinishedAt") == "0001-01-01T00:00:00Z"
+        )
+    except (KeyError, TypeError, AttributeError):
+        return False
+
+
+def _valid_staging_inspection(
+    inspection: object,
+    binding: RunTestsDockerBinding,
+    plan: DockerExecutionPlan,
+    expected_container_id: str,
+) -> bool:
+    try:
+        state = inspection["State"]
+        return (
+            _valid_staging_configuration(
+                inspection, binding, plan, expected_container_id
+            )
+            and type(state) is dict
+            and state.get("Status") == "exited"
+            and state.get("ExitCode") == 0
+        )
+    except (KeyError, TypeError, AttributeError):
+        return False
+
+
+def _execution_observation(
+    inspection: object,
+    binding: RunTestsDockerBinding,
+    plan: DockerExecutionPlan,
+    contract_digest: str,
+    expected_image_id: str,
+) -> dict[str, object] | None:
+    try:
+        synthetic_volumes = tuple(
+            {
+                "Name": volume.name,
+                "Labels": {
+                    _DOCKER_OWNERSHIP_LABEL: binding.ownership_token,
+                },
+                "Driver": "local",
+                "Scope": "local",
+                "Options": None,
+            }
+            for volume in (plan.workspace_volume, plan.output_volume)
+        )
+        validate_docker_execution_inspections(
+            plan,
+            inspection,
+            synthetic_volumes[0],
+            synthetic_volumes[1],
+        )
+        config = inspection["Config"]
+        labels = config["Labels"]
+        state = inspection["State"]
+        status = state["Status"]
+        valid = (
+            type(inspection) is dict
+            and inspection.get("Name") == f"/{binding.container_name}"
+            and inspection.get("Image") == expected_image_id
+            and type(config) is dict
+            and type(labels) is dict
+            and labels.get(_DOCKER_OWNERSHIP_LABEL) == binding.ownership_token
+            and labels.get(_DOCKER_EXECUTION_ID_LABEL) == binding.execution_id
+            and labels.get(_DOCKER_CONTRACT_DIGEST_LABEL) == contract_digest
+            and config.get("Image") == plan.image_reference
+            and type(state) is dict
+            and status
+            in {"created", "running", "paused", "restarting", "dead", "exited"}
+        )
+        if not valid:
+            return None
+        ever_started = not (
+            status == "created"
+            and state.get("Pid") == 0
+            and state.get("StartedAt") == "0001-01-01T00:00:00Z"
+            and state.get("FinishedAt") == "0001-01-01T00:00:00Z"
+        )
+        return {
+            "name": binding.container_name,
+            "ownership_token": binding.ownership_token,
+            "execution_id": binding.execution_id,
+            "execution_contract_digest": contract_digest,
+            "status": status,
+            "ever_started": ever_started,
+            "immutable_image_matches": True,
+            "config_matches": True,
+            "mounts_match": True,
+        }
+    except (KeyError, TypeError, AttributeError, ValueError):
+        return None
+
+
+def _resource_observation(
+    inspection: object,
+    *,
+    name: str,
+    ownership_token: str,
+    configuration_matches: bool,
+) -> dict[str, object] | None:
+    if type(inspection) is not dict:
+        return None
+    labels = inspection.get("Labels")
+    if (
+        inspection.get("Name") != name
+        or type(labels) is not dict
+        or labels.get(_DOCKER_OWNERSHIP_LABEL) != ownership_token
+    ):
+        return None
+    return {
+        "name": name,
+        "ownership_token": ownership_token,
+        "configuration_matches": configuration_matches,
+    }
+
+
+def _owned_run_tests_execution_container(
+    inspection: object,
+    binding: RunTestsDockerBinding,
+    contract_digest: str,
+) -> bool:
+    if type(inspection) is not dict:
+        return False
+    config = inspection.get("Config")
+    labels = config.get("Labels") if type(config) is dict else None
+    return (
+        inspection.get("Name") == f"/{binding.container_name}"
+        and type(labels) is dict
+        and labels.get(_DOCKER_OWNERSHIP_LABEL) == binding.ownership_token
+        and labels.get(_DOCKER_EXECUTION_ID_LABEL) == binding.execution_id
+        and labels.get(_DOCKER_CONTRACT_DIGEST_LABEL) == contract_digest
+    )
+
+
+def _extract_run_tests_output_tar(
+    contract: RunTestsExecutionContract,
+    raw: bytes,
+) -> tuple[RunTestsStartedEnvelope, RunTestsResultEnvelope]:
+    if type(raw) is not bytes or not 1 <= len(raw) <= _MAX_DOCKER_OUTPUT_ARCHIVE_BYTES:
+        raise ValueError("run-tests output archive exceeds its limit")
+    try:
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+            members = archive.getmembers()
+            if len(members) != 3:
+                raise ValueError("run-tests output archive is not closed")
+            names = tuple(member.name for member in members)
+            if names[0] == "." and set(names[1:]) == {
+                "./started.json",
+                "./result.json",
+            }:
+                prefix = "./"
+            elif names[0] == "output" and set(names[1:]) == {
+                "output/started.json",
+                "output/result.json",
+            }:
+                prefix = "output/"
+            else:
+                raise ValueError(
+                    f"run-tests output archive names are not canonical: {names!r}"
+                )
+            if not members[0].isdir() or any(
+                not member.isfile() for member in members[1:]
+            ):
+                raise ValueError("run-tests output archive types are invalid")
+            payload_end = max(
+                member.offset_data + ((member.size + 511) // 512) * 512
+                for member in members
+            )
+            trailer = raw[payload_end:]
+            if (
+                len(trailer) < 1_024
+                or len(trailer) % 512 != 0
+                or any(trailer)
+            ):
+                raise ValueError("run-tests output archive is not terminated")
+            contents: dict[str, bytes] = {}
+            for member in members[1:]:
+                if not 1 <= member.size <= _MAX_RUN_TESTS_ENVELOPE_BYTES:
+                    raise ValueError("run-tests output envelope size is invalid")
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    raise ValueError("run-tests output envelope is missing")
+                content = extracted.read(_MAX_RUN_TESTS_ENVELOPE_BYTES + 1)
+                if len(content) != member.size:
+                    raise ValueError("run-tests output envelope size changed")
+                contents[member.name.removeprefix(prefix)] = content
+            if archive.next() is not None:
+                raise ValueError("run-tests output archive has extra members")
+    except (tarfile.TarError, EOFError, OSError) as error:
+        raise ValueError("run-tests output archive is invalid") from error
+    started = decode_run_tests_started_envelope(contents["started.json"])
+    result = decode_run_tests_result_envelope(contents["result.json"])
+    contract_digest = _run_tests_contract_digest(contract)
+    if not _valid_run_tests_started_observation(
+        started,
+        execution_id=contract.execution_id,
+        contract_digest=contract_digest,
+    ) or not _valid_run_tests_result_observation(
+        result,
+        execution_id=contract.execution_id,
+        contract_digest=contract_digest,
+    ):
+        raise ValueError("run-tests output archive does not match contract")
+    return started, result
+
+
+def _run_tests_result_matches_exit(
+    result: RunTestsResultEnvelope,
+    exit_code: object,
+) -> bool:
+    return type(exit_code) is int and (
+        result.actual_exit_code == exit_code
+        if result.actual_exit_code is not None
+        else result.failure_code is not None and exit_code == 1
+    )
+
+
+def _prepare_run_tests_docker(
+    executor: DockerRunTestsExecutor,
+    contract: RunTestsExecutionContract,
+    snapshot: CandidateExecutionSnapshot,
+) -> RunTestsPreparationOutcome:
+    cleanup_required = False
+    try:
+        commands = _run_tests_docker_command_plan(executor, contract)
+        binding = commands.binding
+        plan = commands.execution_plan
+        contract_digest = commands.contract_digest
+        stream = _run_tests_snapshot_stream(contract, snapshot)
+        preflight = tuple(
+            _docker_checked(executor, command).stdout
+            for command in commands.preflight_absent_argv
+        )
+        container_names = _docker_lines(preflight[0])
+        if binding.staging_container_name in container_names:
+            raise ValueError("Docker staging container already exists")
+        lifecycle = validate_docker_preflight_absent(
+            plan,
+            DockerPreflightObservation(
+                container_names=container_names,
+                volume_names=_docker_lines(preflight[1]),
+            ),
+        )
+        cleanup_required = True
+        _docker_checked(executor, commands.create_workspace_volume_argv)
+        lifecycle = mark_docker_resource_created(
+            plan, lifecycle, "workspace_volume"
+        )
+        workspace_after_create = _docker_inspection(
+            _docker_checked(
+                executor,
+                commands.inspect_workspace_volume_argv,
+            ).stdout
+        )
+        if not _valid_docker_volume_inspection(
+            plan,
+            workspace_after_create,
+            resource="workspace_volume",
+        ):
+            raise ValueError("Docker workspace volume ownership is invalid")
+        staging_id = _docker_created_container_id(
+            _docker_checked(
+                executor, commands.create_staging_container_argv
+            ).stdout
+        )
+        staging_inspect_by_id = _docker_command_with_container_id(
+            commands.inspect_staging_container_argv, staging_id
+        )
+        staging_prestart = _docker_inspection(
+            _docker_checked(executor, staging_inspect_by_id).stdout
+        )
+        if not _valid_staging_prestart_inspection(
+            staging_prestart,
+            binding,
+            plan,
+            staging_id,
+        ):
+            raise ValueError("Docker staging pre-start inspection is invalid")
+        workspace_pinned = _docker_inspection(
+            _docker_checked(
+                executor,
+                commands.inspect_workspace_volume_argv,
+            ).stdout
+        )
+        if not _valid_docker_volume_inspection(
+            plan,
+            workspace_pinned,
+            resource="workspace_volume",
+        ):
+            raise ValueError("Docker pinned workspace volume is invalid")
+        staged = _docker_checked(
+            executor,
+            _docker_command_with_container_id(
+                commands.start_staging_container_argv, staging_id
+            ),
+            input_bytes=stream,
+            timeout=30.0,
+        )
+        expected_summary = rfc8785.dumps(
+            {
+                "execution_contract_digest": contract_digest,
+                "execution_id": contract.execution_id,
+                "workspace_manifest_digest": contract.workspace_manifest_digest,
+            }
+        ) + b"\n"
+        if staged.stdout != expected_summary or staged.stderr:
+            raise ValueError("Docker staging result is invalid")
+        stage_inspection = _docker_inspection(
+            _docker_checked(
+                executor,
+                staging_inspect_by_id,
+            ).stdout
+        )
+        if not _valid_staging_inspection(
+            stage_inspection, binding, plan, staging_id
+        ):
+            raise ValueError("Docker staging inspection is invalid")
+        _docker_checked(
+            executor,
+            _docker_command_with_container_id(
+                commands.remove_staging_container_argv, staging_id
+            ),
+        )
+        absent = _inspect_optional(
+            executor,
+            commands.inspect_staging_container_argv,
+        )
+        if absent is not None:
+            raise ValueError("Docker staging container absence is unproven")
+        _docker_checked(executor, commands.create_output_volume_argv)
+        lifecycle = mark_docker_resource_created(plan, lifecycle, "output_volume")
+        _docker_checked(
+            executor,
+            commands.create_execution_container_argv,
+        )
+        lifecycle = mark_docker_resource_created(plan, lifecycle, "container")
+        image = _docker_inspection(
+            _docker_checked(
+                executor,
+                commands.inspect_image_argv,
+            ).stdout
+        )
+        container = _docker_inspection(
+            _docker_checked(
+                executor,
+                commands.inspect_execution_container_argv,
+            ).stdout
+        )
+        workspace = _docker_inspection(
+            _docker_checked(
+                executor,
+                commands.inspect_workspace_volume_argv,
+            ).stdout
+        )
+        output = _docker_inspection(
+            _docker_checked(
+                executor,
+                commands.inspect_output_volume_argv,
+            ).stdout
+        )
+        local_image_id = _validated_docker_image_id(plan, image)
+        if local_image_id is None:
+            raise ValueError("Docker image identity is invalid")
+        derive_ready_docker_start(
+            plan,
+            lifecycle,
+            image,
+            container,
+            workspace,
+            output,
+        )
+        if _execution_observation(
+            container,
+            binding,
+            plan,
+            contract_digest,
+            local_image_id,
+        ) is None:
+            raise ValueError("Docker execution identity is invalid")
+        return RunTestsPreparationOutcome("READY_TO_START")
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        if cleanup_required:
+            try:
+                _cleanup_run_tests_docker(executor, contract)
+            except (
+                OSError,
+                RuntimeError,
+                subprocess.SubprocessError,
+                ValueError,
+                TypeError,
+            ):
+                pass
+        return RunTestsPreparationOutcome("UNRESOLVED")
+
+
+def _start_and_wait_run_tests_docker(
+    executor: DockerRunTestsExecutor,
+    contract: RunTestsExecutionContract,
+) -> RunTestsExecutionOutcome:
+    try:
+        commands = _run_tests_docker_command_plan(executor, contract)
+        binding = commands.binding
+        plan = commands.execution_plan
+        contract_digest = commands.contract_digest
+        image = _docker_inspection(
+            _docker_checked(executor, commands.inspect_image_argv).stdout
+        )
+        local_image_id = _validated_docker_image_id(plan, image)
+        if local_image_id is None:
+            return RunTestsExecutionOutcome("UNRESOLVED")
+        inspected = _docker_inspection(
+            _docker_checked(
+                executor,
+                commands.inspect_execution_container_argv,
+            ).stdout
+        )
+        container_id = _docker_inspected_container_id(inspected)
+        observation = _execution_observation(
+            inspected,
+            binding,
+            plan,
+            contract_digest,
+            local_image_id,
+        )
+        state = inspected.get("State")
+        if (
+            container_id is None
+            or observation is None
+            or observation["status"] != "created"
+            or observation["ever_started"] is not False
+            or type(state) is not dict
+            or state.get("Running") is not False
+            or state.get("Paused") is not False
+            or state.get("Restarting") is not False
+            or state.get("Dead") is not False
+            or state.get("ExitCode") != 0
+        ):
+            return RunTestsExecutionOutcome("UNRESOLVED")
+        _docker_checked(
+            executor,
+            _docker_command_with_container_id(
+                commands.start_execution_container_argv, container_id
+            ),
+        )
+        waited = _docker_checked(
+            executor,
+            _docker_command_with_container_id(
+                commands.wait_execution_container_argv, container_id
+            ),
+            timeout=140.0,
+        )
+        try:
+            wait_exit = int(waited.stdout.strip().decode("ascii"))
+        except (UnicodeDecodeError, ValueError):
+            return RunTestsExecutionOutcome("UNRESOLVED")
+        if not 0 <= wait_exit <= 255:
+            return RunTestsExecutionOutcome("UNRESOLVED")
+        after = _docker_inspection(
+            _docker_checked(
+                executor,
+                _docker_command_with_container_id(
+                    commands.inspect_execution_container_argv, container_id
+                ),
+            ).stdout
+        )
+        after_observation = _execution_observation(
+            after,
+            binding,
+            plan,
+            contract_digest,
+            local_image_id,
+        )
+        if (
+            _docker_inspected_container_id(after, expected=container_id) is None
+            or after_observation is None
+        ):
+            return RunTestsExecutionOutcome("UNRESOLVED")
+        if after_observation["status"] in {"running", "paused", "restarting"}:
+            return RunTestsExecutionOutcome("WAIT_RUNNING")
+        if after_observation["status"] != "exited":
+            return RunTestsExecutionOutcome("UNRESOLVED")
+        state = after.get("State")
+        if type(state) is not dict or state.get("ExitCode") != wait_exit:
+            return RunTestsExecutionOutcome("UNRESOLVED")
+        archive = _docker_checked(
+            executor,
+            _docker_command_with_container_id(
+                commands.copy_output_envelopes_argv, container_id
+            ),
+        ).stdout
+        _, result = _extract_run_tests_output_tar(contract, archive)
+        if not _run_tests_result_matches_exit(result, wait_exit):
+            return RunTestsExecutionOutcome("UNRESOLVED")
+        return RunTestsExecutionOutcome("CLOSED_RESULT", result)
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return RunTestsExecutionOutcome("UNRESOLVED")
+
+
+def _inspect_optional(
+    executor: DockerRunTestsExecutor,
+    argv: tuple[str, ...],
+) -> dict[str, Any] | None:
+    result = _docker_result(executor, argv)
+    if result.returncode != 0:
+        name = argv[-1]
+        expected_stderr = (
+            f"Error response from daemon: get {name}: no such volume\n".encode()
+            if argv[1:3] == ("volume", "inspect")
+            else f"error: no such object: {name}\n".encode()
+        )
+        if (
+            result.returncode != 1
+            or result.stdout != b"[]\n"
+            or result.stderr != expected_stderr
+        ):
+            raise ValueError("Docker absence observation is invalid")
+        return None
+    return _docker_inspection(result.stdout)
+
+
+def _reconcile_run_tests_docker(
+    executor: DockerRunTestsExecutor,
+    contract: RunTestsExecutionContract,
+    journal_state: RunTestsJournalState,
+    receipt_state: RunTestsReceiptState,
+) -> RunTestsExecutionOutcome:
+    if type(journal_state) is not str or journal_state not in {
+        "RESERVED",
+        "STARTED_UNCONFIRMED",
+    }:
+        raise ValueError("run-tests journal state is invalid")
+    if type(receipt_state) is not str or receipt_state not in {
+        "ABSENT",
+        "MATCH",
+        "MISMATCH",
+    }:
+        raise ValueError("run-tests Receipt observation is invalid")
+    try:
+        if receipt_state == "MATCH":
+            try:
+                executor.cleanup(contract)
+            except (
+                OSError,
+                subprocess.SubprocessError,
+                ValueError,
+                TypeError,
+                RuntimeError,
+            ):
+                return RunTestsExecutionOutcome("UNRESOLVED")
+            return RunTestsExecutionOutcome("CLOSED_RESULT", None)
+        if receipt_state == "MISMATCH":
+            return RunTestsExecutionOutcome("UNRESOLVED")
+        prepare_candidate_execution_snapshot(
+            CandidateExecutionSnapshotRequest(
+                runtime_root=executor._candidate_runtime_root,
+                workspace_id=contract.candidate_workspace_id,
+                source_artifact_sha256=contract.source_artifact_sha256,
+                expected_head_commit=contract.candidate_commit,
+                expected_workspace_manifest_digest=(
+                    contract.workspace_manifest_digest
+                ),
+            )
+        )
+        commands = _run_tests_docker_command_plan(executor, contract)
+        binding = commands.binding
+        plan = commands.execution_plan
+        contract_digest = commands.contract_digest
+        staging_raw = _inspect_optional(
+            executor, commands.inspect_staging_container_argv
+        )
+        container_raw = _inspect_optional(
+            executor, commands.inspect_execution_container_argv
+        )
+        workspace_raw = _inspect_optional(
+            executor,
+            commands.inspect_workspace_volume_argv,
+        )
+        output_raw = _inspect_optional(
+            executor,
+            commands.inspect_output_volume_argv,
+        )
+        if all(
+            inspection is None
+            for inspection in (
+                staging_raw,
+                container_raw,
+                workspace_raw,
+                output_raw,
+            )
+        ):
+            action = reconcile_run_tests_docker_execution(
+                journal_state,
+                binding,
+                RunTestsDockerObservation(None, None, None, None, None, None),
+                expected_execution_contract_digest=contract_digest,
+                receipt_state=receipt_state,
+            )
+            return RunTestsExecutionOutcome(
+                "SAFE_TO_RETRY" if action == "SAFE_TO_RETRY" else "UNRESOLVED"
+            )
+        image_raw = _docker_inspection(
+            _docker_checked(
+                executor,
+                commands.inspect_image_argv,
+            ).stdout
+        )
+        local_image_id = _validated_docker_image_id(plan, image_raw)
+        if local_image_id is None:
+            return RunTestsExecutionOutcome("UNRESOLVED")
+        staging = None
+        if staging_raw is not None:
+            staging_id = _docker_inspected_container_id(staging_raw)
+            if staging_id is None:
+                return RunTestsExecutionOutcome("UNRESOLVED")
+            staging = _resource_observation(
+                staging_raw,
+                name=binding.staging_container_name,
+                ownership_token=binding.ownership_token,
+                configuration_matches=(
+                    _valid_staging_prestart_inspection(
+                        staging_raw, binding, plan, staging_id
+                    )
+                    or _valid_staging_inspection(
+                        staging_raw, binding, plan, staging_id
+                    )
+                ),
+            )
+            if staging is None:
+                return RunTestsExecutionOutcome("UNRESOLVED")
+        container = None
+        started = None
+        result = None
+        if container_raw is not None:
+            container_id = _docker_inspected_container_id(container_raw)
+            if container_id is None:
+                return RunTestsExecutionOutcome("UNRESOLVED")
+            container = _execution_observation(
+                container_raw,
+                binding,
+                plan,
+                contract_digest,
+                local_image_id,
+            )
+            if container is None:
+                return RunTestsExecutionOutcome("UNRESOLVED")
+            if container["ever_started"] is True:
+                copied = _docker_checked(
+                    executor,
+                    _docker_command_with_container_id(
+                        commands.copy_output_envelopes_argv, container_id
+                    ),
+                )
+                try:
+                    started, result = _extract_run_tests_output_tar(
+                        contract, copied.stdout
+                    )
+                    if (
+                        container["status"] == "exited"
+                        and not _run_tests_result_matches_exit(
+                            result,
+                            container_raw.get("State", {}).get("ExitCode"),
+                        )
+                    ):
+                        started = None
+                        result = None
+                except ValueError:
+                    started = None
+                    result = None
+        workspace = None
+        if workspace_raw is not None:
+            workspace = _resource_observation(
+                workspace_raw,
+                name=binding.workspace_volume_name,
+                ownership_token=binding.ownership_token,
+                configuration_matches=_valid_docker_volume_inspection(
+                    plan, workspace_raw, resource="workspace_volume"
+                ),
+            )
+            if workspace is None:
+                return RunTestsExecutionOutcome("UNRESOLVED")
+        output = None
+        if output_raw is not None:
+            output = _resource_observation(
+                output_raw,
+                name=binding.output_volume_name,
+                ownership_token=binding.ownership_token,
+                configuration_matches=_valid_docker_volume_inspection(
+                    plan, output_raw, resource="output_volume"
+                ),
+            )
+            if output is None:
+                return RunTestsExecutionOutcome("UNRESOLVED")
+        observation = RunTestsDockerObservation(
+            staging_container=staging,
+            container=container,
+            workspace_volume=workspace,
+            output_volume=output,
+            started=started,
+            result=result,
+        )
+        action = reconcile_run_tests_docker_execution(
+            journal_state,
+            binding,
+            observation,
+            expected_execution_contract_digest=contract_digest,
+            receipt_state=receipt_state,
+        )
+        if action == "WAIT_RUNNING":
+            return RunTestsExecutionOutcome("WAIT_RUNNING")
+        if action == "SAFE_TO_RETRY":
+            return RunTestsExecutionOutcome("SAFE_TO_RETRY")
+        if action == "CLEAN_PRESTART":
+            executor.cleanup(contract)
+            return RunTestsExecutionOutcome("SAFE_TO_RETRY")
+        if action == "RESUME_RESULT" and result is not None:
+            return RunTestsExecutionOutcome("CLOSED_RESULT", result)
+        if action == "CLEAN_COMMITTED":
+            executor.cleanup(contract)
+            return RunTestsExecutionOutcome("CLOSED_RESULT", result)
+        return RunTestsExecutionOutcome("UNRESOLVED")
+    except (
+        CandidateReadError,
+        OSError,
+        subprocess.SubprocessError,
+        ValueError,
+        TypeError,
+    ):
+        return RunTestsExecutionOutcome("UNRESOLVED")
+
+
+def _cleanup_run_tests_docker(
+    executor: DockerRunTestsExecutor,
+    contract: RunTestsExecutionContract,
+) -> None:
+    commands = _run_tests_docker_command_plan(executor, contract)
+    binding = commands.binding
+    plan = commands.execution_plan
+    resources: tuple[
+        tuple[str, str, tuple[str, ...], tuple[str, ...]], ...
+    ] = (
+        (
+            "container",
+            binding.container_name,
+            commands.inspect_execution_container_argv,
+            commands.remove_execution_container_argv,
+        ),
+        (
+            "output_volume",
+            binding.output_volume_name,
+            commands.inspect_output_volume_argv,
+            commands.remove_output_volume_argv,
+        ),
+        (
+            "staging",
+            binding.staging_container_name,
+            commands.inspect_staging_container_argv,
+            commands.remove_staging_container_force_argv,
+        ),
+        (
+            "workspace_volume",
+            binding.workspace_volume_name,
+            commands.inspect_workspace_volume_argv,
+            commands.remove_workspace_volume_argv,
+        ),
+    )
+    for resource, name, inspect_argv, remove_argv in resources:
+        inspection = _inspect_optional(executor, inspect_argv)
+        if inspection is None:
+            continue
+        container_id = (
+            _docker_inspected_container_id(inspection)
+            if resource in {"container", "staging"}
+            else None
+        )
+        if resource == "container":
+            owned = _owned_run_tests_execution_container(
+                inspection,
+                binding,
+                commands.contract_digest,
+            ) and container_id is not None
+        elif resource == "staging":
+            labels = inspection.get("Config", {}).get("Labels", {})
+            owned = (
+                container_id is not None
+                and inspection.get("Name") == f"/{name}"
+                and type(labels) is dict
+                and labels.get(_DOCKER_OWNERSHIP_LABEL)
+                == binding.ownership_token
+            )
+        else:
+            owned = _docker_resource_is_owned(plan, resource, inspection)
+        if not owned:
+            raise RuntimeError(f"retained unowned Docker resource: {name}")
+        if container_id is not None:
+            remove_argv = _docker_command_with_container_id(
+                remove_argv, container_id
+            )
+        _docker_checked(executor, remove_argv)
+        if _inspect_optional(executor, inspect_argv) is not None:
+            raise RuntimeError(f"Docker resource remains after cleanup: {name}")
+
+
+class DockerRunTestsExecutor:
+    def __init__(
+        self,
+        *,
+        docker_binary: Path,
+        candidate_runtime_root: Path,
+        image_reference: str,
+        run: DockerCommandRunner | None = None,
+    ) -> None:
+        if (
+            not isinstance(docker_binary, Path)
+            or not docker_binary.is_absolute()
+            or docker_binary != Path(os.path.abspath(docker_binary))
+            or not isinstance(candidate_runtime_root, Path)
+            or not candidate_runtime_root.is_absolute()
+            or candidate_runtime_root
+            != Path(os.path.abspath(candidate_runtime_root))
+            or not _valid_immutable_image_reference(image_reference)
+            or (run is not None and not callable(run))
+        ):
+            raise ValueError("Docker run-tests executor configuration is invalid")
+        self._docker_binary = docker_binary
+        self._candidate_runtime_root = candidate_runtime_root
+        self._image_reference = image_reference
+        self._run = _run_docker_command if run is None else run
+
+    def prepare(
+        self,
+        contract: RunTestsExecutionContract,
+        snapshot: CandidateExecutionSnapshot,
+    ) -> RunTestsPreparationOutcome:
+        return _prepare_run_tests_docker(self, contract, snapshot)
+
+    def start_and_wait(
+        self,
+        contract: RunTestsExecutionContract,
+    ) -> RunTestsExecutionOutcome:
+        return _start_and_wait_run_tests_docker(self, contract)
+
+    def reconcile(
+        self,
+        contract: RunTestsExecutionContract,
+        journal_state: RunTestsJournalState,
+        receipt_state: RunTestsReceiptState,
+    ) -> RunTestsExecutionOutcome:
+        return _reconcile_run_tests_docker(
+            self, contract, journal_state, receipt_state
+        )
+
+    def cleanup(self, contract: RunTestsExecutionContract) -> None:
+        _cleanup_run_tests_docker(self, contract)
 
 
 def _validated_process_request(
@@ -4458,10 +6939,20 @@ def _terminate_process_group(
         process.wait(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
     except subprocess.TimeoutExpired:
         pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    while True:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            break
+        except PermissionError as error:
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining == 0:
+                raise ProcessExecutionError(
+                    "bounded process cleanup exceeded its grace period"
+                ) from error
+            time.sleep(min(0.01, remaining))
+        else:
+            break
     remaining = max(0.0, deadline - time.monotonic())
     try:
         process.wait(timeout=remaining)

@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -25,6 +26,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 import openworkproof.evidence as evidence
+import openworkproof.repo_tools as repo_tools
 from openworkproof.models import (
     ACTION_RECEIPT_ADAPTER,
     AgentRequest,
@@ -35,6 +37,7 @@ from openworkproof.models import (
     RunTestsArguments,
     TestResultEvidence,
     ToolCallReceipt,
+    request_arguments_digest,
 )
 from openworkproof.policy import (
     AuthorizationContext,
@@ -54,7 +57,7 @@ from openworkproof.repo_tools import (
     RollbackRequest as WorkspaceRollbackRequest,
     rollback_candidate_workspace,
 )
-from openworkproof.signing import key_id, sign_payload
+from openworkproof.signing import key_id, sign_payload, verify_nested_claim
 
 
 class ToolCallDenied(RuntimeError):
@@ -184,6 +187,8 @@ def make_candidate_rollback_handler(
 
 
 _MAX_RECEIPT_BYTES = 64 * 1024
+_MAX_AGENT_REQUEST_BYTES = 8_192
+_MAX_AUTHORIZATION_PREFIX_BYTES = 8 * 1024 * 1024
 
 
 def _digest(value: object) -> str:
@@ -241,6 +246,101 @@ def _handler_execution_id(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _StoredRunTestsExecution:
+    execution_id: str
+    request: AgentRequest
+    contract: repo_tools.RunTestsExecutionContract
+    execution_facts: ProspectiveExecutionFacts
+    authorization_prefix_digest: str
+    reserved_at: datetime
+    state: Literal["RESERVED", "STARTED_UNCONFIRMED"]
+
+
+def _canonical_agent_request(request: AgentRequest) -> bytes:
+    if type(request) is not AgentRequest:
+        raise ValueError("stored AgentRequest is invalid")
+    encoded = rfc8785.dumps(request.model_dump(mode="json"))
+    if not 1 <= len(encoded) <= _MAX_AGENT_REQUEST_BYTES:
+        raise ValueError("stored AgentRequest exceeds its byte limit")
+    return encoded
+
+
+def _authorization_prefix_digest(
+    prefix: AuthorizationLedgerPrefix,
+) -> str:
+    if type(prefix) is not AuthorizationLedgerPrefix:
+        raise ValueError("authorization prefix is invalid")
+    encoded = rfc8785.dumps(
+        {
+            "domain": "openworkproof/authorization-ledger-prefix/v0.1",
+            "effective_grants": [
+                grant.model_dump(mode="json")
+                for grant in prefix.effective_grants
+            ],
+            "grant_attempts": [
+                grant.model_dump(mode="json")
+                for grant in prefix.grant_attempts
+            ],
+            "receipts": [
+                receipt.model_dump(mode="json")
+                for receipt in prefix.receipts
+            ],
+        }
+    )
+    if not 1 <= len(encoded) <= _MAX_AUTHORIZATION_PREFIX_BYTES:
+        raise ValueError("authorization prefix exceeds its byte limit")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _decode_canonical_agent_request(raw: object) -> AgentRequest:
+    if type(raw) is not str:
+        raise ValueError("stored AgentRequest JSON is invalid")
+    encoded = raw.encode("utf-8")
+    if not 1 <= len(encoded) <= _MAX_AGENT_REQUEST_BYTES:
+        raise ValueError("stored AgentRequest exceeds its byte limit")
+
+    def reject_duplicates(
+        pairs: list[tuple[str, object]],
+    ) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("stored AgentRequest has duplicate keys")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"invalid JSON constant: {value}")
+
+    value = json.loads(
+        raw,
+        object_pairs_hook=reject_duplicates,
+        parse_constant=reject_constant,
+    )
+    if rfc8785.dumps(value) != encoded:
+        raise ValueError("stored AgentRequest is not canonical")
+    request = AgentRequest.model_validate(value)
+    if _canonical_agent_request(request) != encoded:
+        raise ValueError("stored AgentRequest does not round trip")
+    return request
+
+
+def _contract_arguments_digest(
+    contract: repo_tools.RunTestsExecutionContract,
+) -> str:
+    arguments = RunTestsArguments(
+        test_mode="verifier",
+        command_digest=contract.command_digest,
+        source_commit=contract.source_commit,
+        candidate_commit=contract.candidate_commit,
+        workspace_manifest_digest=contract.workspace_manifest_digest,
+        container_image_digest=contract.container_image_digest,
+        fixed_test_source_digest=contract.fixed_test_source_digest,
+    )
+    return request_arguments_digest("owp.run_tests", arguments)
+
+
 def _normalized_sql(value: str) -> str:
     return " ".join(value.split()).casefold()
 
@@ -267,9 +367,14 @@ def _ensure_handler_execution_schema(
         actual = _normalized_sql(row[0])
         if actual == _normalized_sql(expected):
             return
-        if actual == _normalized_sql(
-            evidence._LEGACY_HANDLER_EXECUTION_SCHEMA
-        ):
+        predecessors = (
+            evidence._LEGACY_HANDLER_EXECUTION_SCHEMA,
+            evidence._HANDLER_EXECUTION_SCHEMA_V1,
+            evidence._HANDLER_EXECUTION_SCHEMA_V2,
+        )
+        if actual in {
+            _normalized_sql(predecessor) for predecessor in predecessors
+        }:
             if connection.execute(
                 "SELECT COUNT(*) FROM handler_executions"
             ).fetchone() != (0,):
@@ -367,6 +472,10 @@ def _recover_handler_executions(
         if not rows:
             return
         row = tuple(rows[0])
+        if row[5] == "owp.run_tests":
+            raise ValueError(
+                "run-tests execution requires typed driver reconciliation"
+            )
         state = row[-1]
         stored = connection.execute(
             "SELECT receipt_json FROM receipts WHERE nonce = ?",
@@ -399,8 +508,47 @@ def _reserve_handler_execution(
     context: AuthorizationContext,
     request: AgentRequest,
     execution_facts: ProspectiveExecutionFacts,
+    execution_contract: repo_tools.RunTestsExecutionContract | None,
 ) -> str:
     execution_id = _handler_execution_id(request, execution_facts)
+    request_json: str | None = None
+    contract_json: str | None = None
+    contract_digest: str | None = None
+    authorization_prefix_digest: str | None = None
+    if request.tool_name == "owp.run_tests":
+        if type(execution_contract) is not repo_tools.RunTestsExecutionContract:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        if (
+            execution_contract.execution_id != execution_id
+            or execution_contract.request_digest != request.digest
+            or execution_contract.arguments_digest != request.arguments_digest
+            or _contract_arguments_digest(execution_contract)
+            != request.arguments_digest
+        ):
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        try:
+            request_bytes = _canonical_agent_request(request)
+            contract_bytes = repo_tools.encode_run_tests_execution_contract(
+                execution_contract
+            )
+        except (TypeError, ValueError) as error:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+        if not 1 <= len(contract_bytes) <= 8_192:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        request_json = request_bytes.decode("utf-8")
+        contract_json = contract_bytes.decode("utf-8")
+        contract_digest = hashlib.sha256(contract_bytes).hexdigest()
+        try:
+            authorization_prefix_digest = _authorization_prefix_digest(
+                context.ledger_prefix
+            )
+        except (TypeError, ValueError) as error:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+    elif request.tool_name == "owp.rollback_patch":
+        if execution_contract is not None:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+    else:
+        raise HandlerCoordinationError("RECOVERY_REQUIRED")
 
     def reserve(connection: sqlite3.Connection) -> None:
         if connection.execute(
@@ -421,8 +569,14 @@ def _reserve_handler_execution(
                 container_instance_id_digest,
                 controller_id,
                 reserved_at,
-                state
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED')
+                state,
+                authorization_prefix_digest,
+                request_json,
+                execution_contract_json,
+                execution_contract_digest
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?, ?
+            )
             """,
             (
                 execution_id,
@@ -436,11 +590,137 @@ def _reserve_handler_execution(
                 execution_facts.container_instance_id_digest,
                 execution_facts.controller_id,
                 context.transaction_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                authorization_prefix_digest,
+                request_json,
+                contract_json,
+                contract_digest,
             ),
         )
 
     _journal_transaction(ledger_path, lock_descriptor, reserve)
     return execution_id
+
+
+def _load_stored_run_tests_execution(
+    ledger_path: Path,
+    lock_descriptor: int,
+) -> _StoredRunTestsExecution | None:
+    def load(
+        connection: sqlite3.Connection,
+    ) -> _StoredRunTestsExecution | None:
+        rows = connection.execute(
+            """
+            SELECT
+                execution_id,
+                work_order_digest,
+                request_digest,
+                nonce,
+                grant_id,
+                tool_name,
+                arguments_digest,
+                execution_context_id,
+                container_instance_id_digest,
+                controller_id,
+                reserved_at,
+                state,
+                authorization_prefix_digest,
+                request_json,
+                execution_contract_json,
+                execution_contract_digest
+            FROM handler_executions
+            ORDER BY execution_id
+            LIMIT 2
+            """
+        ).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise ValueError("multiple handler executions are unresolved")
+        if rows[0][5] == "owp.rollback_patch":
+            return None
+        (
+            execution_id,
+            work_order_digest,
+            request_digest,
+            nonce,
+            grant_id,
+            tool_name,
+            arguments_digest,
+            execution_context_id,
+            container_instance_id_digest,
+            controller_id,
+            reserved_at_raw,
+            state,
+            authorization_prefix_digest,
+            request_json,
+            contract_json,
+            contract_digest,
+        ) = rows[0]
+        request = _decode_canonical_agent_request(request_json)
+        work_order = evidence.load_authoritative_work_order(connection)
+        if type(contract_json) is not str:
+            raise ValueError("stored execution contract JSON is invalid")
+        contract_bytes = contract_json.encode("utf-8")
+        if not 1 <= len(contract_bytes) <= 8_192:
+            raise ValueError("stored execution contract exceeds its byte limit")
+        contract = repo_tools.decode_run_tests_execution_contract(
+            contract_bytes
+        )
+        if (
+            type(contract_digest) is not str
+            or hashlib.sha256(contract_bytes).hexdigest() != contract_digest
+        ):
+            raise ValueError("stored execution contract digest is invalid")
+        if type(reserved_at_raw) is not str:
+            raise ValueError("stored reservation time is invalid")
+        reserved_at = datetime.strptime(
+            reserved_at_raw, "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+        if reserved_at.strftime("%Y-%m-%dT%H:%M:%SZ") != reserved_at_raw:
+            raise ValueError("stored reservation time is not a UTC second")
+        if state not in {"RESERVED", "STARTED_UNCONFIRMED"}:
+            raise ValueError("stored execution state is invalid")
+        if (
+            type(authorization_prefix_digest) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", authorization_prefix_digest)
+            is None
+        ):
+            raise ValueError("stored authorization prefix digest is invalid")
+        facts = ProspectiveExecutionFacts(
+            execution_context_id=execution_context_id,
+            container_instance_id_digest=container_instance_id_digest,
+            controller_id=controller_id,
+        )
+        if (
+            tool_name != "owp.run_tests"
+            or not verify_nested_claim(request, work_order)
+            or request.work_order_digest != work_order_digest
+            or request.digest != request_digest
+            or request.nonce != nonce
+            or request.grant_id != grant_id
+            or request.tool_name != tool_name
+            or request.arguments_digest != arguments_digest
+            or _handler_execution_id(request, facts) != execution_id
+            or contract.execution_id != execution_id
+            or contract.request_digest != request_digest
+            or contract.arguments_digest != arguments_digest
+            or _contract_arguments_digest(contract) != arguments_digest
+        ):
+            raise ValueError("stored run-tests execution fields disagree")
+        return _StoredRunTestsExecution(
+            execution_id=execution_id,
+            request=request,
+            contract=contract,
+            execution_facts=facts,
+            authorization_prefix_digest=authorization_prefix_digest,
+            reserved_at=reserved_at,
+            state=state,
+        )
+
+    result = _journal_transaction(ledger_path, lock_descriptor, load)
+    if result is None or type(result) is _StoredRunTestsExecution:
+        return result
+    raise HandlerCoordinationError("RECOVERY_REQUIRED")
 
 
 def _mark_handler_started(
@@ -468,6 +748,97 @@ def _finalize_handler_execution(
     lock_descriptor: int,
 ) -> None:
     _recover_handler_executions(ledger_path, lock_descriptor)
+
+
+def _delete_handler_execution(
+    ledger_path: Path,
+    lock_descriptor: int,
+    execution_id: str,
+) -> None:
+    def delete(connection: sqlite3.Connection) -> None:
+        cursor = connection.execute(
+            "DELETE FROM handler_executions WHERE execution_id = ?",
+            (execution_id,),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("handler execution journal is unavailable")
+
+    _journal_transaction(ledger_path, lock_descriptor, delete)
+
+
+def _run_tests_receipt_state(
+    ledger_path: Path,
+    lock_descriptor: int,
+    stored: _StoredRunTestsExecution,
+) -> repo_tools.RunTestsReceiptState:
+    def observe(connection: sqlite3.Connection) -> str:
+        row = connection.execute(
+            "SELECT receipt_json FROM receipts WHERE nonce = ?",
+            (stored.request.nonce,),
+        ).fetchone()
+        if row is None:
+            return "ABSENT"
+        journal_row = connection.execute(
+            """
+            SELECT
+                execution_id, work_order_digest, request_digest, nonce,
+                grant_id, tool_name, arguments_digest,
+                execution_context_id, container_instance_id_digest,
+                controller_id, reserved_at, state
+            FROM handler_executions
+            WHERE execution_id = ?
+            """,
+            (stored.execution_id,),
+        ).fetchone()
+        if journal_row is None or type(row[0]) is not str:
+            raise ValueError("stored run-tests Receipt observation is invalid")
+        return (
+            "MATCH"
+            if _receipt_matches_handler_execution(row[0], tuple(journal_row))
+            else "MISMATCH"
+        )
+
+    result = _journal_transaction(ledger_path, lock_descriptor, observe)
+    if result in {"ABSENT", "MATCH", "MISMATCH"}:
+        return result
+    raise HandlerCoordinationError("RECOVERY_REQUIRED")
+
+
+def _recovery_authorization_context(
+    ledger_path: Path,
+    evidence_root: Path,
+    context: AuthorizationContext,
+    stored: _StoredRunTestsExecution,
+    receipt_state: repo_tools.RunTestsReceiptState,
+    now: datetime,
+    lock_descriptor: int,
+) -> AuthorizationContext:
+    _require_current_context(
+        ledger_path,
+        evidence_root,
+        context,
+        now,
+        lock_descriptor,
+    )
+    if stored.request.work_order_digest != context.work_order.digest:
+        raise HandlerCoordinationError("RECOVERY_REQUIRED")
+    if receipt_state != "ABSENT":
+        return context
+    try:
+        current_prefix_digest = _authorization_prefix_digest(
+            context.ledger_prefix
+        )
+    except (TypeError, ValueError) as error:
+        raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+    if current_prefix_digest != stored.authorization_prefix_digest:
+        raise HandlerCoordinationError("RECOVERY_REQUIRED")
+    return derive_authorization_context(
+        context.work_order,
+        context.ledger_prefix,
+        context.committed_evidence,
+        context.replay_checkpoint,
+        stored.reserved_at,
+    )
 
 
 def _remaining_tool_calls(context: AuthorizationContext, grant_id: str) -> int:
@@ -651,6 +1022,20 @@ def _test_result_payload(
     return rfc8785.dumps(result.model_dump(mode="json"))
 
 
+def _run_tests_arguments_from_contract(
+    contract: repo_tools.RunTestsExecutionContract,
+) -> RunTestsArguments:
+    return RunTestsArguments(
+        test_mode="verifier",
+        command_digest=contract.command_digest,
+        source_commit=contract.source_commit,
+        candidate_commit=contract.candidate_commit,
+        workspace_manifest_digest=contract.workspace_manifest_digest,
+        container_image_digest=contract.container_image_digest,
+        fixed_test_source_digest=contract.fixed_test_source_digest,
+    )
+
+
 def _next_test_reference(
     context: AuthorizationContext,
     arguments: RunTestsArguments,
@@ -800,15 +1185,19 @@ def _build_run_tests_receipt(
     sidecar_private_key: Ed25519PrivateKey,
     *,
     execution_status: str,
+    execution_error_code: Literal[
+        "OUTPUT_LIMIT", "TIMEOUT", "DISK_LIMIT"
+    ] | None,
     actual_exit_code: int | None,
     payload: bytes | None,
 ) -> ToolCallReceipt:
     if execution_status == "succeeded":
+        if execution_error_code is not None:
+            raise HandlerCoordinationError("run-tests outcome is malformed")
         assert payload is not None and actual_exit_code is not None
         reference = _next_test_reference(context, arguments, payload)
         evidence_refs = (reference,)
         output_digest = reference.sha256
-        execution_error_code = None
         state_after = (
             "locally_verified"
             if arguments.test_mode == "verifier"
@@ -823,11 +1212,18 @@ def _build_run_tests_receipt(
             else context.current_state
         )
     else:
+        if execution_error_code not in {
+            "OUTPUT_LIMIT",
+            "TIMEOUT",
+            "DISK_LIMIT",
+        }:
+            raise HandlerCoordinationError("run-tests outcome is malformed")
+        if payload is not None or actual_exit_code is not None:
+            raise HandlerCoordinationError("run-tests outcome is malformed")
         evidence_refs = ()
         output_digest = _digest(
-            {"status": "failed", "error_code": "HANDLER_ERROR"}
+            {"status": "failed", "error_code": execution_error_code}
         )
-        execution_error_code = "HANDLER_ERROR"
         state_after = context.current_state
     results = _predicate_results(
         context,
@@ -929,7 +1325,13 @@ def _preflight_run_tests_receipts(
     sidecar_private_key: Ed25519PrivateKey,
 ) -> None:
     representative_receipts = []
-    for exit_code in (0, 255):
+    expected_exit_code = next(
+        profile.expected_exit_code
+        for profile in context.work_order.test_profiles
+        if profile.test_mode == "verifier"
+    )
+    unexpected_exit_code = 0 if expected_exit_code != 0 else 1
+    for exit_code in (expected_exit_code, unexpected_exit_code):
         payload = _test_result_payload(arguments, exit_code)
         representative_receipts.append(
             _build_run_tests_receipt(
@@ -939,28 +1341,149 @@ def _preflight_run_tests_receipts(
                 execution_facts,
                 sidecar_private_key,
                 execution_status="succeeded",
+                execution_error_code=None,
                 actual_exit_code=exit_code,
                 payload=payload,
             )
         )
-    representative_receipts.append(
-        _build_run_tests_receipt(
-            context,
-            request,
-            arguments,
-            execution_facts,
-            sidecar_private_key,
-            execution_status="failed",
-            actual_exit_code=None,
-            payload=None,
+    for failure_code in ("OUTPUT_LIMIT", "TIMEOUT", "DISK_LIMIT"):
+        representative_receipts.append(
+            _build_run_tests_receipt(
+                context,
+                request,
+                arguments,
+                execution_facts,
+                sidecar_private_key,
+                execution_status="failed",
+                execution_error_code=failure_code,
+                actual_exit_code=None,
+                payload=None,
+            )
         )
-    )
     if any(
         len(rfc8785.dumps(receipt.model_dump(mode="json")))
         > _MAX_RECEIPT_BYTES
         for receipt in representative_receipts
     ):
         raise HandlerCoordinationError("BUNDLE_CAPACITY_EXCEEDED")
+
+
+def _recover_run_tests_execution(
+    ledger_path: Path,
+    evidence_root: Path,
+    lock_descriptor: int,
+    context: AuthorizationContext,
+    stored: _StoredRunTestsExecution,
+    sidecar_private_key: Ed25519PrivateKey,
+    execution_driver: repo_tools.RunTestsExecutionDriver,
+    now: datetime,
+) -> ToolCallReceipt | None:
+    if (
+        key_id(sidecar_private_key.public_key())
+        != stored.execution_facts.controller_id
+    ):
+        raise HandlerCoordinationError("RECOVERY_REQUIRED")
+    receipt_state = _run_tests_receipt_state(
+        ledger_path, lock_descriptor, stored
+    )
+    old_context = _recovery_authorization_context(
+        ledger_path,
+        evidence_root,
+        context,
+        stored,
+        receipt_state,
+        now,
+        lock_descriptor,
+    )
+    try:
+        outcome = execution_driver.reconcile(
+            stored.contract,
+            stored.state,
+            receipt_state,
+        )
+    except Exception as error:
+        raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+    if outcome.action in {"WAIT_RUNNING", "UNRESOLVED"}:
+        raise HandlerCoordinationError("RECOVERY_REQUIRED")
+    if outcome.action == "SAFE_TO_RETRY":
+        if receipt_state != "ABSENT":
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        _delete_handler_execution(
+            ledger_path, lock_descriptor, stored.execution_id
+        )
+        return None
+    if outcome.action != "CLOSED_RESULT":
+        raise HandlerCoordinationError("RECOVERY_REQUIRED")
+    if receipt_state == "MISMATCH":
+        raise HandlerCoordinationError("RECOVERY_REQUIRED")
+    if receipt_state == "MATCH":
+        if outcome.result is not None:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        _delete_handler_execution(
+            ledger_path, lock_descriptor, stored.execution_id
+        )
+        return None
+    result = outcome.result
+    if result is not None:
+        try:
+            repo_tools.encode_run_tests_result_envelope(result)
+        except (TypeError, ValueError) as error:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+    contract_digest = hashlib.sha256(
+        repo_tools.encode_run_tests_execution_contract(stored.contract)
+    ).hexdigest()
+    if (
+        result is None
+        or result.execution_id != stored.execution_id
+        or result.execution_contract_digest != contract_digest
+    ):
+        raise HandlerCoordinationError("RECOVERY_REQUIRED")
+    arguments = _run_tests_arguments_from_contract(stored.contract)
+    if result.failure_code is not None:
+        receipt = _build_run_tests_receipt(
+            old_context,
+            stored.request,
+            arguments,
+            stored.execution_facts,
+            sidecar_private_key,
+            execution_status="failed",
+            execution_error_code=result.failure_code,
+            actual_exit_code=None,
+            payload=None,
+        )
+        payloads: dict[str, bytes] = {}
+    else:
+        if result.actual_exit_code is None:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        payload = _test_result_payload(arguments, result.actual_exit_code)
+        receipt = _build_run_tests_receipt(
+            old_context,
+            stored.request,
+            arguments,
+            stored.execution_facts,
+            sidecar_private_key,
+            execution_status="succeeded",
+            execution_error_code=None,
+            actual_exit_code=result.actual_exit_code,
+            payload=payload,
+        )
+        payloads = {receipt.evidence_refs[0].path: payload}
+    evidence.complete_receipt_publication(
+        ledger_path,
+        evidence_root=evidence_root,
+        receipt=receipt,
+        payloads=payloads,
+        clock=lambda: stored.reserved_at,
+        _borrowed_lock_descriptor=lock_descriptor,
+    )
+    try:
+        execution_driver.cleanup(stored.contract)
+    except Exception as error:
+        raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+    _delete_handler_execution(
+        ledger_path, lock_descriptor, stored.execution_id
+    )
+    return receipt
 
 
 def execute_run_tests(
@@ -971,15 +1494,23 @@ def execute_run_tests(
     request: AgentRequest,
     request_arguments: RunTestsArguments,
     execution_facts: ProspectiveExecutionFacts,
+    candidate_snapshot_request: repo_tools.CandidateExecutionSnapshotRequest,
     sidecar_private_key: Ed25519PrivateKey,
-    handler: Callable[[RunTestsArguments], int],
+    execution_driver: repo_tools.RunTestsExecutionDriver,
     clock: Callable[[], datetime],
 ) -> ToolCallReceipt:
     """Authorize, execute, sign, publish, and commit one test call."""
 
     path = Path(ledger_path)
     root = Path(evidence_root)
-    if not callable(handler):
+    if (
+        type(candidate_snapshot_request)
+        is not repo_tools.CandidateExecutionSnapshotRequest
+        or not callable(getattr(execution_driver, "prepare", None))
+        or not callable(getattr(execution_driver, "start_and_wait", None))
+        or not callable(getattr(execution_driver, "reconcile", None))
+        or not callable(getattr(execution_driver, "cleanup", None))
+    ):
         raise HandlerCoordinationError("HANDLER_UNAVAILABLE")
     evidence.recover_evidence_publications(path, evidence_root=root)
     lock_descriptor = evidence._acquire_target_lock(path)
@@ -987,8 +1518,29 @@ def execute_run_tests(
     receipt: ToolCallReceipt | None = None
     try:
         _ensure_handler_execution_schema(path, lock_descriptor)
-        _recover_handler_executions(path, lock_descriptor)
         now = evidence._freeze_trusted_utc_second(clock())
+        stored = _load_stored_run_tests_execution(path, lock_descriptor)
+        if stored is not None:
+            receipt = _recover_run_tests_execution(
+                path,
+                root,
+                lock_descriptor,
+                context,
+                stored,
+                sidecar_private_key,
+                execution_driver,
+                now,
+            )
+            if receipt is not None:
+                _, release_errors = evidence._release_target_lock(
+                    lock_descriptor
+                )
+                lock_descriptor = -1
+                if release_errors:
+                    raise HandlerCoordinationError(
+                        "handler coordination lock release failed"
+                    ) from release_errors[0]
+                return receipt
         if (
             key_id(sidecar_private_key.public_key())
             != execution_facts.controller_id
@@ -1011,6 +1563,20 @@ def execute_run_tests(
         )
         if not decision.allowed:
             raise ToolCallDenied(decision)
+        if (
+            request_arguments.test_mode != "verifier"
+            or request_arguments.command_digest
+            != repo_tools.frozen_verifier_command_digest()
+            or candidate_snapshot_request.source_artifact_sha256
+            != context.work_order.replay_profile.source_artifact_sha256
+            or candidate_snapshot_request.expected_head_commit
+            != request_arguments.candidate_commit
+            or candidate_snapshot_request.expected_workspace_manifest_digest
+            != request_arguments.workspace_manifest_digest
+        ):
+            raise HandlerCoordinationError(
+                "run-tests execution binding is invalid"
+            )
         _preflight_run_tests_receipts(
             context,
             request,
@@ -1018,23 +1584,94 @@ def execute_run_tests(
             execution_facts,
             sidecar_private_key,
         )
-        execution_id = _reserve_handler_execution(
+        execution_id = _handler_execution_id(request, execution_facts)
+        execution_contract = repo_tools.RunTestsExecutionContract(
+            execution_id=execution_id,
+            request_digest=request.digest,
+            arguments_digest=request.arguments_digest,
+            candidate_workspace_id=candidate_snapshot_request.workspace_id,
+            source_artifact_sha256=(
+                candidate_snapshot_request.source_artifact_sha256
+            ),
+            source_commit=request_arguments.source_commit,
+            candidate_commit=request_arguments.candidate_commit,
+            workspace_manifest_digest=(
+                request_arguments.workspace_manifest_digest
+            ),
+            container_image_digest=(
+                request_arguments.container_image_digest
+            ),
+            command_digest=request_arguments.command_digest,
+            fixed_test_source_digest=(
+                request_arguments.fixed_test_source_digest
+            ),
+        )
+        _reserve_handler_execution(
             path,
             lock_descriptor,
             context,
             request,
             execution_facts,
+            execution_contract,
         )
+        try:
+            snapshot = repo_tools.prepare_candidate_execution_snapshot(
+                candidate_snapshot_request
+            )
+            if (
+                snapshot.head_commit
+                != candidate_snapshot_request.expected_head_commit
+                or snapshot.workspace_manifest_digest
+                != candidate_snapshot_request.expected_workspace_manifest_digest
+            ):
+                raise ValueError("candidate execution snapshot is mismatched")
+            preparation = execution_driver.prepare(
+                execution_contract,
+                snapshot,
+            )
+        except Exception:
+            preparation = repo_tools.RunTestsPreparationOutcome("UNRESOLVED")
+        if preparation.action != "READY_TO_START":
+            try:
+                recovered = execution_driver.reconcile(
+                    execution_contract,
+                    "RESERVED",
+                    "ABSENT",
+                )
+            except Exception as error:
+                raise HandlerCoordinationError(
+                    "RECOVERY_REQUIRED"
+                ) from error
+            if recovered.action == "SAFE_TO_RETRY":
+                _delete_handler_execution(
+                    path, lock_descriptor, execution_id
+                )
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
         _mark_handler_started(
             path,
             lock_descriptor,
             execution_id,
         )
         try:
-            actual_exit_code = handler(request_arguments)
-            if type(actual_exit_code) is not int or not 0 <= actual_exit_code <= 255:
-                raise ValueError("test handler exit code is invalid")
-        except Exception:
+            outcome = execution_driver.start_and_wait(execution_contract)
+        except Exception as error:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+        if outcome.action != "CLOSED_RESULT" or outcome.result is None:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        result = outcome.result
+        try:
+            repo_tools.encode_run_tests_result_envelope(result)
+        except (TypeError, ValueError) as error:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+        contract_digest = hashlib.sha256(
+            repo_tools.encode_run_tests_execution_contract(execution_contract)
+        ).hexdigest()
+        if (
+            result.execution_id != execution_id
+            or result.execution_contract_digest != contract_digest
+        ):
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        if result.failure_code is not None:
             receipt = _build_run_tests_receipt(
                 context,
                 request,
@@ -1042,11 +1679,15 @@ def execute_run_tests(
                 execution_facts,
                 sidecar_private_key,
                 execution_status="failed",
+                execution_error_code=result.failure_code,
                 actual_exit_code=None,
                 payload=None,
             )
             payloads = {}
         else:
+            actual_exit_code = result.actual_exit_code
+            if actual_exit_code is None:
+                raise HandlerCoordinationError("RECOVERY_REQUIRED")
             payload = _test_result_payload(
                 request_arguments,
                 actual_exit_code,
@@ -1058,6 +1699,7 @@ def execute_run_tests(
                 execution_facts,
                 sidecar_private_key,
                 execution_status="succeeded",
+                execution_error_code=None,
                 actual_exit_code=actual_exit_code,
                 payload=payload,
             )
@@ -1070,10 +1712,17 @@ def execute_run_tests(
             clock=lambda: now,
             _borrowed_lock_descriptor=lock_descriptor,
         )
-        _finalize_handler_execution(path, lock_descriptor)
+        try:
+            execution_driver.cleanup(execution_contract)
+        except Exception as error:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+        _delete_handler_execution(path, lock_descriptor, execution_id)
     except Exception as error:
         primary_error = error
-    _, release_errors = evidence._release_target_lock(lock_descriptor)
+    if lock_descriptor < 0:
+        release_errors = ()
+    else:
+        _, release_errors = evidence._release_target_lock(lock_descriptor)
     if primary_error is not None:
         if release_errors:
             raise HandlerCoordinationError(
@@ -1309,6 +1958,7 @@ def execute_rollback(
             context,
             request,
             execution_facts,
+            None,
         )
         _mark_handler_started(path, lock_descriptor, execution_id)
         try:

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 
 import pytest
@@ -12,6 +14,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSEMBLER = ROOT / "supply-chain" / "images" / "prepare_context.py"
+EXECUTION_RUNNER_BLOB = b"RUNNER = 'revision-bound'\n"
+EXECUTION_VERIFIER_TEST_BLOB = b"def test_revision_bound():\n    assert True\n"
 HELPER_SOURCE_BLOBS = {
     "src/openworkproof/__init__.py": b"PACKAGE = True\n",
     "src/openworkproof/models.py": b"MODELS = True\n",
@@ -77,6 +81,12 @@ def context_inputs(tmp_path: Path) -> dict[str, Path | str | bytes]:
     tracked: dict[str, bytes] = {
         "requirements-lock.txt": b"project lock\n",
         "supply-chain/images/execution/Dockerfile": b"FROM execution\n",
+        "supply-chain/images/execution/run_tests_runner.py": (
+            EXECUTION_RUNNER_BLOB
+        ),
+        "supply-chain/images/execution/verifier_test.py": (
+            EXECUTION_VERIFIER_TEST_BLOB
+        ),
         "supply-chain/images/execution/requirements.lock": (
             b"pytest==1.0 \\\n"
             + f"    --hash=sha256:{_sha256(execution_wheel)}\n".encode()
@@ -139,6 +149,61 @@ def _assemble(
     )
 
 
+def _context_tree_metadata(root: Path) -> dict[str, tuple[int, int, int, bytes | None]]:
+    entries = (root, *sorted(root.rglob("*")))
+    metadata: dict[str, tuple[int, int, int, bytes | None]] = {}
+    for path in entries:
+        details = path.lstat()
+        assert not stat.S_ISLNK(details.st_mode)
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        metadata[relative] = (
+            stat.S_IFMT(details.st_mode),
+            stat.S_IMODE(details.st_mode),
+            details.st_mtime_ns,
+            path.read_bytes() if path.is_file() else None,
+        )
+    return metadata
+
+
+def _set_input_tree_mtime(root: Path, epoch_ns: int) -> None:
+    for path in (root, *sorted(root.rglob("*"), reverse=True)):
+        os.utime(path, ns=(epoch_ns, epoch_ns), follow_symlinks=False)
+
+
+def test_assembler_normalizes_complete_context_tree_mtime_to_revision_epoch(
+    context_inputs: dict[str, Path | str | bytes], tmp_path: Path
+) -> None:
+    first_output = tmp_path / "first-context"
+    second_output = tmp_path / "second-context"
+    input_roots = (
+        context_inputs["wheelhouse"],
+        context_inputs["deb_closure"],
+    )
+    assert all(isinstance(path, Path) for path in input_roots)
+    for input_root in input_roots:
+        assert isinstance(input_root, Path)
+        _set_input_tree_mtime(input_root, 1_700_000_000_000_000_000)
+
+    first_result = _assemble(context_inputs, first_output)
+
+    for input_root in input_roots:
+        assert isinstance(input_root, Path)
+        _set_input_tree_mtime(input_root, 1_800_000_000_000_000_000)
+    second_result = _assemble(context_inputs, second_output)
+
+    assert first_result.returncode == 0, first_result.stderr
+    assert second_result.returncode == 0, second_result.stderr
+    first_tree = _context_tree_metadata(first_output)
+    second_tree = _context_tree_metadata(second_output)
+    assert first_tree == second_tree
+    repo = context_inputs["repo"]
+    assert isinstance(repo, Path)
+    revision_epoch_ns = int(
+        _git(repo, "show", "-s", "--format=%ct", str(context_inputs["revision"]))
+    ) * 1_000_000_000
+    assert {entry[2] for entry in first_tree.values()} == {revision_epoch_ns}
+
+
 def test_assembler_rejects_an_unknown_source_revision(
     context_inputs: dict[str, Path | str | bytes], tmp_path: Path
 ) -> None:
@@ -176,6 +241,12 @@ def test_assembler_uses_git_blobs_and_ignores_worktree_source_drift(
         (repo / relative_path).write_text(
             "WORKTREE_DRIFT = True\n", encoding="utf-8"
         )
+    (repo / "supply-chain/images/execution/run_tests_runner.py").write_bytes(
+        b"UNTRACKED_WORKTREE_DRIFT = True\n"
+    )
+    (repo / "supply-chain/images/execution/verifier_test.py").write_bytes(
+        b"def test_worktree_drift():\n    assert False\n"
+    )
 
     result = _assemble(context_inputs, output)
 
@@ -199,10 +270,26 @@ def test_assembler_uses_git_blobs_and_ignores_worktree_source_drift(
         "".join(expected_source_sums)
     )
     assert (output / "execution/Dockerfile").read_bytes() == b"FROM execution\n"
+    assert (
+        output / "execution/run_tests_runner.py"
+    ).read_bytes() == EXECUTION_RUNNER_BLOB
+    assert (
+        output / "execution/verifier_test.py"
+    ).read_bytes() == EXECUTION_VERIFIER_TEST_BLOB
+    assert (output / "execution/SHA256SUMS").read_text(encoding="utf-8") == (
+        f"{_sha256(b'FROM execution\n')}  Dockerfile\n"
+        f"{_sha256((output / 'execution/requirements.lock').read_bytes())}  "
+        "requirements.lock\n"
+        f"{_sha256(EXECUTION_RUNNER_BLOB)}  run_tests_runner.py\n"
+        f"{_sha256(EXECUTION_VERIFIER_TEST_BLOB)}  verifier_test.py\n"
+    )
     assert sorted(path.relative_to(output).as_posix() for path in output.rglob("*")) == [
         "execution",
         "execution/Dockerfile",
+        "execution/SHA256SUMS",
         "execution/requirements.lock",
+        "execution/run_tests_runner.py",
+        "execution/verifier_test.py",
         "execution/wheels",
         "execution/wheels/SHA256SUMS",
         f"execution/wheels/{context_inputs['execution_wheel_name']}",
@@ -222,6 +309,34 @@ def test_assembler_uses_git_blobs_and_ignores_worktree_source_drift(
         "trusted-helper/wheels/SHA256SUMS",
         f"trusted-helper/wheels/{context_inputs['helper_wheel_name']}",
     ]
+
+
+def test_assembler_runner_changes_only_with_the_selected_revision_blob(
+    context_inputs: dict[str, Path | str | bytes], tmp_path: Path
+) -> None:
+    repo = context_inputs["repo"]
+    assert isinstance(repo, Path)
+    old_output = tmp_path / "old-context"
+    old_revision = str(context_inputs["revision"])
+    changed = b"RUNNER = 'new-revision'\n"
+    runner_path = repo / "supply-chain/images/execution/run_tests_runner.py"
+    runner_path.write_bytes(changed)
+    _git(repo, "add", "supply-chain/images/execution/run_tests_runner.py")
+    _git(repo, "commit", "-qm", "change runner")
+    new_revision = _git(repo, "rev-parse", "HEAD")
+    new_output = tmp_path / "new-context"
+
+    old_result = _assemble(context_inputs, old_output, revision=old_revision)
+    new_result = _assemble(context_inputs, new_output, revision=new_revision)
+
+    assert old_result.returncode == 0, old_result.stderr
+    assert new_result.returncode == 0, new_result.stderr
+    assert (
+        old_output / "execution/run_tests_runner.py"
+    ).read_bytes() == EXECUTION_RUNNER_BLOB
+    assert (
+        new_output / "execution/run_tests_runner.py"
+    ).read_bytes() == changed
 
 
 @pytest.mark.parametrize("missing_kind", ["wheel", "deb"])

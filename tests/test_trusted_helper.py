@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -61,6 +63,111 @@ def _candidate(
     )
 
 
+def _rebound_snapshot_candidate(
+    candidate: repo_tools.CandidateWorkspace,
+    files: tuple[repo_tools.SourceFile, ...],
+) -> repo_tools.CandidateWorkspace:
+    (candidate.worktree / "README.md").unlink()
+    for source_file in files:
+        target = candidate.worktree / source_file.path
+        target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        target.write_bytes(source_file.content)
+        target.chmod(0o755 if source_file.mode == "100755" else 0o644)
+    environment = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "OpenWorkProof",
+        "GIT_AUTHOR_EMAIL": "owp@example.invalid",
+        "GIT_AUTHOR_DATE": "1970-01-01T00:00:01Z",
+        "GIT_COMMITTER_NAME": "OpenWorkProof",
+        "GIT_COMMITTER_EMAIL": "owp@example.invalid",
+        "GIT_COMMITTER_DATE": "1970-01-01T00:00:01Z",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+    }
+
+    def git(*arguments: str, input_bytes: bytes | None = None) -> bytes:
+        return subprocess.run(
+            [
+                "/usr/bin/git",
+                f"--git-dir={candidate.git_dir}",
+                f"--work-tree={candidate.worktree}",
+                "-c",
+                "core.hooksPath=/dev/null",
+                *arguments,
+            ],
+            input=input_bytes,
+            check=True,
+            capture_output=True,
+            env=environment,
+            cwd=candidate.worktree,
+        ).stdout
+
+    git("add", "-A")
+    tree_oid = git("write-tree").decode("ascii").strip()
+    head_commit = git(
+        "commit-tree",
+        tree_oid,
+        "-p",
+        candidate.head_commit,
+        input_bytes=b"snapshot byte boundary\n",
+    ).decode("ascii").strip()
+    git("update-ref", "refs/heads/candidate", head_commit)
+    git("reset", "--hard", head_commit)
+    worktree_fd = os.open(
+        candidate.worktree,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        manifest = repo_tools.scan_workspace_manifest(
+            worktree_fd,
+            head_commit,
+        )
+    finally:
+        os.close(worktree_fd)
+    manifest_digest = repo_tools.workspace_manifest_digest(manifest)
+    control = rfc8785.dumps(
+        {
+            "schema_version": "openworkproof-candidate-control/0.1",
+            "workspace_id": candidate.workspace_id,
+            "source_artifact_sha256": candidate.source_artifact_sha256,
+            "head_commit": head_commit,
+            "workspace_manifest_digest": manifest_digest,
+            "worktree_inode": candidate.worktree.stat().st_ino,
+            "git_inode": candidate.git_dir.stat().st_ino,
+        }
+    )
+    control_path = candidate.candidate_root / "control.json"
+    control_path.write_bytes(control)
+    control_path.chmod(0o600)
+    return replace(
+        candidate,
+        head_commit=head_commit,
+        workspace_manifest_digest=manifest_digest,
+    )
+
+
+def _snapshot_files_with_total_size(
+    total_size: int,
+) -> tuple[repo_tools.SourceFile, ...]:
+    files: list[repo_tools.SourceFile] = []
+    remaining = total_size
+    index = 0
+    while remaining:
+        size = min(remaining, 1_048_576)
+        files.append(
+            repo_tools.SourceFile(
+                f"file-{index:02d}.bin",
+                "100644",
+                bytes([index]) * size,
+            )
+        )
+        remaining -= size
+        index += 1
+    return tuple(files)
+
+
 def _request(
     candidate: repo_tools.CandidateWorkspace,
     *,
@@ -89,6 +196,123 @@ def _request(
         ),
         path=path,
     )
+
+
+def _snapshot_request(
+    candidate: repo_tools.CandidateWorkspace,
+    *,
+    source_artifact_sha256: str | None = None,
+    expected_head_commit: str | None = None,
+    expected_workspace_manifest_digest: str | None = None,
+) -> repo_tools.CandidateExecutionSnapshotRequest:
+    return repo_tools.CandidateExecutionSnapshotRequest(
+        runtime_root=candidate.runtime_root,
+        workspace_id=candidate.workspace_id,
+        source_artifact_sha256=(
+            candidate.source_artifact_sha256
+            if source_artifact_sha256 is None
+            else source_artifact_sha256
+        ),
+        expected_head_commit=(
+            candidate.head_commit
+            if expected_head_commit is None
+            else expected_head_commit
+        ),
+        expected_workspace_manifest_digest=(
+            candidate.workspace_manifest_digest
+            if expected_workspace_manifest_digest is None
+            else expected_workspace_manifest_digest
+        ),
+    )
+
+
+def _assert_snapshot_recovery(
+    candidate: repo_tools.CandidateWorkspace,
+    request: object | None = None,
+) -> None:
+    with pytest.raises(repo_tools.CandidateReadError) as raised:
+        repo_tools.prepare_candidate_execution_snapshot(
+            _snapshot_request(candidate) if request is None else request
+        )
+    assert raised.value.code == "RECOVERY_REQUIRED"
+
+
+def _install_snapshot_aba_weave(
+    candidate: repo_tools.CandidateWorkspace,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    directory: str = "",
+) -> tuple[Path, Path, dict[str, int | bool]]:
+    prefix = f"{directory}/" if directory else ""
+    a_path = candidate.worktree / prefix / "a.txt"
+    b_path = candidate.worktree / prefix / "b.txt"
+    real_scan = repo_tools.scan_workspace_manifest
+    real_stat = repo_tools.os.stat
+    state: dict[str, int | bool] = {
+        "scan_calls": 0,
+        "woven_a_stats": 0,
+        "weaving": False,
+    }
+
+    def interleave_file_reads(path: str) -> None:
+        if path == f"{prefix}a.txt":
+            b_path.write_bytes(b"evil!\n")
+        elif path == f"{prefix}b.txt":
+            a_path.write_bytes(b"evil!\n")
+            b_path.write_bytes(b"bravo\n")
+
+    def weave_manifest_scan(
+        root_fd: int,
+        head_commit: str,
+    ) -> repo_tools.WorkspaceManifest:
+        state["scan_calls"] = int(state["scan_calls"]) + 1
+        state["weaving"] = state["scan_calls"] == 2
+        try:
+            return real_scan(root_fd, head_commit)
+        finally:
+            state["weaving"] = False
+
+    def weave_siblings(
+        path,
+        *,
+        dir_fd=None,
+        follow_symlinks=True,
+    ) -> os.stat_result:
+        if state["weaving"] and path == "a.txt":
+            state["woven_a_stats"] = int(state["woven_a_stats"]) + 1
+            if state["woven_a_stats"] == 1:
+                a_path.write_bytes(b"alpha\n")
+                return real_stat(
+                    path,
+                    dir_fd=dir_fd,
+                    follow_symlinks=follow_symlinks,
+                )
+            if state["woven_a_stats"] == 2:
+                metadata = real_stat(
+                    path,
+                    dir_fd=dir_fd,
+                    follow_symlinks=follow_symlinks,
+                )
+                a_path.write_bytes(b"evil!\n")
+                return metadata
+        return real_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_file_hook",
+        interleave_file_reads,
+    )
+    monkeypatch.setattr(
+        repo_tools,
+        "scan_workspace_manifest",
+        weave_manifest_scan,
+    )
+    monkeypatch.setattr(repo_tools.os, "stat", weave_siblings)
+    return a_path, b_path, state
 
 
 def _dispatcher_request(
@@ -1145,6 +1369,1214 @@ def test_read_candidate_file_returns_exact_closed_result(tmp_path: Path) -> None
     )
 
 
+def test_prepare_candidate_execution_snapshot_returns_exact_files(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+
+    result = repo_tools.prepare_candidate_execution_snapshot(
+        repo_tools.CandidateExecutionSnapshotRequest(
+            runtime_root=candidate.runtime_root,
+            workspace_id=candidate.workspace_id,
+            source_artifact_sha256=candidate.source_artifact_sha256,
+            expected_head_commit=candidate.head_commit,
+            expected_workspace_manifest_digest=(
+                candidate.workspace_manifest_digest
+            ),
+        )
+    )
+
+    assert result.head_commit == candidate.head_commit
+    assert (
+        result.workspace_manifest_digest
+        == candidate.workspace_manifest_digest
+    )
+    assert result.plan.files == (
+        repo_tools.SourceFile("README.md", "100644", b"base\n"),
+    )
+
+
+def test_prepare_candidate_execution_snapshot_reads_every_file_in_order(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"readme\n",
+        additional_files=(
+            repo_tools.SourceFile("z-last.txt", "100644", b"last\n"),
+            repo_tools.SourceFile("bin/run", "100755", b"#!/bin/sh\n"),
+            repo_tools.SourceFile("a-first.txt", "100644", b"first\n"),
+        ),
+    )
+
+    result = repo_tools.prepare_candidate_execution_snapshot(
+        _snapshot_request(candidate)
+    )
+
+    assert result.plan.files == (
+        repo_tools.SourceFile("README.md", "100644", b"readme\n"),
+        repo_tools.SourceFile("a-first.txt", "100644", b"first\n"),
+        repo_tools.SourceFile("bin/run", "100755", b"#!/bin/sh\n"),
+        repo_tools.SourceFile("z-last.txt", "100644", b"last\n"),
+    )
+
+
+def test_prepare_candidate_execution_snapshot_returns_exact_one_mib_file(
+    tmp_path: Path,
+) -> None:
+    content = b"x" * 1_048_576
+    candidate = _candidate(tmp_path, content)
+
+    result = repo_tools.prepare_candidate_execution_snapshot(
+        _snapshot_request(candidate)
+    )
+
+    assert result.plan.files == (
+        repo_tools.SourceFile("README.md", "100644", content),
+    )
+
+
+def test_prepare_candidate_execution_snapshot_accepts_exact_eight_mib(
+    tmp_path: Path,
+) -> None:
+    files = _snapshot_files_with_total_size(8_388_608)
+    candidate = _rebound_snapshot_candidate(
+        _candidate(tmp_path, b"base\n"),
+        files,
+    )
+
+    result = repo_tools.prepare_candidate_execution_snapshot(
+        _snapshot_request(candidate)
+    )
+
+    assert result.plan.files == files
+    assert sum(len(source_file.content) for source_file in result.plan.files) == (
+        8_388_608
+    )
+
+
+def test_prepare_candidate_execution_snapshot_rejects_eight_mib_plus_one_before_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _rebound_snapshot_candidate(
+        _candidate(tmp_path, b"base\n"),
+        _snapshot_files_with_total_size(8_388_609),
+    )
+    real_capture = repo_tools._read_candidate_execution_snapshot_file
+    capture_calls: list[str] = []
+    hook_calls: list[str] = []
+
+    def observe_capture(checkpoint, entry):
+        capture_calls.append(entry.path_bytes_b64url)
+        return real_capture(checkpoint, entry)
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_read_candidate_execution_snapshot_file",
+        observe_capture,
+    )
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_file_hook",
+        hook_calls.append,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+    assert capture_calls == []
+    assert hook_calls == []
+
+
+def test_prepare_candidate_execution_snapshot_normalizes_checkpoint_file_changed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_read_authority_matches",
+        lambda unused: False,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+
+def test_prepare_candidate_execution_snapshot_rejects_sibling_change_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"base\n",
+        additional_files=(
+            repo_tools.SourceFile("z-last.txt", "100644", b"last\n"),
+        ),
+    )
+    sibling = candidate.worktree / "README.md"
+    sibling_inode = sibling.stat().st_ino
+
+    def change_previously_read_sibling(path: str) -> None:
+        if path == "z-last.txt":
+            with sibling.open("r+b") as stream:
+                stream.write(b"evil\n")
+            assert sibling.stat().st_ino == sibling_inode
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_file_hook",
+        change_previously_read_sibling,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+
+def test_prepare_candidate_execution_snapshot_rejects_nested_sibling_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"base\n",
+        additional_files=(
+            repo_tools.SourceFile("nested/a.txt", "100644", b"alpha\n"),
+            repo_tools.SourceFile("z-last.txt", "100644", b"last\n"),
+        ),
+    )
+    sibling = candidate.worktree / "nested" / "a.txt"
+    sibling_inode = sibling.stat().st_ino
+
+    def change_nested_sibling(path: str) -> None:
+        if path == "z-last.txt":
+            with sibling.open("r+b") as stream:
+                stream.write(b"evil!\n")
+            assert sibling.stat().st_ino == sibling_inode
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_file_hook",
+        change_nested_sibling,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+
+def test_prepare_candidate_execution_snapshot_rejects_globally_woven_aba(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"base\n",
+        additional_files=(
+            repo_tools.SourceFile("a.txt", "100644", b"alpha\n"),
+            repo_tools.SourceFile("b.txt", "100644", b"bravo\n"),
+        ),
+    )
+    a_path, b_path, state = _install_snapshot_aba_weave(
+        candidate,
+        monkeypatch,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+    assert state["scan_calls"] == 2
+    assert state["woven_a_stats"] == 2
+    assert a_path.read_bytes() == b"evil!\n"
+    assert b_path.read_bytes() == b"bravo\n"
+
+
+def test_prepare_candidate_execution_snapshot_rejects_nested_woven_aba(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"base\n",
+        additional_files=(
+            repo_tools.SourceFile("nested/a.txt", "100644", b"alpha\n"),
+            repo_tools.SourceFile("nested/b.txt", "100644", b"bravo\n"),
+        ),
+    )
+    a_path, b_path, state = _install_snapshot_aba_weave(
+        candidate,
+        monkeypatch,
+        directory="nested",
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+    assert state["scan_calls"] == 2
+    assert state["woven_a_stats"] == 2
+    assert a_path.read_bytes() == b"evil!\n"
+    assert b_path.read_bytes() == b"bravo\n"
+
+
+def test_prepare_candidate_execution_snapshot_rejects_513th_entry_before_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    for index in range(512):
+        (candidate.worktree / f"extra-{index:03d}.txt").write_bytes(b"")
+    last_name = "extra-511.txt"
+    real_stat = repo_tools.os.stat
+    real_open = repo_tools.os.open
+    last_entry_io: list[str] = []
+
+    def observe_stat(path, *, dir_fd=None, follow_symlinks=True):
+        if path == last_name and dir_fd is not None:
+            last_entry_io.append("stat")
+        return real_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    def observe_open(path, flags, mode=0o777, *, dir_fd=None):
+        if path == last_name and dir_fd is not None:
+            last_entry_io.append("open")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(repo_tools.os, "stat", observe_stat)
+    monkeypatch.setattr(repo_tools.os, "open", observe_open)
+
+    _assert_snapshot_recovery(candidate)
+    assert last_entry_io == []
+
+
+def test_prepare_candidate_execution_snapshot_rejects_symlink(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    target = candidate.worktree / "README.md"
+    target.unlink()
+    target.symlink_to("missing")
+
+    _assert_snapshot_recovery(candidate)
+
+
+def test_prepare_candidate_execution_snapshot_rejects_hardlink(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    target = candidate.worktree / "README.md"
+    target.unlink()
+    external = tmp_path / "external"
+    external.write_bytes(b"base\n")
+    os.link(external, target)
+
+    _assert_snapshot_recovery(candidate)
+
+
+def test_prepare_candidate_execution_snapshot_rejects_fifo(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    target = candidate.worktree / "README.md"
+    target.unlink()
+    os.mkfifo(target)
+
+    _assert_snapshot_recovery(candidate)
+
+
+def test_prepare_candidate_execution_snapshot_rejects_oversize_regular_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = (
+        repo_tools.SourceFile(
+            "README.md",
+            "100644",
+            b"x" * (1_048_576 + 1),
+        ),
+    )
+    candidate = _candidate(tmp_path, b"base\n")
+    records = repo_tools._workspace_records_for_files(files)
+    scanned_manifests: list[repo_tools.WorkspaceManifest] = []
+
+    def build_oversize_manifest(
+        unused_root_fd: int,
+        head_commit: str,
+    ) -> repo_tools.WorkspaceManifest:
+        manifest = repo_tools.build_workspace_manifest(head_commit, records)
+        scanned_manifests.append(manifest)
+        return manifest
+
+    monkeypatch.setattr(
+        repo_tools,
+        "scan_workspace_manifest",
+        build_oversize_manifest,
+    )
+    candidate = _rebound_snapshot_candidate(
+        candidate,
+        files,
+    )
+    manifest = repo_tools.build_workspace_manifest(
+        candidate.head_commit,
+        records,
+    )
+    gate_calls: list[repo_tools.WorkspaceManifest] = []
+    gate_returns: list[tuple[repo_tools.WorkspaceManifestEntry, ...]] = []
+    file_hook_calls: list[str] = []
+    real_gate = repo_tools._candidate_execution_snapshot_regular_entries
+
+    def observe_gate(
+        candidate_manifest: repo_tools.WorkspaceManifest,
+    ) -> tuple[repo_tools.WorkspaceManifestEntry, ...]:
+        gate_calls.append(candidate_manifest)
+        entries = real_gate(candidate_manifest)
+        gate_returns.append(entries)
+        return entries
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_regular_entries",
+        observe_gate,
+    )
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_file_hook",
+        file_hook_calls.append,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+    assert scanned_manifests == [manifest, manifest]
+    assert gate_calls == [manifest]
+    assert gate_returns == []
+    assert file_hook_calls == []
+
+
+def test_prepare_candidate_execution_snapshot_rejects_wrong_source_digest(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+
+    _assert_snapshot_recovery(
+        candidate,
+        _snapshot_request(candidate, source_artifact_sha256="c" * 64),
+    )
+
+
+def test_prepare_candidate_execution_snapshot_rejects_wrong_head(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+
+    _assert_snapshot_recovery(
+        candidate,
+        _snapshot_request(candidate, expected_head_commit="0" * 40),
+    )
+
+
+def test_prepare_candidate_execution_snapshot_rejects_wrong_manifest_digest(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+
+    _assert_snapshot_recovery(
+        candidate,
+        _snapshot_request(
+            candidate,
+            expected_workspace_manifest_digest="0" * 64,
+        ),
+    )
+
+
+@pytest.mark.parametrize("mutation", ("replace", "drift"))
+def test_prepare_candidate_execution_snapshot_rejects_control_replacement_or_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    control = candidate.candidate_root / "control.json"
+    original = control.read_bytes()
+
+    def mutate_control() -> None:
+        if mutation == "replace":
+            replacement = candidate.candidate_root / "replacement"
+            replacement.write_bytes(original)
+            replacement.chmod(0o600)
+            replacement.replace(control)
+        else:
+            with control.open("r+b") as stream:
+                stream.write(b" " + original[1:])
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_after_files_hook",
+        mutate_control,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+
+@pytest.mark.parametrize("mutation", ("index", "authority"))
+def test_prepare_candidate_execution_snapshot_rejects_git_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+
+    def mutate_git() -> None:
+        if mutation == "index":
+            subprocess.run(
+                [
+                    "/usr/bin/git",
+                    f"--git-dir={candidate.git_dir}",
+                    f"--work-tree={candidate.worktree}",
+                    "update-index",
+                    "--chmod=+x",
+                    "README.md",
+                ],
+                check=True,
+                capture_output=True,
+                env={
+                    "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "LC_ALL": "C",
+                    "PATH": "/usr/bin:/bin",
+                },
+            )
+        else:
+            head = candidate.git_dir / "HEAD"
+            original = head.read_bytes()
+            head.write_bytes(b"x" * len(original))
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_after_files_hook",
+        mutate_git,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+
+def test_prepare_candidate_execution_snapshot_rejects_external_git_alternates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    external_objects = tmp_path / "external-objects"
+    (candidate.git_dir / "objects").rename(external_objects)
+    internal_objects = candidate.git_dir / "objects"
+    (internal_objects / "info").mkdir(parents=True)
+    (internal_objects / "pack").mkdir()
+    (internal_objects / "info" / "alternates").write_text(
+        f"{external_objects}\n",
+        encoding="ascii",
+    )
+    git_environment = {
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+    }
+    resolved = subprocess.run(
+        [
+            "/usr/bin/git",
+            f"--git-dir={candidate.git_dir}",
+            f"--work-tree={candidate.worktree}",
+            "cat-file",
+            "-e",
+            "HEAD^{commit}",
+        ],
+        check=False,
+        capture_output=True,
+        env=git_environment,
+        cwd=candidate.worktree,
+    )
+    assert resolved.returncode == 0
+    hook_calls: list[str] = []
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_file_hook",
+        hook_calls.append,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+    assert hook_calls == []
+
+
+def test_prepare_candidate_execution_snapshot_reruns_git_semantics_after_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    real_git_read_only = repo_tools._run_git_read_only
+    after_files = False
+    final_git_calls: list[tuple[str, ...]] = []
+
+    def change_cached_index() -> None:
+        nonlocal after_files
+        subprocess.run(
+            [
+                "/usr/bin/git",
+                f"--git-dir={candidate.git_dir}",
+                f"--work-tree={candidate.worktree}",
+                "update-index",
+                "--chmod=+x",
+                "README.md",
+            ],
+            check=True,
+            capture_output=True,
+            env={
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "LC_ALL": "C",
+                "PATH": "/usr/bin:/bin",
+            },
+        )
+        after_files = True
+
+    def observe_git_read_only(*args, **kwargs):
+        if after_files:
+            final_git_calls.append(kwargs["arguments"])
+        return real_git_read_only(*args, **kwargs)
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_after_files_hook",
+        change_cached_index,
+    )
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_read_authority_matches",
+        lambda unused: True,
+    )
+    monkeypatch.setattr(
+        repo_tools,
+        "_run_git_read_only",
+        observe_git_read_only,
+    )
+
+    _assert_snapshot_recovery(candidate)
+
+    assert final_git_calls == [
+        ("rev-parse", "HEAD"),
+        ("cat-file", "-e", "HEAD^{commit}"),
+        ("diff-index", "--cached", "--quiet", "HEAD", "--"),
+    ]
+
+
+def test_prepare_candidate_execution_snapshot_disables_candidate_fsmonitor(
+    tmp_path: Path,
+) -> None:
+    content = b"base\n"
+    candidate = _candidate(tmp_path, content)
+    fsmonitor = tmp_path / "candidate-fsmonitor"
+    marker = tmp_path / "fsmonitor-marker"
+    fsmonitor.write_bytes(
+        b'#!/bin/sh\n: > "${0%/*}/fsmonitor-marker"\n'
+    )
+    fsmonitor.chmod(0o700)
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            f"--git-dir={candidate.git_dir}",
+            "config",
+            "core.fsmonitor",
+            str(fsmonitor),
+        ],
+        check=True,
+        capture_output=True,
+        env={
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "LC_ALL": "C",
+            "PATH": "/usr/bin:/bin",
+        },
+    )
+
+    result = repo_tools.prepare_candidate_execution_snapshot(
+        _snapshot_request(candidate)
+    )
+
+    assert result.plan.files == (
+        repo_tools.SourceFile("README.md", "100644", content),
+    )
+    assert not marker.exists()
+
+
+def test_prepare_candidate_execution_snapshot_disables_candidate_external_diff(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    external_diff = tmp_path / "candidate-external-diff"
+    marker = tmp_path / "external-diff-marker"
+    external_diff.write_bytes(
+        b'#!/bin/sh\n: > "${0%/*}/external-diff-marker"\nexit 0\n'
+    )
+    external_diff.chmod(0o700)
+    git_environment = {
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+    }
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            f"--git-dir={candidate.git_dir}",
+            f"--work-tree={candidate.worktree}",
+            "update-index",
+            "--chmod=+x",
+            "README.md",
+        ],
+        check=True,
+        capture_output=True,
+        env=git_environment,
+    )
+    for key, value in (
+        ("diff.external", str(external_diff)),
+        ("diff.trustExitCode", "true"),
+    ):
+        subprocess.run(
+            [
+                "/usr/bin/git",
+                f"--git-dir={candidate.git_dir}",
+                "config",
+                key,
+                value,
+            ],
+            check=True,
+            capture_output=True,
+            env=git_environment,
+        )
+
+    error_code = None
+    try:
+        repo_tools.prepare_candidate_execution_snapshot(
+            _snapshot_request(candidate)
+        )
+    except repo_tools.CandidateReadError as error:
+        error_code = error.code
+
+    assert (error_code, marker.exists()) == ("RECOVERY_REQUIRED", False)
+
+
+def test_prepare_candidate_execution_snapshot_closes_every_fd_on_file_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(
+        tmp_path,
+        b"base\n",
+        source_path="nested/README.md",
+    )
+    real_anchor = repo_tools._candidate_read_anchor
+    real_open = repo_tools.os.open
+    real_read_workspace_file = repo_tools._read_workspace_file
+    checkpoint_descriptors: list[int] = []
+    file_descriptors: list[int] = []
+    file_read_armed = False
+
+    def capture_anchor(*args, **kwargs):
+        anchor = real_anchor(*args, **kwargs)
+        checkpoint_descriptors.append(anchor.descriptor)
+        return anchor
+
+    def arm_file_failure(path: str) -> None:
+        nonlocal file_read_armed
+        assert path == "nested/README.md"
+        file_read_armed = True
+
+    def capture_open(path, flags, mode=0o777, *, dir_fd=None):
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if file_read_armed:
+            file_descriptors.append(descriptor)
+        return descriptor
+
+    def fail_file_read(descriptor: int, size_bytes: int) -> bytes:
+        if file_read_armed:
+            raise OSError("injected snapshot read failure")
+        return real_read_workspace_file(descriptor, size_bytes)
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_read_anchor",
+        capture_anchor,
+    )
+    monkeypatch.setattr(
+        repo_tools,
+        "_candidate_execution_snapshot_file_hook",
+        arm_file_failure,
+    )
+    monkeypatch.setattr(repo_tools.os, "open", capture_open)
+    monkeypatch.setattr(repo_tools, "_read_workspace_file", fail_file_read)
+
+    _assert_snapshot_recovery(candidate)
+    assert len(checkpoint_descriptors) == 5
+    assert len(file_descriptors) == 2
+    for descriptor in (*checkpoint_descriptors, *file_descriptors):
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+def test_prepare_candidate_execution_snapshot_closes_checkpoint_fds_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    real_anchor = repo_tools._candidate_read_anchor
+    captured_descriptors: list[int] = []
+
+    def capture_anchor(*args, **kwargs):
+        anchor = real_anchor(*args, **kwargs)
+        captured_descriptors.append(anchor.descriptor)
+        return anchor
+
+    def fail_scan(
+        unused_root_fd: int,
+        unused_head_commit: str,
+    ) -> repo_tools.WorkspaceManifest:
+        raise repo_tools.ManifestError("injected checkpoint failure")
+
+    monkeypatch.setattr(repo_tools, "_candidate_read_anchor", capture_anchor)
+    monkeypatch.setattr(repo_tools, "scan_workspace_manifest", fail_scan)
+
+    _assert_snapshot_recovery(candidate)
+    assert len(captured_descriptors) == 5
+    for descriptor in captured_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+@pytest.mark.parametrize("failure_type", (KeyboardInterrupt, SystemExit))
+def test_prepare_candidate_execution_snapshot_closes_checkpoint_fds_on_base_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[BaseException],
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    real_anchor = repo_tools._candidate_read_anchor
+    captured_descriptors: list[int] = []
+
+    def capture_anchor(*args, **kwargs):
+        anchor = real_anchor(*args, **kwargs)
+        captured_descriptors.append(anchor.descriptor)
+        return anchor
+
+    def interrupt_scan(
+        unused_root_fd: int,
+        unused_head_commit: str,
+    ) -> repo_tools.WorkspaceManifest:
+        raise failure_type("injected base exception")
+
+    monkeypatch.setattr(repo_tools, "_candidate_read_anchor", capture_anchor)
+    monkeypatch.setattr(repo_tools, "scan_workspace_manifest", interrupt_scan)
+
+    leaked_descriptors: list[int] = []
+    with pytest.raises(failure_type) as raised:
+        try:
+            repo_tools.prepare_candidate_execution_snapshot(
+                _snapshot_request(candidate)
+            )
+        finally:
+            for descriptor in captured_descriptors:
+                try:
+                    os.fstat(descriptor)
+                except OSError:
+                    continue
+                leaked_descriptors.append(descriptor)
+                os.close(descriptor)
+
+    assert raised.value.args == ("injected base exception",)
+    assert len(captured_descriptors) == 5
+    assert leaked_descriptors == []
+
+
+@pytest.mark.parametrize("failure_type", (KeyboardInterrupt, SystemExit))
+def test_snapshot_closes_checkpoint_fds_when_owner_return_is_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[BaseException],
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    real_anchor = repo_tools._candidate_read_anchor
+    captured_descriptors: list[int] = []
+    owner = repo_tools._with_verified_candidate_checkpoint_read_only
+    source_lines, first_line = inspect.getsourcelines(owner)
+    return_line = next(
+        first_line + offset
+        for offset, source_line in enumerate(source_lines)
+        if source_line.strip() == "return operation_result"
+    )
+    failure = failure_type("injected owner return interruption")
+
+    def capture_anchor(*args, **kwargs):
+        anchor = real_anchor(*args, **kwargs)
+        captured_descriptors.append(anchor.descriptor)
+        return anchor
+
+    def interrupt_owner_return(frame, event, unused_argument):
+        if (
+            event == "line"
+            and frame.f_code is owner.__code__
+            and frame.f_lineno == return_line
+        ):
+            raise failure
+        return interrupt_owner_return
+
+    monkeypatch.setattr(repo_tools, "_candidate_read_anchor", capture_anchor)
+
+    leaked_descriptors: list[int] = []
+    with pytest.raises(failure_type) as raised:
+        try:
+            sys.settrace(interrupt_owner_return)
+            repo_tools.prepare_candidate_execution_snapshot(
+                _snapshot_request(candidate)
+            )
+        finally:
+            sys.settrace(None)
+            for descriptor in captured_descriptors:
+                try:
+                    os.fstat(descriptor)
+                except OSError:
+                    continue
+                leaked_descriptors.append(descriptor)
+                os.close(descriptor)
+
+    assert len(captured_descriptors) == 5
+    assert leaked_descriptors == []
+    assert raised.value is failure
+
+
+@pytest.mark.parametrize("failure_type", (KeyboardInterrupt, SystemExit))
+@pytest.mark.parametrize("site", ("checkpoint_root", "snapshot_file"))
+def test_snapshot_closes_fd_when_open_registration_is_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[BaseException],
+    site: str,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    real_open = repo_tools.os.open
+    real_close = repo_tools.os.close
+    opened_descriptors: list[int] = []
+    close_calls: list[int] = []
+    snapshot_file_armed = False
+    if site == "checkpoint_root":
+        target_path = candidate.runtime_root
+    else:
+        target_path = "README.md"
+    target = repo_tools._CandidateReadDescriptorOwner.open
+    source_lines, first_line = inspect.getsourcelines(target)
+    boundary_line = next(
+        first_line + offset
+        for offset, source_line in enumerate(source_lines)
+        if source_line.strip() == "self._descriptors.append(descriptor)"
+    )
+    failure = failure_type(f"injected {site} registration interruption")
+
+    def arm_snapshot_file(unused_path: str) -> None:
+        nonlocal snapshot_file_armed
+        close_calls.clear()
+        snapshot_file_armed = True
+
+    def observe_open(path, flags, mode=0o777, *, dir_fd=None):
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if (
+            (site == "checkpoint_root" and path == target_path)
+            or (
+                site == "snapshot_file"
+                and snapshot_file_armed
+                and path == target_path
+            )
+        ):
+            if site == "checkpoint_root":
+                close_calls.clear()
+            opened_descriptors.append(descriptor)
+        return descriptor
+
+    def observe_close(descriptor: int) -> None:
+        close_calls.append(descriptor)
+        real_close(descriptor)
+
+    def interrupt_registration(frame, event, unused_argument):
+        if (
+            event == "line"
+            and frame.f_code is target.__code__
+            and frame.f_lineno == boundary_line
+            and frame.f_locals["path"] == target_path
+            and (site == "checkpoint_root" or snapshot_file_armed)
+        ):
+            raise failure
+        return interrupt_registration
+
+    monkeypatch.setattr(repo_tools.os, "open", observe_open)
+    monkeypatch.setattr(repo_tools.os, "close", observe_close)
+    if site == "snapshot_file":
+        monkeypatch.setattr(
+            repo_tools,
+            "_candidate_execution_snapshot_file_hook",
+            arm_snapshot_file,
+        )
+
+    leaked_descriptors: list[int] = []
+    with pytest.raises(failure_type) as raised:
+        try:
+            sys.settrace(interrupt_registration)
+            repo_tools.prepare_candidate_execution_snapshot(
+                _snapshot_request(candidate)
+            )
+        finally:
+            sys.settrace(None)
+            for descriptor in opened_descriptors:
+                try:
+                    os.fstat(descriptor)
+                except OSError:
+                    continue
+                leaked_descriptors.append(descriptor)
+                real_close(descriptor)
+
+    assert len(opened_descriptors) == 1
+    assert leaked_descriptors == []
+    assert close_calls.count(opened_descriptors[0]) == 1
+    assert raised.value is failure
+
+
+@pytest.mark.parametrize("failure_type", (KeyboardInterrupt, SystemExit))
+def test_snapshot_closes_duplicate_when_dup_registration_is_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[BaseException],
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    real_dup = repo_tools.os.dup
+    real_close = repo_tools.os.close
+    duplicated_descriptors: list[int] = []
+    close_calls: list[int] = []
+    target = repo_tools._CandidateReadDescriptorOwner.dup
+    source_lines, first_line = inspect.getsourcelines(target)
+    boundary_line = next(
+        first_line + offset
+        for offset, source_line in enumerate(source_lines)
+        if source_line.strip() == "self._descriptors.append(duplicate)"
+    )
+    failure = failure_type("injected duplicate registration interruption")
+
+    def observe_dup(descriptor: int) -> int:
+        duplicate = real_dup(descriptor)
+        close_calls.clear()
+        duplicated_descriptors.append(duplicate)
+        return duplicate
+
+    def observe_close(descriptor: int) -> None:
+        close_calls.append(descriptor)
+        real_close(descriptor)
+
+    def interrupt_registration(frame, event, unused_argument):
+        if (
+            event == "line"
+            and frame.f_code is target.__code__
+            and frame.f_lineno == boundary_line
+        ):
+            raise failure
+        return interrupt_registration
+
+    monkeypatch.setattr(repo_tools.os, "dup", observe_dup)
+    monkeypatch.setattr(repo_tools.os, "close", observe_close)
+
+    leaked_descriptors: list[int] = []
+    with pytest.raises(failure_type) as raised:
+        try:
+            sys.settrace(interrupt_registration)
+            repo_tools.prepare_candidate_execution_snapshot(
+                _snapshot_request(candidate)
+            )
+        finally:
+            sys.settrace(None)
+            for descriptor in duplicated_descriptors:
+                try:
+                    os.fstat(descriptor)
+                except OSError:
+                    continue
+                leaked_descriptors.append(descriptor)
+                real_close(descriptor)
+
+    assert len(duplicated_descriptors) == 1
+    assert leaked_descriptors == []
+    assert close_calls.count(duplicated_descriptors[0]) == 1
+    assert raised.value is failure
+
+
+def test_candidate_descriptor_owner_does_not_close_recycled_duplicate() -> None:
+    source = os.open("/dev/null", os.O_RDONLY)
+    owner = repo_tools._CandidateReadDescriptorOwner()
+    recycled: int | None = None
+    try:
+        duplicate = owner.dup(source)
+        owner.close()
+        recycled = os.dup(source)
+        assert recycled == duplicate
+
+        owner.close()
+
+        os.fstat(recycled)
+    finally:
+        if recycled is not None:
+            os.close(recycled)
+        os.close(source)
+
+
+def test_candidate_snapshot_and_read_route_all_descriptor_acquisitions_through_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = b"base\n"
+    candidate = _candidate(
+        tmp_path,
+        content,
+        source_path="nested/README.md",
+    )
+    real_open = repo_tools.os.open
+    real_dup = repo_tools.os.dup
+    owner_open_code = repo_tools._CandidateReadDescriptorOwner.open.__code__
+    owner_dup_code = repo_tools._CandidateReadDescriptorOwner.dup.__code__
+    direct_acquisition_callers: list[tuple[str, str]] = []
+
+    def observe_open(path, flags, mode=0o777, *, dir_fd=None):
+        caller = sys._getframe(1)
+        if (
+            caller.f_globals.get("__name__") == repo_tools.__name__
+            and caller.f_code is not owner_open_code
+        ):
+            direct_acquisition_callers.append(("open", caller.f_code.co_name))
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    def observe_dup(descriptor: int) -> int:
+        caller = sys._getframe(1)
+        if (
+            caller.f_globals.get("__name__") == repo_tools.__name__
+            and caller.f_code is not owner_dup_code
+        ):
+            direct_acquisition_callers.append(("dup", caller.f_code.co_name))
+        return real_dup(descriptor)
+
+    monkeypatch.setattr(repo_tools.os, "open", observe_open)
+    monkeypatch.setattr(repo_tools.os, "dup", observe_dup)
+
+    snapshot = repo_tools.prepare_candidate_execution_snapshot(
+        _snapshot_request(candidate)
+    )
+    read = repo_tools.read_candidate_file(
+        _request(candidate, path="nested/README.md")
+    )
+
+    assert snapshot.plan.files == (
+        repo_tools.SourceFile("nested/README.md", "100644", content),
+    )
+    assert read.content == content
+    assert direct_acquisition_callers == []
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    (
+        ("runtime_root", Path("relative-runtime")),
+        ("workspace_id", "B" * 64),
+        ("source_artifact_sha256", "A" * 64),
+        ("expected_head_commit", "A" * 40),
+        ("expected_workspace_manifest_digest", "A" * 64),
+    ),
+)
+def test_prepare_candidate_execution_snapshot_requires_canonical_request_fields(
+    tmp_path: Path,
+    field: str,
+    wrong_value: object,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    values = {
+        "runtime_root": candidate.runtime_root,
+        "workspace_id": candidate.workspace_id,
+        "source_artifact_sha256": candidate.source_artifact_sha256,
+        "expected_head_commit": candidate.head_commit,
+        "expected_workspace_manifest_digest": (
+            candidate.workspace_manifest_digest
+        ),
+    }
+    values[field] = wrong_value
+    request = repo_tools.CandidateExecutionSnapshotRequest(**values)
+
+    _assert_snapshot_recovery(candidate, request)
+
+
+def test_prepare_candidate_execution_snapshot_requires_exact_request_type(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    request = _snapshot_request(candidate)
+
+    _assert_snapshot_recovery(
+        candidate,
+        {
+            "runtime_root": request.runtime_root,
+            "workspace_id": request.workspace_id,
+        },
+    )
+
+
+def test_prepare_candidate_execution_snapshot_requires_private_owned_runtime(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    candidate.runtime_root.chmod(0o755)
+
+    _assert_snapshot_recovery(candidate)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing_file",
+        "missing_directory",
+        "extra_file",
+        "extra_directory",
+        "reserved_path",
+        "invalid_path",
+    ),
+)
+def test_prepare_candidate_execution_snapshot_rejects_workspace_shape_changes(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    source_path = (
+        "nested/README.md" if mutation == "missing_directory" else "README.md"
+    )
+    candidate = _candidate(tmp_path, b"base\n", source_path=source_path)
+    if mutation == "missing_file":
+        (candidate.worktree / "README.md").unlink()
+    elif mutation == "missing_directory":
+        (candidate.worktree / "nested" / "README.md").unlink()
+        (candidate.worktree / "nested").rmdir()
+    elif mutation == "extra_file":
+        (candidate.worktree / "extra.txt").write_bytes(b"extra\n")
+    elif mutation == "extra_directory":
+        (candidate.worktree / "extra").mkdir()
+    elif mutation == "reserved_path":
+        (candidate.worktree / ".git").mkdir()
+    else:
+        (candidate.worktree / "invalid name.txt").write_bytes(b"invalid\n")
+
+    _assert_snapshot_recovery(candidate)
+
+
+@pytest.mark.parametrize("mode", (0o600, 0o777))
+def test_prepare_candidate_execution_snapshot_rejects_noncanonical_file_mode(
+    tmp_path: Path,
+    mode: int,
+) -> None:
+    candidate = _candidate(tmp_path, b"base\n")
+    (candidate.worktree / "README.md").chmod(mode)
+
+    _assert_snapshot_recovery(candidate)
+
+
 def test_read_candidate_file_returns_empty_file(tmp_path: Path) -> None:
     candidate = _candidate(tmp_path, b"")
 
@@ -1779,8 +3211,8 @@ def test_read_candidate_file_maps_post_read_manifest_scan_error(
 ) -> None:
     candidate = _candidate(tmp_path, b"base\n")
     real_scan = repo_tools.scan_workspace_manifest
-    real_close = repo_tools._close_candidate_read_checkpoint
-    closed_descriptors: tuple[int, ...] = ()
+    real_anchor = repo_tools._candidate_read_anchor
+    closed_descriptors: list[int] = []
     scan_calls = 0
 
     def fail_post_read_scan(
@@ -1793,14 +3225,10 @@ def test_read_candidate_file_maps_post_read_manifest_scan_error(
             raise repo_tools.ManifestError("post-read scan failed")
         return real_scan(root_fd, head_commit)
 
-    def observe_close(
-        checkpoint: repo_tools._VerifiedCandidateReadCheckpoint,
-    ) -> None:
-        nonlocal closed_descriptors
-        closed_descriptors = tuple(
-            anchor.descriptor for anchor in checkpoint.anchors
-        )
-        real_close(checkpoint)
+    def capture_anchor(*args, **kwargs):
+        anchor = real_anchor(*args, **kwargs)
+        closed_descriptors.append(anchor.descriptor)
+        return anchor
 
     monkeypatch.setattr(
         repo_tools,
@@ -1809,8 +3237,8 @@ def test_read_candidate_file_maps_post_read_manifest_scan_error(
     )
     monkeypatch.setattr(
         repo_tools,
-        "_close_candidate_read_checkpoint",
-        observe_close,
+        "_candidate_read_anchor",
+        capture_anchor,
     )
 
     with pytest.raises(repo_tools.CandidateReadError) as raised:
@@ -2270,15 +3698,17 @@ def test_read_candidate_file_uses_only_frozen_read_only_git_calls(
     for command, kwargs in observed:
         assert command[0] == "/usr/bin/git"
         config_index = command.index("-c")
-        assert command[config_index : config_index + 6] == [
+        assert command[config_index : config_index + 8] == [
             "-c",
             "core.autocrlf=false",
             "-c",
             "core.filemode=true",
             "-c",
             "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
         ]
-        observed_arguments.append(tuple(command[config_index + 6 :]))
+        observed_arguments.append(tuple(command[config_index + 8 :]))
         assert kwargs["env"] == expected_environment
         assert kwargs["timeout"] == 30
         assert kwargs["check"] is False

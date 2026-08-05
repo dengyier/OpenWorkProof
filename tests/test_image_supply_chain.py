@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 
 import pytest
 
@@ -30,6 +31,12 @@ TRACKED_INPUTS = {
     ),
     ("execution", "requirements_lock_sha256"): (
         "supply-chain/images/execution/requirements.lock"
+    ),
+    ("execution", "runner_sha256"): (
+        "supply-chain/images/execution/run_tests_runner.py"
+    ),
+    ("execution", "fixed_test_source_sha256"): (
+        "supply-chain/images/execution/verifier_test.py"
     ),
     ("trusted_helper", "dockerfile_sha256"): (
         "supply-chain/images/trusted-helper/Dockerfile"
@@ -98,9 +105,11 @@ def _load_candidate_inventory(inventory_path: Path) -> dict[str, object]:
         },
         "inventory",
     )
-    assert inventory["schema_version"] == (
-        "openworkproof-image-candidate-inventory/0.1"
-    )
+    schema_version = _assert_string(inventory["schema_version"], "schema_version")
+    assert schema_version in {
+        "openworkproof-image-candidate-inventory/0.1",
+        "openworkproof-image-candidate-inventory/0.2",
+    }, "unsupported schema_version"
     revision = _assert_string(inventory["source_revision"], "source_revision")
     assert REVISION_PATTERN.fullmatch(revision)
     assert inventory_path.stem == revision
@@ -131,16 +140,22 @@ def _load_candidate_inventory(inventory_path: Path) -> dict[str, object]:
     build_inputs = _assert_exact_keys(
         inventory["build_inputs"], {"global", "execution", "trusted_helper"}, "inputs"
     )
+    execution_input_keys = {
+        "dockerfile_sha256",
+        "requirements_lock_sha256",
+        "wheel_sha256sums_sha256",
+    }
+    if schema_version == "openworkproof-image-candidate-inventory/0.2":
+        execution_input_keys |= {
+            "runner_sha256",
+            "fixed_test_source_sha256",
+        }
     expected_input_keys = {
         "global": {
             "project_requirements_lock_sha256",
             "full_wheelhouse_sha256sums_sha256",
         },
-        "execution": {
-            "dockerfile_sha256",
-            "requirements_lock_sha256",
-            "wheel_sha256sums_sha256",
-        },
+        "execution": execution_input_keys,
         "trusted_helper": {
             "dockerfile_sha256",
             "requirements_lock_sha256",
@@ -156,6 +171,8 @@ def _load_candidate_inventory(inventory_path: Path) -> dict[str, object]:
         for key, digest in values.items():
             _assert_sha256(digest, f"{group}.{key}")
     for (group, key), relative_path in TRACKED_INPUTS.items():
+        if key not in build_inputs[group]:
+            continue
         assert build_inputs[group][key] == hashlib.sha256(
             _git_bytes(revision, relative_path)
         ).hexdigest()
@@ -237,13 +254,21 @@ def _load_candidate_inventory(inventory_path: Path) -> dict[str, object]:
             and all(type(token) is str for token in image["cmd"])
         )
         if image_name == "execution":
-            assert image["entrypoint"] == ["/usr/bin/env", "--"]
-            assert image["cmd"] == [
-                "/opt/venv/bin/python",
-                "-I",
-                "-m",
-                "pytest",
-            ]
+            if schema_version == "openworkproof-image-candidate-inventory/0.2":
+                assert image["entrypoint"] == [
+                    "/opt/venv/bin/python",
+                    "-I",
+                    "/opt/openworkproof/run_tests_runner.py",
+                ]
+                assert image["cmd"] == ["execute"]
+            else:
+                assert image["entrypoint"] == ["/usr/bin/env", "--"]
+                assert image["cmd"] == [
+                    "/opt/venv/bin/python",
+                    "-I",
+                    "-m",
+                    "pytest",
+                ]
         elif revision == "33a485eacf4ab97b2507f00e5a824ba4a5c8c29c":
             assert image["entrypoint"] == ["/opt/venv/bin/python", "-I"]
             assert image["cmd"] == ["-c", "import sys; sys.exit(64)"]
@@ -407,9 +432,20 @@ def _locked_packages(lock_text: str) -> tuple[str, ...]:
     )
 
 
-def _assert_fixed_helper_process_config(dockerfile: str) -> None:
-    instructions: dict[str, list[object]] = {"ENTRYPOINT": [], "CMD": []}
+def _assert_fixed_process_config(
+    dockerfile: str,
+    expected_entrypoint: list[str],
+    expected_cmd: list[str],
+    expected_copy: str | None = None,
+) -> None:
+    instructions: dict[str, list[object]] = {
+        "FROM": [],
+        "COPY": [],
+        "ENTRYPOINT": [],
+        "CMD": [],
+    }
     in_continuation = False
+    seen_from = False
     for raw_line in dockerfile.splitlines():
         stripped = raw_line.lstrip()
         assert not re.match(
@@ -427,22 +463,66 @@ def _assert_fixed_helper_process_config(dockerfile: str) -> None:
         if name in instructions:
             assert len(parts) == 2, f"missing {name} value"
             assert not continues, f"continued {name} is not allowed"
-            try:
-                value = json.loads(parts[1])
-            except json.JSONDecodeError as error:
-                raise AssertionError(f"invalid {name} JSON") from error
+            if name == "FROM":
+                seen_from = True
+            else:
+                assert seen_from, f"{name} must follow FROM"
+            if name in {"ENTRYPOINT", "CMD"}:
+                try:
+                    value = json.loads(parts[1])
+                except json.JSONDecodeError as error:
+                    raise AssertionError(f"invalid {name} JSON") from error
+            else:
+                value = parts[1]
             instructions[name].append(value)
         elif continues:
             in_continuation = True
 
     assert not in_continuation, "unterminated Dockerfile continuation"
-    assert instructions["ENTRYPOINT"] == [[
-        "/opt/venv/bin/python",
-        "-I",
-        "-m",
-        "openworkproof.trusted_helper",
-    ]]
-    assert instructions["CMD"] == [[]]
+    assert len(instructions["FROM"]) == 1
+    assert instructions["ENTRYPOINT"] == [expected_entrypoint]
+    assert instructions["CMD"] == [expected_cmd]
+    if expected_copy is not None:
+        assert instructions["COPY"].count(expected_copy) == 1
+
+
+def _assert_fixed_helper_process_config(dockerfile: str) -> None:
+    _assert_fixed_process_config(
+        dockerfile,
+        [
+            "/opt/venv/bin/python",
+            "-I",
+            "-m",
+            "openworkproof.trusted_helper",
+        ],
+        [],
+    )
+
+
+def _assert_fixed_execution_process_config(dockerfile: str) -> None:
+    _assert_fixed_process_config(
+        dockerfile,
+        [
+            "/opt/venv/bin/python",
+            "-I",
+            "/opt/openworkproof/run_tests_runner.py",
+        ],
+        ["execute"],
+        "run_tests_runner.py /opt/openworkproof/run_tests_runner.py",
+    )
+
+
+def _assert_execution_copy_up_mountpoints(dockerfile: str) -> None:
+    required = (
+        "RUN install -d -o 65532 -g 65532 -m 0755 "
+        "/workspace /output"
+    )
+    assert dockerfile.count(required) == 1
+    assert dockerfile.index(required) < dockerfile.index("USER 65532:65532")
+    assert not any(
+        re.match(r"^\s*VOLUME(?:\s|$)", line, re.IGNORECASE)
+        for line in dockerfile.splitlines()
+    )
 
 
 def test_supplychain_test_contract_is_portable_and_registered() -> None:
@@ -459,10 +539,19 @@ def test_supplychain_test_contract_is_portable_and_registered() -> None:
 def test_execution_image_contract_is_minimal_and_offline() -> None:
     dockerfile = _read("execution/Dockerfile")
     lock_text = _read("execution/requirements.lock")
+    runner_path = IMAGE_ROOT / "execution" / "run_tests_runner.py"
+    verifier_test_path = IMAGE_ROOT / "execution" / "verifier_test.py"
+    runner_mode = runner_path.lstat().st_mode
 
     assert f"FROM {BASE_IMAGE}" in dockerfile
     assert not dockerfile.startswith("# syntax=")
     assert "COPY wheels/ /tmp/wheels/" in dockerfile
+    assert (
+        "COPY Dockerfile requirements.lock run_tests_runner.py verifier_test.py "
+        "SHA256SUMS /tmp/context/" in dockerfile
+    )
+    assert "cd /tmp/context/" in dockerfile
+    assert "sha256sum -c SHA256SUMS" in dockerfile
     assert "sha256sum -c SHA256SUMS" in dockerfile
     assert "--no-index" in dockerfile
     assert "--require-hashes" in dockerfile
@@ -470,7 +559,26 @@ def test_execution_image_contract_is_minimal_and_offline() -> None:
     assert "COPY helper-src/" not in dockerfile
     assert "src/openworkproof" not in dockerfile
     assert "USER 65532:65532" in dockerfile
-    assert 'ENTRYPOINT ["/usr/bin/env", "--"]' in dockerfile
+    assert stat.S_ISREG(runner_mode) and not runner_path.is_symlink()
+    assert runner_path.read_bytes()
+    assert "COPY run_tests_runner.py /opt/openworkproof/run_tests_runner.py" in dockerfile
+    assert "COPY verifier_test.py /tmp/verifier_test.py" in dockerfile
+    assert (
+        "install -d -o 0 -g 0 -m 0555 /fixed-tests" in dockerfile
+        and "install -o 0 -g 0 -m 0444 /tmp/verifier_test.py "
+        "/fixed-tests/verifier_test.py" in dockerfile
+    )
+    assert stat.S_ISREG(verifier_test_path.lstat().st_mode)
+    assert not verifier_test_path.is_symlink()
+    assert verifier_test_path.read_bytes()
+    _assert_fixed_execution_process_config(dockerfile)
+    _assert_execution_copy_up_mountpoints(dockerfile)
+    assert 'ENTRYPOINT ["/usr/bin/env", "--"]' not in dockerfile
+    assert "openworkproof.trusted_helper" not in dockerfile
+    assert "pip install openworkproof" not in dockerfile.casefold()
+    combined = dockerfile + runner_path.read_text(encoding="utf-8")
+    assert "SIDECAR" not in combined.upper()
+    assert "/var/run/docker.sock" not in combined
     assert _locked_packages(lock_text) == (
         "iniconfig",
         "markdown-it-py",
@@ -480,6 +588,95 @@ def test_execution_image_contract_is_minimal_and_offline() -> None:
         "pygments",
         "pytest",
     )
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        "RUN install -d -o 65532 -g 65532 -m 0755 /workspace",
+        "RUN install -d -o 65532 -g 65532 -m 0755 /output",
+        "RUN install -d -o 0 -g 65532 -m 0755 /workspace /output",
+        "RUN install -d -o 65532 -g 0 -m 0755 /workspace /output",
+    ),
+)
+def test_execution_candidate_requires_both_nonroot_copy_up_mountpoints(
+    replacement: str,
+) -> None:
+    dockerfile = _read("execution/Dockerfile")
+    required = (
+        "RUN install -d -o 65532 -g 65532 -m 0755 "
+        "/workspace /output"
+    )
+    mutated = dockerfile.replace(required, replacement, 1)
+
+    with pytest.raises(AssertionError):
+        _assert_execution_copy_up_mountpoints(mutated)
+
+
+def test_execution_candidate_rejects_volume_declaration() -> None:
+    dockerfile = _read("execution/Dockerfile")
+
+    with pytest.raises(AssertionError):
+        _assert_execution_copy_up_mountpoints(
+            dockerfile + '\nVOLUME ["/workspace", "/output"]\n'
+        )
+
+
+@pytest.mark.parametrize(
+    "shadow",
+    (
+        '\nentrypoint ["/bin/false"]\n',
+        '\nEnTrYpOiNt ["/bin/false"]\n',
+        "\nentrypoint /bin/sh -c 'exit 0'\n",
+        '\ncmd ["shadow"]\n',
+        "\nCmD /bin/sh -c 'exit 0'\n",
+    ),
+)
+def test_execution_candidate_rejects_case_or_shell_form_process_shadow(
+    shadow: str,
+) -> None:
+    dockerfile = _read("execution/Dockerfile")
+
+    with pytest.raises(AssertionError):
+        _assert_fixed_execution_process_config(dockerfile + shadow)
+
+
+@pytest.mark.parametrize(
+    "multi_stage",
+    (
+        "\nFROM busybox\n",
+        "\nfrom busybox\n",
+        "FROM busybox AS shadow\n",
+    ),
+)
+def test_execution_candidate_rejects_any_second_or_shadow_stage(
+    multi_stage: str,
+) -> None:
+    dockerfile = _read("execution/Dockerfile")
+
+    with pytest.raises(AssertionError):
+        _assert_fixed_execution_process_config(dockerfile + multi_stage)
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    (
+        "COPY run_tests_runner.py /opt/openworkproof/run_tests_runner.py",
+        (
+            'ENTRYPOINT ["/opt/venv/bin/python", "-I", '
+            '"/opt/openworkproof/run_tests_runner.py"]'
+        ),
+        'CMD ["execute"]',
+    ),
+)
+def test_execution_candidate_rejects_process_or_runner_copy_before_from(
+    instruction: str,
+) -> None:
+    dockerfile = _read("execution/Dockerfile")
+    moved = instruction + "\n" + dockerfile.replace(instruction + "\n", "", 1)
+
+    with pytest.raises(AssertionError):
+        _assert_fixed_execution_process_config(moved)
 
 
 def test_trusted_helper_candidate_has_a_closed_package_surface() -> None:
@@ -628,6 +825,22 @@ def test_supply_chain_record_keeps_day0_and_acceptor_claims_closed() -> None:
     assert "不构成 Acceptor access" in record
     assert "不构成 clean-cache reacquisition" in record
     assert "不构成 Day 0 PASS" in record
+    assert "execution-test candidate" in record
+    assert "不是最终 trusted helper" in record
+    assert "不构成 registry 推送证据" in record
+    assert "不构成 Acceptor 独立验收证据" in record
+    assert "不构成 D8 证据" in record
+    assert "不构成 Day 0 证据" in record
+    assert "PID 1" in record
+    assert "同为 UID/GID 65532" in record
+    assert "零后代" in record
+    assert "Landlock ABI" in record
+    assert "只允许在 `/tmp` 下写入" in record
+    assert "Linux `/dev/null` 字符设备" in record
+    assert "不开放 `/dev`" in record
+    assert "openworkproof-image-candidate-inventory/0.2" in record
+    assert "runner_sha256" in record
+    assert "fixed_test_source_sha256" in record
 
 
 @pytest.mark.parametrize("inventory_path", CANDIDATE_PATHS, ids=lambda path: path.stem)
@@ -636,6 +849,132 @@ def test_candidate_inventory_is_closed_and_claims_only_local_evidence(
 ) -> None:
     inventory = _load_candidate_inventory(inventory_path)
     assert inventory["source_revision"] == inventory_path.stem
+
+
+def test_inventory_v01_remains_valid_without_runner_digest(tmp_path: Path) -> None:
+    inventory = copy.deepcopy(_load_candidate_inventory(CANDIDATE_PATHS[-1]))
+
+    assert inventory["schema_version"] == (
+        "openworkproof-image-candidate-inventory/0.1"
+    )
+    assert "runner_sha256" not in inventory["build_inputs"]["execution"]
+    assert "fixed_test_source_sha256" not in inventory["build_inputs"]["execution"]
+    assert _load_candidate_inventory(_write_inventory(tmp_path, inventory)) == inventory
+
+
+def _inventory_v02_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict[str, object], Path]:
+    inventory = copy.deepcopy(_load_candidate_inventory(CANDIDATE_PATHS[-1]))
+    inventory["schema_version"] = "openworkproof-image-candidate-inventory/0.2"
+    original_git_bytes = _git_bytes
+    additional_blobs = {
+        "supply-chain/images/execution/run_tests_runner.py": b"runner\n",
+        "supply-chain/images/execution/verifier_test.py": b"fixed test\n",
+    }
+
+    def git_bytes(revision: str, relative_path: str) -> bytes:
+        if relative_path in additional_blobs:
+            return additional_blobs[relative_path]
+        return original_git_bytes(revision, relative_path)
+
+    inventory["build_inputs"]["execution"].update(
+        {
+            "runner_sha256": hashlib.sha256(additional_blobs[
+                "supply-chain/images/execution/run_tests_runner.py"
+            ]).hexdigest(),
+            "fixed_test_source_sha256": hashlib.sha256(additional_blobs[
+                "supply-chain/images/execution/verifier_test.py"
+            ]).hexdigest(),
+        }
+    )
+    inventory["images"]["execution"]["entrypoint"] = [
+        "/opt/venv/bin/python",
+        "-I",
+        "/opt/openworkproof/run_tests_runner.py",
+    ]
+    inventory["images"]["execution"]["cmd"] = ["execute"]
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_git_bytes",
+        git_bytes,
+    )
+    path = _write_inventory(tmp_path, inventory)
+    return inventory, path
+
+
+def test_inventory_v02_requires_execution_runner_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory, path = _inventory_v02_fixture(tmp_path, monkeypatch)
+
+    assert _load_candidate_inventory(path) == inventory
+    del inventory["build_inputs"]["execution"]["runner_sha256"]
+    with pytest.raises(AssertionError, match="keys"):
+        _load_candidate_inventory(_write_inventory(tmp_path, inventory))
+
+
+def test_inventory_v02_requires_fixed_test_source_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory, path = _inventory_v02_fixture(tmp_path, monkeypatch)
+
+    assert _load_candidate_inventory(path) == inventory
+    del inventory["build_inputs"]["execution"]["fixed_test_source_sha256"]
+    with pytest.raises(AssertionError, match="keys"):
+        _load_candidate_inventory(_write_inventory(tmp_path, inventory))
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "additional_keys"),
+    (
+        (
+            "openworkproof-image-candidate-inventory/0.1",
+            {"runner_sha256": "a" * 64},
+        ),
+        (
+            "openworkproof-image-candidate-inventory/0.1",
+            {"fixed_test_source_sha256": "b" * 64},
+        ),
+        (
+            "openworkproof-image-candidate-inventory/0.1",
+            {
+                "runner_sha256": "a" * 64,
+                "fixed_test_source_sha256": "b" * 64,
+            },
+        ),
+        (
+            "openworkproof-image-candidate-inventory/0.2",
+            {"runner_sha256": "a" * 64},
+        ),
+        (
+            "openworkproof-image-candidate-inventory/0.2",
+            {"fixed_test_source_sha256": "b" * 64},
+        ),
+    ),
+)
+def test_inventory_versions_reject_cross_version_execution_key_mixtures(
+    tmp_path: Path,
+    schema_version: str,
+    additional_keys: dict[str, str],
+) -> None:
+    inventory = copy.deepcopy(_load_candidate_inventory(CANDIDATE_PATHS[-1]))
+    inventory["schema_version"] = schema_version
+    inventory["build_inputs"]["execution"].update(additional_keys)
+
+    with pytest.raises(AssertionError):
+        _load_candidate_inventory(_write_inventory(tmp_path, inventory))
+
+
+def test_inventory_loader_rejects_unknown_schema_version(tmp_path: Path) -> None:
+    inventory = copy.deepcopy(_load_candidate_inventory(CANDIDATE_PATHS[-1]))
+    inventory["schema_version"] = "openworkproof-image-candidate-inventory/9.9"
+
+    with pytest.raises(AssertionError, match="schema_version"):
+        _load_candidate_inventory(_write_inventory(tmp_path, inventory))
 
 
 def test_inventory_loader_rejects_duplicate_json_keys(tmp_path: Path) -> None:
