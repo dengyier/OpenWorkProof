@@ -344,7 +344,7 @@ CREATE TABLE handler_executions (
 """
 
 
-_HANDLER_EXECUTION_SCHEMA = """
+_HANDLER_EXECUTION_SCHEMA_V2 = """
 CREATE TABLE handler_executions (
     execution_id TEXT PRIMARY KEY,
     work_order_digest TEXT NOT NULL
@@ -376,6 +376,50 @@ CREATE TABLE handler_executions (
         OR
         (
             tool_name = 'owp.rollback_patch'
+            AND request_json IS NULL
+            AND execution_contract_json IS NULL
+            AND execution_contract_digest IS NULL
+        )
+    )
+)
+"""
+
+
+_HANDLER_EXECUTION_SCHEMA = """
+CREATE TABLE handler_executions (
+    execution_id TEXT PRIMARY KEY,
+    work_order_digest TEXT NOT NULL
+        REFERENCES work_orders(work_order_digest),
+    request_digest TEXT NOT NULL UNIQUE,
+    nonce TEXT NOT NULL UNIQUE,
+    grant_id TEXT NOT NULL REFERENCES grants(grant_id),
+    tool_name TEXT NOT NULL CHECK (
+        tool_name IN ('owp.run_tests', 'owp.rollback_patch')
+    ),
+    arguments_digest TEXT NOT NULL,
+    execution_context_id TEXT NOT NULL UNIQUE,
+    container_instance_id_digest TEXT NOT NULL UNIQUE,
+    controller_id TEXT NOT NULL,
+    reserved_at TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (
+        state IN ('RESERVED', 'STARTED_UNCONFIRMED')
+    ),
+    authorization_prefix_digest TEXT,
+    request_json TEXT,
+    execution_contract_json TEXT,
+    execution_contract_digest TEXT,
+    CHECK (
+        (
+            tool_name = 'owp.run_tests'
+            AND authorization_prefix_digest IS NOT NULL
+            AND request_json IS NOT NULL
+            AND execution_contract_json IS NOT NULL
+            AND execution_contract_digest IS NOT NULL
+        )
+        OR
+        (
+            tool_name = 'owp.rollback_patch'
+            AND authorization_prefix_digest IS NULL
             AND request_json IS NULL
             AND execution_contract_json IS NULL
             AND execution_contract_digest IS NULL

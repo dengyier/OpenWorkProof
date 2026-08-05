@@ -188,6 +188,7 @@ def make_candidate_rollback_handler(
 
 _MAX_RECEIPT_BYTES = 64 * 1024
 _MAX_AGENT_REQUEST_BYTES = 8_192
+_MAX_AUTHORIZATION_PREFIX_BYTES = 8 * 1024 * 1024
 
 
 def _digest(value: object) -> str:
@@ -251,6 +252,7 @@ class _StoredRunTestsExecution:
     request: AgentRequest
     contract: repo_tools.RunTestsExecutionContract
     execution_facts: ProspectiveExecutionFacts
+    authorization_prefix_digest: str
     reserved_at: datetime
     state: Literal["RESERVED", "STARTED_UNCONFIRMED"]
 
@@ -262,6 +264,33 @@ def _canonical_agent_request(request: AgentRequest) -> bytes:
     if not 1 <= len(encoded) <= _MAX_AGENT_REQUEST_BYTES:
         raise ValueError("stored AgentRequest exceeds its byte limit")
     return encoded
+
+
+def _authorization_prefix_digest(
+    prefix: AuthorizationLedgerPrefix,
+) -> str:
+    if type(prefix) is not AuthorizationLedgerPrefix:
+        raise ValueError("authorization prefix is invalid")
+    encoded = rfc8785.dumps(
+        {
+            "domain": "openworkproof/authorization-ledger-prefix/v0.1",
+            "effective_grants": [
+                grant.model_dump(mode="json")
+                for grant in prefix.effective_grants
+            ],
+            "grant_attempts": [
+                grant.model_dump(mode="json")
+                for grant in prefix.grant_attempts
+            ],
+            "receipts": [
+                receipt.model_dump(mode="json")
+                for receipt in prefix.receipts
+            ],
+        }
+    )
+    if not 1 <= len(encoded) <= _MAX_AUTHORIZATION_PREFIX_BYTES:
+        raise ValueError("authorization prefix exceeds its byte limit")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _decode_canonical_agent_request(raw: object) -> AgentRequest:
@@ -341,6 +370,7 @@ def _ensure_handler_execution_schema(
         predecessors = (
             evidence._LEGACY_HANDLER_EXECUTION_SCHEMA,
             evidence._HANDLER_EXECUTION_SCHEMA_V1,
+            evidence._HANDLER_EXECUTION_SCHEMA_V2,
         )
         if actual in {
             _normalized_sql(predecessor) for predecessor in predecessors
@@ -484,6 +514,7 @@ def _reserve_handler_execution(
     request_json: str | None = None
     contract_json: str | None = None
     contract_digest: str | None = None
+    authorization_prefix_digest: str | None = None
     if request.tool_name == "owp.run_tests":
         if type(execution_contract) is not repo_tools.RunTestsExecutionContract:
             raise HandlerCoordinationError("RECOVERY_REQUIRED")
@@ -507,6 +538,12 @@ def _reserve_handler_execution(
         request_json = request_bytes.decode("utf-8")
         contract_json = contract_bytes.decode("utf-8")
         contract_digest = hashlib.sha256(contract_bytes).hexdigest()
+        try:
+            authorization_prefix_digest = _authorization_prefix_digest(
+                context.ledger_prefix
+            )
+        except (TypeError, ValueError) as error:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
     elif request.tool_name == "owp.rollback_patch":
         if execution_contract is not None:
             raise HandlerCoordinationError("RECOVERY_REQUIRED")
@@ -533,10 +570,13 @@ def _reserve_handler_execution(
                 controller_id,
                 reserved_at,
                 state,
+                authorization_prefix_digest,
                 request_json,
                 execution_contract_json,
                 execution_contract_digest
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?)
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?, ?
+            )
             """,
             (
                 execution_id,
@@ -550,6 +590,7 @@ def _reserve_handler_execution(
                 execution_facts.container_instance_id_digest,
                 execution_facts.controller_id,
                 context.transaction_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                authorization_prefix_digest,
                 request_json,
                 contract_json,
                 contract_digest,
@@ -582,6 +623,7 @@ def _load_stored_run_tests_execution(
                 controller_id,
                 reserved_at,
                 state,
+                authorization_prefix_digest,
                 request_json,
                 execution_contract_json,
                 execution_contract_digest
@@ -609,6 +651,7 @@ def _load_stored_run_tests_execution(
             controller_id,
             reserved_at_raw,
             state,
+            authorization_prefix_digest,
             request_json,
             contract_json,
             contract_digest,
@@ -637,6 +680,12 @@ def _load_stored_run_tests_execution(
             raise ValueError("stored reservation time is not a UTC second")
         if state not in {"RESERVED", "STARTED_UNCONFIRMED"}:
             raise ValueError("stored execution state is invalid")
+        if (
+            type(authorization_prefix_digest) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", authorization_prefix_digest)
+            is None
+        ):
+            raise ValueError("stored authorization prefix digest is invalid")
         facts = ProspectiveExecutionFacts(
             execution_context_id=execution_context_id,
             container_instance_id_digest=container_instance_id_digest,
@@ -663,6 +712,7 @@ def _load_stored_run_tests_execution(
             request=request,
             contract=contract,
             execution_facts=facts,
+            authorization_prefix_digest=authorization_prefix_digest,
             reserved_at=reserved_at,
             state=state,
         )
@@ -770,20 +820,18 @@ def _recovery_authorization_context(
         now,
         lock_descriptor,
     )
-    if (
-        stored.request.work_order_digest != context.work_order.digest
-        or (
-            receipt_state == "MATCH"
-            and (
-                not context.ledger_prefix.receipts
-                or context.ledger_prefix.receipts[-1].nonce
-                != stored.request.nonce
-            )
-        )
-    ):
+    if stored.request.work_order_digest != context.work_order.digest:
         raise HandlerCoordinationError("RECOVERY_REQUIRED")
     if receipt_state != "ABSENT":
         return context
+    try:
+        current_prefix_digest = _authorization_prefix_digest(
+            context.ledger_prefix
+        )
+    except (TypeError, ValueError) as error:
+        raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+    if current_prefix_digest != stored.authorization_prefix_digest:
+        raise HandlerCoordinationError("RECOVERY_REQUIRED")
     return derive_authorization_context(
         context.work_order,
         context.ledger_prefix,

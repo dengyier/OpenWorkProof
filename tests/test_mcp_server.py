@@ -360,6 +360,7 @@ def _run_tests_case(
         "request": request,
         "arguments": arguments,
         "facts": facts,
+        "root": root,
         "verifier": verifier,
         "developer": developer,
         "verifier_issuance": verifier_issuance,
@@ -513,6 +514,118 @@ class _FakeRunTestsExecutionDriver:
             raise self.cleanup_error
 
 
+class _PersistentRunTestsExecutionDriver:
+    _PREPARATION_RESOURCES = {
+        "workspace_volume": ("workspace_volume_name",),
+        "staging_create": (
+            "workspace_volume_name",
+            "staging_container_name",
+        ),
+        "staging_removal": ("workspace_volume_name",),
+        "output_volume": (
+            "workspace_volume_name",
+            "output_volume_name",
+        ),
+        "execution_container": (
+            "workspace_volume_name",
+            "output_volume_name",
+            "container_name",
+        ),
+    }
+
+    def __init__(
+        self,
+        state_path: Path,
+        *,
+        prepare_crash_position: str | None = None,
+        start_crash_position: str | None = None,
+    ) -> None:
+        self.state_path = state_path
+        self.prepare_crash_position = prepare_crash_position
+        self.start_crash_position = start_crash_position
+        self.calls: list[tuple[object, ...]] = []
+        self.reconciled_resources: dict[str, str] | None = None
+
+    def _read(self) -> dict[str, object]:
+        if not self.state_path.exists():
+            return {"phase": "empty", "resources": {}, "start_count": 0}
+        value = json.loads(self.state_path.read_text(encoding="utf-8"))
+        assert type(value) is dict
+        return value
+
+    def _write(self, value: dict[str, object]) -> None:
+        self.state_path.write_text(
+            json.dumps(value, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+    @classmethod
+    def resources_for(
+        cls,
+        contract: repo_tools.RunTestsExecutionContract,
+        position: str,
+    ) -> dict[str, str]:
+        binding = repo_tools.derive_run_tests_docker_binding(
+            contract.execution_id
+        )
+        return {
+            attribute: getattr(binding, attribute)
+            for attribute in cls._PREPARATION_RESOURCES[position]
+        }
+
+    def prepare(self, contract, snapshot):
+        self.calls.append(("prepare", contract, snapshot))
+        start_count = self._read()["start_count"]
+        for position in self._PREPARATION_RESOURCES:
+            self._write(
+                {
+                    "execution_id": contract.execution_id,
+                    "phase": position,
+                    "resources": self.resources_for(contract, position),
+                    "start_count": start_count,
+                }
+            )
+            if position == self.prepare_crash_position:
+                os._exit(71)
+        return repo_tools.RunTestsPreparationOutcome("READY_TO_START")
+
+    def start_and_wait(self, contract):
+        self.calls.append(("start_and_wait", contract))
+        state = self._read()
+        state.update(
+            {
+                "execution_id": contract.execution_id,
+                "phase": self.start_crash_position or "closed_result",
+                "start_count": int(state["start_count"]) + 1,
+            }
+        )
+        self._write(state)
+        if self.start_crash_position is not None:
+            os._exit(73)
+        return _closed_run_tests_outcome(contract)
+
+    def reconcile(self, contract, journal_state, receipt_state):
+        self.calls.append(
+            ("reconcile", contract, journal_state, receipt_state)
+        )
+        state = self._read()
+        assert state["execution_id"] == contract.execution_id
+        self.reconciled_resources = dict(state["resources"])
+        if state["phase"] in self._PREPARATION_RESOURCES:
+            state.update({"phase": "reconciled", "resources": {}})
+            self._write(state)
+            return repo_tools.RunTestsExecutionOutcome("SAFE_TO_RETRY")
+        if state["phase"] in {"docker_start_accepted", "result_renamed"}:
+            return _closed_run_tests_outcome(contract)
+        return repo_tools.RunTestsExecutionOutcome("UNRESOLVED")
+
+    def cleanup(self, contract):
+        self.calls.append(("cleanup", contract))
+        state = self._read()
+        state.update({"phase": "cleaned", "resources": {}})
+        self._write(state)
+
+
 @pytest.fixture(autouse=True)
 def _stub_candidate_execution_snapshot(
     monkeypatch: pytest.MonkeyPatch,
@@ -565,6 +678,29 @@ def _reserve_run_tests_execution(case, *, started: bool) -> None:
             )
     finally:
         evidence._release_target_lock(lock_descriptor)
+
+
+def _run_tests_persistence_counts(case) -> tuple[int, int, int, int]:
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        return connection.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM receipts WHERE nonce = ?),
+                (SELECT COUNT(*) FROM grant_events AS event
+                 JOIN receipts AS receipt
+                   ON receipt.receipt_id = event.receipt_id
+                 WHERE receipt.nonce = ?),
+                (SELECT COUNT(*) FROM evidence_publications AS publication
+                 JOIN receipts AS receipt
+                   ON receipt.receipt_id = publication.receipt_id
+                 WHERE receipt.nonce = ?),
+                (SELECT version FROM work_order_state WHERE singleton = 1)
+            """,
+            (case["request"].nonce,) * 3,
+        ).fetchone()
+    finally:
+        connection.close()
 
 
 def _current_run_tests_context(case, now: datetime):
@@ -651,6 +787,37 @@ def _execute_run_tests_case(
         clock=lambda: (
             selected_context.transaction_time if now is None else now
         ),
+    )
+
+
+def _append_same_second_grant(
+    case,
+    role_keys,
+    now: datetime,
+):
+    child = _child_grant(
+        case["work_order"],
+        case["root"],
+        role_keys,
+        label="handler-loop:same-second-child",
+        updates={
+            "allowed_tools": ["owp.repo_read"],
+            "quota": {"tool_calls": 1, "repair_rounds": 0},
+        },
+    )
+    return _issue_child(
+        case["ledger_path"],
+        child,
+        _delegation_request(
+            case["work_order"],
+            case["root"],
+            child,
+            role_keys,
+            actor_role="Manager",
+            nonce=_grant_id("handler-loop:same-second-child-request"),
+        ),
+        role_keys,
+        now,
     )
 
 
@@ -751,10 +918,73 @@ def test_handler_journal_schema_includes_run_tests_recovery_fields(
     finally:
         connection.close()
     assert {row[1] for row in columns} >= {
+        "authorization_prefix_digest",
         "request_json",
         "execution_contract_json",
         "execution_contract_digest",
     }
+
+
+def test_authorization_prefix_digest_binds_all_canonical_components(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    prefix = case["context"].ledger_prefix
+    stable = AuthorizationLedgerPrefix(
+        effective_grants=tuple(prefix.effective_grants),
+        grant_attempts=tuple(prefix.grant_attempts),
+        receipts=tuple(prefix.receipts),
+    )
+    assert mcp_server._authorization_prefix_digest(prefix) == (
+        mcp_server._authorization_prefix_digest(stable)
+    )
+
+    changed_grant = prefix.effective_grants[0].model_copy(
+        update={"subject_agent_id": "changed-subject"}
+    )
+    changed_grants = AuthorizationLedgerPrefix(
+        effective_grants=(changed_grant, *prefix.effective_grants[1:]),
+        grant_attempts=prefix.grant_attempts,
+        receipts=prefix.receipts,
+    )
+    assert mcp_server._authorization_prefix_digest(changed_grants) != (
+        mcp_server._authorization_prefix_digest(prefix)
+    )
+
+    changed_attempts = AuthorizationLedgerPrefix(
+        effective_grants=prefix.effective_grants,
+        grant_attempts=(changed_grant,),
+        receipts=prefix.receipts,
+    )
+    assert mcp_server._authorization_prefix_digest(changed_attempts) != (
+        mcp_server._authorization_prefix_digest(prefix)
+    )
+
+    changed_receipt = prefix.receipts[-1].model_copy(
+        update={"sequence": prefix.receipts[-1].sequence + 1}
+    )
+    changed_receipts = AuthorizationLedgerPrefix(
+        effective_grants=prefix.effective_grants,
+        grant_attempts=prefix.grant_attempts,
+        receipts=(*prefix.receipts[:-1], changed_receipt),
+    )
+    assert mcp_server._authorization_prefix_digest(changed_receipts) != (
+        mcp_server._authorization_prefix_digest(prefix)
+    )
+
+
+def test_current_handler_schema_has_a_named_prefix_predecessor() -> None:
+    assert hasattr(evidence, "_HANDLER_EXECUTION_SCHEMA_V2")
 
 
 def test_handler_journal_recovery_fields_are_closed_by_tool(
@@ -777,9 +1007,10 @@ def test_handler_journal_recovery_fields_are_closed_by_tool(
             execution_id, work_order_digest, request_digest, nonce,
             grant_id, tool_name, arguments_digest, execution_context_id,
             container_instance_id_digest, controller_id, reserved_at, state,
+            authorization_prefix_digest,
             request_json, execution_contract_json,
             execution_contract_digest
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?, ?)
     """
     common = (
         "0" * 64,
@@ -796,7 +1027,9 @@ def test_handler_journal_recovery_fields_are_closed_by_tool(
     )
     try:
         with pytest.raises(sqlite3.IntegrityError):
-            connection.execute(insert, (*common, None, None, None))
+            connection.execute(insert, (*common, None, None, None, None))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(insert, (*common, "d" * 64, None, None, None))
         rollback = (
             "6" * 64,
             case["work_order"].digest,
@@ -811,7 +1044,15 @@ def test_handler_journal_recovery_fields_are_closed_by_tool(
             fixed_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
         with pytest.raises(sqlite3.IntegrityError):
-            connection.execute(insert, (*rollback, "{}", "{}", "c" * 64))
+            connection.execute(
+                insert,
+                (*rollback, "d" * 64, None, None, None),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                insert,
+                (*rollback, None, "{}", "{}", "c" * 64),
+            )
     finally:
         connection.close()
 
@@ -819,6 +1060,7 @@ def test_handler_journal_recovery_fields_are_closed_by_tool(
 @pytest.mark.parametrize(
     "predecessor",
     (
+        evidence._HANDLER_EXECUTION_SCHEMA_V2,
         evidence._HANDLER_EXECUTION_SCHEMA_V1,
         evidence._LEGACY_HANDLER_EXECUTION_SCHEMA,
     ),
@@ -870,6 +1112,7 @@ def test_handler_journal_schema_migrates_empty_predecessors(
 @pytest.mark.parametrize(
     "predecessor",
     (
+        evidence._HANDLER_EXECUTION_SCHEMA_V2,
         evidence._HANDLER_EXECUTION_SCHEMA_V1,
         evidence._LEGACY_HANDLER_EXECUTION_SCHEMA,
     ),
@@ -893,6 +1136,16 @@ def test_handler_journal_schema_rejects_nonempty_predecessors(
     try:
         connection.execute("DROP TABLE handler_executions")
         connection.execute(predecessor)
+        tool_name = (
+            "owp.rollback_patch"
+            if predecessor == evidence._HANDLER_EXECUTION_SCHEMA_V2
+            else "owp.run_tests"
+        )
+        grant_id = (
+            case["developer"].grant_id
+            if tool_name == "owp.rollback_patch"
+            else case["verifier"].grant_id
+        )
         connection.execute(
             """
             INSERT INTO handler_executions (
@@ -900,14 +1153,15 @@ def test_handler_journal_schema_rejects_nonempty_predecessors(
                 grant_id, tool_name, arguments_digest,
                 execution_context_id, container_instance_id_digest,
                 controller_id, reserved_at, state
-            ) VALUES (?, ?, ?, ?, ?, 'owp.run_tests', ?, ?, ?, ?, ?, 'RESERVED')
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED')
             """,
             (
                 "0" * 64,
                 case["work_order"].digest,
                 case["request"].digest,
                 case["request"].nonce,
-                case["verifier"].grant_id,
+                grant_id,
+                tool_name,
                 case["request"].arguments_digest,
                 case["facts"].execution_context_id,
                 case["facts"].container_instance_id_digest,
@@ -964,6 +1218,11 @@ def test_handler_journal_persists_and_loads_exact_recovery_fields(
         request=case["request"],
         contract=contract,
         execution_facts=case["facts"],
+        authorization_prefix_digest=(
+            mcp_server._authorization_prefix_digest(
+                case["context"].ledger_prefix
+            )
+        ),
         reserved_at=fixed_now,
         state="RESERVED",
     )
@@ -971,7 +1230,8 @@ def test_handler_journal_persists_and_loads_exact_recovery_fields(
     try:
         row = connection.execute(
             """
-            SELECT request_json, execution_contract_json,
+            SELECT authorization_prefix_digest,
+                   request_json, execution_contract_json,
                    execution_contract_digest
             FROM handler_executions
             """
@@ -981,6 +1241,9 @@ def test_handler_journal_persists_and_loads_exact_recovery_fields(
     request_bytes = rfc8785.dumps(case["request"].model_dump(mode="json"))
     contract_bytes = repo_tools.encode_run_tests_execution_contract(contract)
     assert row == (
+        mcp_server._authorization_prefix_digest(
+            case["context"].ledger_prefix
+        ),
         request_bytes.decode("utf-8"),
         contract_bytes.decode("utf-8"),
         hashlib.sha256(contract_bytes).hexdigest(),
@@ -1092,6 +1355,7 @@ def test_handler_journal_recovery_fields_reject_mixed_tool_rows(
         "duplicate_request_key",
         "noncanonical_request",
         "request_signature",
+        "authorization_prefix_digest",
         "contract_digest",
         "contract_arguments",
         "journal_arguments_digest",
@@ -1153,6 +1417,12 @@ def test_handler_journal_recovery_fields_reject_tampering(
                 connection.execute(
                     "UPDATE handler_executions SET execution_contract_digest = ?",
                     ("0" * 64,),
+                )
+            elif tamper == "authorization_prefix_digest":
+                connection.execute(
+                    "UPDATE handler_executions "
+                    "SET authorization_prefix_digest = ?",
+                    ("not-a-digest",),
                 )
             elif tamper == "contract_arguments":
                 raw = connection.execute(
@@ -2051,6 +2321,59 @@ def test_execute_run_tests_retries_after_safe_reserved_recovery(
         connection.close()
 
 
+def test_execute_run_tests_absent_receipt_rejects_same_second_prefix_advance(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    _reserve_run_tests_execution(case, started=False)
+    later = _append_same_second_grant(
+        case,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    current_context = _current_run_tests_context(case, fixed_now)
+    driver = _FakeRunTestsExecutionDriver(
+        reconciliation_outcomes=(
+            repo_tools.RunTestsExecutionOutcome("SAFE_TO_RETRY"),
+        )
+    )
+
+    with pytest.raises(HandlerCoordinationError, match="RECOVERY_REQUIRED"):
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            driver,
+            context=current_context,
+        )
+
+    assert driver.calls == []
+    assert current_context.ledger_prefix.receipts[-1].receipt_id == (
+        later.receipt_id
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT request_digest, state FROM handler_executions"
+        ).fetchone() == (case["request"].digest, "RESERVED")
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE nonce = ?",
+            (case["request"].nonce,),
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
 @pytest.mark.parametrize(
     ("crash_step", "expected_state", "exit_code"),
     (
@@ -2076,6 +2399,7 @@ def test_execute_run_tests_recovers_journal_transition_crashes(
         sidecar_receipt_factory=sidecar_receipt_factory,
         now=fixed_now,
     )
+    before = _run_tests_persistence_counts(case)
     target_name = (
         "_reserve_handler_execution"
         if crash_step == "reservation"
@@ -2128,6 +2452,9 @@ def test_execute_run_tests_recovers_journal_transition_crashes(
     assert sum(
         call[0] == "start_and_wait" for call in recovery_driver.calls
     ) == 1
+    after = _run_tests_persistence_counts(case)
+    assert after[:3] == (1, 1, 1)
+    assert after[3] == before[3] + 1
 
 
 @pytest.mark.parametrize(
@@ -2155,20 +2482,35 @@ def test_execute_run_tests_recovers_each_preparation_crash_position(
         sidecar_receipt_factory=sidecar_receipt_factory,
         now=fixed_now,
     )
+    contract = _run_tests_contract(case)
+    state_path = tmp_path / f"persistent-preparation-{position}.json"
+    before = _run_tests_persistence_counts(case)
     child = os.fork()
     if child == 0:
         _execute_run_tests_case(
             case,
             tmp_path,
             ephemeral_role_keys,
-            _FakeRunTestsExecutionDriver(
-                prepare_exit_code=71
+            _PersistentRunTestsExecutionDriver(
+                state_path,
+                prepare_crash_position=position,
             ),
         )
         os._exit(72)
     _, status = os.waitpid(child, 0)
     assert os.WIFEXITED(status)
     assert os.WEXITSTATUS(status) == 71
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted == {
+        "execution_id": contract.execution_id,
+        "phase": position,
+        "resources": (
+            _PersistentRunTestsExecutionDriver.resources_for(
+                contract, position
+            )
+        ),
+        "start_count": 0,
+    }
     connection = evidence.connect_ledger(case["ledger_path"])
     try:
         assert connection.execute(
@@ -2181,10 +2523,8 @@ def test_execute_run_tests_recovers_each_preparation_crash_position(
     finally:
         connection.close()
 
-    recovery_driver = _FakeRunTestsExecutionDriver(
-        reconciliation_outcomes=(
-            repo_tools.RunTestsExecutionOutcome("SAFE_TO_RETRY"),
-        )
+    recovery_driver = _PersistentRunTestsExecutionDriver(
+        state_path,
     )
     receipt = _execute_run_tests_case(
         case,
@@ -2196,14 +2536,26 @@ def test_execute_run_tests_recovers_each_preparation_crash_position(
     assert sum(
         call[0] == "start_and_wait" for call in recovery_driver.calls
     ) == 1
+    assert recovery_driver.reconciled_resources == persisted["resources"]
+    final_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert final_state["resources"] == {}
+    assert final_state["phase"] == "cleaned"
+    assert final_state["start_count"] == 1
+    after = _run_tests_persistence_counts(case)
+    assert after[:3] == (1, 1, 1)
+    assert after[3] == before[3] + 1
 
 
+@pytest.mark.parametrize(
+    "position", ("docker_start_accepted", "result_renamed")
+)
 def test_execute_run_tests_recovers_lost_start_ack_without_second_start(
     tmp_path: Path,
     signed_work_order: WorkOrder,
     ephemeral_role_keys,
     sidecar_receipt_factory,
     fixed_now: datetime,
+    position: str,
 ) -> None:
     case = _run_tests_case(
         tmp_path=tmp_path,
@@ -2212,14 +2564,17 @@ def test_execute_run_tests_recovers_lost_start_ack_without_second_start(
         sidecar_receipt_factory=sidecar_receipt_factory,
         now=fixed_now,
     )
+    state_path = tmp_path / f"persistent-start-{position}.json"
+    before = _run_tests_persistence_counts(case)
     child = os.fork()
     if child == 0:
         _execute_run_tests_case(
             case,
             tmp_path,
             ephemeral_role_keys,
-            _FakeRunTestsExecutionDriver(
-                start_exit_code=73
+            _PersistentRunTestsExecutionDriver(
+                state_path,
+                start_crash_position=position,
             ),
         )
         os._exit(74)
@@ -2227,8 +2582,12 @@ def test_execute_run_tests_recovers_lost_start_ack_without_second_start(
     assert os.WIFEXITED(status)
     assert os.WEXITSTATUS(status) == 73
     contract = _run_tests_contract(case)
-    recovery_driver = _FakeRunTestsExecutionDriver(
-        reconciliation_outcomes=(_closed_run_tests_outcome(contract),)
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted["execution_id"] == contract.execution_id
+    assert persisted["phase"] == position
+    assert persisted["start_count"] == 1
+    recovery_driver = _PersistentRunTestsExecutionDriver(
+        state_path,
     )
     receipt = _execute_run_tests_case(
         case,
@@ -2241,6 +2600,9 @@ def test_execute_run_tests_recovers_lost_start_ack_without_second_start(
     assert sum(
         call[0] == "start_and_wait" for call in recovery_driver.calls
     ) == 0
+    assert json.loads(state_path.read_text(encoding="utf-8"))[
+        "start_count"
+    ] == 1
     connection = evidence.connect_ledger(case["ledger_path"])
     try:
         assert connection.execute(
@@ -2253,6 +2615,9 @@ def test_execute_run_tests_recovers_lost_start_ack_without_second_start(
         ).fetchone() == (1,)
     finally:
         connection.close()
+    after = _run_tests_persistence_counts(case)
+    assert after[:3] == (1, 1, 1)
+    assert after[3] == before[3] + 1
 
 
 def test_execute_run_tests_recovers_committed_receipt_after_cleanup_crash(
@@ -2277,8 +2642,11 @@ def test_execute_run_tests_recovers_committed_receipt_after_cleanup_crash(
         ).fetchone()
     finally:
         connection.close()
+    before_counts = _run_tests_persistence_counts(case)
     first_driver = _FakeRunTestsExecutionDriver(
-        cleanup_error=RuntimeError("injected cleanup failure")
+        actual_exit_code=None,
+        failure_code="TIMEOUT",
+        cleanup_error=RuntimeError("injected cleanup failure"),
     )
     with pytest.raises(
         HandlerCoordinationError, match="RECOVERY_REQUIRED"
@@ -2301,19 +2669,26 @@ def test_execute_run_tests_recovers_committed_receipt_after_cleanup_crash(
             "SELECT state FROM handler_executions"
         ).fetchone() == ("STARTED_UNCONFIRMED",)
         assert connection.execute(
-            """
-            SELECT state
-            FROM evidence_publications
-            WHERE receipt_id = (
-                SELECT receipt_id FROM receipts WHERE nonce = ?
-            )
-            """,
+            "SELECT COUNT(*) FROM evidence_publications "
+            "WHERE receipt_id = ("
+            "SELECT receipt_id FROM receipts WHERE nonce = ?)",
             (case["request"].nonce,),
-        ).fetchone() == ("COMMITTED",)
+        ).fetchone() == (0,)
     finally:
         connection.close()
+    committed_counts = _run_tests_persistence_counts(case)
+    assert committed_counts[:3] == (1, 1, 0)
+    assert committed_counts[3] == before_counts[3] + 1
 
+    later = _append_same_second_grant(
+        case,
+        ephemeral_role_keys,
+        fixed_now,
+    )
     current_context = _current_run_tests_context(case, fixed_now)
+    assert current_context.ledger_prefix.receipts[-1].receipt_id == (
+        later.receipt_id
+    )
     recovery_driver = _FakeRunTestsExecutionDriver(
         reconciliation_outcomes=(
             repo_tools.RunTestsExecutionOutcome("CLOSED_RESULT", None),
@@ -2340,7 +2715,7 @@ def test_execute_run_tests_recovers_committed_receipt_after_cleanup_crash(
         ).fetchone() == (0,)
         assert connection.execute(
             "SELECT COUNT(*), MAX(sequence) FROM receipts"
-        ).fetchone() == committed
+        ).fetchone() == (committed[0] + 1, committed[1] + 1)
     finally:
         connection.close()
 
@@ -2360,6 +2735,7 @@ def test_execute_run_tests_crash_after_journal_cleanup_does_not_republish(
         sidecar_receipt_factory=sidecar_receipt_factory,
         now=fixed_now,
     )
+    before_counts = _run_tests_persistence_counts(case)
     real_delete = mcp_server._delete_handler_execution
 
     def crash_after_delete(*args, **kwargs):
@@ -2399,6 +2775,9 @@ def test_execute_run_tests_crash_after_journal_cleanup_does_not_republish(
         ).fetchone() == (1,)
     finally:
         connection.close()
+    committed_counts = _run_tests_persistence_counts(case)
+    assert committed_counts[:3] == (1, 1, 1)
+    assert committed_counts[3] == before_counts[3] + 1
 
     driver = _FakeRunTestsExecutionDriver()
     with pytest.raises(ToolCallDenied):
@@ -2418,6 +2797,7 @@ def test_execute_run_tests_crash_after_journal_cleanup_does_not_republish(
         ).fetchone() == committed
     finally:
         connection.close()
+    assert _run_tests_persistence_counts(case) == committed_counts
 
 
 def test_execute_run_tests_migrates_ledger_without_handler_journal(
@@ -2740,13 +3120,15 @@ def test_execute_rollback_handler_exception_requires_recovery(
         ).fetchone() == before
         assert connection.execute(
             """
-            SELECT tool_name, state, request_json,
+            SELECT tool_name, state, authorization_prefix_digest,
+                   request_json,
                    execution_contract_json, execution_contract_digest
             FROM handler_executions
             """
         ).fetchone() == (
             "owp.rollback_patch",
             "STARTED_UNCONFIRMED",
+            None,
             None,
             None,
             None,
