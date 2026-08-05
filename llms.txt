@@ -1,0 +1,24 @@
+# OpenWorkProof
+
+> OpenWorkProof is an open protocol for AI agent work contracts and verifiable execution. It answers the question MCP and A2A leave open: under what authority does an agent work, and on what evidence is its result accepted? It defines four signed protocol objects — WorkOrder (work contract), CapabilityGrant (attenuating authority), ActionReceipt (per-action evidence), and AcceptanceReceipt (human acceptance) — bound into a single verifiable history. Core principles: Proof-Carrying Work, No-Cloning Authority, and Fail Closed. A standalone offline verifier (validate_grant_chain) lets third parties audit the full signed authorization history without connecting to either party's systems.
+
+OpenWorkProof does not make agents smarter; it gives agents the accountability structure needed for real social collaboration: work can be authorized, constrained, verified, accepted — and rejected when evidence is insufficient.
+
+Current status: v0.1.0 in active development. Protocol models, Ed25519 signing, grant attenuation and quota replay, pure pre-authorization (tool calls / human decisions / rollback), causality and policy replay layers, and the offline grant-chain verifier are implemented with 1,247 passing tests. CLI, MCP transport server, and the end-to-end demo are not yet complete.
+
+## Documentation
+
+- [README](https://github.com/dengyier/OpenWorkProof/blob/main/README.md): Project overview, positioning, quick start, and current implementation status
+- [Protocol Schemas](https://github.com/dengyier/OpenWorkProof/tree/main/specs/v0.1): Authoritative JSON Schemas for WorkOrder, CapabilityGrant, ActionReceipt, and AcceptanceReceipt
+
+## Source
+
+- [models.py](https://github.com/dengyier/OpenWorkProof/blob/main/src/openworkproof/models.py): Four protocol object models with strict JSON/byte-boundary validation
+- [policy.py](https://github.com/dengyier/OpenWorkProof/blob/main/src/openworkproof/policy.py): Policy replay and pure pre-authorization (authorize_tool_call, validate_human_decision, validate_rollback, validate_grant_chain)
+- [evidence.py](https://github.com/dengyier/OpenWorkProof/blob/main/src/openworkproof/evidence.py): SQLite authoritative ledger, atomic grant issuance/revocation, evidence staging and publication with crash recovery
+- [composition.py](https://github.com/dengyier/OpenWorkProof/blob/main/src/openworkproof/composition.py): Causality replay layer reconstructing immutable causal snapshots per receipt
+
+## Optional
+
+- [pyproject.toml](https://github.com/dengyier/OpenWorkProof/blob/main/pyproject.toml): Packaging metadata and pinned dependencies
+- [tests](https://github.com/dengyier/OpenWorkProof/tree/main/tests): 1,247-test conformance suite covering policy, composition, and receipt-chain behavior
