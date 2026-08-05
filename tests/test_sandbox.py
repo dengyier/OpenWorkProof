@@ -26,6 +26,15 @@ import openworkproof.mcp_server as mcp_server
 import openworkproof.repo_tools as repo_tools
 
 
+FIXED_VERIFIER_TEST_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "supply-chain"
+    / "images"
+    / "execution"
+    / "verifier_test.py"
+)
+
+
 def _decode_path(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
@@ -5805,47 +5814,116 @@ def test_docker_cleanup_retains_attempted_unowned_resource() -> None:
     assert not any(command[1] == "rm" for command in commands)
 
 
+def _live_rich_candidate_files() -> tuple[repo_tools.SourceFile, ...]:
+    return (
+        repo_tools.SourceFile("rich/__init__.py", "100644", b""),
+        repo_tools.SourceFile(
+            "rich/_loop.py",
+            "100644",
+            b"from typing import Iterable, Tuple, TypeVar\n\n"
+            b"T = TypeVar('T')\n\n"
+            b"def loop_last(values: Iterable[T]) -> Iterable[Tuple[bool, T]]:\n"
+            b"    iter_values = iter(values)\n"
+            b"    try:\n"
+            b"        previous_value = next(iter_values)\n"
+            b"    except StopIteration:\n"
+            b"        return\n"
+            b"    for value in iter_values:\n"
+            b"        yield False, previous_value\n"
+            b"        previous_value = value\n"
+            b"    yield True, previous_value\n",
+        ),
+        repo_tools.SourceFile(
+            "rich/_wrap.py",
+            "100644",
+            b"from __future__ import annotations\n\n"
+            b"import re\n"
+            b"from typing import Iterable\n\n"
+            b"from ._loop import loop_last\n"
+            b"from .cells import cell_len, chop_cells\n\n"
+            b"re_word = re.compile(r'[^\\S\\u00a0]*(?:[^\\s\\u00a0]|\\u00a0)+[^\\S\\u00a0]*')\n\n"
+            b"def words(text: str) -> Iterable[tuple[int, int, str]]:\n"
+            b"    position = 0\n"
+            b"    word_match = re_word.match(text, position)\n"
+            b"    while word_match is not None:\n"
+            b"        start, end = word_match.span()\n"
+            b"        word = word_match.group(0)\n"
+            b"        yield start, end, word\n"
+            b"        word_match = re_word.match(text, end)\n\n"
+            b"def divide_line(text: str, width: int, fold: bool = True) -> list[int]:\n"
+            b"    break_positions: list[int] = []\n"
+            b"    append = break_positions.append\n"
+            b"    cell_offset = 0\n"
+            b"    for start, _end, word in words(text):\n"
+            b"        word_length = cell_len(word.rstrip())\n"
+            b"        remaining_space = width - cell_offset\n"
+            b"        if remaining_space >= word_length:\n"
+            b"            cell_offset += cell_len(word)\n"
+            b"        elif word_length > width:\n"
+            b"            if fold:\n"
+            b"                for last, line in loop_last(chop_cells(word, width=width)):\n"
+            b"                    if start:\n"
+            b"                        append(start)\n"
+            b"                    if last:\n"
+            b"                        cell_offset = cell_len(line)\n"
+            b"                    else:\n"
+            b"                        start += len(line)\n"
+            b"            else:\n"
+            b"                if start:\n"
+            b"                    append(start)\n"
+            b"                cell_offset = cell_len(word)\n"
+            b"        elif cell_offset and start:\n"
+            b"            append(start)\n"
+            b"            cell_offset = cell_len(word)\n"
+            b"    return break_positions\n",
+        ),
+        repo_tools.SourceFile(
+            "rich/cells.py",
+            "100644",
+            b"def cell_len(text: str) -> int:\n"
+            b"    return len(text)\n\n"
+            b"def chop_cells(text: str, width: int) -> list[str]:\n"
+            b"    return [text[start:start + width] for start in range(0, len(text), width)]\n",
+        ),
+    )
+
+
 def _live_runner_snapshot(
     image_reference: str,
 ) -> tuple[bytes, bytes, bytes]:
-    candidate = (
-        b"import os\n"
-        b"from pathlib import Path\n"
-        b"import stat\n\n"
-        b"def test_copy_up_and_containment():\n"
-        b"    assert (os.getuid(), os.getgid()) == (65532, 65532)\n"
-        b"    for root in ('/workspace', '/output'):\n"
-        b"        metadata = os.stat(root)\n"
-        b"        assert (metadata.st_uid, metadata.st_gid) == (65532, 65532)\n"
-        b"        assert stat.S_IMODE(metadata.st_mode) == 0o755\n"
-        b"    for target in ('/workspace/forbidden', '/output/forbidden', '/root-forbidden'):\n"
-        b"        try:\n"
-        b"            Path(target).write_text('forbidden')\n"
-        b"        except OSError:\n"
-        b"            pass\n"
-        b"        else:\n"
-        b"            raise AssertionError(f'wrote {target}')\n"
-        b"    Path('/tmp/allowed').write_text('allowed')\n"
-        b"    assert not Path('/var/run/docker.sock').exists()\n"
-    )
-    path = "test_copy_up.py"
+    files = _live_rich_candidate_files()
     candidate_commit = "2" * 40
-    manifest = repo_tools.WorkspaceManifest(
-        schema_version="openworkproof-workspace-manifest/0.1",
-        head_commit=candidate_commit,
-        entries=(
-            repo_tools.WorkspaceManifestEntry(
-                path_bytes_b64url=base64.urlsafe_b64encode(
-                    path.encode("ascii")
-                ).rstrip(b"=").decode("ascii"),
-                type="regular",
-                posix_mode="100644",
-                size_bytes=len(candidate),
-                sha256=hashlib.sha256(candidate).hexdigest(),
-                symlink_target_b64url=None,
-            ),
-        ),
+    records = [
+        repo_tools.WorkspaceScanRecord(
+            path_bytes=b"rich",
+            entry_type="directory",
+            posix_mode=stat.S_IFDIR | 0o755,
+            size_bytes=None,
+            content=None,
+            symlink_target=None,
+            link_count=1,
+            read_token_before="stable",
+            read_token_after="stable",
+        )
+    ]
+    records.extend(
+        repo_tools.WorkspaceScanRecord(
+            path_bytes=source_file.path.encode("ascii"),
+            entry_type="regular",
+            posix_mode=stat.S_IFREG | 0o644,
+            size_bytes=len(source_file.content),
+            content=source_file.content,
+            symlink_target=None,
+            link_count=1,
+            read_token_before="stable",
+            read_token_after="stable",
+        )
+        for source_file in files
     )
+    manifest = repo_tools.build_workspace_manifest(candidate_commit, records)
+    fixed_test_source_digest = hashlib.sha256(
+        FIXED_VERIFIER_TEST_PATH.read_bytes()
+    ).hexdigest()
     contract = {
         "arguments_digest": "3" * 64,
         "candidate_commit": candidate_commit,
@@ -5853,7 +5931,7 @@ def _live_runner_snapshot(
         "command_digest": repo_tools.frozen_verifier_command_digest(),
         "container_image_digest": image_reference.split("@", 1)[1],
         "execution_id": "6" * 64,
-        "fixed_test_source_digest": "7" * 64,
+        "fixed_test_source_digest": fixed_test_source_digest,
         "request_digest": "8" * 64,
         "schema_version": "openworkproof-run-contract/0.1",
         "source_artifact_sha256": "9" * 64,
@@ -5873,11 +5951,12 @@ def _live_runner_snapshot(
             },
             "files": [
                 {
-                    "mode": "100644",
-                    "path": path,
-                    "sha256": hashlib.sha256(candidate).hexdigest(),
-                    "size_bytes": len(candidate),
+                    "mode": source_file.mode,
+                    "path": source_file.path,
+                    "sha256": hashlib.sha256(source_file.content).hexdigest(),
+                    "size_bytes": len(source_file.content),
                 }
+                for source_file in files
             ],
             "schema_version": "openworkproof-snapshot-stream/0.1",
         }
@@ -5886,7 +5965,7 @@ def _live_runner_snapshot(
         b"openworkproof-snapshot-stream/0.1\n"
         + len(header_bytes).to_bytes(4, "big")
         + header_bytes
-        + candidate
+        + b"".join(source_file.content for source_file in files)
         + contract_bytes
     )
     contract_digest = hashlib.sha256(contract_bytes).hexdigest()
@@ -5907,6 +5986,40 @@ def _live_runner_snapshot(
         }
     )
     return stream, summary, started
+
+
+def test_live_runner_snapshot_binds_tracked_fixed_test_bytes() -> None:
+    snapshot, _, _ = _live_runner_snapshot(
+        "openworkproof/execution-test@sha256:" + "a" * 64
+    )
+    magic = b"openworkproof-snapshot-stream/0.1\n"
+    header_size = int.from_bytes(snapshot[len(magic) : len(magic) + 4], "big")
+    header_start = len(magic) + 4
+    header = json.loads(snapshot[header_start : header_start + header_size])
+    contract_size = header["contract"]["size_bytes"]
+    contract = json.loads(snapshot[-contract_size:])
+    fixed_test = FIXED_VERIFIER_TEST_PATH.read_bytes()
+    candidate_files = _live_rich_candidate_files()
+
+    assert header["files"] == [
+        {
+            "mode": source_file.mode,
+            "path": source_file.path,
+            "sha256": hashlib.sha256(source_file.content).hexdigest(),
+            "size_bytes": len(source_file.content),
+        }
+        for source_file in candidate_files
+    ]
+    assert [source_file.path for source_file in candidate_files] == [
+        "rich/__init__.py",
+        "rich/_loop.py",
+        "rich/_wrap.py",
+        "rich/cells.py",
+    ]
+    assert contract["fixed_test_source_digest"] == hashlib.sha256(fixed_test).hexdigest()
+    assert contract["fixed_test_source_digest"] != hashlib.sha256(
+        fixed_test + b"# stale or mutated image\n"
+    ).hexdigest()
 
 
 @pytest.mark.docker

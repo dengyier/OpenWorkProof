@@ -56,9 +56,9 @@ OCI_INDEX = "application/vnd.oci.image.index.v1+json"
 OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 OCI_CONFIG = "application/vnd.oci.image.config.v1+json"
 OCI_LAYER = "application/vnd.oci.image.layer.v1.tar+gzip"
-IN_TOTO = "application/vnd.in-toto+json"
-IN_TOTO_STATEMENT = "https://in-toto.io/Statement/v0.1"
-SLSA_V1 = "https://slsa.dev/provenance/v1"
+DOCKER_MANIFEST = "application/vnd.docker.distribution.manifest.v2+json"
+DOCKER_CONFIG = "application/vnd.docker.container.image.v1+json"
+DOCKER_LAYER = "application/vnd.docker.image.rootfs.diff.tar.gzip"
 OCI_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 BLOB_PATH_PATTERN = re.compile(r"^blobs/sha256/([0-9a-f]{64})$")
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
@@ -66,10 +66,6 @@ MAX_ARCHIVE_MEMBERS = 128
 MAX_JSON_BYTES = 1024 * 1024
 MAX_IMAGE_LAYERS = 64
 MAX_IMAGE_HISTORY = 256
-MAX_ATTESTATION_LAYERS = 8
-MAX_INDEX_DESCRIPTORS = 4
-MAX_INDEX_DEPTH = 1
-MAX_TOTAL_INDEX_DESCRIPTORS = 8
 MAX_SNAPSHOT_ENTRIES = 4096
 MAX_SNAPSHOT_DEPTH = 64
 MAX_SNAPSHOT_FILE_BYTES = 512 * 1024 * 1024
@@ -584,56 +580,6 @@ def _verify_descriptor_blob(
     )
 
 
-def _index_leaf_descriptors(
-    archive: tarfile.TarFile,
-    members: Mapping[str, tarfile.TarInfo],
-    index_descriptor: Mapping[str, object],
-    *,
-    depth: int = 0,
-    seen: set[str] | None = None,
-    budget: list[int] | None = None,
-) -> list[dict[str, object]]:
-    assert depth <= MAX_INDEX_DEPTH, "OCI index nesting is too deep"
-    digest = index_descriptor["digest"]
-    assert isinstance(digest, str)
-    if seen is None:
-        seen = set()
-    assert digest not in seen, "OCI index descriptor cycle"
-    seen.add(digest)
-    if budget is None:
-        budget = [0]
-    raw = _descriptor_bytes(archive, members, index_descriptor)
-    index = _archive_json(raw, "nested image index")
-    assert set(index) == {"schemaVersion", "mediaType", "manifests"}
-    assert index["schemaVersion"] == 2 and index["mediaType"] == OCI_INDEX
-    manifests = index["manifests"]
-    assert type(manifests) is list and 1 <= len(manifests) <= MAX_INDEX_DESCRIPTORS
-    budget[0] += len(manifests)
-    assert budget[0] <= MAX_TOTAL_INDEX_DESCRIPTORS
-    leaves: list[dict[str, object]] = []
-    for raw_descriptor in manifests:
-        descriptor = _descriptor(
-            raw_descriptor,
-            label="nested manifest",
-            allow_annotations=True,
-            allow_platform=True,
-        )
-        if descriptor["mediaType"] == OCI_INDEX:
-            leaves.extend(
-                _index_leaf_descriptors(
-                    archive,
-                    members,
-                    descriptor,
-                    depth=depth + 1,
-                    seen=seen,
-                    budget=budget,
-                )
-            )
-        else:
-            leaves.append(descriptor)
-    return leaves
-
-
 def _config_identity(
     raw: bytes,
     *,
@@ -721,20 +667,25 @@ def _image_manifest_identity(
     members: Mapping[str, tarfile.TarInfo],
     manifest_raw: bytes,
     *,
+    manifest_media_type: str,
+    config_media_type: str,
+    layer_media_type: str,
     expected_image: Mapping[str, object] | None,
 ) -> _ImageIdentity:
     manifest = _archive_json(manifest_raw, "image manifest")
     assert set(manifest) == {"schemaVersion", "mediaType", "config", "layers"}
-    assert manifest["schemaVersion"] == 2 and manifest["mediaType"] == OCI_MANIFEST
+    assert manifest["schemaVersion"] == 2
+    assert manifest["mediaType"] == manifest_media_type
     config_descriptor = _descriptor(
-        manifest["config"], label="config", media_type=OCI_CONFIG
+        manifest["config"], label="config", media_type=config_media_type
     )
     layers = manifest["layers"]
     assert type(layers) is list and 1 <= len(layers) <= MAX_IMAGE_LAYERS, (
         "image layers must be bounded"
     )
     layer_descriptors = [
-        _descriptor(layer, label="layer", media_type=OCI_LAYER) for layer in layers
+        _descriptor(layer, label="layer", media_type=layer_media_type)
+        for layer in layers
     ]
     config_raw = _descriptor_bytes(archive, members, config_descriptor)
     for layer in layer_descriptors:
@@ -750,59 +701,6 @@ def _image_manifest_identity(
         rootfs_diff_ids=diff_ids,
         config_semantics=semantics,
     )
-
-
-def _verify_attestation_manifest(
-    archive: tarfile.TarFile,
-    members: Mapping[str, tarfile.TarInfo],
-    manifest_raw: bytes,
-    selected_manifest_digest: str,
-    expected_tag: str,
-) -> None:
-    manifest = _archive_json(manifest_raw, "attestation manifest")
-    assert set(manifest) == {"schemaVersion", "mediaType", "config", "layers"}
-    assert manifest["schemaVersion"] == 2 and manifest["mediaType"] == OCI_MANIFEST
-    config = _descriptor(
-        manifest["config"], label="attestation config", media_type=OCI_CONFIG
-    )
-    config_raw = _descriptor_bytes(archive, members, config)
-    layers = manifest["layers"]
-    assert type(layers) is list and 1 <= len(layers) <= MAX_ATTESTATION_LAYERS
-    assert len(layers) == 1, "Docker 29.5 attestation must have one layer"
-    descriptor = _descriptor(
-        layers[0],
-        label="attestation layer",
-        media_type=IN_TOTO,
-        allow_annotations=True,
-    )
-    assert descriptor["annotations"] == {"in-toto.io/predicate-type": SLSA_V1}
-    statement_raw = _descriptor_bytes(archive, members, descriptor)
-    config_value = _archive_json(config_raw, "attestation config")
-    assert config_value == {
-        "architecture": "unknown",
-        "config": {},
-        "os": "unknown",
-        "rootfs": {
-            "diff_ids": [descriptor["digest"]],
-            "type": "layers",
-        },
-    }
-    statement = _archive_json(statement_raw, "in-toto statement")
-    assert set(statement) == {"_type", "predicate", "predicateType", "subject"}
-    assert statement["_type"] == IN_TOTO_STATEMENT
-    assert statement["predicateType"] == SLSA_V1
-    assert type(statement["predicate"]) is dict
-    subject = statement["subject"]
-    assert type(subject) is list and len(subject) == 1
-    assert type(subject[0]) is dict and set(subject[0]) == {"digest", "name"}
-    repository, separator, revision = expected_tag.rpartition(":")
-    assert separator == ":" and repository and ":" not in repository
-    assert re.fullmatch(r"[0-9a-f]{40}", revision)
-    expected_subject_name = (
-        f"pkg:docker/{repository}@{revision}?platform=linux%2Farm64"
-    )
-    assert subject[0]["name"] == expected_subject_name
-    assert subject[0]["digest"] == {"sha256": selected_manifest_digest[7:]}
 
 
 def _verify_docker_archive(
@@ -833,7 +731,7 @@ def _verify_docker_archive(
         config_match = BLOB_PATH_PATTERN.fullmatch(record["Config"])
         assert config_match, "Docker Config path is not canonical"
         layer_paths = record["Layers"]
-        assert type(layer_paths) is list and layer_paths
+        assert type(layer_paths) is list and 1 <= len(layer_paths) <= MAX_IMAGE_LAYERS
         layer_matches = [BLOB_PATH_PATTERN.fullmatch(item) for item in layer_paths]
         assert all(layer_matches), "Docker Layer path is not canonical"
         assert record["Config"] in members, (
@@ -866,60 +764,26 @@ def _verify_docker_archive(
         assert type(index["manifests"]) is list and len(index["manifests"]) == 1
         top = _descriptor(
             index["manifests"][0],
-            label="Docker index",
-            media_type=OCI_INDEX,
+            label="Docker manifest",
+            media_type=DOCKER_MANIFEST,
             allow_annotations=True,
         )
+        if expected_image is not None:
+            assert top["digest"] == expected_image["local_image_id"]
+        identity = _image_manifest_identity(
+            archive,
+            members,
+            _descriptor_bytes(archive, members, top),
+            manifest_media_type=DOCKER_MANIFEST,
+            config_media_type=DOCKER_CONFIG,
+            layer_media_type=DOCKER_LAYER,
+            expected_image=expected_image,
+        )
         assert top["annotations"] == {
+            "config.digest": identity.config_digest,
             "io.containerd.image.name": f"docker.io/{expected_tag}",
             "org.opencontainers.image.ref.name": expected_tag.rsplit(":", 1)[1],
         }
-        if expected_image is not None:
-            assert top["digest"] == expected_image["local_image_id"]
-        nested_descriptors = _index_leaf_descriptors(archive, members, top)
-        identities: list[tuple[dict[str, object], _ImageIdentity]] = []
-        attestations: list[tuple[dict[str, object], bytes]] = []
-        for descriptor in nested_descriptors:
-            manifest_raw = _descriptor_bytes(archive, members, descriptor)
-            if descriptor.get("platform") == {"architecture": "arm64", "os": "linux"}:
-                assert descriptor["mediaType"] == OCI_MANIFEST
-                assert set(descriptor) == {"digest", "mediaType", "platform", "size"}
-                identities.append(
-                    (
-                        descriptor,
-                        _image_manifest_identity(
-                            archive,
-                            members,
-                            manifest_raw,
-                            expected_image=expected_image,
-                        ),
-                    )
-                )
-            else:
-                attestations.append((descriptor, manifest_raw))
-        assert len(identities) == 1
-        image_descriptor, identity = identities[0]
-        assert len(attestations) == 1
-        attestation_descriptor, attestation_raw = attestations[0]
-        assert attestation_descriptor == {
-            "annotations": {
-                "vnd.docker.reference.digest": image_descriptor["digest"],
-                "vnd.docker.reference.type": "attestation-manifest",
-            },
-            "digest": attestation_descriptor["digest"],
-            "mediaType": OCI_MANIFEST,
-            "platform": {"architecture": "unknown", "os": "unknown"},
-            "size": attestation_descriptor["size"],
-        }
-        _verify_attestation_manifest(
-            archive,
-            members,
-            attestation_raw,
-            str(image_descriptor["digest"]),
-            expected_tag,
-        )
-        if expected_image is not None:
-            assert image_descriptor["digest"] == expected_image["oci_manifest_digest"]
         assert identity.config_digest == f"sha256:{config_match.group(1)}"
         assert identity.layer_digests == tuple(
             f"sha256:{match.group(1)}" for match in layer_matches if match is not None
@@ -960,6 +824,9 @@ def _verify_oci_archive(
             archive,
             members,
             manifest_raw,
+            manifest_media_type=OCI_MANIFEST,
+            config_media_type=OCI_CONFIG,
+            layer_media_type=OCI_LAYER,
             expected_image=expected_image,
         )
         _assert_archive_closed(members)
@@ -1065,131 +932,125 @@ def _synthetic_docker_files(
 ) -> tuple[dict[str, bytes], str, str]:
     revision = "a" * 40
     tag = f"openworkproof/execution-test:{revision}"
-    files, selected_digest = _synthetic_oci_files()
-    selected_hex = selected_digest[7:]
-    selected_raw = files[f"blobs/sha256/{selected_hex}"]
-    image_manifest = json.loads(selected_raw)
-
-    statement = {
-        "_type": "https://in-toto.io/Statement/v0.1",
-        "predicate": {"buildDefinition": {}, "runDetails": {}},
-        "predicateType": "https://slsa.dev/provenance/v1",
-        "subject": [
-            {
-                "digest": {"sha256": selected_hex},
-                "name": (
-                    "pkg:docker/openworkproof/execution-test@"
-                    f"{revision}?platform=linux%2Farm64"
-                ),
-            }
-        ],
-    }
-    if mutation == "statement-predicate-type":
-        statement["predicateType"] = "https://example.invalid/predicate"
-    elif mutation == "statement-subject":
-        statement["subject"][0]["digest"]["sha256"] = "f" * 64
-    elif mutation == "statement-subject-name":
-        statement["subject"][0]["name"] = "arbitrary-but-nonempty"
-    statement_raw = json.dumps(statement, separators=(",", ":")).encode()
-    statement_hex = _sha256_bytes(statement_raw)
-
-    attestation_config = {
-        "architecture": "unknown",
-        "config": {},
-        "os": "unknown",
-        "rootfs": {"diff_ids": [f"sha256:{statement_hex}"], "type": "layers"},
-    }
-    if mutation == "config-semantics":
-        attestation_config["architecture"] = "arm64"
-    config_raw = json.dumps(attestation_config, separators=(",", ":")).encode()
-    config_hex = _sha256_bytes(config_raw)
-    config_media_type = OCI_CONFIG
+    layer_count = MAX_IMAGE_LAYERS + 1 if mutation == "layer-count" else 1
+    config = _synthetic_image_config(layer_count=layer_count)
+    config_hex = _sha256_bytes(config)
+    layer = b"layer"
+    layer_hex = _sha256_bytes(layer)
+    config_media_type = DOCKER_CONFIG
     if mutation == "config-media-type":
-        config_media_type = "application/octet-stream"
-    layer_media_type = "application/vnd.in-toto+json"
-    if mutation == "in-toto-media-type":
+        config_media_type = OCI_CONFIG
+    layer_media_type = DOCKER_LAYER
+    if mutation == "layer-media-type":
         layer_media_type = OCI_LAYER
-    layer_annotations = {"in-toto.io/predicate-type": "https://slsa.dev/provenance/v1"}
-    if mutation == "predicate-annotation":
-        layer_annotations["in-toto.io/predicate-type"] = "https://example.invalid"
-    layer = {
-        "annotations": layer_annotations,
-        "digest": f"sha256:{statement_hex}",
-        "mediaType": layer_media_type,
-        "size": len(statement_raw),
-    }
-    layers = [layer]
-    if mutation == "attestation-layers":
-        layers = [layer] * (MAX_ATTESTATION_LAYERS + 1)
-    attestation_manifest = {
+    manifest = {
         "config": {
             "digest": f"sha256:{config_hex}",
             "mediaType": config_media_type,
-            "size": len(config_raw),
+            "size": len(config),
         },
-        "layers": layers,
-        "mediaType": OCI_MANIFEST,
+        "layers": [
+            {
+                "digest": f"sha256:{layer_hex}",
+                "mediaType": layer_media_type,
+                "size": len(layer),
+            }
+        ]
+        * layer_count,
+        "mediaType": DOCKER_MANIFEST,
         "schemaVersion": 2,
     }
-    attestation_raw = json.dumps(attestation_manifest, separators=(",", ":")).encode()
-    attestation_hex = _sha256_bytes(attestation_raw)
+    if mutation == "manifest-media-type":
+        manifest["mediaType"] = OCI_MANIFEST
+    manifest_raw = json.dumps(manifest, separators=(",", ":")).encode()
+    manifest_hex = _sha256_bytes(manifest_raw)
     annotations = {
-        "vnd.docker.reference.digest": selected_digest,
-        "vnd.docker.reference.type": "attestation-manifest",
+        "config.digest": f"sha256:{config_hex}",
+        "io.containerd.image.name": f"docker.io/{tag}",
+        "org.opencontainers.image.ref.name": revision,
     }
-    platform = {"architecture": "unknown", "os": "unknown"}
-    if mutation == "descriptor-platform":
-        platform = {"architecture": "amd64", "os": "linux"}
-    elif mutation == "descriptor-annotations":
+    if mutation == "missing-config-annotation":
+        annotations.pop("config.digest")
+    elif mutation == "wrong-config-annotation":
+        annotations["config.digest"] = f"sha256:{'f' * 64}"
+    elif mutation == "extra-annotation":
         annotations["unexpected"] = "value"
-    elif mutation == "reference-digest":
-        annotations["vnd.docker.reference.digest"] = f"sha256:{'f' * 64}"
-    attestation_descriptor = {
+    elif mutation == "image-name":
+        annotations["io.containerd.image.name"] = "docker.io/unexpected/name:tag"
+    elif mutation == "ref-name":
+        annotations["org.opencontainers.image.ref.name"] = "unexpected"
+    descriptor = {
         "annotations": annotations,
-        "digest": f"sha256:{attestation_hex}",
-        "mediaType": OCI_MANIFEST,
-        "platform": platform,
-        "size": len(attestation_raw),
+        "digest": f"sha256:{manifest_hex}",
+        "mediaType": DOCKER_MANIFEST,
+        "size": len(manifest_raw),
     }
-    selected_descriptor = {
-        "digest": selected_digest,
-        "mediaType": OCI_MANIFEST,
-        "platform": {"architecture": "arm64", "os": "linux"},
-        "size": len(selected_raw),
-    }
-    descriptors = [selected_descriptor, attestation_descriptor]
-    if mutation == "index-descriptors":
-        descriptors.extend([attestation_descriptor] * (MAX_INDEX_DESCRIPTORS - 1))
-    nested = {
+    if mutation == "top-media-type":
+        descriptor["mediaType"] = OCI_MANIFEST
+    elif mutation == "top-size":
+        descriptor["size"] += 1
+    descriptors = [descriptor]
+    if mutation == "extra-descriptor":
+        descriptors.append(copy.deepcopy(descriptor))
+    index = {
         "manifests": descriptors,
         "mediaType": OCI_INDEX,
         "schemaVersion": 2,
     }
-    nested_raw = json.dumps(nested, separators=(",", ":")).encode()
-    nested_hex = _sha256_bytes(nested_raw)
-    nested_blobs = {f"blobs/sha256/{nested_hex}": nested_raw}
-    if mutation == "index-depth":
-        child_hex = nested_hex
-        child_raw = nested_raw
-        for _ in range(MAX_INDEX_DEPTH + 1):
-            wrapper = {
+    legacy = [
+        {
+            "Config": f"blobs/sha256/{config_hex}",
+            "Layers": [f"blobs/sha256/{layer_hex}"] * layer_count,
+            "RepoTags": [tag],
+        }
+    ]
+    if mutation == "legacy-config":
+        legacy[0]["Config"] = f"blobs/sha256/{layer_hex}"
+    elif mutation == "legacy-layers":
+        legacy[0]["Layers"] = [f"blobs/sha256/{config_hex}"]
+    files = {
+        "oci-layout": b'{"imageLayoutVersion":"1.0.0"}',
+        "index.json": json.dumps(index, separators=(",", ":")).encode(),
+        "manifest.json": json.dumps(legacy, separators=(",", ":")).encode(),
+        f"blobs/sha256/{manifest_hex}": manifest_raw,
+        f"blobs/sha256/{config_hex}": config,
+        f"blobs/sha256/{layer_hex}": layer,
+    }
+    if mutation == "unreferenced-blob":
+        files[f"blobs/sha256/{'f' * 64}"] = b"unreferenced"
+    if mutation == "provenance-attestation":
+        attestation_raw = (
+            b'{"schemaVersion":2,"mediaType":"application/vnd.oci.image.'
+            b'manifest.v1+json","config":{},"layers":[]}'
+        )
+        attestation_hex = _sha256_bytes(attestation_raw)
+        nested_raw = json.dumps(
+            {
                 "manifests": [
                     {
-                        "digest": f"sha256:{child_hex}",
-                        "mediaType": OCI_INDEX,
-                        "size": len(child_raw),
-                    }
+                        "digest": descriptor["digest"],
+                        "mediaType": OCI_MANIFEST,
+                        "platform": {"architecture": "arm64", "os": "linux"},
+                        "size": descriptor["size"],
+                    },
+                    {
+                        "annotations": {
+                            "vnd.docker.reference.digest": descriptor["digest"],
+                            "vnd.docker.reference.type": "attestation-manifest",
+                        },
+                        "digest": f"sha256:{attestation_hex}",
+                        "mediaType": OCI_MANIFEST,
+                        "platform": {"architecture": "unknown", "os": "unknown"},
+                        "size": len(attestation_raw),
+                    },
                 ],
                 "mediaType": OCI_INDEX,
                 "schemaVersion": 2,
-            }
-            child_raw = json.dumps(wrapper, separators=(",", ":")).encode()
-            child_hex = _sha256_bytes(child_raw)
-            nested_blobs[f"blobs/sha256/{child_hex}"] = child_raw
-        nested_hex = child_hex
-        nested_raw = child_raw
-    index = {
-        "manifests": [
+            },
+            separators=(",", ":"),
+        ).encode()
+        nested_hex = _sha256_bytes(nested_raw)
+        index["manifests"] = [
             {
                 "annotations": {
                     "io.containerd.image.name": f"docker.io/{tag}",
@@ -1199,32 +1060,11 @@ def _synthetic_docker_files(
                 "mediaType": OCI_INDEX,
                 "size": len(nested_raw),
             }
-        ],
-        "mediaType": OCI_INDEX,
-        "schemaVersion": 2,
-    }
-    legacy = [
-        {
-            "Config": f"blobs/sha256/{image_manifest['config']['digest'][7:]}",
-            "Layers": [
-                f"blobs/sha256/{descriptor['digest'][7:]}"
-                for descriptor in image_manifest["layers"]
-            ],
-            "RepoTags": [tag],
-        }
-    ]
-    files.pop("index.json")
-    files.update(
-        {
-            "index.json": json.dumps(index, separators=(",", ":")).encode(),
-            "manifest.json": json.dumps(legacy, separators=(",", ":")).encode(),
-            f"blobs/sha256/{attestation_hex}": attestation_raw,
-            f"blobs/sha256/{config_hex}": config_raw,
-            f"blobs/sha256/{statement_hex}": statement_raw,
-        }
-    )
-    files.update(nested_blobs)
-    return files, tag, selected_digest
+        ]
+        files["index.json"] = json.dumps(index, separators=(",", ":")).encode()
+        files[f"blobs/sha256/{nested_hex}"] = nested_raw
+        files[f"blobs/sha256/{attestation_hex}"] = attestation_raw
+    return files, tag, f"sha256:{manifest_hex}"
 
 
 @pytest.mark.parametrize("unsafe_kind", ["directory", "symlink"])
@@ -1328,35 +1168,48 @@ def test_oci_archive_rejects_unreferenced_regular_payload(tmp_path: Path) -> Non
         _verify_oci_archive(path, manifest_digest)
 
 
-def test_synthetic_docker_archive_matches_actual_attestation_shape(
+def test_synthetic_docker_archive_matches_provenance_free_docker_save_shape(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "candidate.docker-archive.tar"
-    files, tag, _ = _synthetic_docker_files()
+    files, tag, local_image_id = _synthetic_docker_files()
     _write_test_archive(path, files)
 
-    _verify_docker_archive(path, tag)
+    _verify_docker_archive(
+        path,
+        tag,
+        {
+            "cmd": None,
+            "entrypoint": ["/usr/bin/env", "--"],
+            "labels": {},
+            "local_image_id": local_image_id,
+            "user": "65532:65532",
+        },
+    )
 
 
 @pytest.mark.parametrize(
     "mutation",
     (
-        "index-descriptors",
-        "index-depth",
-        "attestation-layers",
-        "descriptor-platform",
-        "descriptor-annotations",
-        "reference-digest",
+        "provenance-attestation",
+        "top-media-type",
+        "extra-descriptor",
+        "missing-config-annotation",
+        "wrong-config-annotation",
+        "extra-annotation",
+        "image-name",
+        "ref-name",
+        "top-size",
         "config-media-type",
-        "config-semantics",
-        "in-toto-media-type",
-        "predicate-annotation",
-        "statement-predicate-type",
-        "statement-subject",
-        "statement-subject-name",
+        "layer-media-type",
+        "manifest-media-type",
+        "legacy-config",
+        "legacy-layers",
+        "layer-count",
+        "unreferenced-blob",
     ),
 )
-def test_docker_archive_rejects_nonactual_attestation_shape(
+def test_docker_archive_rejects_nonactual_provenance_free_shape(
     tmp_path: Path,
     mutation: str,
 ) -> None:
@@ -1477,19 +1330,6 @@ def test_archive_path_must_be_regular_nonsymlink_and_bounded(
 
     with pytest.raises(AssertionError):
         _verify_archive_path(candidate)
-
-
-def test_recursive_index_rejects_a_seen_descriptor_cycle() -> None:
-    digest = f"sha256:{'a' * 64}"
-    descriptor = {"digest": digest, "mediaType": OCI_INDEX, "size": 1}
-
-    with pytest.raises(AssertionError, match="cycle"):
-        _index_leaf_descriptors(  # type: ignore[arg-type]
-            None,
-            {},
-            descriptor,
-            seen={digest},
-        )
 
 
 def test_image_config_rejects_more_than_64_layers() -> None:
