@@ -4094,23 +4094,30 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
     )
     attempted_resources = []
     try:
-        for resource, volume in (
-            ("workspace_volume", plan.workspace_volume),
-            ("output_volume", plan.output_volume),
-        ):
-            attempted_resources.append(("volume", volume.name))
-            subprocess.run(
-                volume.create_argv,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            lifecycle = repo_tools.mark_docker_resource_created(
-                plan,
-                lifecycle,
-                resource,
-            )
+        attempted_resources.append(("volume", plan.workspace_volume.name))
+        subprocess.run(
+            plan.workspace_volume.create_argv,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        lifecycle = repo_tools.mark_docker_resource_created(
+            plan,
+            lifecycle,
+            "workspace_volume",
+        )
+        assert subprocess.run(
+            (
+                str(docker_binary),
+                "volume",
+                "inspect",
+                plan.output_volume.name,
+            ),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).returncode != 0
         staging_name = f"owp-stage-{suffix}"
         attempted_resources.append(("container", staging_name))
         subprocess.run(
@@ -4174,6 +4181,19 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
             timeout=10,
         ).returncode != 0
 
+        attempted_resources.append(("volume", plan.output_volume.name))
+        subprocess.run(
+            plan.output_volume.create_argv,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        lifecycle = repo_tools.mark_docker_resource_created(
+            plan,
+            lifecycle,
+            "output_volume",
+        )
         attempted_resources.append(("container", plan.container_name))
         subprocess.run(
             plan.create_container_argv,
