@@ -122,6 +122,24 @@ python "$OWP_REPO/supply-chain/images/prepare_context.py" \
 `*.oci-archive.tar` 是 `docker buildx --output type=oci` 产生、包含
 `oci-layout` 与 `index.json` 且不带 Docker `manifest.json` 的真实 OCI
 image-layout archive。两者格式和哈希在 candidate 清单中分开记录，不能互称。
+每次 OCI export 和 live rebuild 都必须从冻结 source revision 的 commit epoch
+推导 UTC RFC3339 秒值，并把它写入 manifest descriptor；不得继承 exporter wall
+clock：
+
+```bash
+OWP_SOURCE_EPOCH=$(git show -s --format=%ct "$OWP_SOURCE_REVISION")
+OWP_OCI_CREATED=$(./.venv/bin/python -c \
+  'from datetime import datetime, timezone; import sys; print(datetime.fromtimestamp(int(sys.argv[1]), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))' \
+  "$OWP_SOURCE_EPOCH")
+docker buildx build --platform linux/arm64 --network none --pull=false \
+  --provenance=false \
+  --build-arg "OWP_SOURCE_REVISION=$OWP_SOURCE_REVISION" \
+  --annotation \
+  "manifest-descriptor:org.opencontainers.image.created=$OWP_OCI_CREATED" \
+  --output "type=oci,dest=/path/to/candidate.oci-archive.tar" \
+  /path/to/revision-bound-context
+```
+
 项目代码/文档许可证仍待权利人确认：
 清单固定记录 `status=PENDING`、`spdx=NOASSERTION`，镜像中不添加 license
 OCI label。

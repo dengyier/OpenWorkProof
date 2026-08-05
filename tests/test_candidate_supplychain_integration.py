@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import copy
 import hashlib
 import io
@@ -796,6 +797,8 @@ def _verify_oci_archive(
     path: Path,
     expected_manifest_digest: str,
     expected_image: Mapping[str, object] | None = None,
+    *,
+    expected_created: str | None = None,
 ) -> _ImageIdentity:
     _verify_archive_path(path)
     with tarfile.open(path, mode="r") as archive:
@@ -818,6 +821,10 @@ def _verify_oci_archive(
             platform=("arm64", "linux"),
             allow_annotations=True,
         )
+        if expected_created is not None:
+            assert descriptor["annotations"] == {
+                "org.opencontainers.image.created": expected_created
+            }, "OCI manifest descriptor created annotation is not revision-bound"
         assert descriptor["digest"] == expected_manifest_digest
         manifest_raw = _descriptor_bytes(archive, members, descriptor)
         identity = _image_manifest_identity(
@@ -1166,6 +1173,26 @@ def test_oci_archive_rejects_unreferenced_regular_payload(tmp_path: Path) -> Non
 
     with pytest.raises(AssertionError, match="unreferenced"):
         _verify_oci_archive(path, manifest_digest)
+
+
+def test_oci_archive_rejects_nonrevision_descriptor_created_time(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "candidate.oci-archive.tar"
+    files, manifest_digest = _synthetic_oci_files()
+    index = json.loads(files["index.json"])
+    index["manifests"][0]["annotations"] = {
+        "org.opencontainers.image.created": "2026-08-04T00:00:01Z"
+    }
+    files["index.json"] = json.dumps(index, separators=(",", ":")).encode()
+    _write_test_archive(path, files)
+
+    with pytest.raises(AssertionError, match="created"):
+        _verify_oci_archive(
+            path,
+            manifest_digest,
+            expected_created="2026-08-04T00:00:00Z",
+        )
 
 
 def test_synthetic_docker_archive_matches_provenance_free_docker_save_shape(
@@ -1924,16 +1951,76 @@ def test_live_execution_probe_overrides_frozen_runner_entrypoint(
     )
 
 
-def _build_context_identity(
-    docker: str,
+def test_rebuild_command_binds_single_revision_descriptor_created_annotation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    revision_epoch = int(subprocess.run(
+        ("git", "show", "-s", "--format=%ct", revision),
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip())
+    expected = (
+        "manifest-descriptor:org.opencontainers.image.created="
+        + datetime.fromtimestamp(revision_epoch, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    )
+    captured: list[tuple[str, ...]] = []
+
+    class CommandCaptured(RuntimeError):
+        pass
+
+    def capture(*args: str, **_: object) -> subprocess.CompletedProcess[str]:
+        captured.append(args)
+        raise CommandCaptured
+
+    monkeypatch.setattr(sys.modules[__name__], "_docker", capture)
+    with pytest.raises(CommandCaptured):
+        _build_context_identity(
+            "/usr/bin/docker",
+            tmp_path / "context",
+            revision,
+            tmp_path / "rebuilt.oci.tar",
+            {},
+        )
+
+    command = captured[0]
+    assert command.count("--annotation") == 1
+    annotation_index = command.index("--annotation")
+    assert command[annotation_index + 1] == expected
+
+
+def _revision_created(revision: str) -> str:
+    epoch = subprocess.run(
+        ("git", "show", "-s", "--format=%ct", revision),
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert re.fullmatch(r"[0-9]+", epoch)
+    return datetime.fromtimestamp(int(epoch), timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def _build_context_argv(
     context: Path,
     revision: str,
     output: Path,
-    expected_image: Mapping[str, object],
-) -> _ImageIdentity:
-    assert not output.exists()
-    result = _docker(
-        docker,
+) -> tuple[str, ...]:
+    created = _revision_created(revision)
+    return (
         "buildx",
         "build",
         "--platform",
@@ -1944,9 +2031,25 @@ def _build_context_identity(
         "--provenance=false",
         "--build-arg",
         f"OWP_SOURCE_REVISION={revision}",
+        "--annotation",
+        f"manifest-descriptor:org.opencontainers.image.created={created}",
         "--output",
         f"type=oci,dest={output}",
         str(context),
+    )
+
+
+def _build_context_identity(
+    docker: str,
+    context: Path,
+    revision: str,
+    output: Path,
+    expected_image: Mapping[str, object],
+) -> _ImageIdentity:
+    assert not output.exists()
+    result = _docker(
+        docker,
+        *_build_context_argv(context, revision, output),
         check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -1955,6 +2058,7 @@ def _build_context_identity(
         output,
         str(expected_image["oci_manifest_digest"]),
         expected_image,
+        expected_created=_revision_created(revision),
     )
 
 
@@ -2072,7 +2176,10 @@ def test_candidate_artifact_chain(tmp_path: Path) -> None:
             image,
         )
         oci_identity = _verify_oci_archive(
-            archives / oci["filename"], image["oci_manifest_digest"], image
+            archives / oci["filename"],
+            image["oci_manifest_digest"],
+            image,
+            expected_created=_revision_created(revision),
         )
         _assert_image_identity_chain(docker_identity, oci_identity)
         identities[image_name] = (docker_identity, oci_identity)

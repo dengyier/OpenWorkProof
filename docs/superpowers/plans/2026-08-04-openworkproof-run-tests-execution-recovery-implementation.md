@@ -1139,11 +1139,34 @@ docker buildx build --load --platform linux/arm64 --network none --pull=false \
   --build-arg "OWP_SOURCE_REVISION=$OWP_SOURCE_REVISION" \
   -t "openworkproof/trusted-helper-candidate:$OWP_SOURCE_REVISION" \
   "$OWP_ARTIFACT_ROOT/build-contexts/$OWP_SOURCE_REVISION/trusted-helper"
+
+OWP_SOURCE_EPOCH=$(git show -s --format=%ct "$OWP_SOURCE_REVISION")
+OWP_OCI_CREATED=$(./.venv/bin/python -c \
+  'from datetime import datetime, timezone; import sys; print(datetime.fromtimestamp(int(sys.argv[1]), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))' \
+  "$OWP_SOURCE_EPOCH")
+docker buildx build --platform linux/arm64 --network none --pull=false \
+  --provenance=false \
+  --build-arg "OWP_SOURCE_REVISION=$OWP_SOURCE_REVISION" \
+  --annotation \
+  "manifest-descriptor:org.opencontainers.image.created=$OWP_OCI_CREATED" \
+  --output \
+  "type=oci,dest=$OWP_ARTIFACT_ROOT/oci/$OWP_SOURCE_REVISION/openworkproof-execution-test-candidate.oci-archive.tar" \
+  "$OWP_ARTIFACT_ROOT/build-contexts/$OWP_SOURCE_REVISION/execution"
+docker buildx build --platform linux/arm64 --network none --pull=false \
+  --provenance=false \
+  --build-arg "OWP_SOURCE_REVISION=$OWP_SOURCE_REVISION" \
+  --annotation \
+  "manifest-descriptor:org.opencontainers.image.created=$OWP_OCI_CREATED" \
+  --output \
+  "type=oci,dest=$OWP_ARTIFACT_ROOT/oci/$OWP_SOURCE_REVISION/openworkproof-trusted-helper-candidate.oci-archive.tar" \
+  "$OWP_ARTIFACT_ROOT/build-contexts/$OWP_SOURCE_REVISION/trusted-helper"
 ```
 
 Run exact runner invalid-input smoke, a closed fixed verifier smoke, and helper
 argv/empty-input failure smoke. Require empty stderr where specified by each
-contract. Export Docker archives and true OCI archives under
+contract. The descriptor annotation above is revision-authoritative; using the
+exporter's wall clock makes otherwise identical OCI archives differ. Export
+Docker archives and true OCI archives under
 `$OWP_ARTIFACT_ROOT/oci/$OWP_SOURCE_REVISION`, then create and verify
 `SHA256SUMS`.
 
