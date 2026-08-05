@@ -3661,6 +3661,16 @@ def _docker_driver_image_reference(
     )
 
 
+def _live_driver_contract_for_image_reference(
+    contract: repo_tools.RunTestsExecutionContract,
+    image_reference: str,
+) -> repo_tools.RunTestsExecutionContract:
+    return replace(
+        contract,
+        container_image_digest=image_reference.rsplit("@", 1)[1],
+    )
+
+
 def _rich_wrap_driver_contract_and_snapshot(
     regex: bytes,
     *,
@@ -4171,6 +4181,22 @@ def test_docker_run_tests_driver_rejects_bare_image_id(
                 command, 1, b"", b"unused"
             ),
         )
+
+
+def test_live_driver_contract_uses_authoritative_repo_digest() -> None:
+    original_contract = _run_tests_execution_contract()
+    local_image_id = "sha256:" + "a" * 64
+    image_reference = (
+        "docker.io/openworkproof/execution-test-dev@sha256:" + "b" * 64
+    )
+
+    contract = _live_driver_contract_for_image_reference(
+        original_contract,
+        image_reference,
+    )
+
+    assert local_image_id != image_reference.rsplit("@", 1)[1]
+    assert contract.container_image_digest == image_reference.rsplit("@", 1)[1]
 
 
 def test_docker_image_id_without_matching_repo_digest_is_not_authority() -> None:
@@ -5577,7 +5603,10 @@ def test_docker_run_tests_driver_required_live_detached_execution(
                 execution_digit=execution_digit,
                 candidate_digit=candidate_digit,
             )
-            contract = replace(original_contract, container_image_digest=image_id)
+            contract = _live_driver_contract_for_image_reference(
+                original_contract,
+                image_reference,
+            )
             assert executor.prepare(contract, snapshot).action == "READY_TO_START"
             outcome = executor.start_and_wait(contract)
             assert outcome.action == "CLOSED_RESULT"
