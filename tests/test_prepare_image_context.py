@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 
 import pytest
@@ -145,6 +147,61 @@ def _assemble(
         capture_output=True,
         text=True,
     )
+
+
+def _context_tree_metadata(root: Path) -> dict[str, tuple[int, int, int, bytes | None]]:
+    entries = (root, *sorted(root.rglob("*")))
+    metadata: dict[str, tuple[int, int, int, bytes | None]] = {}
+    for path in entries:
+        details = path.lstat()
+        assert not stat.S_ISLNK(details.st_mode)
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        metadata[relative] = (
+            stat.S_IFMT(details.st_mode),
+            stat.S_IMODE(details.st_mode),
+            details.st_mtime_ns,
+            path.read_bytes() if path.is_file() else None,
+        )
+    return metadata
+
+
+def _set_input_tree_mtime(root: Path, epoch_ns: int) -> None:
+    for path in (root, *sorted(root.rglob("*"), reverse=True)):
+        os.utime(path, ns=(epoch_ns, epoch_ns), follow_symlinks=False)
+
+
+def test_assembler_normalizes_complete_context_tree_mtime_to_revision_epoch(
+    context_inputs: dict[str, Path | str | bytes], tmp_path: Path
+) -> None:
+    first_output = tmp_path / "first-context"
+    second_output = tmp_path / "second-context"
+    input_roots = (
+        context_inputs["wheelhouse"],
+        context_inputs["deb_closure"],
+    )
+    assert all(isinstance(path, Path) for path in input_roots)
+    for input_root in input_roots:
+        assert isinstance(input_root, Path)
+        _set_input_tree_mtime(input_root, 1_700_000_000_000_000_000)
+
+    first_result = _assemble(context_inputs, first_output)
+
+    for input_root in input_roots:
+        assert isinstance(input_root, Path)
+        _set_input_tree_mtime(input_root, 1_800_000_000_000_000_000)
+    second_result = _assemble(context_inputs, second_output)
+
+    assert first_result.returncode == 0, first_result.stderr
+    assert second_result.returncode == 0, second_result.stderr
+    first_tree = _context_tree_metadata(first_output)
+    second_tree = _context_tree_metadata(second_output)
+    assert first_tree == second_tree
+    repo = context_inputs["repo"]
+    assert isinstance(repo, Path)
+    revision_epoch_ns = int(
+        _git(repo, "show", "-s", "--format=%ct", str(context_inputs["revision"]))
+    ) * 1_000_000_000
+    assert {entry[2] for entry in first_tree.values()} == {revision_epoch_ns}
 
 
 def test_assembler_rejects_an_unknown_source_revision(

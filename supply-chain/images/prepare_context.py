@@ -9,6 +9,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,20 @@ def _resolve_revision(repo: Path, revision: str) -> str:
             f"source revision resolved to a different commit: {resolved_text}"
         )
     return resolved_text
+
+
+def _revision_mtime_ns(repo: Path, revision: str) -> int:
+    timestamp = _git(repo, "show", "-s", "--format=%ct", revision)
+    try:
+        timestamp_text = timestamp.decode("ascii").strip()
+    except UnicodeDecodeError as error:
+        raise ContextError("source revision timestamp is not ASCII") from error
+    if not re.fullmatch(r"[0-9]+", timestamp_text):
+        raise ContextError("source revision timestamp is invalid")
+    timestamp_ns = int(timestamp_text) * 1_000_000_000
+    if timestamp_ns > (1 << 63) - 1:
+        raise ContextError("source revision timestamp is out of range")
+    return timestamp_ns
 
 
 def _git_blob(repo: Path, revision: str, relative_path: str) -> bytes:
@@ -189,6 +204,44 @@ def _copy_selected(
     _write(destination / "SHA256SUMS", sums_data)
 
 
+def _normalize_tree_mtime(root: Path, timestamp_ns: int) -> None:
+    timestamp = (timestamp_ns, timestamp_ns)
+    for _, directory_names, file_names, directory_fd in os.fwalk(
+        root, topdown=False, follow_symlinks=False
+    ):
+        for name in file_names:
+            details = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISREG(details.st_mode):
+                raise ContextError(f"generated context file is unsafe: {name}")
+            os.utime(
+                name,
+                ns=timestamp,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        for name in directory_names:
+            details = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(details.st_mode):
+                raise ContextError(f"generated context directory is unsafe: {name}")
+            os.utime(
+                name,
+                ns=timestamp,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+
+    open_flags = os.O_RDONLY
+    open_flags |= getattr(os, "O_DIRECTORY", 0)
+    open_flags |= getattr(os, "O_NOFOLLOW", 0)
+    root_fd = os.open(root, open_flags)
+    try:
+        if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
+            raise ContextError("generated context root is unsafe")
+        os.utime(root_fd, ns=timestamp)
+    finally:
+        os.close(root_fd)
+
+
 def assemble(
     repo: Path,
     revision: str,
@@ -198,6 +251,7 @@ def assemble(
 ) -> None:
     repo = repo.resolve()
     revision = _resolve_revision(repo, revision)
+    revision_mtime_ns = _revision_mtime_ns(repo, revision)
     if output_root.exists():
         raise ContextError(f"output root already exists: {output_root}")
 
@@ -304,6 +358,7 @@ def assemble(
         for path, expected in expected_files.items():
             if path.is_symlink() or not path.is_file() or path.read_bytes() != expected:
                 raise ContextError(f"generated tracked context input drifted: {path.name}")
+        _normalize_tree_mtime(temporary, revision_mtime_ns)
         os.replace(temporary, output_root)
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
