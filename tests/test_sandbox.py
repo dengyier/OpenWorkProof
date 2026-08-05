@@ -7,6 +7,7 @@ import copy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import time
 from collections.abc import Callable
 
@@ -3501,6 +3503,726 @@ def test_classify_docker_execution_failure_uses_structured_volume_observation(
 
     assert repo_tools.classify_docker_execution_failure(observed) == expected
     assert not hasattr(observed, "stderr")
+
+
+def _docker_driver_contract_and_snapshot(
+) -> tuple[
+    repo_tools.RunTestsExecutionContract,
+    repo_tools.CandidateExecutionSnapshot,
+]:
+    source_file = repo_tools.SourceFile(
+        "test_driver.py",
+        "100644",
+        b"def test_driver():\n    assert True\n",
+    )
+    manifest = repo_tools.WorkspaceManifest(
+        schema_version="openworkproof-workspace-manifest/0.1",
+        head_commit="7" * 40,
+        entries=(
+            repo_tools.WorkspaceManifestEntry(
+                path_bytes_b64url=base64.urlsafe_b64encode(
+                    source_file.path.encode("ascii")
+                ).rstrip(b"=").decode("ascii"),
+                type="regular",
+                posix_mode=source_file.mode,
+                size_bytes=len(source_file.content),
+                sha256=hashlib.sha256(source_file.content).hexdigest(),
+                symlink_target_b64url=None,
+            ),
+        ),
+    )
+    manifest_digest = repo_tools.workspace_manifest_digest(manifest)
+    contract = replace(
+        _run_tests_execution_contract(),
+        workspace_manifest_digest=manifest_digest,
+        command_digest=repo_tools.frozen_verifier_command_digest(),
+    )
+    snapshot = repo_tools.CandidateExecutionSnapshot(
+        head_commit=contract.candidate_commit,
+        workspace_manifest_digest=manifest_digest,
+        plan=repo_tools.ExecutionSnapshotPlan(
+            files=(source_file,),
+            read_only=True,
+            owner_uid=65532,
+            owner_gid=65532,
+            atime_unix_seconds=0,
+            mtime_unix_seconds=0,
+            clear_extended_attributes=True,
+            clear_posix_acls=True,
+            clear_file_capabilities=True,
+        ),
+    )
+    return contract, snapshot
+
+
+def _docker_driver_tar(
+    contract: repo_tools.RunTestsExecutionContract,
+    *,
+    extra_name: str | None = None,
+) -> bytes:
+    contract_digest = hashlib.sha256(
+        repo_tools.encode_run_tests_execution_contract(contract)
+    ).hexdigest()
+    started = repo_tools.encode_run_tests_started_envelope(
+        repo_tools.RunTestsStartedEnvelope(
+            execution_id=contract.execution_id,
+            execution_contract_digest=contract_digest,
+        )
+    )
+    result = repo_tools.encode_run_tests_result_envelope(
+        replace(
+            _run_tests_result_envelope(),
+            execution_id=contract.execution_id,
+            execution_contract_digest=contract_digest,
+        )
+    )
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w") as tar:
+        root = tarfile.TarInfo(".")
+        root.type = tarfile.DIRTYPE
+        root.mode = 0o755
+        tar.addfile(root)
+        for name, content in (
+            ("./started.json", started),
+            ("./result.json", result),
+        ):
+            member = tarfile.TarInfo(name)
+            member.size = len(content)
+            member.mode = 0o644
+            tar.addfile(member, io.BytesIO(content))
+        if extra_name is not None:
+            member = tarfile.TarInfo(extra_name)
+            member.size = 2
+            member.mode = 0o644
+            tar.addfile(member, io.BytesIO(b"{}"))
+    return archive.getvalue()
+
+
+def _docker_driver_execution_inspection(
+    plan: repo_tools.DockerExecutionPlan,
+    contract: repo_tools.RunTestsExecutionContract,
+    *,
+    status: str,
+) -> dict:
+    inspection = _docker_container_inspection(plan)
+    contract_digest = hashlib.sha256(
+        repo_tools.encode_run_tests_execution_contract(contract)
+    ).hexdigest()
+    inspection["Config"]["Labels"].update(
+        {
+            "openworkproof.execution-id": contract.execution_id,
+            "openworkproof.execution-contract-digest": contract_digest,
+        }
+    )
+    state = inspection["State"]
+    state["Status"] = status
+    if status == "exited":
+        state.update(
+            {
+                "Running": False,
+                "Pid": 0,
+                "ExitCode": 0,
+                "StartedAt": "2026-08-05T00:00:00Z",
+                "FinishedAt": "2026-08-05T00:00:01Z",
+            }
+        )
+    return inspection
+
+
+def test_docker_run_tests_driver_uses_exact_detached_lifecycle_transcript(
+    tmp_path: Path,
+) -> None:
+    contract, snapshot = _docker_driver_contract_and_snapshot()
+    docker_binary = Path("/usr/local/bin/docker")
+    image_reference = (
+        "registry.example/openworkproof/test-runner@"
+        + contract.container_image_digest
+    )
+    binding = repo_tools.derive_run_tests_docker_binding(contract.execution_id)
+    plan = repo_tools.derive_docker_execution_plan(
+        docker_binary=docker_binary,
+        image_reference=image_reference,
+        container_name=binding.container_name,
+        workspace_volume_name=binding.workspace_volume_name,
+        output_volume_name=binding.output_volume_name,
+        ownership_token=binding.ownership_token,
+        command=("execute",),
+    )
+    contract_digest = hashlib.sha256(
+        repo_tools.encode_run_tests_execution_contract(contract)
+    ).hexdigest()
+    staging_create = (
+        str(docker_binary),
+        "create",
+        "--name",
+        binding.staging_container_name,
+        "--label",
+        f"openworkproof.execution-owner={binding.ownership_token}",
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--user",
+        "65532:65532",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--interactive",
+        "--mount",
+        (
+            f"type=volume,source={binding.workspace_volume_name},"
+            "target=/workspace"
+        ),
+        image_reference,
+        "stage",
+    )
+    execution_create = list(plan.create_container_argv)
+    execution_create[8:8] = [
+        "--label",
+        f"openworkproof.execution-id={contract.execution_id}",
+        "--label",
+        f"openworkproof.execution-contract-digest={contract_digest}",
+    ]
+    execution_create = tuple(execution_create)
+    expected_commands = (
+        *plan.preflight_absent_argv,
+        plan.workspace_volume.create_argv,
+        staging_create,
+        (
+            str(docker_binary),
+            "start",
+            "--attach",
+            "--interactive",
+            binding.staging_container_name,
+        ),
+        (str(docker_binary), "inspect", binding.staging_container_name),
+        (str(docker_binary), "rm", binding.staging_container_name),
+        (str(docker_binary), "inspect", binding.staging_container_name),
+        plan.output_volume.create_argv,
+        execution_create,
+        (str(docker_binary), "image", "inspect", image_reference),
+        (str(docker_binary), "inspect", binding.container_name),
+        (
+            str(docker_binary),
+            "volume",
+            "inspect",
+            binding.workspace_volume_name,
+        ),
+        (
+            str(docker_binary),
+            "volume",
+            "inspect",
+            binding.output_volume_name,
+        ),
+        (str(docker_binary), "inspect", binding.container_name),
+        (str(docker_binary), "start", binding.container_name),
+        (str(docker_binary), "wait", binding.container_name),
+        (str(docker_binary), "inspect", binding.container_name),
+        (
+            str(docker_binary),
+            "cp",
+            f"{binding.container_name}:/output/.",
+            "-",
+        ),
+    )
+    observed: list[tuple[tuple[str, ...], bytes | None, float]] = []
+    command_index = 0
+
+    def run(
+        command: tuple[str, ...],
+        input_bytes: bytes | None,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[bytes]:
+        nonlocal command_index
+        assert command == expected_commands[command_index]
+        command_index += 1
+        observed.append((command, input_bytes, timeout))
+        if command in plan.preflight_absent_argv:
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+        if command == (str(docker_binary), "inspect", binding.staging_container_name):
+            if command_index == 6:
+                inspection = {
+                    "Name": f"/{binding.staging_container_name}",
+                    "Config": {
+                        "Image": image_reference,
+                        "User": "65532:65532",
+                        "Labels": {
+                            "openworkproof.execution-owner": binding.ownership_token,
+                        },
+                    },
+                    "HostConfig": {"NetworkMode": "none", "ReadonlyRootfs": True},
+                    "Mounts": [
+                        {
+                            "Destination": "/workspace",
+                            "Type": "volume",
+                            "Name": binding.workspace_volume_name,
+                            "RW": True,
+                        }
+                    ],
+                    "State": {"Status": "exited", "ExitCode": 0},
+                }
+                return subprocess.CompletedProcess(
+                    command, 0, json.dumps([inspection]).encode(), b""
+                )
+            return subprocess.CompletedProcess(command, 1, b"", b"missing")
+        if command == (str(docker_binary), "image", "inspect", image_reference):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps([_docker_image_inspection(plan)]).encode(),
+                b"",
+            )
+        if command == (str(docker_binary), "inspect", binding.container_name):
+            status = "created" if command_index in {12, 15} else "exited"
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps([
+                    _docker_driver_execution_inspection(
+                        plan,
+                        contract,
+                        status=status,
+                    )
+                ]).encode(),
+                b"",
+            )
+        if command[1:3] == ("volume", "inspect"):
+            resource = (
+                "workspace_volume"
+                if command[-1] == binding.workspace_volume_name
+                else "output_volume"
+            )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps([_docker_volume_inspection(plan, resource)]).encode(),
+                b"",
+            )
+        if command == (str(docker_binary), "wait", binding.container_name):
+            return subprocess.CompletedProcess(command, 0, b"0\n", b"")
+        if command == (
+            str(docker_binary),
+            "start",
+            "--attach",
+            "--interactive",
+            binding.staging_container_name,
+        ):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                rfc8785.dumps(
+                    {
+                        "execution_contract_digest": contract_digest,
+                        "execution_id": contract.execution_id,
+                        "workspace_manifest_digest": (
+                            contract.workspace_manifest_digest
+                        ),
+                    }
+                )
+                + b"\n",
+                b"",
+            )
+        if command[1] == "cp":
+            return subprocess.CompletedProcess(
+                command, 0, _docker_driver_tar(contract), b""
+            )
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=docker_binary,
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=image_reference,
+        run=run,
+    )
+
+    assert executor.prepare(contract, snapshot) == (
+        repo_tools.RunTestsPreparationOutcome("READY_TO_START")
+    )
+    outcome = executor.start_and_wait(contract)
+
+    assert outcome.action == "CLOSED_RESULT"
+    assert outcome.result is not None and outcome.result.actual_exit_code == 0
+    assert tuple(command for command, _, _ in observed) == expected_commands
+    staging_input = observed[4][1]
+    assert staging_input is not None and len(staging_input) <= 8_527_872
+    assert all(timeout > 0 for _, _, timeout in observed)
+
+
+def test_docker_run_tests_driver_rejects_extra_tar_member(
+    tmp_path: Path,
+) -> None:
+    contract, _ = _docker_driver_contract_and_snapshot()
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=Path("/usr/local/bin/docker"),
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=(
+            "registry.example/openworkproof/test-runner@"
+            + contract.container_image_digest
+        ),
+        run=lambda command, input_bytes, timeout: subprocess.CompletedProcess(
+            command,
+            0,
+            _docker_driver_tar(contract, extra_name="./extra.json"),
+            b"",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="output archive"):
+        repo_tools._extract_run_tests_output_tar(
+            contract,
+            _docker_driver_tar(contract, extra_name="./extra.json"),
+        )
+
+
+def test_docker_run_tests_driver_accepts_inspected_immutable_image_id(
+    tmp_path: Path,
+) -> None:
+    contract, _ = _docker_driver_contract_and_snapshot()
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=Path("/usr/local/bin/docker"),
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=contract.container_image_digest,
+        run=lambda command, input_bytes, timeout: subprocess.CompletedProcess(
+            command, 1, b"", b"unused"
+        ),
+    )
+
+    binding, plan, _ = repo_tools._run_tests_driver_plan(executor, contract)
+
+    assert plan.image_reference == contract.container_image_digest
+    assert binding.execution_id == contract.execution_id
+
+
+def test_docker_run_tests_driver_cleans_owned_partial_after_staging_timeout(
+    tmp_path: Path,
+) -> None:
+    contract, snapshot = _docker_driver_contract_and_snapshot()
+    docker_binary = Path("/usr/local/bin/docker")
+    image_reference = (
+        "registry.example/openworkproof/test-runner@"
+        + contract.container_image_digest
+    )
+    binding = repo_tools.derive_run_tests_docker_binding(contract.execution_id)
+    plan = repo_tools.derive_docker_execution_plan(
+        docker_binary=docker_binary,
+        image_reference=image_reference,
+        container_name=binding.container_name,
+        workspace_volume_name=binding.workspace_volume_name,
+        output_volume_name=binding.output_volume_name,
+        ownership_token=binding.ownership_token,
+        command=("execute",),
+    )
+    commands: list[tuple[str, ...]] = []
+    stage_present = True
+    workspace_present = True
+
+    def run(command, input_bytes, timeout):
+        nonlocal stage_present, workspace_present
+        command = tuple(command)
+        commands.append(command)
+        if command in plan.preflight_absent_argv:
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+        if command[1:5] == ("start", "--attach", "--interactive", binding.staging_container_name):
+            raise subprocess.TimeoutExpired(command, timeout)
+        if command == (str(docker_binary), "inspect", binding.container_name):
+            return subprocess.CompletedProcess(command, 1, b"", b"missing")
+        if command == (str(docker_binary), "inspect", binding.staging_container_name):
+            if not stage_present:
+                return subprocess.CompletedProcess(command, 1, b"", b"missing")
+            inspection = {
+                "Name": f"/{binding.staging_container_name}",
+                "Config": {
+                    "Labels": {
+                        "openworkproof.execution-owner": binding.ownership_token,
+                    }
+                },
+            }
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps([inspection]).encode(), b""
+            )
+        if command == (
+            str(docker_binary),
+            "volume",
+            "inspect",
+            binding.output_volume_name,
+        ):
+            return subprocess.CompletedProcess(command, 1, b"", b"missing")
+        if command == (
+            str(docker_binary),
+            "volume",
+            "inspect",
+            binding.workspace_volume_name,
+        ):
+            if not workspace_present:
+                return subprocess.CompletedProcess(command, 1, b"", b"missing")
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps([
+                    _docker_volume_inspection(plan, "workspace_volume")
+                ]).encode(),
+                b"",
+            )
+        if command[1:3] == ("rm", "--force"):
+            stage_present = False
+        if command[1:3] == ("volume", "rm"):
+            workspace_present = False
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=docker_binary,
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=image_reference,
+        run=run,
+    )
+
+    assert executor.prepare(contract, snapshot).action == "UNRESOLVED"
+    assert (docker_binary.as_posix(), "rm", "--force", "--volumes", binding.staging_container_name) in commands
+    assert (docker_binary.as_posix(), "volume", "rm", binding.workspace_volume_name) in commands
+    assert plan.output_volume.create_argv not in commands
+
+
+def test_docker_run_tests_driver_safe_retry_requires_checkpoint_and_absence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract, snapshot = _docker_driver_contract_and_snapshot()
+    observed_requests = []
+
+    def checkpoint(request):
+        observed_requests.append(request)
+        return snapshot
+
+    monkeypatch.setattr(
+        repo_tools,
+        "prepare_candidate_execution_snapshot",
+        checkpoint,
+    )
+    commands = []
+
+    def run(command, input_bytes, timeout):
+        commands.append(tuple(command))
+        return subprocess.CompletedProcess(command, 1, b"", b"not found")
+
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=Path("/usr/local/bin/docker"),
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=(
+            "registry.example/openworkproof/test-runner@"
+            + contract.container_image_digest
+        ),
+        run=run,
+    )
+
+    outcome = executor.reconcile(contract, "ABSENT")
+
+    assert outcome == repo_tools.RunTestsExecutionOutcome("SAFE_TO_RETRY")
+    assert observed_requests == [
+        repo_tools.CandidateExecutionSnapshotRequest(
+            runtime_root=tmp_path.resolve(),
+            workspace_id=contract.candidate_workspace_id,
+            source_artifact_sha256=contract.source_artifact_sha256,
+            expected_head_commit=contract.candidate_commit,
+            expected_workspace_manifest_digest=(
+                contract.workspace_manifest_digest
+            ),
+        )
+    ]
+    assert len(commands) == 4
+
+
+def test_docker_run_tests_driver_rechecks_mounts_before_sole_start(
+    tmp_path: Path,
+) -> None:
+    contract, _ = _docker_driver_contract_and_snapshot()
+    docker_binary = Path("/usr/local/bin/docker")
+    image_reference = (
+        "registry.example/openworkproof/test-runner@"
+        + contract.container_image_digest
+    )
+    binding = repo_tools.derive_run_tests_docker_binding(contract.execution_id)
+    plan = repo_tools.derive_docker_execution_plan(
+        docker_binary=docker_binary,
+        image_reference=image_reference,
+        container_name=binding.container_name,
+        workspace_volume_name=binding.workspace_volume_name,
+        output_volume_name=binding.output_volume_name,
+        ownership_token=binding.ownership_token,
+        command=("execute",),
+    )
+    inspection = _docker_driver_execution_inspection(
+        plan,
+        contract,
+        status="created",
+    )
+    inspection["Mounts"][0]["RW"] = True
+    commands = []
+
+    def run(command, input_bytes, timeout):
+        commands.append(tuple(command))
+        if tuple(command) != (
+            str(docker_binary),
+            "inspect",
+            binding.container_name,
+        ):
+            raise AssertionError("unsafe container was started")
+        return subprocess.CompletedProcess(
+            command, 0, json.dumps([inspection]).encode(), b""
+        )
+
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=docker_binary,
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=image_reference,
+        run=run,
+    )
+
+    assert executor.start_and_wait(contract).action == "UNRESOLVED"
+    assert commands == [
+        (str(docker_binary), "inspect", binding.container_name)
+    ]
+
+
+@pytest.mark.docker
+def test_docker_run_tests_driver_required_live_detached_execution(
+    tmp_path: Path,
+) -> None:
+    if os.environ.get("OPENWORKPROOF_REQUIRE_LIVE_DOCKER") != "1":
+        pytest.skip("set OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 for live driver")
+    artifact_root_text = os.environ.get(
+        "OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT"
+    )
+    if artifact_root_text is None:
+        pytest.skip("live driver context requires candidate artifact root")
+    docker_location = os.environ.get("OPENWORKPROOF_DOCKER") or shutil.which(
+        "docker"
+    )
+    if docker_location is None:
+        pytest.fail("Docker CLI unavailable for required-live driver test")
+    docker_binary = Path(docker_location).resolve()
+    daemon = subprocess.run(
+        (str(docker_binary), "info", "--format", "{{.ServerVersion}}"),
+        capture_output=True,
+        timeout=10,
+    )
+    assert daemon.returncode == 0, daemon.stderr
+
+    repository = Path(__file__).resolve().parents[1]
+    task5_revision = "6cd8c340c9ea1086524b420b0b2bfbb3e4ae4325"
+    artifact_root = Path(artifact_root_text).resolve()
+    context_root = tmp_path / "revision-context"
+    assembled = subprocess.run(
+        (
+            sys.executable,
+            str(repository / "supply-chain/images/prepare_context.py"),
+            "--repo",
+            str(repository),
+            "--source-revision",
+            task5_revision,
+            "--wheelhouse",
+            str(artifact_root / "wheelhouse/linux-arm64-cp312-full"),
+            "--deb-closure",
+            str(artifact_root / "debs/linux-arm64-trixie-git"),
+            "--output-root",
+            str(context_root),
+        ),
+        capture_output=True,
+        timeout=60,
+    )
+    assert assembled.returncode == 0, assembled.stderr
+    tag = f"openworkproof/execution-test-dev:{task5_revision}"
+    assert subprocess.run(
+        (str(docker_binary), "image", "inspect", tag),
+        capture_output=True,
+        timeout=10,
+    ).returncode != 0
+    image_id = None
+    contract = None
+    executor = None
+    try:
+        built = subprocess.run(
+            (
+                str(docker_binary),
+                "build",
+                "--network",
+                "none",
+                "--pull=false",
+                "--platform",
+                "linux/arm64",
+                "--build-arg",
+                f"OWP_SOURCE_REVISION={task5_revision}",
+                "--tag",
+                tag,
+                str(context_root / "execution"),
+            ),
+            capture_output=True,
+            timeout=120,
+        )
+        assert built.returncode == 0, built.stderr
+        inspected = subprocess.run(
+            (str(docker_binary), "image", "inspect", tag),
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+        image_id = json.loads(inspected.stdout)[0]["Id"]
+        assert isinstance(image_id, str) and image_id.startswith("sha256:")
+
+        original_contract, snapshot = _docker_driver_contract_and_snapshot()
+        contract = replace(
+            original_contract,
+            container_image_digest=image_id,
+        )
+        executor = repo_tools.DockerRunTestsExecutor(
+            docker_binary=docker_binary,
+            candidate_runtime_root=tmp_path.resolve(),
+            image_reference=image_id,
+        )
+        assert executor.prepare(contract, snapshot).action == "READY_TO_START"
+        outcome = executor.start_and_wait(contract)
+        assert outcome.action == "CLOSED_RESULT"
+        assert outcome.result is not None
+        assert outcome.result.actual_exit_code == 0
+        executor.cleanup(contract)
+        binding = repo_tools.derive_run_tests_docker_binding(
+            contract.execution_id
+        )
+        for inspect_command in (
+            (str(docker_binary), "inspect", binding.staging_container_name),
+            (str(docker_binary), "inspect", binding.container_name),
+            (
+                str(docker_binary),
+                "volume",
+                "inspect",
+                binding.workspace_volume_name,
+            ),
+            (
+                str(docker_binary),
+                "volume",
+                "inspect",
+                binding.output_volume_name,
+            ),
+        ):
+            assert subprocess.run(
+                inspect_command,
+                capture_output=True,
+                timeout=10,
+            ).returncode != 0
+    finally:
+        if executor is not None and contract is not None:
+            try:
+                executor.cleanup(contract)
+            except (RuntimeError, ValueError, subprocess.SubprocessError):
+                pass
+        removed = subprocess.run(
+            (str(docker_binary), "image", "rm", "--force", tag),
+            capture_output=True,
+            timeout=30,
+        )
+        if image_id is not None:
+            assert removed.returncode == 0, removed.stderr
 
 
 def _docker_prerequisite_unavailable(message: str) -> None:
