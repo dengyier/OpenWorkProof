@@ -861,6 +861,7 @@ RunTestsRecoveryAction = Literal[
     "CLEAN_COMMITTED",
     "UNRESOLVED",
 ]
+RunTestsJournalState = Literal["RESERVED", "STARTED_UNCONFIRMED"]
 RunTestsReceiptState = Literal["ABSENT", "MATCH", "MISMATCH"]
 
 
@@ -901,6 +902,7 @@ class RunTestsExecutionDriver(Protocol):
     def reconcile(
         self,
         contract: RunTestsExecutionContract,
+        journal_state: RunTestsJournalState,
         receipt_state: RunTestsReceiptState,
     ) -> RunTestsExecutionOutcome: ...
 
@@ -4732,7 +4734,7 @@ def _valid_run_tests_result_observation(
 
 
 def reconcile_run_tests_docker_execution(
-    journal_state: Literal["RESERVED", "STARTED_UNCONFIRMED"],
+    journal_state: RunTestsJournalState,
     binding: RunTestsDockerBinding,
     observation: RunTestsDockerObservation,
     *,
@@ -6080,6 +6082,17 @@ def _extract_run_tests_output_tar(
                 not member.isfile() for member in members[1:]
             ):
                 raise ValueError("run-tests output archive types are invalid")
+            payload_end = max(
+                member.offset_data + ((member.size + 511) // 512) * 512
+                for member in members
+            )
+            trailer = raw[payload_end:]
+            if (
+                len(trailer) < 1_024
+                or len(trailer) % 512 != 0
+                or any(trailer)
+            ):
+                raise ValueError("run-tests output archive is not terminated")
             contents: dict[str, bytes] = {}
             for member in members[1:]:
                 if not 1 <= member.size <= _MAX_RUN_TESTS_ENVELOPE_BYTES:
@@ -6153,6 +6166,18 @@ def _prepare_run_tests_docker(
         lifecycle = mark_docker_resource_created(
             plan, lifecycle, "workspace_volume"
         )
+        workspace_after_create = _docker_inspection(
+            _docker_checked(
+                executor,
+                commands.inspect_workspace_volume_argv,
+            ).stdout
+        )
+        if not _valid_docker_volume_inspection(
+            plan,
+            workspace_after_create,
+            resource="workspace_volume",
+        ):
+            raise ValueError("Docker workspace volume ownership is invalid")
         _docker_checked(executor, commands.create_staging_container_argv)
         staged = _docker_checked(
             executor,
@@ -6368,8 +6393,14 @@ def _inspect_optional(
 def _reconcile_run_tests_docker(
     executor: DockerRunTestsExecutor,
     contract: RunTestsExecutionContract,
+    journal_state: RunTestsJournalState,
     receipt_state: RunTestsReceiptState,
 ) -> RunTestsExecutionOutcome:
+    if type(journal_state) is not str or journal_state not in {
+        "RESERVED",
+        "STARTED_UNCONFIRMED",
+    }:
+        raise ValueError("run-tests journal state is invalid")
     if type(receipt_state) is not str or receipt_state not in {
         "ABSENT",
         "MATCH",
@@ -6420,7 +6451,16 @@ def _reconcile_run_tests_docker(
                 output_raw,
             )
         ):
-            return RunTestsExecutionOutcome("SAFE_TO_RETRY")
+            action = reconcile_run_tests_docker_execution(
+                journal_state,
+                binding,
+                RunTestsDockerObservation(None, None, None, None, None, None),
+                expected_execution_contract_digest=contract_digest,
+                receipt_state=receipt_state,
+            )
+            return RunTestsExecutionOutcome(
+                "SAFE_TO_RETRY" if action == "SAFE_TO_RETRY" else "UNRESOLVED"
+            )
         image_raw = _docker_inspection(
             _docker_checked(
                 executor,
@@ -6507,14 +6547,6 @@ def _reconcile_run_tests_docker(
             output_volume=output,
             started=started,
             result=result,
-        )
-        journal_state = (
-            "RESERVED"
-            if receipt_state == "ABSENT"
-            and container is None
-            and started is None
-            and result is None
-            else "STARTED_UNCONFIRMED"
         )
         action = reconcile_run_tests_docker_execution(
             journal_state,
@@ -6657,9 +6689,12 @@ class DockerRunTestsExecutor:
     def reconcile(
         self,
         contract: RunTestsExecutionContract,
+        journal_state: RunTestsJournalState,
         receipt_state: RunTestsReceiptState,
     ) -> RunTestsExecutionOutcome:
-        return _reconcile_run_tests_docker(self, contract, receipt_state)
+        return _reconcile_run_tests_docker(
+            self, contract, journal_state, receipt_state
+        )
 
     def cleanup(self, contract: RunTestsExecutionContract) -> None:
         _cleanup_run_tests_docker(self, contract)

@@ -3678,6 +3678,7 @@ def test_docker_run_tests_driver_uses_exact_detached_lifecycle_transcript(
     expected_commands = (
         *command_plan.preflight_absent_argv,
         command_plan.create_workspace_volume_argv,
+        command_plan.inspect_workspace_volume_argv,
         command_plan.create_staging_container_argv,
         command_plan.start_staging_container_argv,
         command_plan.inspect_staging_container_argv,
@@ -3711,7 +3712,7 @@ def test_docker_run_tests_driver_uses_exact_detached_lifecycle_transcript(
         if command in plan.preflight_absent_argv:
             return subprocess.CompletedProcess(command, 0, b"", b"")
         if command == (str(docker_binary), "inspect", binding.staging_container_name):
-            if command_index == 6:
+            if command_index == 7:
                 inspection = {
                     "Name": f"/{binding.staging_container_name}",
                     "Config": {
@@ -3746,7 +3747,7 @@ def test_docker_run_tests_driver_uses_exact_detached_lifecycle_transcript(
                 b"",
             )
         if command == (str(docker_binary), "inspect", binding.container_name):
-            status = "created" if command_index in {12, 16} else "exited"
+            status = "created" if command_index in {13, 17} else "exited"
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -3817,7 +3818,7 @@ def test_docker_run_tests_driver_uses_exact_detached_lifecycle_transcript(
     assert outcome.action == "CLOSED_RESULT"
     assert outcome.result is not None and outcome.result.actual_exit_code == 0
     assert tuple(command for command, _, _ in observed) == expected_commands
-    staging_input = observed[4][1]
+    staging_input = observed[5][1]
     assert staging_input is not None and len(staging_input) <= 8_527_872
     assert all(timeout > 0 for _, _, timeout in observed)
 
@@ -3900,6 +3901,18 @@ def test_docker_run_tests_driver_rejects_extra_tar_member(
             contract,
             _docker_driver_tar(contract, extra_name="./extra.json"),
         )
+
+
+@pytest.mark.parametrize("mutation", ("nonzero_tail", "concatenated_tar"))
+def test_docker_run_tests_driver_rejects_data_after_tar_termination(
+    mutation: str,
+) -> None:
+    contract, _ = _docker_driver_contract_and_snapshot()
+    archive = _docker_driver_tar(contract)
+    raw = archive + (b"x" if mutation == "nonzero_tail" else archive)
+
+    with pytest.raises(ValueError, match="archive"):
+        repo_tools._extract_run_tests_output_tar(contract, raw)
 
 
 def test_docker_run_tests_driver_accepts_inspected_immutable_image_id(
@@ -4148,9 +4161,67 @@ def test_docker_run_tests_driver_cleans_every_partial_create_position(
     }
 
 
-def test_docker_run_tests_driver_safe_retry_requires_checkpoint_and_absence(
+def test_docker_run_tests_driver_rejects_unowned_workspace_volume_create_race(
+    tmp_path: Path,
+) -> None:
+    contract, snapshot = _docker_driver_contract_and_snapshot()
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=Path("/usr/local/bin/docker"),
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=contract.container_image_digest,
+        run=lambda command, input_bytes, timeout: None,
+    )
+    commands = repo_tools._run_tests_docker_command_plan(executor, contract)
+    observed = []
+
+    def run(command, input_bytes, timeout):
+        command = tuple(command)
+        observed.append((command, input_bytes))
+        if command in commands.preflight_absent_argv:
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+        if command == commands.create_workspace_volume_argv:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                (commands.binding.workspace_volume_name + "\n").encode(),
+                b"",
+            )
+        if command == commands.inspect_workspace_volume_argv:
+            inspection = _docker_volume_inspection(
+                commands.execution_plan, "workspace_volume"
+            )
+            inspection["Labels"]["openworkproof.execution-owner"] = "f" * 64
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps([inspection]).encode(), b""
+            )
+        return _docker_driver_absent(command)
+
+    executor._run = run
+
+    assert executor.prepare(contract, snapshot).action == "UNRESOLVED"
+    assert all(
+        command != commands.create_staging_container_argv
+        and command != commands.start_staging_container_argv
+        for command, _ in observed
+    )
+    assert all(input_bytes is None for _, input_bytes in observed)
+    assert commands.remove_workspace_volume_argv not in {
+        command for command, _ in observed
+    }
+
+
+@pytest.mark.parametrize(
+    ("journal_state", "expected_action"),
+    (
+        ("RESERVED", "SAFE_TO_RETRY"),
+        ("STARTED_UNCONFIRMED", "UNRESOLVED"),
+    ),
+)
+def test_docker_run_tests_driver_all_absent_preserves_journal_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    journal_state: str,
+    expected_action: str,
 ) -> None:
     contract, snapshot = _docker_driver_contract_and_snapshot()
     observed_requests = []
@@ -4184,9 +4255,9 @@ def test_docker_run_tests_driver_safe_retry_requires_checkpoint_and_absence(
         run=run,
     )
 
-    outcome = executor.reconcile(contract, "ABSENT")
+    outcome = executor.reconcile(contract, journal_state, "ABSENT")
 
-    assert outcome == repo_tools.RunTestsExecutionOutcome("SAFE_TO_RETRY")
+    assert outcome.action == expected_action
     assert observed_requests == [
         repo_tools.CandidateExecutionSnapshotRequest(
             runtime_root=tmp_path.resolve(),
@@ -4224,7 +4295,7 @@ def test_docker_run_tests_driver_match_closes_without_pruned_image_or_result(
     )
     commands = repo_tools._run_tests_docker_command_plan(executor, contract)
 
-    assert executor.reconcile(contract, "MATCH") == (
+    assert executor.reconcile(contract, "STARTED_UNCONFIRMED", "MATCH") == (
         repo_tools.RunTestsExecutionOutcome("CLOSED_RESULT", None)
     )
     assert observed == [
@@ -4279,7 +4350,7 @@ def test_docker_run_tests_driver_match_cleans_stopped_container_without_cp(
 
     executor._run = run
 
-    assert executor.reconcile(contract, "MATCH") == (
+    assert executor.reconcile(contract, "STARTED_UNCONFIRMED", "MATCH") == (
         repo_tools.RunTestsExecutionOutcome("CLOSED_RESULT", None)
     )
     assert commands.remove_execution_container_argv in observed
@@ -4374,7 +4445,9 @@ def test_docker_run_tests_driver_daemon_error_is_not_absence(
         ),
     )
 
-    assert executor.reconcile(contract, "ABSENT").action == "UNRESOLVED"
+    assert executor.reconcile(contract, "RESERVED", "ABSENT").action == (
+        "UNRESOLVED"
+    )
     with pytest.raises(ValueError, match="absence"):
         executor.cleanup(contract)
 
@@ -4536,7 +4609,7 @@ def test_docker_run_tests_driver_recovery_maps_clean_prestart_and_committed(
         run=run,
     )
 
-    outcome = executor.reconcile(contract, receipt_state)
+    outcome = executor.reconcile(contract, "RESERVED", receipt_state)
 
     assert outcome.action == expected_action
     assert cleaned == [contract]
@@ -4613,7 +4686,9 @@ def test_docker_run_tests_driver_reconcile_running_and_result_uncertainty(
 
     executor._run = run
 
-    assert executor.reconcile(contract, "ABSENT").action == expected_action
+    assert executor.reconcile(
+        contract, "STARTED_UNCONFIRMED", "ABSENT"
+    ).action == expected_action
 
 
 def test_docker_run_tests_cleanup_removes_only_exact_owned_names_in_reverse_order(
