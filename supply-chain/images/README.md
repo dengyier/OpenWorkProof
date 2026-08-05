@@ -3,12 +3,15 @@
 本目录保存可审计、可复建的镜像定义和最小 hash-lock；wheel、Debian
 `.deb`、外部构建上下文和 OCI archive 不进入 Git。
 
-当前本地 candidate 的闭合机器清单为
-`candidates/4460abf3615252077bd37f182c8b69acf5c9da70.json`。历史清单
-`candidates/ed2da68a1009dd8b333025404e7198dc5a12660e.json` 与
-`candidates/33a485eacf4ab97b2507f00e5a824ba4a5c8c29c.json` 均保留并继续按其
-各自 revision 验证；只有当前八项构建定义及 `SOURCE_ALLOWLIST` 指向的四份
-helper 源码 blob 全部逐字节匹配时，清单才可被选择为 current。清单绑定构建
+已有 `openworkproof-image-candidate-inventory/0.1` 历史清单保持原字节并继续按
+各自 revision 验证；新的 current candidate 必须使用
+`openworkproof-image-candidate-inventory/0.2`。只有项目 lock、execution 的
+Dockerfile、requirements lock、`run_tests_runner.py`、`verifier_test.py`、helper
+的 Dockerfile、requirements lock、Debian lock、source allowlist，以及
+`SOURCE_ALLOWLIST` 指向的四份 helper 源码 blob 全部逐字节匹配时，清单才可被
+唯一选择为 current。v0.2 的 `build_inputs.execution` 除 v0.1 的三个字段外，
+还必须恰好同时记录 `runner_sha256` 与 `fixed_test_source_sha256`；任何跨版本字段
+混用均拒绝。清单绑定构建
 revision、基础镜像、全部 build-context 清单哈希、本地 image ID、原样
 `.RepoDigests`、运行配置、OCI manifest 和 archive 哈希。当前外部本地根为
 `/Users/molin/Project/openWorkProof-day0`；清单中的外部路径必须按

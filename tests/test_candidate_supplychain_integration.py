@@ -30,6 +30,7 @@ ALL_TRACKED_DEFINITION_PATHS = (
     "requirements-lock.txt",
     "supply-chain/images/execution/Dockerfile",
     "supply-chain/images/execution/requirements.lock",
+    "supply-chain/images/execution/run_tests_runner.py",
     "supply-chain/images/execution/verifier_test.py",
     "supply-chain/images/trusted-helper/Dockerfile",
     "supply-chain/images/trusted-helper/requirements.lock",
@@ -1714,18 +1715,32 @@ def test_context_manifest_binding_rejects_an_arbitrary_inventory_digest(
         _verify_context_manifest_bindings(execution, helper, inventory)
 
 
-def test_current_candidate_inventory_is_selected_by_tracked_definition() -> None:
+def test_current_candidate_inventory_binds_execution_runner() -> None:
     path, inventory = _select_current_inventory()
+    revision = inventory["source_revision"]
 
-    assert path.name == f"{inventory['source_revision']}.json"
-
-
-def test_current_candidate_selector_chooses_full_workspace_source_revision() -> None:
-    _, inventory = _select_current_inventory()
-
-    assert inventory["source_revision"] == (
-        "4460abf3615252077bd37f182c8b69acf5c9da70"
+    assert path.name == f"{revision}.json"
+    assert inventory["schema_version"] == (
+        "openworkproof-image-candidate-inventory/0.2"
     )
+    assert inventory["build_inputs"]["execution"]["runner_sha256"] == (
+        _sha256_bytes(_git_bytes(
+            revision,
+            "supply-chain/images/execution/run_tests_runner.py",
+        ))
+    )
+
+
+def test_current_candidate_inventory_binds_fixed_test_source() -> None:
+    _, inventory = _select_current_inventory()
+    revision = inventory["source_revision"]
+
+    assert inventory["build_inputs"]["execution"][
+        "fixed_test_source_sha256"
+    ] == _sha256_bytes(_git_bytes(
+        revision,
+        "supply-chain/images/execution/verifier_test.py",
+    ))
 
 
 def test_candidate_inventory_selector_rejects_zero_matches() -> None:

@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 
 import pytest
 
@@ -30,6 +31,12 @@ TRACKED_INPUTS = {
     ),
     ("execution", "requirements_lock_sha256"): (
         "supply-chain/images/execution/requirements.lock"
+    ),
+    ("execution", "runner_sha256"): (
+        "supply-chain/images/execution/run_tests_runner.py"
+    ),
+    ("execution", "fixed_test_source_sha256"): (
+        "supply-chain/images/execution/verifier_test.py"
     ),
     ("trusted_helper", "dockerfile_sha256"): (
         "supply-chain/images/trusted-helper/Dockerfile"
@@ -98,9 +105,11 @@ def _load_candidate_inventory(inventory_path: Path) -> dict[str, object]:
         },
         "inventory",
     )
-    assert inventory["schema_version"] == (
-        "openworkproof-image-candidate-inventory/0.1"
-    )
+    schema_version = _assert_string(inventory["schema_version"], "schema_version")
+    assert schema_version in {
+        "openworkproof-image-candidate-inventory/0.1",
+        "openworkproof-image-candidate-inventory/0.2",
+    }, "unsupported schema_version"
     revision = _assert_string(inventory["source_revision"], "source_revision")
     assert REVISION_PATTERN.fullmatch(revision)
     assert inventory_path.stem == revision
@@ -131,16 +140,22 @@ def _load_candidate_inventory(inventory_path: Path) -> dict[str, object]:
     build_inputs = _assert_exact_keys(
         inventory["build_inputs"], {"global", "execution", "trusted_helper"}, "inputs"
     )
+    execution_input_keys = {
+        "dockerfile_sha256",
+        "requirements_lock_sha256",
+        "wheel_sha256sums_sha256",
+    }
+    if schema_version == "openworkproof-image-candidate-inventory/0.2":
+        execution_input_keys |= {
+            "runner_sha256",
+            "fixed_test_source_sha256",
+        }
     expected_input_keys = {
         "global": {
             "project_requirements_lock_sha256",
             "full_wheelhouse_sha256sums_sha256",
         },
-        "execution": {
-            "dockerfile_sha256",
-            "requirements_lock_sha256",
-            "wheel_sha256sums_sha256",
-        },
+        "execution": execution_input_keys,
         "trusted_helper": {
             "dockerfile_sha256",
             "requirements_lock_sha256",
@@ -156,6 +171,8 @@ def _load_candidate_inventory(inventory_path: Path) -> dict[str, object]:
         for key, digest in values.items():
             _assert_sha256(digest, f"{group}.{key}")
     for (group, key), relative_path in TRACKED_INPUTS.items():
+        if key not in build_inputs[group]:
+            continue
         assert build_inputs[group][key] == hashlib.sha256(
             _git_bytes(revision, relative_path)
         ).hexdigest()
@@ -237,13 +254,21 @@ def _load_candidate_inventory(inventory_path: Path) -> dict[str, object]:
             and all(type(token) is str for token in image["cmd"])
         )
         if image_name == "execution":
-            assert image["entrypoint"] == ["/usr/bin/env", "--"]
-            assert image["cmd"] == [
-                "/opt/venv/bin/python",
-                "-I",
-                "-m",
-                "pytest",
-            ]
+            if schema_version == "openworkproof-image-candidate-inventory/0.2":
+                assert image["entrypoint"] == [
+                    "/opt/venv/bin/python",
+                    "-I",
+                    "/opt/openworkproof/run_tests_runner.py",
+                ]
+                assert image["cmd"] == ["execute"]
+            else:
+                assert image["entrypoint"] == ["/usr/bin/env", "--"]
+                assert image["cmd"] == [
+                    "/opt/venv/bin/python",
+                    "-I",
+                    "-m",
+                    "pytest",
+                ]
         elif revision == "33a485eacf4ab97b2507f00e5a824ba4a5c8c29c":
             assert image["entrypoint"] == ["/opt/venv/bin/python", "-I"]
             assert image["cmd"] == ["-c", "import sys; sys.exit(64)"]
@@ -813,6 +838,9 @@ def test_supply_chain_record_keeps_day0_and_acceptor_claims_closed() -> None:
     assert "只允许在 `/tmp` 下写入" in record
     assert "Linux `/dev/null` 字符设备" in record
     assert "不开放 `/dev`" in record
+    assert "openworkproof-image-candidate-inventory/0.2" in record
+    assert "runner_sha256" in record
+    assert "fixed_test_source_sha256" in record
 
 
 @pytest.mark.parametrize("inventory_path", CANDIDATE_PATHS, ids=lambda path: path.stem)
@@ -821,6 +849,132 @@ def test_candidate_inventory_is_closed_and_claims_only_local_evidence(
 ) -> None:
     inventory = _load_candidate_inventory(inventory_path)
     assert inventory["source_revision"] == inventory_path.stem
+
+
+def test_inventory_v01_remains_valid_without_runner_digest(tmp_path: Path) -> None:
+    inventory = copy.deepcopy(_load_candidate_inventory(CANDIDATE_PATHS[-1]))
+
+    assert inventory["schema_version"] == (
+        "openworkproof-image-candidate-inventory/0.1"
+    )
+    assert "runner_sha256" not in inventory["build_inputs"]["execution"]
+    assert "fixed_test_source_sha256" not in inventory["build_inputs"]["execution"]
+    assert _load_candidate_inventory(_write_inventory(tmp_path, inventory)) == inventory
+
+
+def _inventory_v02_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict[str, object], Path]:
+    inventory = copy.deepcopy(_load_candidate_inventory(CANDIDATE_PATHS[-1]))
+    inventory["schema_version"] = "openworkproof-image-candidate-inventory/0.2"
+    original_git_bytes = _git_bytes
+    additional_blobs = {
+        "supply-chain/images/execution/run_tests_runner.py": b"runner\n",
+        "supply-chain/images/execution/verifier_test.py": b"fixed test\n",
+    }
+
+    def git_bytes(revision: str, relative_path: str) -> bytes:
+        if relative_path in additional_blobs:
+            return additional_blobs[relative_path]
+        return original_git_bytes(revision, relative_path)
+
+    inventory["build_inputs"]["execution"].update(
+        {
+            "runner_sha256": hashlib.sha256(additional_blobs[
+                "supply-chain/images/execution/run_tests_runner.py"
+            ]).hexdigest(),
+            "fixed_test_source_sha256": hashlib.sha256(additional_blobs[
+                "supply-chain/images/execution/verifier_test.py"
+            ]).hexdigest(),
+        }
+    )
+    inventory["images"]["execution"]["entrypoint"] = [
+        "/opt/venv/bin/python",
+        "-I",
+        "/opt/openworkproof/run_tests_runner.py",
+    ]
+    inventory["images"]["execution"]["cmd"] = ["execute"]
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_git_bytes",
+        git_bytes,
+    )
+    path = _write_inventory(tmp_path, inventory)
+    return inventory, path
+
+
+def test_inventory_v02_requires_execution_runner_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory, path = _inventory_v02_fixture(tmp_path, monkeypatch)
+
+    assert _load_candidate_inventory(path) == inventory
+    del inventory["build_inputs"]["execution"]["runner_sha256"]
+    with pytest.raises(AssertionError, match="keys"):
+        _load_candidate_inventory(_write_inventory(tmp_path, inventory))
+
+
+def test_inventory_v02_requires_fixed_test_source_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory, path = _inventory_v02_fixture(tmp_path, monkeypatch)
+
+    assert _load_candidate_inventory(path) == inventory
+    del inventory["build_inputs"]["execution"]["fixed_test_source_sha256"]
+    with pytest.raises(AssertionError, match="keys"):
+        _load_candidate_inventory(_write_inventory(tmp_path, inventory))
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "additional_keys"),
+    (
+        (
+            "openworkproof-image-candidate-inventory/0.1",
+            {"runner_sha256": "a" * 64},
+        ),
+        (
+            "openworkproof-image-candidate-inventory/0.1",
+            {"fixed_test_source_sha256": "b" * 64},
+        ),
+        (
+            "openworkproof-image-candidate-inventory/0.1",
+            {
+                "runner_sha256": "a" * 64,
+                "fixed_test_source_sha256": "b" * 64,
+            },
+        ),
+        (
+            "openworkproof-image-candidate-inventory/0.2",
+            {"runner_sha256": "a" * 64},
+        ),
+        (
+            "openworkproof-image-candidate-inventory/0.2",
+            {"fixed_test_source_sha256": "b" * 64},
+        ),
+    ),
+)
+def test_inventory_versions_reject_cross_version_execution_key_mixtures(
+    tmp_path: Path,
+    schema_version: str,
+    additional_keys: dict[str, str],
+) -> None:
+    inventory = copy.deepcopy(_load_candidate_inventory(CANDIDATE_PATHS[-1]))
+    inventory["schema_version"] = schema_version
+    inventory["build_inputs"]["execution"].update(additional_keys)
+
+    with pytest.raises(AssertionError):
+        _load_candidate_inventory(_write_inventory(tmp_path, inventory))
+
+
+def test_inventory_loader_rejects_unknown_schema_version(tmp_path: Path) -> None:
+    inventory = copy.deepcopy(_load_candidate_inventory(CANDIDATE_PATHS[-1]))
+    inventory["schema_version"] = "openworkproof-image-candidate-inventory/9.9"
+
+    with pytest.raises(AssertionError, match="schema_version"):
+        _load_candidate_inventory(_write_inventory(tmp_path, inventory))
 
 
 def test_inventory_loader_rejects_duplicate_json_keys(tmp_path: Path) -> None:
