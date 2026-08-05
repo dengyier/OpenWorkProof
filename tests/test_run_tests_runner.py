@@ -8,9 +8,14 @@ import io
 import json
 import os
 from pathlib import Path
+import signal
+import subprocess
 import sys
+import time
 
 import pytest
+
+from openworkproof import repo_tools
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -232,6 +237,17 @@ def test_stage_writes_snapshot_and_exact_canonical_summary(tmp_path: Path) -> No
     )
 
     assert result == 0
+    normalized_paths = (
+        workspace,
+        workspace / "README.md",
+        workspace / "src",
+        workspace / "src/test_sample.py",
+        workspace / "run-contract.json",
+    )
+    for path in normalized_paths:
+        metadata = path.lstat()
+        assert metadata.st_atime_ns == 0
+        assert metadata.st_mtime_ns == 0
     assert (workspace / "README.md").read_bytes() == files["README.md"][1]
     assert (workspace / "src/test_sample.py").read_bytes() == files["src/test_sample.py"][1]
     assert (workspace / "run-contract.json").read_bytes() == _canonical(contract)
@@ -299,6 +315,443 @@ def test_runner_rejects_528_entry_manifest_before_success_or_marker(
 
     assert result != 0
     assert stdout.getvalue() == b""
+    assert not list(output.iterdir())
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "a",
+        "a" * 512,
+        "src/main.py",
+        ".gitignore",
+        ".Git/config",
+        "src/.git/config",
+    ),
+)
+def test_runner_path_acceptance_matches_authoritative_validator(path: str) -> None:
+    assert repo_tools.validate_canonical_relative_path(path) == path
+    assert runner._validated_path(path) == path
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "",
+        "a" * 513,
+        "/absolute",
+        "trailing/",
+        "empty//segment",
+        ".",
+        "..",
+        "a/./b",
+        "a/../b",
+        "a\\b",
+        "has space",
+        "line\nbreak",
+        "control\x01byte",
+        "glob*",
+        "question?",
+        "class[ab]",
+        ".git",
+        ".git/config",
+    ),
+)
+def test_runner_path_rejection_matches_authoritative_validator(path: str) -> None:
+    with pytest.raises(repo_tools.PathError):
+        repo_tools.validate_canonical_relative_path(path)
+    with pytest.raises(runner.RunnerError):
+        runner._validated_path(path)
+
+
+def test_runner_manifest_digest_matches_authoritative_repo_tools() -> None:
+    files = {
+        ".Git/config": ("100644", b"case-sensitive\n"),
+        "README.md": ("100644", b"readme\n"),
+        "src/app.py": ("100755", b"app\n"),
+    }
+    directories = {
+        "/".join(path.split("/")[:index])
+        for path in files
+        for index in range(1, len(path.split("/")))
+    }
+    records = [
+        repo_tools.WorkspaceScanRecord(
+            path.encode("ascii"),
+            "directory",
+            0o040755,
+            None,
+            None,
+            None,
+            1,
+            "stable",
+            "stable",
+        )
+        for path in directories
+    ]
+    records.extend(
+        repo_tools.WorkspaceScanRecord(
+            path.encode("ascii"),
+            "regular",
+            int(mode, 8),
+            len(content),
+            content,
+            None,
+            1,
+            "stable",
+            "stable",
+        )
+        for path, (mode, content) in files.items()
+    )
+    authoritative = repo_tools.workspace_manifest_digest(
+        repo_tools.build_workspace_manifest("2" * 40, records)
+    )
+
+    assert runner._manifest_digest(files, "2" * 40) == authoritative
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    ("partial_enospc", "fsync", "file_utime", "mkdir_followup"),
+)
+def test_stage_failure_cleans_every_new_file_and_directory_immediately(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    files = {"nested/candidate.py": ("100644", b"candidate bytes")}
+    contract = _contract(files)
+    if failure_point == "partial_enospc":
+        real_write = runner.os.write
+        calls = 0
+
+        def partial_then_enospc(descriptor: int, content) -> int:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_write(descriptor, content[:1])
+            raise OSError(28, os.strerror(28))
+
+        monkeypatch.setattr(runner.os, "write", partial_then_enospc)
+    elif failure_point == "fsync":
+        monkeypatch.setattr(
+            runner.os,
+            "fsync",
+            lambda descriptor: (_ for _ in ()).throw(OSError("fsync failed")),
+        )
+    elif failure_point == "file_utime":
+        monkeypatch.setattr(
+            runner.os,
+            "utime",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("utime failed")),
+        )
+    else:
+        monkeypatch.setattr(
+            runner.os,
+            "chmod",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("chmod failed")),
+        )
+
+    result = runner.main(
+        ("stage",),
+        workspace_root=workspace,
+        input_stream=io.BytesIO(_stream(files, contract)),
+        output_stream=io.BytesIO(),
+    )
+
+    assert result != 0
+    assert not list(workspace.iterdir())
+
+
+def _no_descendant_cleanup() -> None:
+    return None
+
+
+@pytest.mark.parametrize("escape", ["setsid", "double_fork"])
+def test_detached_survivor_is_closed_before_exact_result_publication(
+    tmp_path: Path, escape: str
+) -> None:
+    workspace, output, _, contract = _write_workspace(tmp_path)
+    pidfile = tmp_path / "survivor.pid"
+    forged = output / "result.json"
+    payload = (
+        "import os,time\n"
+        "from pathlib import Path\n"
+        f"Path({str(pidfile)!r}).write_text(str(os.getpid()))\n"
+        "time.sleep(0.2)\n"
+        f"Path({str(forged)!r}).write_text('forged')\n"
+        "time.sleep(30)\n"
+    )
+    if escape == "setsid":
+        descendant = payload
+    else:
+        descendant = (
+            "import os\n"
+            "if os.fork(): os._exit(0)\n"
+            "os.setsid()\n"
+            "if os.fork(): os._exit(0)\n"
+            + payload
+        )
+    parent = (
+        "import subprocess,sys\n"
+        f"subprocess.Popen([sys.executable,'-c',{descendant!r}], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+        "stderr=subprocess.DEVNULL, start_new_session=True)\n"
+    )
+    survivor_pid: int | None = None
+
+    def cleanup_survivor() -> None:
+        nonlocal survivor_pid
+        for _ in range(100):
+            if pidfile.exists():
+                break
+            time.sleep(0.01)
+        survivor_pid = int(pidfile.read_text())
+        os.kill(survivor_pid, signal.SIGKILL)
+
+    def supervised_process(argv, cwd):
+        return runner._run_process(
+            (sys.executable, "-c", parent),
+            cwd,
+            descendant_cleaner=cleanup_survivor,
+        )
+
+    try:
+        result = runner.main(
+            ("execute",),
+            workspace_root=workspace,
+            output_root=output,
+            process_runner=supervised_process,
+        )
+        exact = (output / "result.json").read_bytes()
+        time.sleep(0.4)
+
+        assert result == 0
+        assert (output / "result.json").read_bytes() == exact
+        assert json.loads(exact)["execution_id"] == contract["execution_id"]
+        assert exact != b"forged"
+    finally:
+        if survivor_pid is not None:
+            try:
+                os.kill(survivor_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.parametrize("tamper", ["bytes", "same_bytes_new_inode"])
+def test_started_marker_tamper_after_child_cleanup_prevents_result(
+    tmp_path: Path, tamper: str
+) -> None:
+    workspace, output, _, _ = _write_workspace(tmp_path)
+
+    def tampering_process(argv, cwd):
+        started = output / "started.json"
+        original = started.read_bytes()
+        if tamper == "bytes":
+            started.write_bytes(b"tampered")
+        else:
+            replacement = output / "replacement"
+            replacement.write_bytes(original)
+            os.replace(replacement, started)
+        return runner.ProcessOutcome(0, None, b"", b"")
+
+    result = runner.main(
+        ("execute",),
+        workspace_root=workspace,
+        output_root=output,
+        process_runner=tampering_process,
+    )
+
+    assert result != 0
+    assert not (output / "result.json").exists()
+
+
+def test_production_descendant_supervision_requires_linux_pid1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner.sys, "platform", "darwin")
+    with pytest.raises(runner.RunnerError, match="Linux"):
+        runner._production_descendant_cleaner()
+
+    monkeypatch.setattr(runner.sys, "platform", "linux")
+    monkeypatch.setattr(runner.os, "getpid", lambda: 2)
+    with pytest.raises(runner.RunnerError, match="PID 1"):
+        runner._production_descendant_cleaner()
+
+
+def test_production_descendant_supervision_requires_readable_empty_proc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner.sys, "platform", "linux")
+    monkeypatch.setattr(runner.os, "getpid", lambda: 1)
+    monkeypatch.setattr(
+        runner.os,
+        "listdir",
+        lambda path: (_ for _ in ()).throw(OSError("proc unavailable")),
+    )
+    with pytest.raises(runner.RunnerError, match="cannot be enumerated"):
+        runner._production_descendant_cleaner()
+
+    monkeypatch.setattr(runner, "_pid_namespace_members", lambda: (2,))
+    with pytest.raises(runner.RunnerError, match="not initially empty"):
+        runner._production_descendant_cleaner()
+
+
+def test_pid_namespace_cleanup_uses_term_kill_and_stable_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observations = iter(((41, 42), (42,), (42,), (), (), ()))
+    signals: list[tuple[tuple[int, ...], int]] = []
+    clock = 0.0
+
+    def monotonic() -> float:
+        return clock
+
+    def advance(seconds: float) -> None:
+        nonlocal clock
+        clock += 0.6
+
+    monkeypatch.setattr(runner, "_reap_pid1_children", lambda: None)
+    monkeypatch.setattr(runner, "_pid_namespace_members", lambda: next(observations))
+    monkeypatch.setattr(
+        runner,
+        "_signal_pid_namespace",
+        lambda pids, requested_signal: signals.append((pids, requested_signal)),
+    )
+    monkeypatch.setattr(runner.time, "monotonic", monotonic)
+    monkeypatch.setattr(runner.time, "sleep", advance)
+
+    runner._close_pid_namespace()
+
+    assert signals == [
+        ((41, 42), signal.SIGTERM),
+        ((42,), signal.SIGTERM),
+        ((42,), signal.SIGKILL),
+    ]
+
+
+def test_pid_namespace_cleanup_fails_when_descendant_never_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signals: list[int] = []
+    clock = 0.0
+
+    def advance(seconds: float) -> None:
+        nonlocal clock
+        clock += 5.5
+
+    monkeypatch.setattr(runner, "_reap_pid1_children", lambda: None)
+    monkeypatch.setattr(runner, "_pid_namespace_members", lambda: (42,))
+    monkeypatch.setattr(
+        runner,
+        "_signal_pid_namespace",
+        lambda pids, requested_signal: signals.append(requested_signal),
+    )
+    monkeypatch.setattr(runner.time, "monotonic", lambda: clock)
+    monkeypatch.setattr(runner.time, "sleep", advance)
+
+    with pytest.raises(runner.RunnerError, match="stable zero"):
+        runner._close_pid_namespace()
+
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_pid_namespace_enumeration_excludes_only_pid1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        runner.os,
+        "listdir",
+        lambda path: ["self", "1", "12", "3", "not-a-pid"],
+    )
+    monkeypatch.setattr(runner.os, "getpid", lambda: 1)
+
+    assert runner._pid_namespace_members() == (3, 12)
+
+
+def test_descendant_supervision_failure_is_fail_closed_without_result(
+    tmp_path: Path,
+) -> None:
+    workspace, output, _, _ = _write_workspace(tmp_path)
+
+    def fail_cleanup() -> None:
+        raise runner.RunnerError("descendant supervision unavailable")
+
+    def process(argv, cwd):
+        return runner._run_process(
+            (sys.executable, "-c", "pass"),
+            cwd,
+            descendant_cleaner=fail_cleanup,
+        )
+
+    result = runner.main(
+        ("execute",),
+        workspace_root=workspace,
+        output_root=output,
+        process_runner=process,
+    )
+
+    assert result != 0
+    assert (output / "started.json").is_file()
+    assert not (output / "result.json").exists()
+
+
+@pytest.mark.parametrize("mode", ["stage", "execute"])
+def test_deep_json_is_a_controlled_nonzero_failure(
+    tmp_path: Path, mode: str
+) -> None:
+    workspace = tmp_path / "workspace"
+    output = tmp_path / "output"
+    workspace.mkdir()
+    output.mkdir()
+    depth = 16_000 if mode == "stage" else 4_000
+    deep = b"[" * depth + b"0" + b"]" * depth
+    if mode == "stage":
+        stream = (
+            b"openworkproof-snapshot-stream/0.1\n"
+            + len(deep).to_bytes(4, "big")
+            + deep
+        )
+        result = runner.main(
+            ("stage",),
+            workspace_root=workspace,
+            input_stream=io.BytesIO(stream),
+            output_stream=io.BytesIO(),
+        )
+    else:
+        (workspace / "candidate").write_bytes(b"x")
+        (workspace / "run-contract.json").write_bytes(deep)
+        result = runner.main(
+            ("execute",),
+            workspace_root=workspace,
+            output_root=output,
+        )
+
+    assert result != 0
+    assert not list(output.iterdir())
+
+
+def test_json_recursionerror_is_a_controlled_runner_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, output, _, _ = _write_workspace(tmp_path)
+    monkeypatch.setattr(
+        runner.json,
+        "loads",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RecursionError("injected JSON recursion")
+        ),
+    )
+
+    result = runner.main(
+        ("execute",),
+        workspace_root=workspace,
+        output_root=output,
+    )
+
+    assert result != 0
     assert not list(output.iterdir())
 
 
@@ -547,6 +1000,7 @@ def test_real_process_capture_enforces_output_limit_and_timeout(
             "import os; os.write(1, b'x' * 2048)",
         ),
         tmp_path,
+        descendant_cleaner=_no_descendant_cleanup,
     )
     assert output.failure_code == "OUTPUT_LIMIT"
     assert len(output.stdout) + len(output.stderr) == 1024
@@ -555,6 +1009,7 @@ def test_real_process_capture_enforces_output_limit_and_timeout(
     timeout = runner._run_process(
         (sys.executable, "-c", "import time; time.sleep(30)"),
         tmp_path,
+        descendant_cleaner=_no_descendant_cleanup,
     )
     assert timeout.failure_code == "TIMEOUT"
 
@@ -567,7 +1022,11 @@ def test_real_process_capture_maps_enospc_to_disk_limit(
 
     monkeypatch.setattr(runner.subprocess, "Popen", raise_enospc)
 
-    outcome = runner._run_process((sys.executable, "-c", "pass"), tmp_path)
+    outcome = runner._run_process(
+        (sys.executable, "-c", "pass"),
+        tmp_path,
+        descendant_cleaner=_no_descendant_cleanup,
+    )
 
     assert outcome == runner.ProcessOutcome(
         exit_code=None,

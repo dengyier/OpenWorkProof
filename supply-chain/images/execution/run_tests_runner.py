@@ -43,6 +43,7 @@ _MAX_CANDIDATE_BYTES = 8_388_608
 _MAX_MANIFEST_ENTRIES = 512
 _MAX_SUMMARY_BYTES = 512
 _ALLOWED_MODES = frozenset({"100644", "100755"})
+_PATH_PATTERN = re.compile(r"^[A-Za-z0-9._/-]+$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _OID = re.compile(r"^[0-9a-f]{40}$")
 _IMAGE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -107,11 +108,16 @@ def _parse_canonical_json(raw: bytes) -> object:
             object_pairs_hook=_reject_duplicates,
             parse_constant=_reject_constant,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError, RunnerError) as error:
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        RecursionError,
+        RunnerError,
+    ) as error:
         raise RunnerError("JSON is not strict canonical ASCII") from error
     try:
         canonical = _canonical(value)
-    except (UnicodeEncodeError, TypeError, ValueError) as error:
+    except (UnicodeEncodeError, TypeError, ValueError, RecursionError) as error:
         raise RunnerError("JSON cannot be canonically encoded") from error
     if canonical != raw:
         raise RunnerError("JSON bytes are not canonical")
@@ -187,10 +193,9 @@ def _validated_path(value: object) -> str:
     parts = value.split("/")
     if (
         not 1 <= len(raw) <= _MAX_PATH_BYTES
-        or value.startswith("/")
-        or value.endswith("/")
-        or "\0" in value
+        or _PATH_PATTERN.fullmatch(value) is None
         or any(part in {"", ".", ".."} for part in parts)
+        or parts[0] == ".git"
         or value == "run-contract.json"
     ):
         raise RunnerError("snapshot path is not canonical")
@@ -209,10 +214,16 @@ def _read_exact(stream: BinaryIO, size: int) -> bytes:
     return b"".join(chunks)
 
 
-def _write_new_regular(path: Path, content: bytes, mode: int) -> None:
+def _write_new_regular(
+    path: Path,
+    content: bytes,
+    mode: int,
+    created_files: list[Path],
+) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags | nofollow, mode)
+    created_files.append(path)
     try:
         view = memoryview(content)
         written = 0
@@ -225,7 +236,20 @@ def _write_new_regular(path: Path, content: bytes, mode: int) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-    os.utime(path, ns=(0, 0), follow_symlinks=False)
+
+
+def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
 
 
 def _read_regular(path: Path, maximum: int) -> tuple[bytes, os.stat_result]:
@@ -247,24 +271,8 @@ def _read_regular(path: Path, maximum: int) -> tuple[bytes, os.stat_result]:
             raise RunnerError(f"file grew during read: {path.name}")
         after = os.fstat(descriptor)
         named = path.lstat()
-        identity_before = (
-            before.st_dev,
-            before.st_ino,
-            before.st_mode,
-            before.st_nlink,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        )
-        identity_after = (
-            after.st_dev,
-            after.st_ino,
-            after.st_mode,
-            after.st_nlink,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        )
+        identity_before = _file_identity(before)
+        identity_after = _file_identity(after)
         if identity_before != identity_after or not os.path.samestat(after, named):
             raise RunnerError(f"file changed during read: {path.name}")
         return content, after
@@ -477,18 +485,20 @@ def _stage(root: Path, input_stream: BinaryIO, output_stream: BinaryIO) -> int:
                 current = current / part
                 if not current.exists():
                     current.mkdir(mode=0o755)
-                    os.chmod(current, 0o755)
-                    os.utime(current, ns=(0, 0), follow_symlinks=False)
                     created_directories.append(current)
+                    os.chmod(current, 0o755)
                 else:
                     metadata = current.lstat()
                     if current.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
                         raise RunnerError("snapshot parent is not a directory")
-            _write_new_regular(destination, content, int(mode[-3:], 8))
-            created_files.append(destination)
+            _write_new_regular(
+                destination,
+                content,
+                int(mode[-3:], 8),
+                created_files,
+            )
         control = root / "run-contract.json"
-        _write_new_regular(control, contract_raw, 0o644)
-        created_files.append(control)
+        _write_new_regular(control, contract_raw, 0o644, created_files)
         staged = _scan_workspace(root)
         expected = {path: (mode, content) for path, mode, content in payloads}
         if staged != expected:
@@ -499,7 +509,10 @@ def _stage(root: Path, input_stream: BinaryIO, output_stream: BinaryIO) -> int:
         manifest_digest = _manifest_digest(staged, contract["candidate_commit"])
         if manifest_digest != contract["workspace_manifest_digest"]:
             raise RunnerError("staged workspace manifest does not match contract")
+        for path in created_files:
+            os.utime(path, ns=(0, 0), follow_symlinks=False)
         for directory in sorted({root, *created_directories}, key=lambda item: len(item.parts), reverse=True):
+            os.utime(directory, ns=(0, 0), follow_symlinks=False)
             descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
             try:
                 os.fsync(descriptor)
@@ -550,7 +563,90 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
         raise RunnerError("verifier process group could not be stopped") from error
 
 
-def _run_process(argv: tuple[str, ...], cwd: Path) -> ProcessOutcome:
+def _pid_namespace_members() -> tuple[int, ...]:
+    try:
+        entries = os.listdir("/proc")
+    except OSError as error:
+        raise RunnerError("Linux PID namespace cannot be enumerated") from error
+    own_pid = os.getpid()
+    return tuple(
+        sorted(
+            int(entry)
+            for entry in entries
+            if entry.isascii()
+            and entry.isdigit()
+            and int(entry) > 0
+            and int(entry) != own_pid
+        )
+    )
+
+
+def _reap_pid1_children() -> None:
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        except OSError as error:
+            raise RunnerError("PID 1 could not reap verifier descendants") from error
+        if pid == 0:
+            return
+
+
+def _signal_pid_namespace(pids: tuple[int, ...], requested_signal: int) -> None:
+    for pid in pids:
+        try:
+            os.kill(pid, requested_signal)
+        except ProcessLookupError:
+            continue
+        except OSError as error:
+            raise RunnerError("verifier descendant could not be signalled") from error
+
+
+def _close_pid_namespace() -> None:
+    term_deadline = time.monotonic() + 1.0
+    kill_deadline = term_deadline + 9.0
+    stable_zero_scans = 0
+    while time.monotonic() < kill_deadline:
+        _reap_pid1_children()
+        pids = _pid_namespace_members()
+        if not pids:
+            stable_zero_scans += 1
+            if stable_zero_scans == 3:
+                return
+        else:
+            stable_zero_scans = 0
+            requested_signal = (
+                signal.SIGTERM
+                if time.monotonic() < term_deadline
+                else signal.SIGKILL
+            )
+            _signal_pid_namespace(pids, requested_signal)
+        time.sleep(0.01)
+    raise RunnerError("verifier descendants did not reach stable zero")
+
+
+def _production_descendant_cleaner() -> Callable[[], None]:
+    if not sys.platform.startswith("linux"):
+        raise RunnerError("verifier descendant supervision requires Linux")
+    if os.getpid() != 1:
+        raise RunnerError("verifier runner must be PID 1")
+    if _pid_namespace_members():
+        raise RunnerError("verifier PID namespace is not initially empty")
+    return _close_pid_namespace
+
+
+def _run_process(
+    argv: tuple[str, ...],
+    cwd: Path,
+    *,
+    descendant_cleaner: Callable[[], None] | None = None,
+) -> ProcessOutcome:
+    cleaner = (
+        _production_descendant_cleaner()
+        if descendant_cleaner is None
+        else descendant_cleaner
+    )
     try:
         process = subprocess.Popen(
             argv,
@@ -570,10 +666,12 @@ def _run_process(argv: tuple[str, ...], cwd: Path) -> ProcessOutcome:
         )
     except OSError as error:
         if error.errno == errno.ENOSPC:
+            cleaner()
             return ProcessOutcome(None, "DISK_LIMIT", b"", b"")
         raise RunnerError("verifier process could not start") from error
     if process.stdout is None or process.stderr is None:
         _terminate_process_group(process)
+        cleaner()
         raise RunnerError("verifier process pipes are unavailable")
     selector = selectors.DefaultSelector()
     buffers = {"stdout": bytearray(), "stderr": bytearray()}
@@ -629,6 +727,7 @@ def _run_process(argv: tuple[str, ...], cwd: Path) -> ProcessOutcome:
         selector.close()
         process.stdout.close()
         process.stderr.close()
+        cleaner()
     if failure is not None:
         return ProcessOutcome(None, failure, bytes(buffers["stdout"]), bytes(buffers["stderr"]))
     if type(process.returncode) is not int or not 0 <= process.returncode <= 255:
@@ -677,6 +776,24 @@ def _atomic_write(path: Path, content: bytes) -> None:
             temporary.unlink()
 
 
+def _validated_marker_identity(
+    path: Path,
+    expected: bytes,
+    prior_identity: tuple[int, ...] | None = None,
+) -> tuple[int, ...]:
+    content, metadata = _read_regular(path, MAX_RESULT_BYTES)
+    identity = _file_identity(metadata)
+    if (
+        content != expected
+        or f"{metadata.st_mode:06o}" != "100644"
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_gid != os.getegid()
+        or (prior_identity is not None and identity != prior_identity)
+    ):
+        raise RunnerError(f"output marker changed: {path.name}")
+    return identity
+
+
 def _execute(
     workspace: Path,
     output: Path,
@@ -703,8 +820,11 @@ def _execute(
             "schema_version": "openworkproof-run-started/0.1",
         }
     )
-    _atomic_write(output / "started.json", started)
+    started_path = output / "started.json"
+    _atomic_write(started_path, started)
+    started_identity = _validated_marker_identity(started_path, started)
     outcome = process_runner(FROZEN_VERIFIER_ARGV, workspace)
+    _validated_marker_identity(started_path, started, started_identity)
     if type(outcome) is not ProcessOutcome:
         raise RunnerError("process runner returned an invalid outcome")
     if type(outcome.stdout) is not bytes or type(outcome.stderr) is not bytes:

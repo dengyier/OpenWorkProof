@@ -411,9 +411,16 @@ def _assert_fixed_process_config(
     dockerfile: str,
     expected_entrypoint: list[str],
     expected_cmd: list[str],
+    expected_copy: str | None = None,
 ) -> None:
-    instructions: dict[str, list[object]] = {"ENTRYPOINT": [], "CMD": []}
+    instructions: dict[str, list[object]] = {
+        "FROM": [],
+        "COPY": [],
+        "ENTRYPOINT": [],
+        "CMD": [],
+    }
     in_continuation = False
+    seen_from = False
     for raw_line in dockerfile.splitlines():
         stripped = raw_line.lstrip()
         assert not re.match(
@@ -431,17 +438,27 @@ def _assert_fixed_process_config(
         if name in instructions:
             assert len(parts) == 2, f"missing {name} value"
             assert not continues, f"continued {name} is not allowed"
-            try:
-                value = json.loads(parts[1])
-            except json.JSONDecodeError as error:
-                raise AssertionError(f"invalid {name} JSON") from error
+            if name == "FROM":
+                seen_from = True
+            else:
+                assert seen_from, f"{name} must follow FROM"
+            if name in {"ENTRYPOINT", "CMD"}:
+                try:
+                    value = json.loads(parts[1])
+                except json.JSONDecodeError as error:
+                    raise AssertionError(f"invalid {name} JSON") from error
+            else:
+                value = parts[1]
             instructions[name].append(value)
         elif continues:
             in_continuation = True
 
     assert not in_continuation, "unterminated Dockerfile continuation"
+    assert len(instructions["FROM"]) == 1
     assert instructions["ENTRYPOINT"] == [expected_entrypoint]
     assert instructions["CMD"] == [expected_cmd]
+    if expected_copy is not None:
+        assert instructions["COPY"].count(expected_copy) == 1
 
 
 def _assert_fixed_helper_process_config(dockerfile: str) -> None:
@@ -466,6 +483,7 @@ def _assert_fixed_execution_process_config(dockerfile: str) -> None:
             "/opt/openworkproof/run_tests_runner.py",
         ],
         ["execute"],
+        "run_tests_runner.py /opt/openworkproof/run_tests_runner.py",
     )
 
 
@@ -534,6 +552,44 @@ def test_execution_candidate_rejects_case_or_shell_form_process_shadow(
 
     with pytest.raises(AssertionError):
         _assert_fixed_execution_process_config(dockerfile + shadow)
+
+
+@pytest.mark.parametrize(
+    "multi_stage",
+    (
+        "\nFROM busybox\n",
+        "\nfrom busybox\n",
+        "FROM busybox AS shadow\n",
+    ),
+)
+def test_execution_candidate_rejects_any_second_or_shadow_stage(
+    multi_stage: str,
+) -> None:
+    dockerfile = _read("execution/Dockerfile")
+
+    with pytest.raises(AssertionError):
+        _assert_fixed_execution_process_config(dockerfile + multi_stage)
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    (
+        "COPY run_tests_runner.py /opt/openworkproof/run_tests_runner.py",
+        (
+            'ENTRYPOINT ["/opt/venv/bin/python", "-I", '
+            '"/opt/openworkproof/run_tests_runner.py"]'
+        ),
+        'CMD ["execute"]',
+    ),
+)
+def test_execution_candidate_rejects_process_or_runner_copy_before_from(
+    instruction: str,
+) -> None:
+    dockerfile = _read("execution/Dockerfile")
+    moved = instruction + "\n" + dockerfile.replace(instruction + "\n", "", 1)
+
+    with pytest.raises(AssertionError):
+        _assert_fixed_execution_process_config(moved)
 
 
 def test_trusted_helper_candidate_has_a_closed_package_surface() -> None:
@@ -688,6 +744,9 @@ def test_supply_chain_record_keeps_day0_and_acceptor_claims_closed() -> None:
     assert "不构成 Acceptor 独立验收证据" in record
     assert "不构成 D8 证据" in record
     assert "不构成 Day 0 证据" in record
+    assert "PID 1" in record
+    assert "同为 UID/GID 65532" in record
+    assert "零后代" in record
 
 
 @pytest.mark.parametrize("inventory_path", CANDIDATE_PATHS, ids=lambda path: path.stem)
