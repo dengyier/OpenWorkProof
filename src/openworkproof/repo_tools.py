@@ -818,6 +818,32 @@ class RunTestsDockerBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class RunTestsDockerCommandPlan:
+    binding: RunTestsDockerBinding
+    execution_plan: DockerExecutionPlan
+    contract_digest: str
+    preflight_absent_argv: tuple[tuple[str, ...], tuple[str, ...]]
+    create_workspace_volume_argv: tuple[str, ...]
+    create_staging_container_argv: tuple[str, ...]
+    start_staging_container_argv: tuple[str, ...]
+    inspect_staging_container_argv: tuple[str, ...]
+    remove_staging_container_argv: tuple[str, ...]
+    create_output_volume_argv: tuple[str, ...]
+    create_execution_container_argv: tuple[str, ...]
+    inspect_image_argv: tuple[str, ...]
+    inspect_execution_container_argv: tuple[str, ...]
+    inspect_workspace_volume_argv: tuple[str, ...]
+    inspect_output_volume_argv: tuple[str, ...]
+    start_execution_container_argv: tuple[str, ...]
+    wait_execution_container_argv: tuple[str, ...]
+    copy_output_envelopes_argv: tuple[str, ...]
+    remove_execution_container_argv: tuple[str, ...]
+    remove_output_volume_argv: tuple[str, ...]
+    remove_staging_container_force_argv: tuple[str, ...]
+    remove_workspace_volume_argv: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class RunTestsDockerObservation:
     staging_container: Mapping[str, Any] | None
     container: Mapping[str, Any] | None
@@ -5455,25 +5481,86 @@ def _run_docker_command(
         or timeout <= 0
     ):
         raise ValueError("Docker command invocation is invalid")
-    completed = subprocess.run(
+    process = subprocess.Popen(
         argv,
-        input=input_bytes,
+        stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         shell=False,
-        check=False,
-        timeout=timeout,
+        close_fds=True,
+        start_new_session=True,
     )
-    stdout = completed.stdout
-    stderr = completed.stderr
-    if type(stdout) is not bytes or type(stderr) is not bytes:
-        raise ValueError("Docker command returned non-byte output")
-    if (
-        len(stdout) > _MAX_DOCKER_COMMAND_OUTPUT_BYTES
-        or len(stderr) > _MAX_DOCKER_COMMAND_OUTPUT_BYTES
-    ):
-        raise ValueError("Docker command output exceeds its limit")
-    return completed
+    if process.stdout is None or process.stderr is None:
+        _terminate_process_group(process, 2)
+        raise ValueError("Docker command pipes are unavailable")
+    selector = selectors.DefaultSelector()
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    input_view = memoryview(b"" if input_bytes is None else input_bytes)
+    input_offset = 0
+    deadline = time.monotonic() + timeout
+    try:
+        for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, name)
+        if process.stdin is not None:
+            os.set_blocking(process.stdin.fileno(), False)
+            if input_view:
+                selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+            else:
+                process.stdin.close()
+        while selector.get_map() or process.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_process_group(process, 2)
+                raise subprocess.TimeoutExpired(
+                    argv,
+                    timeout,
+                    output=bytes(buffers["stdout"]),
+                    stderr=bytes(buffers["stderr"]),
+                )
+            for key, _ in selector.select(min(remaining, 0.1)):
+                if key.data == "stdin":
+                    try:
+                        count = os.write(
+                            key.fd,
+                            input_view[input_offset : input_offset + 65_536],
+                        )
+                    except BrokenPipeError:
+                        count = len(input_view) - input_offset
+                    input_offset += count
+                    if input_offset == len(input_view):
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                    continue
+                try:
+                    data = os.read(key.fd, 65_536)
+                except BlockingIOError:
+                    continue
+                if not data:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                buffer = buffers[key.data]
+                if len(buffer) + len(data) > _MAX_DOCKER_COMMAND_OUTPUT_BYTES:
+                    _terminate_process_group(process, 2)
+                    raise ValueError("Docker command output exceeds its limit")
+                buffer.extend(data)
+        returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        return subprocess.CompletedProcess(
+            argv,
+            returncode,
+            bytes(buffers["stdout"]),
+            bytes(buffers["stderr"]),
+        )
+    except BaseException:
+        if process.poll() is None:
+            _terminate_process_group(process, 2)
+        raise
+    finally:
+        selector.close()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
 
 
 def _run_tests_contract_digest(contract: RunTestsExecutionContract) -> str:
@@ -5709,6 +5796,105 @@ def _execution_create_argv(
     return tuple(argv)
 
 
+def _run_tests_docker_command_plan(
+    executor: DockerRunTestsExecutor,
+    contract: RunTestsExecutionContract,
+) -> RunTestsDockerCommandPlan:
+    binding, plan, contract_digest = _run_tests_driver_plan(executor, contract)
+    docker = str(executor._docker_binary)
+    return RunTestsDockerCommandPlan(
+        binding=binding,
+        execution_plan=plan,
+        contract_digest=contract_digest,
+        preflight_absent_argv=plan.preflight_absent_argv,
+        create_workspace_volume_argv=plan.workspace_volume.create_argv,
+        create_staging_container_argv=_staging_create_argv(
+            executor, binding, plan
+        ),
+        start_staging_container_argv=(
+            docker,
+            "start",
+            "--attach",
+            "--interactive",
+            binding.staging_container_name,
+        ),
+        inspect_staging_container_argv=(
+            docker,
+            "inspect",
+            binding.staging_container_name,
+        ),
+        remove_staging_container_argv=(
+            docker,
+            "rm",
+            binding.staging_container_name,
+        ),
+        create_output_volume_argv=plan.output_volume.create_argv,
+        create_execution_container_argv=_execution_create_argv(
+            plan, contract, contract_digest
+        ),
+        inspect_image_argv=(docker, "image", "inspect", plan.image_reference),
+        inspect_execution_container_argv=(
+            docker,
+            "inspect",
+            binding.container_name,
+        ),
+        inspect_workspace_volume_argv=(
+            docker,
+            "volume",
+            "inspect",
+            binding.workspace_volume_name,
+        ),
+        inspect_output_volume_argv=(
+            docker,
+            "volume",
+            "inspect",
+            binding.output_volume_name,
+        ),
+        start_execution_container_argv=(
+            docker,
+            "start",
+            binding.container_name,
+        ),
+        wait_execution_container_argv=(
+            docker,
+            "wait",
+            binding.container_name,
+        ),
+        copy_output_envelopes_argv=(
+            docker,
+            "cp",
+            f"{binding.container_name}:/output/.",
+            "-",
+        ),
+        remove_execution_container_argv=(
+            docker,
+            "rm",
+            "--force",
+            "--volumes",
+            binding.container_name,
+        ),
+        remove_output_volume_argv=(
+            docker,
+            "volume",
+            "rm",
+            binding.output_volume_name,
+        ),
+        remove_staging_container_force_argv=(
+            docker,
+            "rm",
+            "--force",
+            "--volumes",
+            binding.staging_container_name,
+        ),
+        remove_workspace_volume_argv=(
+            docker,
+            "volume",
+            "rm",
+            binding.workspace_volume_name,
+        ),
+    )
+
+
 def _valid_staging_inspection(
     inspection: object,
     binding: RunTestsDockerBinding,
@@ -5750,6 +5936,7 @@ def _execution_observation(
     binding: RunTestsDockerBinding,
     plan: DockerExecutionPlan,
     contract_digest: str,
+    expected_image_id: str,
 ) -> dict[str, object] | None:
     try:
         synthetic_volumes = tuple(
@@ -5777,6 +5964,7 @@ def _execution_observation(
         valid = (
             type(inspection) is dict
             and inspection.get("Name") == f"/{binding.container_name}"
+            and inspection.get("Image") == expected_image_id
             and type(config) is dict
             and type(labels) is dict
             and labels.get(_DOCKER_OWNERSHIP_LABEL) == binding.ownership_token
@@ -5894,6 +6082,17 @@ def _extract_run_tests_output_tar(
     return started, result
 
 
+def _run_tests_result_matches_exit(
+    result: RunTestsResultEnvelope,
+    exit_code: object,
+) -> bool:
+    return type(exit_code) is int and (
+        result.actual_exit_code == exit_code
+        if result.actual_exit_code is not None
+        else result.failure_code is not None and exit_code == 1
+    )
+
+
 def _prepare_run_tests_docker(
     executor: DockerRunTestsExecutor,
     contract: RunTestsExecutionContract,
@@ -5901,11 +6100,14 @@ def _prepare_run_tests_docker(
 ) -> RunTestsPreparationOutcome:
     cleanup_required = False
     try:
-        binding, plan, contract_digest = _run_tests_driver_plan(executor, contract)
+        commands = _run_tests_docker_command_plan(executor, contract)
+        binding = commands.binding
+        plan = commands.execution_plan
+        contract_digest = commands.contract_digest
         stream = _run_tests_snapshot_stream(contract, snapshot)
         preflight = tuple(
             _docker_checked(executor, command).stdout
-            for command in plan.preflight_absent_argv
+            for command in commands.preflight_absent_argv
         )
         container_names = _docker_lines(preflight[0])
         if binding.staging_container_name in container_names:
@@ -5918,20 +6120,14 @@ def _prepare_run_tests_docker(
             ),
         )
         cleanup_required = True
-        _docker_checked(executor, plan.workspace_volume.create_argv)
+        _docker_checked(executor, commands.create_workspace_volume_argv)
         lifecycle = mark_docker_resource_created(
             plan, lifecycle, "workspace_volume"
         )
-        _docker_checked(executor, _staging_create_argv(executor, binding, plan))
+        _docker_checked(executor, commands.create_staging_container_argv)
         staged = _docker_checked(
             executor,
-            (
-                str(executor._docker_binary),
-                "start",
-                "--attach",
-                "--interactive",
-                binding.staging_container_name,
-            ),
+            commands.start_staging_container_argv,
             input_bytes=stream,
             timeout=30.0,
         )
@@ -5947,75 +6143,54 @@ def _prepare_run_tests_docker(
         stage_inspection = _docker_inspection(
             _docker_checked(
                 executor,
-                (
-                    str(executor._docker_binary),
-                    "inspect",
-                    binding.staging_container_name,
-                ),
+                commands.inspect_staging_container_argv,
             ).stdout
         )
         if not _valid_staging_inspection(stage_inspection, binding, plan):
             raise ValueError("Docker staging inspection is invalid")
         _docker_checked(
             executor,
-            (str(executor._docker_binary), "rm", binding.staging_container_name),
+            commands.remove_staging_container_argv,
         )
-        absent = _docker_result(
+        absent = _inspect_optional(
             executor,
-            (
-                str(executor._docker_binary),
-                "inspect",
-                binding.staging_container_name,
-            ),
+            commands.inspect_staging_container_argv,
         )
-        if absent.returncode == 0 or absent.stdout not in {b"", b"[]\n"}:
+        if absent is not None:
             raise ValueError("Docker staging container absence is unproven")
-        _docker_checked(executor, plan.output_volume.create_argv)
+        _docker_checked(executor, commands.create_output_volume_argv)
         lifecycle = mark_docker_resource_created(plan, lifecycle, "output_volume")
         _docker_checked(
             executor,
-            _execution_create_argv(plan, contract, contract_digest),
+            commands.create_execution_container_argv,
         )
         lifecycle = mark_docker_resource_created(plan, lifecycle, "container")
         image = _docker_inspection(
             _docker_checked(
                 executor,
-                (
-                    str(executor._docker_binary),
-                    "image",
-                    "inspect",
-                    plan.image_reference,
-                ),
+                commands.inspect_image_argv,
             ).stdout
         )
         container = _docker_inspection(
             _docker_checked(
                 executor,
-                (str(executor._docker_binary), "inspect", plan.container_name),
+                commands.inspect_execution_container_argv,
             ).stdout
         )
         workspace = _docker_inspection(
             _docker_checked(
                 executor,
-                (
-                    str(executor._docker_binary),
-                    "volume",
-                    "inspect",
-                    plan.workspace_volume.name,
-                ),
+                commands.inspect_workspace_volume_argv,
             ).stdout
         )
         output = _docker_inspection(
             _docker_checked(
                 executor,
-                (
-                    str(executor._docker_binary),
-                    "volume",
-                    "inspect",
-                    plan.output_volume.name,
-                ),
+                commands.inspect_output_volume_argv,
             ).stdout
         )
+        if image.get("Id") != contract.container_image_digest:
+            raise ValueError("Docker image ID does not match execution contract")
         derive_ready_docker_start(
             plan,
             lifecycle,
@@ -6025,7 +6200,11 @@ def _prepare_run_tests_docker(
             output,
         )
         if _execution_observation(
-            container, binding, plan, contract_digest
+            container,
+            binding,
+            plan,
+            contract_digest,
+            contract.container_image_digest,
         ) is None:
             raise ValueError("Docker execution identity is invalid")
         return RunTestsPreparationOutcome("READY_TO_START")
@@ -6049,15 +6228,22 @@ def _start_and_wait_run_tests_docker(
     contract: RunTestsExecutionContract,
 ) -> RunTestsExecutionOutcome:
     try:
-        binding, plan, contract_digest = _run_tests_driver_plan(executor, contract)
+        commands = _run_tests_docker_command_plan(executor, contract)
+        binding = commands.binding
+        plan = commands.execution_plan
+        contract_digest = commands.contract_digest
         inspected = _docker_inspection(
             _docker_checked(
                 executor,
-                (str(executor._docker_binary), "inspect", binding.container_name),
+                commands.inspect_execution_container_argv,
             ).stdout
         )
         observation = _execution_observation(
-            inspected, binding, plan, contract_digest
+            inspected,
+            binding,
+            plan,
+            contract_digest,
+            contract.container_image_digest,
         )
         state = inspected.get("State")
         if (
@@ -6074,11 +6260,11 @@ def _start_and_wait_run_tests_docker(
             return RunTestsExecutionOutcome("UNRESOLVED")
         _docker_checked(
             executor,
-            (str(executor._docker_binary), "start", binding.container_name),
+            commands.start_execution_container_argv,
         )
         waited = _docker_checked(
             executor,
-            (str(executor._docker_binary), "wait", binding.container_name),
+            commands.wait_execution_container_argv,
             timeout=140.0,
         )
         try:
@@ -6090,11 +6276,15 @@ def _start_and_wait_run_tests_docker(
         after = _docker_inspection(
             _docker_checked(
                 executor,
-                (str(executor._docker_binary), "inspect", binding.container_name),
+                commands.inspect_execution_container_argv,
             ).stdout
         )
         after_observation = _execution_observation(
-            after, binding, plan, contract_digest
+            after,
+            binding,
+            plan,
+            contract_digest,
+            contract.container_image_digest,
         )
         if after_observation is None:
             return RunTestsExecutionOutcome("UNRESOLVED")
@@ -6107,15 +6297,10 @@ def _start_and_wait_run_tests_docker(
             return RunTestsExecutionOutcome("UNRESOLVED")
         archive = _docker_checked(
             executor,
-            (
-                str(executor._docker_binary),
-                "cp",
-                f"{binding.container_name}:/output/.",
-                "-",
-            ),
+            commands.copy_output_envelopes_argv,
         ).stdout
         _, result = _extract_run_tests_output_tar(contract, archive)
-        if result.actual_exit_code is not None and result.actual_exit_code != wait_exit:
+        if not _run_tests_result_matches_exit(result, wait_exit):
             return RunTestsExecutionOutcome("UNRESOLVED")
         return RunTestsExecutionOutcome("CLOSED_RESULT", result)
     except (OSError, subprocess.SubprocessError, ValueError, TypeError):
@@ -6128,7 +6313,17 @@ def _inspect_optional(
 ) -> dict[str, Any] | None:
     result = _docker_result(executor, argv)
     if result.returncode != 0:
-        if result.stdout not in {b"", b"[]\n"}:
+        name = argv[-1]
+        expected_stderr = (
+            f"Error response from daemon: get {name}: no such volume\n".encode()
+            if argv[1:3] == ("volume", "inspect")
+            else f"error: no such object: {name}\n".encode()
+        )
+        if (
+            result.returncode != 1
+            or result.stdout != b"[]\n"
+            or result.stderr != expected_stderr
+        ):
             raise ValueError("Docker absence observation is invalid")
         return None
     return _docker_inspection(result.stdout)
@@ -6157,21 +6352,31 @@ def _reconcile_run_tests_docker(
                 ),
             )
         )
-        binding, plan, contract_digest = _run_tests_driver_plan(executor, contract)
-        docker = str(executor._docker_binary)
+        commands = _run_tests_docker_command_plan(executor, contract)
+        binding = commands.binding
+        plan = commands.execution_plan
+        contract_digest = commands.contract_digest
+        image_raw = _docker_inspection(
+            _docker_checked(
+                executor,
+                commands.inspect_image_argv,
+            ).stdout
+        )
+        if image_raw.get("Id") != contract.container_image_digest:
+            return RunTestsExecutionOutcome("UNRESOLVED")
         staging_raw = _inspect_optional(
-            executor, (docker, "inspect", binding.staging_container_name)
+            executor, commands.inspect_staging_container_argv
         )
         container_raw = _inspect_optional(
-            executor, (docker, "inspect", binding.container_name)
+            executor, commands.inspect_execution_container_argv
         )
         workspace_raw = _inspect_optional(
             executor,
-            (docker, "volume", "inspect", binding.workspace_volume_name),
+            commands.inspect_workspace_volume_argv,
         )
         output_raw = _inspect_optional(
             executor,
-            (docker, "volume", "inspect", binding.output_volume_name),
+            commands.inspect_output_volume_argv,
         )
         staging = None
         if staging_raw is not None:
@@ -6190,24 +6395,32 @@ def _reconcile_run_tests_docker(
         result = None
         if container_raw is not None:
             container = _execution_observation(
-                container_raw, binding, plan, contract_digest
+                container_raw,
+                binding,
+                plan,
+                contract_digest,
+                contract.container_image_digest,
             )
             if container is None:
                 return RunTestsExecutionOutcome("UNRESOLVED")
             if container["ever_started"] is True:
                 copied = _docker_checked(
                     executor,
-                    (
-                        docker,
-                        "cp",
-                        f"{binding.container_name}:/output/.",
-                        "-",
-                    ),
+                    commands.copy_output_envelopes_argv,
                 )
                 try:
                     started, result = _extract_run_tests_output_tar(
                         contract, copied.stdout
                     )
+                    if (
+                        container["status"] == "exited"
+                        and not _run_tests_result_matches_exit(
+                            result,
+                            container_raw.get("State", {}).get("ExitCode"),
+                        )
+                    ):
+                        started = None
+                        result = None
                 except ValueError:
                     started = None
                     result = None
@@ -6246,10 +6459,9 @@ def _reconcile_run_tests_docker(
         journal_state = (
             "RESERVED"
             if receipt_state == "ABSENT"
-            and all(
-                resource is None
-                for resource in (staging, container, workspace, output)
-            )
+            and container is None
+            and started is None
+            and result is None
             else "STARTED_UNCONFIRMED"
         )
         action = reconcile_run_tests_docker_execution(
@@ -6263,9 +6475,12 @@ def _reconcile_run_tests_docker(
             return RunTestsExecutionOutcome("WAIT_RUNNING")
         if action == "SAFE_TO_RETRY":
             return RunTestsExecutionOutcome("SAFE_TO_RETRY")
+        if action == "CLEAN_PRESTART":
+            executor.cleanup(contract)
+            return RunTestsExecutionOutcome("SAFE_TO_RETRY")
         if action == "RESUME_RESULT" and result is not None:
             return RunTestsExecutionOutcome("CLOSED_RESULT", result)
-        if action == "CLEAN_COMMITTED" and result is not None:
+        if action == "CLEAN_COMMITTED":
             executor.cleanup(contract)
             return RunTestsExecutionOutcome("CLOSED_RESULT", result)
         return RunTestsExecutionOutcome("UNRESOLVED")
@@ -6283,37 +6498,48 @@ def _cleanup_run_tests_docker(
     executor: DockerRunTestsExecutor,
     contract: RunTestsExecutionContract,
 ) -> None:
-    binding, plan, contract_digest = _run_tests_driver_plan(executor, contract)
-    docker = str(executor._docker_binary)
-    resources: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    commands = _run_tests_docker_command_plan(executor, contract)
+    binding = commands.binding
+    plan = commands.execution_plan
+    resources: tuple[
+        tuple[str, str, tuple[str, ...], tuple[str, ...]], ...
+    ] = (
         (
             "container",
             binding.container_name,
-            (docker, "inspect", binding.container_name),
+            commands.inspect_execution_container_argv,
+            commands.remove_execution_container_argv,
         ),
         (
             "output_volume",
             binding.output_volume_name,
-            (docker, "volume", "inspect", binding.output_volume_name),
+            commands.inspect_output_volume_argv,
+            commands.remove_output_volume_argv,
         ),
         (
             "staging",
             binding.staging_container_name,
-            (docker, "inspect", binding.staging_container_name),
+            commands.inspect_staging_container_argv,
+            commands.remove_staging_container_force_argv,
         ),
         (
             "workspace_volume",
             binding.workspace_volume_name,
-            (docker, "volume", "inspect", binding.workspace_volume_name),
+            commands.inspect_workspace_volume_argv,
+            commands.remove_workspace_volume_argv,
         ),
     )
-    for resource, name, inspect_argv in resources:
+    for resource, name, inspect_argv, remove_argv in resources:
         inspection = _inspect_optional(executor, inspect_argv)
         if inspection is None:
             continue
         if resource == "container":
             owned = _execution_observation(
-                inspection, binding, plan, contract_digest
+                inspection,
+                binding,
+                plan,
+                commands.contract_digest,
+                contract.container_image_digest,
             ) is not None
         elif resource == "staging":
             labels = inspection.get("Config", {}).get("Labels", {})
@@ -6327,12 +6553,7 @@ def _cleanup_run_tests_docker(
             owned = _docker_resource_is_owned(plan, resource, inspection)
         if not owned:
             raise RuntimeError(f"retained unowned Docker resource: {name}")
-        remove = (
-            (docker, "rm", "--force", "--volumes", name)
-            if resource in {"container", "staging"}
-            else (docker, "volume", "rm", name)
-        )
-        _docker_checked(executor, remove)
+        _docker_checked(executor, remove_argv)
         if _inspect_optional(executor, inspect_argv) is not None:
             raise RuntimeError(f"Docker resource remains after cleanup: {name}")
 

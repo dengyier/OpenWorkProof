@@ -2422,7 +2422,9 @@ def _docker_container_inspection(
 
 
 def _docker_image_inspection(plan: repo_tools.DockerExecutionPlan) -> dict:
+    image_id = plan.image_reference.rsplit("@", 1)[-1]
     return {
+        "Id": image_id,
         "RepoDigests": [plan.image_reference],
         "Config": {"Volumes": None},
     }
@@ -3559,6 +3561,8 @@ def _docker_driver_tar(
     contract: repo_tools.RunTestsExecutionContract,
     *,
     extra_name: str | None = None,
+    actual_exit_code: int | None = 0,
+    failure_code: str | None = None,
 ) -> bytes:
     contract_digest = hashlib.sha256(
         repo_tools.encode_run_tests_execution_contract(contract)
@@ -3574,6 +3578,8 @@ def _docker_driver_tar(
             _run_tests_result_envelope(),
             execution_id=contract.execution_id,
             execution_contract_digest=contract_digest,
+            actual_exit_code=actual_exit_code,
+            failure_code=failure_code,
         )
     )
     archive = io.BytesIO()
@@ -3603,6 +3609,7 @@ def _docker_driver_execution_inspection(
     contract: repo_tools.RunTestsExecutionContract,
     *,
     status: str,
+    exit_code: int = 0,
 ) -> dict:
     inspection = _docker_container_inspection(plan)
     contract_digest = hashlib.sha256(
@@ -3614,6 +3621,7 @@ def _docker_driver_execution_inspection(
             "openworkproof.execution-contract-digest": contract_digest,
         }
     )
+    inspection["Image"] = contract.container_image_digest
     state = inspection["State"]
     state["Status"] = status
     if status == "exited":
@@ -3621,12 +3629,23 @@ def _docker_driver_execution_inspection(
             {
                 "Running": False,
                 "Pid": 0,
-                "ExitCode": 0,
+                "ExitCode": exit_code,
                 "StartedAt": "2026-08-05T00:00:00Z",
                 "FinishedAt": "2026-08-05T00:00:01Z",
             }
         )
     return inspection
+
+
+def _docker_driver_absent(command) -> subprocess.CompletedProcess[bytes]:
+    command = tuple(command)
+    name = command[-1]
+    stderr = (
+        f"Error response from daemon: get {name}: no such volume\n".encode()
+        if command[1:3] == ("volume", "inspect")
+        else f"error: no such object: {name}\n".encode()
+    )
+    return subprocess.CompletedProcess(command, 1, b"[]\n", stderr)
 
 
 def test_docker_run_tests_driver_uses_exact_detached_lifecycle_transcript(
@@ -3638,94 +3657,37 @@ def test_docker_run_tests_driver_uses_exact_detached_lifecycle_transcript(
         "registry.example/openworkproof/test-runner@"
         + contract.container_image_digest
     )
-    binding = repo_tools.derive_run_tests_docker_binding(contract.execution_id)
-    plan = repo_tools.derive_docker_execution_plan(
-        docker_binary=docker_binary,
-        image_reference=image_reference,
-        container_name=binding.container_name,
-        workspace_volume_name=binding.workspace_volume_name,
-        output_volume_name=binding.output_volume_name,
-        ownership_token=binding.ownership_token,
-        command=("execute",),
-    )
-    contract_digest = hashlib.sha256(
-        repo_tools.encode_run_tests_execution_contract(contract)
-    ).hexdigest()
-    staging_create = (
-        str(docker_binary),
-        "create",
-        "--name",
-        binding.staging_container_name,
-        "--label",
-        f"openworkproof.execution-owner={binding.ownership_token}",
-        "--pull",
-        "never",
-        "--network",
-        "none",
-        "--read-only",
-        "--user",
-        "65532:65532",
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges",
-        "--interactive",
-        "--mount",
-        (
-            f"type=volume,source={binding.workspace_volume_name},"
-            "target=/workspace"
+    command_plan = repo_tools._run_tests_docker_command_plan(
+        repo_tools.DockerRunTestsExecutor(
+            docker_binary=docker_binary,
+            candidate_runtime_root=tmp_path.resolve(),
+            image_reference=image_reference,
+            run=lambda command, input_bytes, timeout: None,
         ),
-        image_reference,
-        "stage",
+        contract,
     )
-    execution_create = list(plan.create_container_argv)
-    execution_create[8:8] = [
-        "--label",
-        f"openworkproof.execution-id={contract.execution_id}",
-        "--label",
-        f"openworkproof.execution-contract-digest={contract_digest}",
-    ]
-    execution_create = tuple(execution_create)
+    binding = command_plan.binding
+    plan = command_plan.execution_plan
+    contract_digest = command_plan.contract_digest
     expected_commands = (
-        *plan.preflight_absent_argv,
-        plan.workspace_volume.create_argv,
-        staging_create,
-        (
-            str(docker_binary),
-            "start",
-            "--attach",
-            "--interactive",
-            binding.staging_container_name,
-        ),
-        (str(docker_binary), "inspect", binding.staging_container_name),
-        (str(docker_binary), "rm", binding.staging_container_name),
-        (str(docker_binary), "inspect", binding.staging_container_name),
-        plan.output_volume.create_argv,
-        execution_create,
-        (str(docker_binary), "image", "inspect", image_reference),
-        (str(docker_binary), "inspect", binding.container_name),
-        (
-            str(docker_binary),
-            "volume",
-            "inspect",
-            binding.workspace_volume_name,
-        ),
-        (
-            str(docker_binary),
-            "volume",
-            "inspect",
-            binding.output_volume_name,
-        ),
-        (str(docker_binary), "inspect", binding.container_name),
-        (str(docker_binary), "start", binding.container_name),
-        (str(docker_binary), "wait", binding.container_name),
-        (str(docker_binary), "inspect", binding.container_name),
-        (
-            str(docker_binary),
-            "cp",
-            f"{binding.container_name}:/output/.",
-            "-",
-        ),
+        *command_plan.preflight_absent_argv,
+        command_plan.create_workspace_volume_argv,
+        command_plan.create_staging_container_argv,
+        command_plan.start_staging_container_argv,
+        command_plan.inspect_staging_container_argv,
+        command_plan.remove_staging_container_argv,
+        command_plan.inspect_staging_container_argv,
+        command_plan.create_output_volume_argv,
+        command_plan.create_execution_container_argv,
+        command_plan.inspect_image_argv,
+        command_plan.inspect_execution_container_argv,
+        command_plan.inspect_workspace_volume_argv,
+        command_plan.inspect_output_volume_argv,
+        command_plan.inspect_execution_container_argv,
+        command_plan.start_execution_container_argv,
+        command_plan.wait_execution_container_argv,
+        command_plan.inspect_execution_container_argv,
+        command_plan.copy_output_envelopes_argv,
     )
     observed: list[tuple[tuple[str, ...], bytes | None, float]] = []
     command_index = 0
@@ -3766,7 +3728,7 @@ def test_docker_run_tests_driver_uses_exact_detached_lifecycle_transcript(
                 return subprocess.CompletedProcess(
                     command, 0, json.dumps([inspection]).encode(), b""
                 )
-            return subprocess.CompletedProcess(command, 1, b"", b"missing")
+            return _docker_driver_absent(command)
         if command == (str(docker_binary), "image", "inspect", image_reference):
             return subprocess.CompletedProcess(
                 command,
@@ -3927,10 +3889,10 @@ def test_docker_run_tests_driver_cleans_owned_partial_after_staging_timeout(
         if command[1:5] == ("start", "--attach", "--interactive", binding.staging_container_name):
             raise subprocess.TimeoutExpired(command, timeout)
         if command == (str(docker_binary), "inspect", binding.container_name):
-            return subprocess.CompletedProcess(command, 1, b"", b"missing")
+            return _docker_driver_absent(command)
         if command == (str(docker_binary), "inspect", binding.staging_container_name):
             if not stage_present:
-                return subprocess.CompletedProcess(command, 1, b"", b"missing")
+                return _docker_driver_absent(command)
             inspection = {
                 "Name": f"/{binding.staging_container_name}",
                 "Config": {
@@ -3948,7 +3910,7 @@ def test_docker_run_tests_driver_cleans_owned_partial_after_staging_timeout(
             "inspect",
             binding.output_volume_name,
         ):
-            return subprocess.CompletedProcess(command, 1, b"", b"missing")
+            return _docker_driver_absent(command)
         if command == (
             str(docker_binary),
             "volume",
@@ -3956,7 +3918,7 @@ def test_docker_run_tests_driver_cleans_owned_partial_after_staging_timeout(
             binding.workspace_volume_name,
         ):
             if not workspace_present:
-                return subprocess.CompletedProcess(command, 1, b"", b"missing")
+                return _docker_driver_absent(command)
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -3984,6 +3946,144 @@ def test_docker_run_tests_driver_cleans_owned_partial_after_staging_timeout(
     assert plan.output_volume.create_argv not in commands
 
 
+@pytest.mark.parametrize(
+    ("failed_create", "lost_ack"),
+    tuple(
+        (resource, lost_ack)
+        for resource in ("workspace", "staging", "output", "execution")
+        for lost_ack in (False, True)
+    ),
+)
+def test_docker_run_tests_driver_cleans_every_partial_create_position(
+    tmp_path: Path,
+    failed_create: str,
+    lost_ack: bool,
+) -> None:
+    contract, snapshot = _docker_driver_contract_and_snapshot()
+    docker_binary = Path("/usr/local/bin/docker")
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=docker_binary,
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=contract.container_image_digest,
+        run=lambda command, input_bytes, timeout: None,
+    )
+    commands = repo_tools._run_tests_docker_command_plan(executor, contract)
+    present = {
+        "workspace": False,
+        "staging": False,
+        "output": False,
+        "execution": False,
+    }
+    create_for = {
+        commands.create_workspace_volume_argv: "workspace",
+        commands.create_staging_container_argv: "staging",
+        commands.create_output_volume_argv: "output",
+        commands.create_execution_container_argv: "execution",
+    }
+    inspect_for = {
+        commands.inspect_workspace_volume_argv: "workspace",
+        commands.inspect_staging_container_argv: "staging",
+        commands.inspect_output_volume_argv: "output",
+        commands.inspect_execution_container_argv: "execution",
+    }
+    remove_for = {
+        commands.remove_workspace_volume_argv: "workspace",
+        commands.remove_staging_container_force_argv: "staging",
+        commands.remove_output_volume_argv: "output",
+        commands.remove_execution_container_argv: "execution",
+        commands.remove_staging_container_argv: "staging",
+    }
+
+    def run(command, input_bytes, timeout):
+        command = tuple(command)
+        if command in commands.preflight_absent_argv:
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+        if command in create_for:
+            resource = create_for[command]
+            if resource == failed_create:
+                if lost_ack:
+                    present[resource] = True
+                    raise subprocess.TimeoutExpired(command, timeout)
+                return subprocess.CompletedProcess(command, 1, b"", b"failed")
+            present[resource] = True
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+        if command == commands.start_staging_container_argv:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                rfc8785.dumps(
+                    {
+                        "execution_contract_digest": commands.contract_digest,
+                        "execution_id": contract.execution_id,
+                        "workspace_manifest_digest": (
+                            contract.workspace_manifest_digest
+                        ),
+                    }
+                )
+                + b"\n",
+                b"",
+            )
+        if command in inspect_for:
+            resource = inspect_for[command]
+            if not present[resource]:
+                return _docker_driver_absent(command)
+            if resource == "workspace":
+                inspection = _docker_volume_inspection(
+                    commands.execution_plan, "workspace_volume"
+                )
+            elif resource == "output":
+                inspection = _docker_volume_inspection(
+                    commands.execution_plan, "output_volume"
+                )
+            elif resource == "execution":
+                inspection = _docker_driver_execution_inspection(
+                    commands.execution_plan, contract, status="created"
+                )
+            else:
+                inspection = {
+                    "Name": f"/{commands.binding.staging_container_name}",
+                    "Config": {
+                        "Image": commands.execution_plan.image_reference,
+                        "User": "65532:65532",
+                        "Labels": {
+                            "openworkproof.execution-owner": (
+                                commands.binding.ownership_token
+                            ),
+                        },
+                    },
+                    "HostConfig": {
+                        "NetworkMode": "none",
+                        "ReadonlyRootfs": True,
+                    },
+                    "Mounts": [
+                        {
+                            "Destination": "/workspace",
+                            "Type": "volume",
+                            "Name": commands.binding.workspace_volume_name,
+                            "RW": True,
+                        }
+                    ],
+                    "State": {"Status": "exited", "ExitCode": 0},
+                }
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps([inspection]).encode(), b""
+            )
+        if command in remove_for:
+            present[remove_for[command]] = False
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+        raise AssertionError(f"unexpected Docker command: {command!r}")
+
+    executor._run = run
+
+    assert executor.prepare(contract, snapshot).action == "UNRESOLVED"
+    assert present == {
+        "workspace": False,
+        "staging": False,
+        "output": False,
+        "execution": False,
+    }
+
+
 def test_docker_run_tests_driver_safe_retry_requires_checkpoint_and_absence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4004,7 +4104,15 @@ def test_docker_run_tests_driver_safe_retry_requires_checkpoint_and_absence(
 
     def run(command, input_bytes, timeout):
         commands.append(tuple(command))
-        return subprocess.CompletedProcess(command, 1, b"", b"not found")
+        if tuple(command)[1:3] == ("image", "inspect"):
+            plan = repo_tools._run_tests_driver_plan(executor, contract)[1]
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps([_docker_image_inspection(plan)]).encode(),
+                b"",
+            )
+        return _docker_driver_absent(command)
 
     executor = repo_tools.DockerRunTestsExecutor(
         docker_binary=Path("/usr/local/bin/docker"),
@@ -4030,7 +4138,7 @@ def test_docker_run_tests_driver_safe_retry_requires_checkpoint_and_absence(
             ),
         )
     ]
-    assert len(commands) == 4
+    assert len(commands) == 5
 
 
 def test_docker_run_tests_driver_rechecks_mounts_before_sole_start(
@@ -4085,17 +4193,453 @@ def test_docker_run_tests_driver_rechecks_mounts_before_sole_start(
     ]
 
 
+def _docker_driver_checkpoint(monkeypatch, snapshot):
+    monkeypatch.setattr(
+        repo_tools,
+        "prepare_candidate_execution_snapshot",
+        lambda request: snapshot,
+    )
+
+
+def test_docker_run_tests_driver_daemon_error_is_not_absence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract, snapshot = _docker_driver_contract_and_snapshot()
+    _docker_driver_checkpoint(monkeypatch, snapshot)
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=Path("/usr/local/bin/docker"),
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=contract.container_image_digest,
+        run=lambda command, input_bytes, timeout: subprocess.CompletedProcess(
+            command, 1, b"", b"Cannot connect to the Docker daemon"
+        ),
+    )
+
+    assert executor.reconcile(contract, "ABSENT").action == "UNRESOLVED"
+    with pytest.raises(ValueError, match="absence"):
+        executor.cleanup(contract)
+
+
+@pytest.mark.parametrize(
+    ("container_exit", "actual_exit_code", "failure_code"),
+    ((9, 0, None), (0, None, "TIMEOUT")),
+)
+def test_docker_run_tests_driver_rejects_container_result_contradiction(
+    tmp_path: Path,
+    container_exit: int,
+    actual_exit_code: int | None,
+    failure_code: str | None,
+) -> None:
+    contract, _ = _docker_driver_contract_and_snapshot()
+    docker_binary = Path("/usr/local/bin/docker")
+    binding = repo_tools.derive_run_tests_docker_binding(contract.execution_id)
+    plan = repo_tools._run_tests_driver_plan(
+        repo_tools.DockerRunTestsExecutor(
+            docker_binary=docker_binary,
+            candidate_runtime_root=tmp_path.resolve(),
+            image_reference=contract.container_image_digest,
+            run=lambda command, input_bytes, timeout: None,
+        ),
+        contract,
+    )[1]
+    calls = 0
+
+    def run(command, input_bytes, timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            inspected = _docker_driver_execution_inspection(
+                plan, contract, status="created"
+            )
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps([inspected]).encode(), b""
+            )
+        if command[1] == "wait":
+            return subprocess.CompletedProcess(
+                command, 0, f"{container_exit}\n".encode(), b""
+            )
+        if command[1] == "inspect":
+            inspected = _docker_driver_execution_inspection(
+                plan,
+                contract,
+                status="exited",
+                exit_code=container_exit,
+            )
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps([inspected]).encode(), b""
+            )
+        if command[1] == "cp":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                _docker_driver_tar(
+                    contract,
+                    actual_exit_code=actual_exit_code,
+                    failure_code=failure_code,
+                ),
+                b"",
+            )
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=docker_binary,
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=contract.container_image_digest,
+        run=run,
+    )
+
+    assert executor.start_and_wait(contract).action == "UNRESOLVED"
+
+
+def test_docker_run_tests_driver_rejects_container_image_id_mismatch(
+    tmp_path: Path,
+) -> None:
+    contract, _ = _docker_driver_contract_and_snapshot()
+    binding = repo_tools.derive_run_tests_docker_binding(contract.execution_id)
+    commands = []
+
+    def run(command, input_bytes, timeout):
+        commands.append(tuple(command))
+        if len(commands) > 1:
+            raise AssertionError("image-mismatched container was started")
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps([
+                {
+                    **_docker_driver_execution_inspection(
+                        repo_tools._run_tests_driver_plan(executor, contract)[1],
+                        contract,
+                        status="created",
+                    ),
+                    "Image": "sha256:" + "f" * 64,
+                }
+            ]).encode(),
+            b"",
+        )
+
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=Path("/usr/local/bin/docker"),
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=contract.container_image_digest,
+        run=run,
+    )
+
+    assert executor.start_and_wait(contract).action == "UNRESOLVED"
+    assert len(commands) == 1
+
+
+@pytest.mark.parametrize(
+    ("receipt_state", "expected_action"),
+    (("ABSENT", "SAFE_TO_RETRY"), ("MATCH", "CLOSED_RESULT")),
+)
+def test_docker_run_tests_driver_recovery_maps_clean_prestart_and_committed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    receipt_state: str,
+    expected_action: str,
+) -> None:
+    contract, snapshot = _docker_driver_contract_and_snapshot()
+    _docker_driver_checkpoint(monkeypatch, snapshot)
+    cleaned = []
+    monkeypatch.setattr(
+        repo_tools,
+        "_cleanup_run_tests_docker",
+        lambda executor, observed_contract: cleaned.append(observed_contract),
+    )
+    binding = repo_tools.derive_run_tests_docker_binding(contract.execution_id)
+
+    def run(command, input_bytes, timeout):
+        if tuple(command)[1:3] == ("image", "inspect"):
+            plan = repo_tools._run_tests_driver_plan(executor, contract)[1]
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps([_docker_image_inspection(plan)]).encode(),
+                b"",
+            )
+        if receipt_state == "ABSENT" and command[-1] == binding.workspace_volume_name:
+            plan = repo_tools._run_tests_driver_plan(executor, contract)[1]
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps([
+                    _docker_volume_inspection(plan, "workspace_volume")
+                ]).encode(),
+                b"",
+            )
+        return _docker_driver_absent(command)
+
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=Path("/usr/local/bin/docker"),
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=contract.container_image_digest,
+        run=run,
+    )
+
+    outcome = executor.reconcile(contract, receipt_state)
+
+    assert outcome.action == expected_action
+    assert cleaned == [contract]
+
+
+@pytest.mark.parametrize(
+    ("status", "exit_code", "archive", "expected_action"),
+    (
+        ("running", 0, b"missing", "WAIT_RUNNING"),
+        ("exited", 0, b"missing", "UNRESOLVED"),
+        ("exited", 9, "valid", "UNRESOLVED"),
+    ),
+)
+def test_docker_run_tests_driver_reconcile_running_and_result_uncertainty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    exit_code: int,
+    archive: bytes | str,
+    expected_action: str,
+) -> None:
+    contract, snapshot = _docker_driver_contract_and_snapshot()
+    _docker_driver_checkpoint(monkeypatch, snapshot)
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=Path("/usr/local/bin/docker"),
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=contract.container_image_digest,
+        run=lambda command, input_bytes, timeout: None,
+    )
+    commands = repo_tools._run_tests_docker_command_plan(executor, contract)
+    container = _docker_driver_execution_inspection(
+        commands.execution_plan,
+        contract,
+        status=status,
+        exit_code=exit_code,
+    )
+    if status == "running":
+        container["State"].update(
+            {
+                "Running": True,
+                "Pid": 123,
+                "StartedAt": "2026-08-05T00:00:00Z",
+            }
+        )
+
+    def run(command, input_bytes, timeout):
+        command = tuple(command)
+        if command == commands.inspect_image_argv:
+            inspection = _docker_image_inspection(commands.execution_plan)
+        elif command == commands.inspect_staging_container_argv:
+            return _docker_driver_absent(command)
+        elif command == commands.inspect_execution_container_argv:
+            inspection = container
+        elif command == commands.inspect_workspace_volume_argv:
+            inspection = _docker_volume_inspection(
+                commands.execution_plan, "workspace_volume"
+            )
+        elif command == commands.inspect_output_volume_argv:
+            inspection = _docker_volume_inspection(
+                commands.execution_plan, "output_volume"
+            )
+        elif command == commands.copy_output_envelopes_argv:
+            payload = (
+                _docker_driver_tar(contract)
+                if archive == "valid"
+                else archive
+            )
+            return subprocess.CompletedProcess(command, 0, payload, b"")
+        else:
+            raise AssertionError(f"unexpected Docker command: {command!r}")
+        return subprocess.CompletedProcess(
+            command, 0, json.dumps([inspection]).encode(), b""
+        )
+
+    executor._run = run
+
+    assert executor.reconcile(contract, "ABSENT").action == expected_action
+
+
+def test_docker_run_tests_cleanup_removes_only_exact_owned_names_in_reverse_order(
+    tmp_path: Path,
+) -> None:
+    contract, _ = _docker_driver_contract_and_snapshot()
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=Path("/usr/local/bin/docker"),
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=contract.container_image_digest,
+        run=lambda command, input_bytes, timeout: None,
+    )
+    commands = repo_tools._run_tests_docker_command_plan(executor, contract)
+    present = {
+        commands.inspect_execution_container_argv: True,
+        commands.inspect_output_volume_argv: True,
+        commands.inspect_staging_container_argv: True,
+        commands.inspect_workspace_volume_argv: True,
+    }
+    remove_to_inspect = {
+        commands.remove_execution_container_argv: (
+            commands.inspect_execution_container_argv
+        ),
+        commands.remove_output_volume_argv: commands.inspect_output_volume_argv,
+        commands.remove_staging_container_force_argv: (
+            commands.inspect_staging_container_argv
+        ),
+        commands.remove_workspace_volume_argv: (
+            commands.inspect_workspace_volume_argv
+        ),
+    }
+    removals = []
+
+    def run(command, input_bytes, timeout):
+        command = tuple(command)
+        if command in remove_to_inspect:
+            removals.append(command)
+            present[remove_to_inspect[command]] = False
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+        if command in present:
+            if not present[command]:
+                return _docker_driver_absent(command)
+            if command == commands.inspect_execution_container_argv:
+                inspection = _docker_driver_execution_inspection(
+                    commands.execution_plan, contract, status="created"
+                )
+            elif command == commands.inspect_output_volume_argv:
+                inspection = _docker_volume_inspection(
+                    commands.execution_plan, "output_volume"
+                )
+            elif command == commands.inspect_workspace_volume_argv:
+                inspection = _docker_volume_inspection(
+                    commands.execution_plan, "workspace_volume"
+                )
+            else:
+                inspection = {
+                    "Name": f"/{commands.binding.staging_container_name}",
+                    "Config": {
+                        "Labels": {
+                            "openworkproof.execution-owner": (
+                                commands.binding.ownership_token
+                            )
+                        }
+                    },
+                }
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps([inspection]).encode(), b""
+            )
+        raise AssertionError(f"unexpected Docker command: {command!r}")
+
+    executor._run = run
+    executor.cleanup(contract)
+
+    assert removals == [
+        commands.remove_execution_container_argv,
+        commands.remove_output_volume_argv,
+        commands.remove_staging_container_force_argv,
+        commands.remove_workspace_volume_argv,
+    ]
+    assert all("*" not in value for command in removals for value in command)
+
+
+def test_docker_run_tests_cleanup_retains_unowned_resource(
+    tmp_path: Path,
+) -> None:
+    contract, _ = _docker_driver_contract_and_snapshot()
+    removed = []
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=Path("/usr/local/bin/docker"),
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=contract.container_image_digest,
+        run=lambda command, input_bytes, timeout: None,
+    )
+    commands = repo_tools._run_tests_docker_command_plan(executor, contract)
+
+    def run(command, input_bytes, timeout):
+        command = tuple(command)
+        if command == commands.inspect_execution_container_argv:
+            inspection = _docker_driver_execution_inspection(
+                commands.execution_plan, contract, status="created"
+            )
+            inspection["Config"]["Labels"][
+                "openworkproof.execution-owner"
+            ] = "f" * 64
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps([inspection]).encode(), b""
+            )
+        removed.append(command)
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    executor._run = run
+    with pytest.raises(RuntimeError, match="retained unowned"):
+        executor.cleanup(contract)
+
+    assert removed == []
+
+
+def test_run_docker_command_uses_bounded_popen_not_subprocess_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        repo_tools.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("unbounded subprocess.run used")
+        ),
+    )
+
+    completed = repo_tools._run_docker_command(
+        (sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ok')"),
+        None,
+        2.0,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == b"ok"
+    assert completed.stderr == b""
+
+
+def test_run_docker_command_kills_process_on_output_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(repo_tools, "_MAX_DOCKER_COMMAND_OUTPUT_BYTES", 64)
+
+    with pytest.raises(ValueError, match="output exceeds"):
+        repo_tools._run_docker_command(
+            (
+                sys.executable,
+                "-c",
+                "import os; os.write(1, b'x' * 65)",
+            ),
+            None,
+            2.0,
+        )
+
+
+def test_run_docker_command_timeout_kills_descendant_and_closes_fds(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "escaped"
+    script = (
+        "import subprocess,sys,time; "
+        "subprocess.Popen([sys.executable,'-c',"
+        f"\"import time,pathlib; time.sleep(.4); pathlib.Path({str(marker)!r}).write_text('x')\"]); "
+        "time.sleep(10)"
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        repo_tools._run_docker_command(
+            (sys.executable, "-c", script),
+            b"input",
+            0.1,
+        )
+    time.sleep(0.6)
+
+    assert not marker.exists()
+
+
 @pytest.mark.docker
 def test_docker_run_tests_driver_required_live_detached_execution(
     tmp_path: Path,
 ) -> None:
     if os.environ.get("OPENWORKPROOF_REQUIRE_LIVE_DOCKER") != "1":
         pytest.skip("set OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 for live driver")
-    artifact_root_text = os.environ.get(
-        "OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT"
-    )
-    if artifact_root_text is None:
-        pytest.skip("live driver context requires candidate artifact root")
     docker_location = os.environ.get("OPENWORKPROOF_DOCKER") or shutil.which(
         "docker"
     )
@@ -4111,7 +4655,18 @@ def test_docker_run_tests_driver_required_live_detached_execution(
 
     repository = Path(__file__).resolve().parents[1]
     task5_revision = "6cd8c340c9ea1086524b420b0b2bfbb3e4ae4325"
-    artifact_root = Path(artifact_root_text).resolve()
+    artifact_root_text = os.environ.get(
+        "OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT"
+    )
+    artifact_root = (
+        Path(artifact_root_text)
+        if artifact_root_text is not None
+        else repository.parent / "openWorkProof-day0"
+    ).resolve()
+    if not (artifact_root / "wheelhouse/linux-arm64-cp312-full").is_dir():
+        pytest.fail(f"live driver wheelhouse unavailable at {artifact_root}")
+    if not (artifact_root / "debs/linux-arm64-trixie-git").is_dir():
+        pytest.fail(f"live driver deb closure unavailable at {artifact_root}")
     context_root = tmp_path / "revision-context"
     assembled = subprocess.run(
         (
