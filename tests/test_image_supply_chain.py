@@ -459,6 +459,8 @@ def test_supplychain_test_contract_is_portable_and_registered() -> None:
 def test_execution_image_contract_is_minimal_and_offline() -> None:
     dockerfile = _read("execution/Dockerfile")
     lock_text = _read("execution/requirements.lock")
+    runner_path = IMAGE_ROOT / "execution" / "run_tests_runner.py"
+    runner_mode = runner_path.lstat().st_mode
 
     assert f"FROM {BASE_IMAGE}" in dockerfile
     assert not dockerfile.startswith("# syntax=")
@@ -470,7 +472,22 @@ def test_execution_image_contract_is_minimal_and_offline() -> None:
     assert "COPY helper-src/" not in dockerfile
     assert "src/openworkproof" not in dockerfile
     assert "USER 65532:65532" in dockerfile
-    assert 'ENTRYPOINT ["/usr/bin/env", "--"]' in dockerfile
+    assert stat.S_ISREG(runner_mode) and not runner_path.is_symlink()
+    assert runner_path.read_bytes()
+    assert "COPY run_tests_runner.py /opt/openworkproof/run_tests_runner.py" in dockerfile
+    assert dockerfile.count("ENTRYPOINT ") == 1
+    assert dockerfile.count("CMD ") == 1
+    assert (
+        'ENTRYPOINT ["/opt/venv/bin/python", "-I", '
+        '"/opt/openworkproof/run_tests_runner.py"]'
+    ) in dockerfile
+    assert 'CMD ["execute"]' in dockerfile
+    assert 'ENTRYPOINT ["/usr/bin/env", "--"]' not in dockerfile
+    assert "openworkproof.trusted_helper" not in dockerfile
+    assert "pip install openworkproof" not in dockerfile.casefold()
+    combined = dockerfile + runner_path.read_text(encoding="utf-8")
+    assert "SIDECAR" not in combined.upper()
+    assert "/var/run/docker.sock" not in combined
     assert _locked_packages(lock_text) == (
         "iniconfig",
         "markdown-it-py",
@@ -628,6 +645,12 @@ def test_supply_chain_record_keeps_day0_and_acceptor_claims_closed() -> None:
     assert "不构成 Acceptor access" in record
     assert "不构成 clean-cache reacquisition" in record
     assert "不构成 Day 0 PASS" in record
+    assert "execution-test candidate" in record
+    assert "不是最终 trusted helper" in record
+    assert "不构成 registry 推送证据" in record
+    assert "不构成 Acceptor 独立验收证据" in record
+    assert "不构成 D8 证据" in record
+    assert "不构成 Day 0 证据" in record
 
 
 @pytest.mark.parametrize("inventory_path", CANDIDATE_PATHS, ids=lambda path: path.stem)

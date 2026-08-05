@@ -12,6 +12,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSEMBLER = ROOT / "supply-chain" / "images" / "prepare_context.py"
+EXECUTION_RUNNER_BLOB = b"RUNNER = 'revision-bound'\n"
 HELPER_SOURCE_BLOBS = {
     "src/openworkproof/__init__.py": b"PACKAGE = True\n",
     "src/openworkproof/models.py": b"MODELS = True\n",
@@ -77,6 +78,9 @@ def context_inputs(tmp_path: Path) -> dict[str, Path | str | bytes]:
     tracked: dict[str, bytes] = {
         "requirements-lock.txt": b"project lock\n",
         "supply-chain/images/execution/Dockerfile": b"FROM execution\n",
+        "supply-chain/images/execution/run_tests_runner.py": (
+            EXECUTION_RUNNER_BLOB
+        ),
         "supply-chain/images/execution/requirements.lock": (
             b"pytest==1.0 \\\n"
             + f"    --hash=sha256:{_sha256(execution_wheel)}\n".encode()
@@ -176,6 +180,9 @@ def test_assembler_uses_git_blobs_and_ignores_worktree_source_drift(
         (repo / relative_path).write_text(
             "WORKTREE_DRIFT = True\n", encoding="utf-8"
         )
+    (repo / "supply-chain/images/execution/run_tests_runner.py").write_bytes(
+        b"UNTRACKED_WORKTREE_DRIFT = True\n"
+    )
 
     result = _assemble(context_inputs, output)
 
@@ -199,10 +206,14 @@ def test_assembler_uses_git_blobs_and_ignores_worktree_source_drift(
         "".join(expected_source_sums)
     )
     assert (output / "execution/Dockerfile").read_bytes() == b"FROM execution\n"
+    assert (
+        output / "execution/run_tests_runner.py"
+    ).read_bytes() == EXECUTION_RUNNER_BLOB
     assert sorted(path.relative_to(output).as_posix() for path in output.rglob("*")) == [
         "execution",
         "execution/Dockerfile",
         "execution/requirements.lock",
+        "execution/run_tests_runner.py",
         "execution/wheels",
         "execution/wheels/SHA256SUMS",
         f"execution/wheels/{context_inputs['execution_wheel_name']}",
@@ -222,6 +233,34 @@ def test_assembler_uses_git_blobs_and_ignores_worktree_source_drift(
         "trusted-helper/wheels/SHA256SUMS",
         f"trusted-helper/wheels/{context_inputs['helper_wheel_name']}",
     ]
+
+
+def test_assembler_runner_changes_only_with_the_selected_revision_blob(
+    context_inputs: dict[str, Path | str | bytes], tmp_path: Path
+) -> None:
+    repo = context_inputs["repo"]
+    assert isinstance(repo, Path)
+    old_output = tmp_path / "old-context"
+    old_revision = str(context_inputs["revision"])
+    changed = b"RUNNER = 'new-revision'\n"
+    runner_path = repo / "supply-chain/images/execution/run_tests_runner.py"
+    runner_path.write_bytes(changed)
+    _git(repo, "add", "supply-chain/images/execution/run_tests_runner.py")
+    _git(repo, "commit", "-qm", "change runner")
+    new_revision = _git(repo, "rev-parse", "HEAD")
+    new_output = tmp_path / "new-context"
+
+    old_result = _assemble(context_inputs, old_output, revision=old_revision)
+    new_result = _assemble(context_inputs, new_output, revision=new_revision)
+
+    assert old_result.returncode == 0, old_result.stderr
+    assert new_result.returncode == 0, new_result.stderr
+    assert (
+        old_output / "execution/run_tests_runner.py"
+    ).read_bytes() == EXECUTION_RUNNER_BLOB
+    assert (
+        new_output / "execution/run_tests_runner.py"
+    ).read_bytes() == changed
 
 
 @pytest.mark.parametrize("missing_kind", ["wheel", "deb"])

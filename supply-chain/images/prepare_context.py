@@ -204,6 +204,7 @@ def assemble(
     tracked_paths = {
         "execution_dockerfile": f"{EXECUTION_PREFIX}/Dockerfile",
         "execution_lock": f"{EXECUTION_PREFIX}/requirements.lock",
+        "execution_runner": f"{EXECUTION_PREFIX}/run_tests_runner.py",
         "helper_dockerfile": f"{HELPER_PREFIX}/Dockerfile",
         "helper_lock": f"{HELPER_PREFIX}/requirements.lock",
         "debian_lock": f"{HELPER_PREFIX}/debian-packages.lock",
@@ -249,6 +250,7 @@ def assemble(
         helper = temporary / "trusted-helper"
         _write(execution / "Dockerfile", blobs["execution_dockerfile"])
         _write(execution / "requirements.lock", blobs["execution_lock"])
+        _write(execution / "run_tests_runner.py", blobs["execution_runner"])
         _copy_selected(wheelhouse, execution / "wheels", execution_wheels)
 
         _write(helper / "Dockerfile", blobs["helper_dockerfile"])
@@ -278,6 +280,7 @@ def assemble(
         expected_files = {
             execution / "Dockerfile": blobs["execution_dockerfile"],
             execution / "requirements.lock": blobs["execution_lock"],
+            execution / "run_tests_runner.py": blobs["execution_runner"],
             helper / "Dockerfile": blobs["helper_dockerfile"],
             helper / "requirements.lock": blobs["helper_lock"],
         }

@@ -49,6 +49,7 @@ Git closure 由固定基础镜像中的 Debian 13 trixie sources 解析；实际
 当前上下文必须位于
 `/Users/molin/Project/openWorkProof-day0/build-contexts/<source-revision>/` 之类的
 revision 专属仓库外目录。每个上下文包含其 Dockerfile、`requirements.lock`、`wheels/`；
+execution 另含从指定 Git revision blob 逐字节复制的 `run_tests_runner.py`，
 helper 另含 `debs/` 和 `helper-src/`。`wheels/SHA256SUMS` 只列上下文内 wheel，
 `debs/SHA256SUMS` 只列上下文内 `.deb`。helper 源文件按 `SOURCE_ALLOWLIST`
 从指定 Git revision 的 blob 提取，禁止从 working tree 复制，也禁止复制整个
@@ -78,9 +79,14 @@ python "$OWP_REPO/supply-chain/images/prepare_context.py" \
 
 ## 入口与边界
 
-- execution/test：`ENTRYPOINT ["/usr/bin/env", "--"]`，默认命令为
-  `/opt/venv/bin/python -I -m pytest`；这允许冻结执行计划传入完整 argv，而不
-  发生入口前缀重复。
+- execution-test candidate：`ENTRYPOINT ["/opt/venv/bin/python", "-I",
+  "/opt/openworkproof/run_tests_runner.py"]`，`CMD ["execute"]`。runner 只接受
+  `stage` 或 `execute`：前者从标准输入接收有界规范快照并复核 candidate
+  manifest，后者只运行固定的 `/opt/venv/bin/python -I -m pytest -q`，写入有界
+  `started.json` 和 `result.json`。它不安装或导入 OpenWorkProof，不接收 Sidecar
+  key、Docker socket、网络或任意命令字符串；它不是最终 trusted helper，也
+  不构成 registry 推送证据、不构成 Acceptor 独立验收证据、不构成 D8 证据、
+  不构成 Day 0 证据。
 - helper：`ENTRYPOINT ["/opt/venv/bin/python", "-I", "-m",
   "openworkproof.trusted_helper"]`，且 `CMD []`。trusted controller 将一个
   WorkOrder 对应的 candidate runtime root 只读挂载为 `/runtime:ro`；helper

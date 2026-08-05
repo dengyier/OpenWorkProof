@@ -30,7 +30,9 @@ RUN cd /tmp/wheels/ \
     && /opt/venv/bin/python -m pip check \
     && rm -rf /tmp/requirements.lock /tmp/wheels
 
+COPY run_tests_runner.py /opt/openworkproof/run_tests_runner.py
+
 WORKDIR /workspace
 USER 65532:65532
-ENTRYPOINT ["/usr/bin/env", "--"]
-CMD ["/opt/venv/bin/python", "-I", "-m", "pytest"]
+ENTRYPOINT ["/opt/venv/bin/python", "-I", "/opt/openworkproof/run_tests_runner.py"]
+CMD ["execute"]
