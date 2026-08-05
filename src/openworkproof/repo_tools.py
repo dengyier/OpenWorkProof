@@ -6541,7 +6541,16 @@ def _reconcile_run_tests_docker(
         raise ValueError("run-tests Receipt observation is invalid")
     try:
         if receipt_state == "MATCH":
-            executor.cleanup(contract)
+            try:
+                executor.cleanup(contract)
+            except (
+                OSError,
+                subprocess.SubprocessError,
+                ValueError,
+                TypeError,
+                RuntimeError,
+            ):
+                return RunTestsExecutionOutcome("UNRESOLVED")
             return RunTestsExecutionOutcome("CLOSED_RESULT", None)
         if receipt_state == "MISMATCH":
             return RunTestsExecutionOutcome("UNRESOLVED")

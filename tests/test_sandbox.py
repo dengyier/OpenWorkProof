@@ -4774,6 +4774,43 @@ def test_docker_run_tests_driver_receipt_match_cleanup_error_is_unresolved(
     assert len(observed) == 1
 
 
+def test_docker_run_tests_driver_receipt_match_runtime_cleanup_error_is_unresolved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract, _ = _docker_driver_contract_and_snapshot()
+    snapshot_requests = []
+
+    monkeypatch.setattr(
+        repo_tools,
+        "prepare_candidate_execution_snapshot",
+        lambda request: snapshot_requests.append(request),
+    )
+
+    def fail_cleanup(executor, observed_contract):
+        assert observed_contract == contract
+        raise RuntimeError("retained unowned Docker resource")
+
+    monkeypatch.setattr(
+        repo_tools,
+        "_cleanup_run_tests_docker",
+        fail_cleanup,
+    )
+    executor = repo_tools.DockerRunTestsExecutor(
+        docker_binary=Path("/usr/local/bin/docker"),
+        candidate_runtime_root=tmp_path.resolve(),
+        image_reference=_docker_driver_image_reference(contract),
+        run=lambda command, input_bytes, timeout: None,
+    )
+
+    assert executor.reconcile(
+        contract,
+        "STARTED_UNCONFIRMED",
+        "MATCH",
+    ) == repo_tools.RunTestsExecutionOutcome("UNRESOLVED")
+    assert snapshot_requests == []
+
+
 def test_docker_run_tests_driver_match_cleans_stopped_container_without_cp(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

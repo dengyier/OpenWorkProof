@@ -870,8 +870,9 @@ name/glob deletion.
 Under `OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1`, assemble a revision-bound temporary
 execution context from the current clean Task-5 commit, build an ephemeral
 `openworkproof/execution-test-dev:<revision>` image with `--network none` and
-`--pull=false`, and pass its immutable inspected image ID to the test. Prove
-actual resource creation, detached start, exact containment, closed exit,
+`--pull=false`, record its actual measured RepoDigest, canonicalize that
+RepoDigest exactly as production does, and pass the qualified reference to the
+test. Prove actual resource creation, detached start, exact containment, closed exit,
 envelope extraction, and zero residue. Remove only that validated temporary
 context and tag after the test. Mark the test with `pytest.mark.docker` and
 retain the existing precise portable skip when the required-live flag is
@@ -1196,12 +1197,72 @@ sidecar without overwriting prior revisions.
 - [ ] **Step 7: Run required-live focused and full gates**
 
 ```bash
-OWP_EXECUTION_IMAGE_ID=$(docker image inspect \
-  "openworkproof/execution-test:$OWP_SOURCE_REVISION" \
-  --format '{{.Id}}')
+export OPENWORKPROOF_DOCKER_TEST_IMAGE="$(
+  ./.venv/bin/python - "$OWP_REPO" "$OWP_SOURCE_REVISION" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+repo = Path(sys.argv[1])
+revision = sys.argv[2]
+if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+    raise SystemExit("invalid source revision")
+inventory_path = (
+    repo / "supply-chain" / "images" / "candidates" / f"{revision}.json"
+)
+try:
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    repo_digests = inventory["images"]["execution"]["local_repo_digests"]
+except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as error:
+    raise SystemExit("invalid execution candidate inventory") from error
+if (
+    type(repo_digests) is not list
+    or len(repo_digests) != 1
+    or type(repo_digests[0]) is not str
+):
+    raise SystemExit("execution candidate must contain exactly one RepoDigest")
+reference = repo_digests[0]
+if len(reference.encode("utf-8")) > 255 or reference.count("@") != 1:
+    raise SystemExit("invalid execution candidate RepoDigest")
+repository, digest = reference.split("@")
+if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+    raise SystemExit("invalid execution candidate RepoDigest")
+components = repository.split("/")
+component_pattern = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*")
+host_pattern = re.compile(r"[a-z0-9]+(?:[.-][a-z0-9]+)*")
+if len(components) < 2 or any(
+    component_pattern.fullmatch(component) is None
+    for component in components[1:]
+):
+    raise SystemExit("invalid execution candidate repository")
+registry = components[0]
+if registry == "localhost" or "." in registry or ":" in registry:
+    host = registry
+    if ":" in registry:
+        if registry.count(":") != 1:
+            raise SystemExit("invalid execution candidate registry")
+        host, port = registry.rsplit(":", 1)
+        if not port.isdigit() or not 1 <= int(port) <= 65_535:
+            raise SystemExit("invalid execution candidate registry")
+    if (
+        not host
+        or len(host) > 253
+        or host_pattern.fullmatch(host) is None
+        or any(len(label) > 63 for label in host.split("."))
+    ):
+        raise SystemExit("invalid execution candidate registry")
+    canonical = reference
+else:
+    if component_pattern.fullmatch(registry) is None:
+        raise SystemExit("invalid execution candidate repository")
+    canonical = f"docker.io/{reference}"
+print(canonical)
+PY
+)"
+docker image inspect "$OPENWORKPROOF_DOCKER_TEST_IMAGE" >/dev/null
 OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-day0 \
 OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 \
-OPENWORKPROOF_DOCKER_TEST_IMAGE="docker.io/openworkproof/execution-test@$OWP_EXECUTION_IMAGE_ID" \
 ./.venv/bin/python -m pytest \
   tests/test_run_tests_runner.py \
   tests/test_sandbox.py \
@@ -1213,7 +1274,6 @@ OPENWORKPROOF_DOCKER_TEST_IMAGE="docker.io/openworkproof/execution-test@$OWP_EXE
 
 OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-day0 \
 OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 \
-OPENWORKPROOF_DOCKER_TEST_IMAGE="docker.io/openworkproof/execution-test@$OWP_EXECUTION_IMAGE_ID" \
 ./.venv/bin/python -m pytest -q
 ```
 
