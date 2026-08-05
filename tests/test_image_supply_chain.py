@@ -487,6 +487,19 @@ def _assert_fixed_execution_process_config(dockerfile: str) -> None:
     )
 
 
+def _assert_execution_copy_up_mountpoints(dockerfile: str) -> None:
+    required = (
+        "RUN install -d -o 65532 -g 65532 -m 0755 "
+        "/workspace /output"
+    )
+    assert dockerfile.count(required) == 1
+    assert dockerfile.index(required) < dockerfile.index("USER 65532:65532")
+    assert not any(
+        re.match(r"^\s*VOLUME(?:\s|$)", line, re.IGNORECASE)
+        for line in dockerfile.splitlines()
+    )
+
+
 def test_supplychain_test_contract_is_portable_and_registered() -> None:
     test_source = Path(__file__).read_text(encoding="utf-8")
     forbidden_home = "/Users" + "/molin/"
@@ -518,6 +531,7 @@ def test_execution_image_contract_is_minimal_and_offline() -> None:
     assert runner_path.read_bytes()
     assert "COPY run_tests_runner.py /opt/openworkproof/run_tests_runner.py" in dockerfile
     _assert_fixed_execution_process_config(dockerfile)
+    _assert_execution_copy_up_mountpoints(dockerfile)
     assert 'ENTRYPOINT ["/usr/bin/env", "--"]' not in dockerfile
     assert "openworkproof.trusted_helper" not in dockerfile
     assert "pip install openworkproof" not in dockerfile.casefold()
@@ -533,6 +547,38 @@ def test_execution_image_contract_is_minimal_and_offline() -> None:
         "pygments",
         "pytest",
     )
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        "RUN install -d -o 65532 -g 65532 -m 0755 /workspace",
+        "RUN install -d -o 65532 -g 65532 -m 0755 /output",
+        "RUN install -d -o 0 -g 65532 -m 0755 /workspace /output",
+        "RUN install -d -o 65532 -g 0 -m 0755 /workspace /output",
+    ),
+)
+def test_execution_candidate_requires_both_nonroot_copy_up_mountpoints(
+    replacement: str,
+) -> None:
+    dockerfile = _read("execution/Dockerfile")
+    required = (
+        "RUN install -d -o 65532 -g 65532 -m 0755 "
+        "/workspace /output"
+    )
+    mutated = dockerfile.replace(required, replacement, 1)
+
+    with pytest.raises(AssertionError):
+        _assert_execution_copy_up_mountpoints(mutated)
+
+
+def test_execution_candidate_rejects_volume_declaration() -> None:
+    dockerfile = _read("execution/Dockerfile")
+
+    with pytest.raises(AssertionError):
+        _assert_execution_copy_up_mountpoints(
+            dockerfile + '\nVOLUME ["/workspace", "/output"]\n'
+        )
 
 
 @pytest.mark.parametrize(

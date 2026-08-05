@@ -32,6 +32,8 @@ RUN cd /tmp/wheels/ \
 
 COPY run_tests_runner.py /opt/openworkproof/run_tests_runner.py
 
+RUN install -d -o 65532 -g 65532 -m 0755 /workspace /output
+
 WORKDIR /workspace
 USER 65532:65532
 ENTRYPOINT ["/opt/venv/bin/python", "-I", "/opt/openworkproof/run_tests_runner.py"]

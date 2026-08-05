@@ -2210,13 +2210,10 @@ def test_derive_docker_execution_plan_is_exact_and_deterministic() -> None:
         "--mount",
         (
             "type=volume,source=owp-workspace-01,"
-            "target=/workspace,readonly,volume-nocopy"
+            "target=/workspace,readonly"
         ),
         "--mount",
-        (
-            "type=volume,source=owp-output-01,"
-            "target=/output,volume-nocopy"
-        ),
+        "type=volume,source=owp-output-01,target=/output",
         (
             "registry.example/openworkproof/test-runner@sha256:"
             + "a" * 64
@@ -2233,12 +2230,9 @@ def test_derive_docker_execution_plan_is_exact_and_deterministic() -> None:
     assert mount_specs == (
         (
             "type=volume,source=owp-workspace-01,"
-            "target=/workspace,readonly,volume-nocopy"
+            "target=/workspace,readonly"
         ),
-        (
-            "type=volume,source=owp-output-01,"
-            "target=/output,volume-nocopy"
-        ),
+        "type=volume,source=owp-output-01,target=/output",
     )
     assert not hasattr(first, "start_container_argv")
     assert first.preflight_absent_argv == (
@@ -2399,14 +2393,12 @@ def _docker_container_inspection(
                     "Source": plan.workspace_volume.name,
                     "Target": "/workspace",
                     "ReadOnly": True,
-                    "VolumeOptions": {"NoCopy": True},
                 },
                 {
                     "Type": "volume",
                     "Source": plan.output_volume.name,
                     "Target": "/output",
                     "ReadOnly": False,
-                    "VolumeOptions": {"NoCopy": True},
                 },
             ],
         },
@@ -2972,7 +2964,7 @@ def test_validate_docker_execution_inspections_rejects_unsafe_profile(
         container["Mounts"][0]["RW"] = True
     elif mutation == "wrong_nocopy":
         container["HostConfig"]["Mounts"][0]["VolumeOptions"] = {
-            "NoCopy": False,
+            "NoCopy": True,
         }
     elif mutation == "extra_tmpfs":
         container["HostConfig"]["Tmpfs"]["/cache"] = "rw,size=1m"
@@ -3957,20 +3949,118 @@ def test_docker_cleanup_retains_attempted_unowned_resource() -> None:
     assert not any(command[1] == "rm" for command in commands)
 
 
+def _live_runner_snapshot(
+    image_reference: str,
+) -> tuple[bytes, bytes, bytes]:
+    candidate = (
+        b"import os\n"
+        b"from pathlib import Path\n"
+        b"import stat\n\n"
+        b"def test_copy_up_and_containment():\n"
+        b"    assert (os.getuid(), os.getgid()) == (65532, 65532)\n"
+        b"    for root in ('/workspace', '/output'):\n"
+        b"        metadata = os.stat(root)\n"
+        b"        assert (metadata.st_uid, metadata.st_gid) == (65532, 65532)\n"
+        b"        assert stat.S_IMODE(metadata.st_mode) == 0o755\n"
+        b"    for target in ('/workspace/forbidden', '/output/forbidden', '/root-forbidden'):\n"
+        b"        try:\n"
+        b"            Path(target).write_text('forbidden')\n"
+        b"        except OSError:\n"
+        b"            pass\n"
+        b"        else:\n"
+        b"            raise AssertionError(f'wrote {target}')\n"
+        b"    Path('/tmp/allowed').write_text('allowed')\n"
+        b"    assert not Path('/var/run/docker.sock').exists()\n"
+    )
+    path = "test_copy_up.py"
+    candidate_commit = "2" * 40
+    manifest = repo_tools.WorkspaceManifest(
+        schema_version="openworkproof-workspace-manifest/0.1",
+        head_commit=candidate_commit,
+        entries=(
+            repo_tools.WorkspaceManifestEntry(
+                path_bytes_b64url=base64.urlsafe_b64encode(
+                    path.encode("ascii")
+                ).rstrip(b"=").decode("ascii"),
+                type="regular",
+                posix_mode="100644",
+                size_bytes=len(candidate),
+                sha256=hashlib.sha256(candidate).hexdigest(),
+                symlink_target_b64url=None,
+            ),
+        ),
+    )
+    contract = {
+        "arguments_digest": "3" * 64,
+        "candidate_commit": candidate_commit,
+        "candidate_workspace_id": "4" * 64,
+        "command_digest": repo_tools.frozen_verifier_command_digest(),
+        "container_image_digest": image_reference.split("@", 1)[1],
+        "execution_id": "6" * 64,
+        "fixed_test_source_digest": "7" * 64,
+        "request_digest": "8" * 64,
+        "schema_version": "openworkproof-run-contract/0.1",
+        "source_artifact_sha256": "9" * 64,
+        "source_commit": "1" * 40,
+        "test_mode": "verifier",
+        "tool_name": "owp.run_tests",
+        "workspace_manifest_digest": repo_tools.workspace_manifest_digest(
+            manifest
+        ),
+    }
+    contract_bytes = rfc8785.dumps(contract)
+    header_bytes = rfc8785.dumps(
+        {
+            "contract": {
+                "sha256": hashlib.sha256(contract_bytes).hexdigest(),
+                "size_bytes": len(contract_bytes),
+            },
+            "files": [
+                {
+                    "mode": "100644",
+                    "path": path,
+                    "sha256": hashlib.sha256(candidate).hexdigest(),
+                    "size_bytes": len(candidate),
+                }
+            ],
+            "schema_version": "openworkproof-snapshot-stream/0.1",
+        }
+    )
+    stream = (
+        b"openworkproof-snapshot-stream/0.1\n"
+        + len(header_bytes).to_bytes(4, "big")
+        + header_bytes
+        + candidate
+        + contract_bytes
+    )
+    contract_digest = hashlib.sha256(contract_bytes).hexdigest()
+    summary = rfc8785.dumps(
+        {
+            "execution_contract_digest": contract_digest,
+            "execution_id": contract["execution_id"],
+            "workspace_manifest_digest": contract[
+                "workspace_manifest_digest"
+            ],
+        }
+    ) + b"\n"
+    started = rfc8785.dumps(
+        {
+            "execution_contract_digest": contract_digest,
+            "execution_id": contract["execution_id"],
+            "schema_version": "openworkproof-run-started/0.1",
+        }
+    )
+    return stream, summary, started
+
+
 @pytest.mark.docker
 def test_real_docker_enforces_frozen_containment_profile() -> None:
     docker_binary, image_reference = _real_docker_cli_and_image()
 
     suffix = f"{os.getpid()}-{time.time_ns()}"
     ownership_token = hashlib.sha256(suffix.encode("ascii")).hexdigest()
-    script = (
-        "set -eu; "
-        "test \"$(id -u):$(id -g)\" = 65532:65532; "
-        "if touch /workspace/forbidden 2>/dev/null; then exit 41; fi; "
-        "if touch /root-forbidden 2>/dev/null; then exit 42; fi; "
-        "touch /output/allowed; touch /tmp/allowed; "
-        "test ! -e /var/run/docker.sock; "
-        "printf containment-ok"
+    snapshot, expected_summary, expected_started = _live_runner_snapshot(
+        image_reference
     )
     plan = repo_tools.derive_docker_execution_plan(
         docker_binary=docker_binary,
@@ -3979,7 +4069,7 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
         workspace_volume_name=f"owp-workspace-{suffix}",
         output_volume_name=f"owp-output-{suffix}",
         ownership_token=ownership_token,
-        command=("/bin/sh", "-c", script),
+        command=("execute",),
     )
     image_inspection = _require_real_docker_daemon_and_image(
         docker_binary,
@@ -4037,16 +4127,19 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
                 "none",
                 "--read-only",
                 "--user",
-                "0:0",
+                "65532:65532",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--interactive",
                 "--mount",
                 (
-                    f"type=volume,source={plan.output_volume.name},"
-                    "target=/output,volume-nocopy"
+                    f"type=volume,source={plan.workspace_volume.name},"
+                    "target=/workspace"
                 ),
                 image_reference,
-                "/bin/sh",
-                "-c",
-                "chown 65532:65532 /output && chmod 0700 /output",
+                "stage",
             ),
             check=True,
             capture_output=True,
@@ -4054,12 +4147,19 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
             timeout=15,
         )
         staged = subprocess.run(
-            (str(docker_binary), "start", "--attach", staging_name),
+            (
+                str(docker_binary),
+                "start",
+                "--attach",
+                "--interactive",
+                staging_name,
+            ),
+            input=snapshot,
             capture_output=True,
-            text=True,
             timeout=30,
         )
         assert staged.returncode == 0, staged.stderr
+        assert staged.stdout == expected_summary
         subprocess.run(
             (str(docker_binary), "rm", staging_name),
             check=True,
@@ -4139,7 +4239,66 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
             timeout=30,
         )
         assert executed.returncode == 0, executed.stderr
-        assert executed.stdout == "containment-ok"
+        assert executed.stdout == ""
+        subprocess.run(
+            (str(docker_binary), "rm", plan.container_name),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        reader_name = f"owp-read-{suffix}"
+        attempted_resources.append(("container", reader_name))
+        subprocess.run(
+            (
+                str(docker_binary),
+                "create",
+                "--name",
+                reader_name,
+                "--label",
+                f"openworkproof.execution-owner={ownership_token}",
+                "--pull",
+                "never",
+                "--network",
+                "none",
+                "--read-only",
+                "--user",
+                "65532:65532",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--mount",
+                (
+                    f"type=volume,source={plan.output_volume.name},"
+                    "target=/output,readonly"
+                ),
+                "--entrypoint",
+                "/bin/sh",
+                image_reference,
+                "-c",
+                "stat -c '%u:%g:%a' /output; cat /output/started.json",
+            ),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        read_back = subprocess.run(
+            (str(docker_binary), "start", "--attach", reader_name),
+            capture_output=True,
+            timeout=30,
+        )
+        assert read_back.returncode == 0, read_back.stderr
+        assert read_back.stdout == b"65532:65532:755\n" + expected_started
+        subprocess.run(
+            (str(docker_binary), "rm", reader_name),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
     finally:
         active_failure = sys.exc_info()[1]
         cleanup_failures = _cleanup_attempted_docker_resources(
@@ -4252,7 +4411,7 @@ def test_real_docker_named_volume_persists_across_short_lived_containers(
                 "none",
                 "--read-only",
                 "--user",
-                "0:0",
+                "65532:65532",
                 "--cap-drop",
                 "ALL",
                 "--security-opt",
@@ -4262,12 +4421,13 @@ def test_real_docker_named_volume_persists_across_short_lived_containers(
                 "--mount",
                 (
                     f"type=volume,source={target_volume.name},"
-                    "target=/volume,volume-nocopy"
+                    f"target={mount_path}"
                 ),
-                image_reference,
+                "--entrypoint",
                 "/bin/sh",
+                image_reference,
                 "-c",
-                f"printf %s {marker!r} > /volume/marker",
+                f"printf %s {marker!r} > {mount_path}/marker",
             ),
             check=True,
             capture_output=True,
@@ -4314,12 +4474,13 @@ def test_real_docker_named_volume_persists_across_short_lived_containers(
                 "--mount",
                 (
                     f"type=volume,source={target_volume.name},"
-                    "target=/volume,readonly,volume-nocopy"
+                    f"target={mount_path},readonly"
                 ),
-                image_reference,
+                "--entrypoint",
                 "/bin/sh",
+                image_reference,
                 "-c",
-                "cat /volume/marker",
+                f"cat {mount_path}/marker",
             ),
             check=True,
             capture_output=True,

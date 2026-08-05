@@ -4989,13 +4989,10 @@ def derive_docker_execution_plan(
         "--mount",
         (
             f"type=volume,source={workspace.name},"
-            "target=/workspace,readonly,volume-nocopy"
+            "target=/workspace,readonly"
         ),
         "--mount",
-        (
-            f"type=volume,source={output.name},"
-            "target=/output,volume-nocopy"
-        ),
+        f"type=volume,source={output.name},target=/output",
         image_reference,
         *command,
     )
@@ -5253,16 +5250,14 @@ def validate_docker_execution_inspections(
             and configured_workspace.get("Source")
             == plan.workspace_volume.name
             and configured_workspace.get("ReadOnly") is True
-            and configured_workspace.get("VolumeOptions", {}).get("NoCopy")
-            is True
+            and "VolumeOptions" not in configured_workspace
             and configured_output.get("Type") == "volume"
             and configured_output.get("Source") == plan.output_volume.name
             and (
                 "ReadOnly" not in configured_output
                 or configured_output.get("ReadOnly") is False
             )
-            and configured_output.get("VolumeOptions", {}).get("NoCopy")
-            is True
+            and "VolumeOptions" not in configured_output
             and _valid_docker_volume_inspection(
                 plan,
                 workspace_volume_inspection,
