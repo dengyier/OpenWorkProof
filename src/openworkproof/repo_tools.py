@@ -5351,6 +5351,43 @@ def validate_docker_execution_inspections(
         raise ValueError("Docker inspection does not match the frozen profile")
 
 
+def _validated_docker_image_id(
+    plan: DockerExecutionPlan,
+    image_inspection: Mapping[str, Any],
+) -> str | None:
+    image_id: object = None
+    try:
+        image_id = image_inspection["Id"]
+        image_config = image_inspection["Config"]
+        repo_digests = image_inspection["RepoDigests"]
+        canonical_repo_digests = [
+            _canonical_observed_repo_digest(reference)
+            for reference in repo_digests
+        ]
+        valid = (
+            type(image_inspection) is dict
+            and type(image_id) is str
+            and _IMAGE_DIGEST_PATTERN.fullmatch(image_id) is not None
+            and type(image_config) is dict
+            and image_config.get("Volumes") in (None, {})
+            and (
+                (
+                    _IMAGE_DIGEST_PATTERN.fullmatch(plan.image_reference)
+                    is not None
+                    and image_id == plan.image_reference
+                )
+                or (
+                    type(repo_digests) is list
+                    and None not in canonical_repo_digests
+                    and plan.image_reference in canonical_repo_digests
+                )
+            )
+        )
+    except (KeyError, TypeError, AttributeError):
+        valid = False
+    return image_id if valid and type(image_id) is str else None
+
+
 def derive_ready_docker_start(
     plan: DockerExecutionPlan,
     lifecycle: DockerLifecycleState,
@@ -5366,33 +5403,7 @@ def derive_ready_docker_start(
         or lifecycle.created_resources != _DOCKER_CREATION_ORDER
     ):
         raise ValueError("Docker lifecycle is not complete")
-    try:
-        image_config = image_inspection["Config"]
-        repo_digests = image_inspection["RepoDigests"]
-        canonical_repo_digests = [
-            _canonical_observed_repo_digest(reference)
-            for reference in repo_digests
-        ]
-        image_valid = (
-            type(image_inspection) is dict
-            and type(image_config) is dict
-            and image_config.get("Volumes") in (None, {})
-            and (
-                (
-                    _IMAGE_DIGEST_PATTERN.fullmatch(plan.image_reference)
-                    is not None
-                    and image_inspection.get("Id") == plan.image_reference
-                )
-                or (
-                    type(repo_digests) is list
-                    and None not in canonical_repo_digests
-                    and plan.image_reference in canonical_repo_digests
-                )
-            )
-        )
-    except (KeyError, TypeError, AttributeError):
-        image_valid = False
-    if not image_valid:
+    if _validated_docker_image_id(plan, image_inspection) is None:
         raise ValueError("Docker image inspection is invalid")
 
     validate_docker_execution_inspections(
@@ -6021,6 +6032,24 @@ def _resource_observation(
     }
 
 
+def _owned_run_tests_execution_container(
+    inspection: object,
+    binding: RunTestsDockerBinding,
+    contract_digest: str,
+) -> bool:
+    if type(inspection) is not dict:
+        return False
+    config = inspection.get("Config")
+    labels = config.get("Labels") if type(config) is dict else None
+    return (
+        inspection.get("Name") == f"/{binding.container_name}"
+        and type(labels) is dict
+        and labels.get(_DOCKER_OWNERSHIP_LABEL) == binding.ownership_token
+        and labels.get(_DOCKER_EXECUTION_ID_LABEL) == binding.execution_id
+        and labels.get(_DOCKER_CONTRACT_DIGEST_LABEL) == contract_digest
+    )
+
+
 def _extract_run_tests_output_tar(
     contract: RunTestsExecutionContract,
     raw: bytes,
@@ -6189,8 +6218,9 @@ def _prepare_run_tests_docker(
                 commands.inspect_output_volume_argv,
             ).stdout
         )
-        if image.get("Id") != contract.container_image_digest:
-            raise ValueError("Docker image ID does not match execution contract")
+        local_image_id = _validated_docker_image_id(plan, image)
+        if local_image_id is None:
+            raise ValueError("Docker image identity is invalid")
         derive_ready_docker_start(
             plan,
             lifecycle,
@@ -6204,7 +6234,7 @@ def _prepare_run_tests_docker(
             binding,
             plan,
             contract_digest,
-            contract.container_image_digest,
+            local_image_id,
         ) is None:
             raise ValueError("Docker execution identity is invalid")
         return RunTestsPreparationOutcome("READY_TO_START")
@@ -6232,6 +6262,12 @@ def _start_and_wait_run_tests_docker(
         binding = commands.binding
         plan = commands.execution_plan
         contract_digest = commands.contract_digest
+        image = _docker_inspection(
+            _docker_checked(executor, commands.inspect_image_argv).stdout
+        )
+        local_image_id = _validated_docker_image_id(plan, image)
+        if local_image_id is None:
+            return RunTestsExecutionOutcome("UNRESOLVED")
         inspected = _docker_inspection(
             _docker_checked(
                 executor,
@@ -6243,7 +6279,7 @@ def _start_and_wait_run_tests_docker(
             binding,
             plan,
             contract_digest,
-            contract.container_image_digest,
+            local_image_id,
         )
         state = inspected.get("State")
         if (
@@ -6284,7 +6320,7 @@ def _start_and_wait_run_tests_docker(
             binding,
             plan,
             contract_digest,
-            contract.container_image_digest,
+            local_image_id,
         )
         if after_observation is None:
             return RunTestsExecutionOutcome("UNRESOLVED")
@@ -6356,13 +6392,10 @@ def _reconcile_run_tests_docker(
         binding = commands.binding
         plan = commands.execution_plan
         contract_digest = commands.contract_digest
-        image_raw = _docker_inspection(
-            _docker_checked(
-                executor,
-                commands.inspect_image_argv,
-            ).stdout
-        )
-        if image_raw.get("Id") != contract.container_image_digest:
+        if receipt_state == "MATCH":
+            executor.cleanup(contract)
+            return RunTestsExecutionOutcome("CLOSED_RESULT", None)
+        if receipt_state == "MISMATCH":
             return RunTestsExecutionOutcome("UNRESOLVED")
         staging_raw = _inspect_optional(
             executor, commands.inspect_staging_container_argv
@@ -6378,6 +6411,25 @@ def _reconcile_run_tests_docker(
             executor,
             commands.inspect_output_volume_argv,
         )
+        if all(
+            inspection is None
+            for inspection in (
+                staging_raw,
+                container_raw,
+                workspace_raw,
+                output_raw,
+            )
+        ):
+            return RunTestsExecutionOutcome("SAFE_TO_RETRY")
+        image_raw = _docker_inspection(
+            _docker_checked(
+                executor,
+                commands.inspect_image_argv,
+            ).stdout
+        )
+        local_image_id = _validated_docker_image_id(plan, image_raw)
+        if local_image_id is None:
+            return RunTestsExecutionOutcome("UNRESOLVED")
         staging = None
         if staging_raw is not None:
             staging = _resource_observation(
@@ -6399,7 +6451,7 @@ def _reconcile_run_tests_docker(
                 binding,
                 plan,
                 contract_digest,
-                contract.container_image_digest,
+                local_image_id,
             )
             if container is None:
                 return RunTestsExecutionOutcome("UNRESOLVED")
@@ -6534,13 +6586,11 @@ def _cleanup_run_tests_docker(
         if inspection is None:
             continue
         if resource == "container":
-            owned = _execution_observation(
+            owned = _owned_run_tests_execution_container(
                 inspection,
                 binding,
-                plan,
                 commands.contract_digest,
-                contract.container_image_digest,
-            ) is not None
+            )
         elif resource == "staging":
             labels = inspection.get("Config", {}).get("Labels", {})
             owned = (
