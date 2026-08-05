@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+import shutil
 import signal
 import stat
 import subprocess
@@ -622,6 +623,423 @@ def _no_child_preexec() -> None:
     return None
 
 
+_LINUX_PROBE_OK = "OPENWORKPROOF_LINUX_PROBE_OK\n"
+_LINUX_PROBE_PREAMBLE = r'''
+import hashlib
+import importlib.util
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location(
+    "openworkproof_live_run_tests_runner",
+    "/opt/openworkproof/run_tests_runner.py",
+)
+assert spec is not None and spec.loader is not None
+runner = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = runner
+spec.loader.exec_module(runner)
+
+workspace = Path("/workspace")
+output = Path("/output")
+scratch = Path("/tmp/openworkproof-landlock-scratch")
+for root in (workspace, output):
+    root.mkdir(mode=0o755, exist_ok=True)
+    assert not any(root.iterdir())
+scratch.mkdir(mode=0o700)
+
+def identity(path):
+    metadata = path.lstat()
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+        path.read_bytes(),
+    )
+
+def prepare(files):
+    for relative, (mode, content) in files.items():
+        path = workspace / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        path.chmod(int(mode[-3:], 8))
+    candidate_commit = "2" * 40
+    contract = {
+        "arguments_digest": "3" * 64,
+        "candidate_commit": candidate_commit,
+        "candidate_workspace_id": "4" * 64,
+        "command_digest": runner._frozen_command_digest(),
+        "container_image_digest": "sha256:" + "5" * 64,
+        "execution_id": "6" * 64,
+        "fixed_test_source_digest": hashlib.sha256(
+            Path("/fixed-tests/verifier_test.py").read_bytes()
+        ).hexdigest(),
+        "request_digest": "8" * 64,
+        "schema_version": "openworkproof-run-contract/0.1",
+        "source_artifact_sha256": "9" * 64,
+        "source_commit": "1" * 40,
+        "test_mode": "verifier",
+        "tool_name": "owp.run_tests",
+        "workspace_manifest_digest": runner._manifest_digest(
+            files, candidate_commit
+        ),
+    }
+    (workspace / "run-contract.json").write_bytes(runner._canonical(contract))
+    return contract
+
+abi = runner._query_landlock_abi()
+preexec = runner._build_landlock_preexec(abi, scratch)
+'''
+
+_FORGED_MARKER_LINUX_PROBE = _LINUX_PROBE_PREAMBLE + r'''
+files = {"README.md": ("100644", b"candidate\n")}
+contract = prepare(files)
+workspace_before = {
+    str(path.relative_to(workspace)): identity(path)
+    for path in sorted(workspace.rglob("*"))
+    if path.is_file()
+}
+workspace_paths = tuple(
+    str(path.relative_to(workspace)) for path in sorted(workspace.rglob("*"))
+)
+forged = runner._canonical(
+    {
+        "actual_exit_code": 0,
+        "execution_contract_digest": "0" * 64,
+        "execution_id": contract["execution_id"],
+        "failure_code": None,
+        "schema_version": "openworkproof-run-result/0.1",
+        "stderr_bytes": 0,
+        "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+        "stdout_bytes": 0,
+        "stdout_sha256": hashlib.sha256(b"").hexdigest(),
+    }
+)
+attack = (
+    "import os\n"
+    "from pathlib import Path\n"
+    "workspace=Path('/workspace')\n"
+    "output=Path('/output')\n"
+    "scratch=Path('/tmp/openworkproof-landlock-scratch')\n"
+    f"forged={forged!r}\n"
+    "source=scratch/'forged'\n"
+    "source.write_bytes(forged)\n"
+    "attempts=[\n"
+    " lambda: (output/'result.json').write_bytes(forged),\n"
+    " lambda: os.replace(source, output/'started.json'),\n"
+    " lambda: os.link(output/'started.json', scratch/'started-alias'),\n"
+    " lambda: os.link(source, output/'result.json'),\n"
+    " lambda: (workspace/'README.md').write_bytes(b'changed'),\n"
+    " lambda: (workspace/'candidate').write_bytes(b'changed'),\n"
+    "]\n"
+    "for attempt in attempts:\n"
+    " try: attempt()\n"
+    " except OSError: pass\n"
+    " else: raise SystemExit(73)\n"
+)
+marker_before = None
+
+def process(argv, cwd):
+    global marker_before
+    assert argv == runner.FROZEN_VERIFIER_ARGV
+    started = output / "started.json"
+    marker_before = identity(started)
+    outcome = runner._run_process(
+        (sys.executable, "-I", "-c", attack),
+        cwd,
+        descendant_cleaner=lambda: None,
+        child_preexec=preexec,
+    )
+    assert outcome.exit_code == 0
+    assert outcome.failure_code is None
+    assert outcome.stdout == b"" and outcome.stderr == b""
+    assert identity(started) == marker_before
+    return outcome
+
+assert runner.main(
+    ("execute",),
+    workspace_root=workspace,
+    output_root=output,
+    process_runner=process,
+) == 0
+assert marker_before is not None
+assert identity(output / "started.json") == marker_before
+published = (output / "result.json").read_bytes()
+published_identity = identity(output / "result.json")
+assert identity(output / "result.json") == published_identity
+assert published != forged
+result = runner._parse_canonical_json(published)
+assert result["execution_id"] == contract["execution_id"]
+assert tuple(
+    str(path.relative_to(workspace)) for path in sorted(workspace.rglob("*"))
+) == workspace_paths
+assert {
+    str(path.relative_to(workspace)): identity(path)
+    for path in sorted(workspace.rglob("*"))
+    if path.is_file()
+} == workspace_before
+assert not (scratch / "started-alias").exists()
+print("OPENWORKPROOF_LINUX_PROBE_OK")
+'''
+
+_EXACT_COMMAND_LINUX_PROBE = _LINUX_PROBE_PREAMBLE + r'''
+preexec = runner._build_landlock_preexec(abi, Path("/tmp"))
+files = {
+    "rich/__init__.py": ("100644", b""),
+    "rich/_wrap.py": (
+        "100644",
+        b"def words(text):\n"
+        b"    yield 0, len(text), text\n\n"
+        b"def divide_line(text, width, fold=False):\n"
+        b"    return [2]\n",
+    ),
+}
+prepare(files)
+workspace_before = {
+    str(path.relative_to(workspace)): identity(path)
+    for path in sorted(workspace.rglob("*"))
+    if path.is_file()
+}
+workspace_paths = tuple(
+    str(path.relative_to(workspace)) for path in sorted(workspace.rglob("*"))
+)
+
+def process(argv, cwd):
+    assert argv == runner.FROZEN_VERIFIER_ARGV
+    outcome = runner._run_process(
+        argv,
+        cwd,
+        descendant_cleaner=lambda: None,
+        child_preexec=preexec,
+    )
+    assert outcome.exit_code == 0
+    assert outcome.failure_code is None
+    return outcome
+
+assert runner.FROZEN_VERIFIER_ARGV == (
+    "/opt/venv/bin/python",
+    "-I",
+    "-m",
+    "pytest",
+    "-q",
+    "-c",
+    "/dev/null",
+    "--rootdir=/fixed-tests",
+    "--confcutdir=/fixed-tests",
+    "/fixed-tests/verifier_test.py",
+)
+assert runner.main(
+    ("execute",),
+    workspace_root=workspace,
+    output_root=output,
+    process_runner=process,
+) == 0
+result = runner._parse_canonical_json((output / "result.json").read_bytes())
+assert result["actual_exit_code"] == 0
+assert result["failure_code"] is None
+assert tuple(
+    str(path.relative_to(workspace)) for path in sorted(workspace.rglob("*"))
+) == workspace_paths
+assert {
+    str(path.relative_to(workspace)): identity(path)
+    for path in sorted(workspace.rglob("*"))
+    if path.is_file()
+} == workspace_before
+print("OPENWORKPROOF_LINUX_PROBE_OK")
+'''
+
+
+def _run_required_live_linux_probe(
+    probe: str,
+    *,
+    run=subprocess.run,
+) -> None:
+    if os.environ.get("OPENWORKPROOF_REQUIRE_LIVE_DOCKER") != "1":
+        pytest.skip(
+            "real Landlock enforcement requires Linux; "
+            "set OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 for the immutable-image probe"
+        )
+    docker = os.environ.get("OPENWORKPROOF_DOCKER") or shutil.which("docker")
+    if docker is None:
+        pytest.fail("required live Docker CLI is unavailable")
+    docker_path = Path(docker).expanduser()
+    if not docker_path.is_file() or not os.access(docker_path, os.X_OK):
+        pytest.fail(f"required live Docker CLI is unavailable: {docker_path}")
+    image = os.environ.get("OPENWORKPROOF_DOCKER_TEST_IMAGE")
+    if image is None or re.fullmatch(r"[^@\s]+@sha256:[0-9a-f]{64}", image) is None:
+        pytest.fail(
+            "required immutable Docker test image is unavailable: set "
+            "OPENWORKPROOF_DOCKER_TEST_IMAGE to repository@sha256:digest"
+        )
+    try:
+        daemon = run(
+            (str(docker_path), "info"),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        pytest.fail(f"required live Docker daemon is unavailable: {type(error).__name__}")
+    if daemon.returncode != 0:
+        pytest.fail(
+            "required live Docker daemon is unavailable: "
+            f"rc={daemon.returncode} stderr={daemon.stderr!r}"
+        )
+    inspected = run(
+        (str(docker_path), "image", "inspect", image),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if inspected.returncode != 0:
+        pytest.fail(
+            "required immutable Docker test image is not preloaded: "
+            f"{image}; rc={inspected.returncode} stderr={inspected.stderr!r}"
+        )
+    completed = run(
+        (
+            str(docker_path),
+            "run",
+            "--rm",
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--read-only",
+            "--user",
+            "65532:65532",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "128",
+            "--memory",
+            "1g",
+            "--cpus",
+            "1",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=256m,uid=65532,gid=65532,mode=0755",
+            "--tmpfs",
+            "/workspace:rw,noexec,nosuid,size=16m,uid=65532,gid=65532,mode=0755",
+            "--tmpfs",
+            "/output:rw,noexec,nosuid,size=2m,uid=65532,gid=65532,mode=0755",
+            "--entrypoint",
+            "/opt/venv/bin/python",
+            image,
+            "-I",
+            "-c",
+            probe,
+        ),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    if completed.returncode != 0:
+        pytest.fail(
+            f"required Linux probe exited {completed.returncode}: "
+            f"stdout={completed.stdout!r}; stderr={completed.stderr!r}"
+        )
+    if completed.stdout != _LINUX_PROBE_OK or completed.stderr != "":
+        pytest.fail(
+            "required Linux probe returned unexpected streams: "
+            f"stdout={completed.stdout!r}; stderr={completed.stderr!r}"
+        )
+
+
+def test_required_live_linux_probe_uses_exact_containment_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = "openworkproof/execution-test@sha256:" + "a" * 64
+    probe = "print('OPENWORKPROOF_LINUX_PROBE_OK')"
+    commands: list[tuple[str, ...]] = []
+
+    def fake_run(command, **kwargs):
+        command = tuple(command)
+        commands.append(command)
+        if command[1] == "info":
+            return subprocess.CompletedProcess(command, 0, "29.5.2\n", "")
+        if command[1:3] == ("image", "inspect"):
+            return subprocess.CompletedProcess(command, 0, "[]\n", "")
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            "OPENWORKPROOF_LINUX_PROBE_OK\n",
+            "",
+        )
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("OPENWORKPROOF_REQUIRE_LIVE_DOCKER", "1")
+    monkeypatch.setenv("OPENWORKPROOF_DOCKER", sys.executable)
+    monkeypatch.setenv("OPENWORKPROOF_DOCKER_TEST_IMAGE", image)
+
+    _run_required_live_linux_probe(probe, run=fake_run)
+
+    assert commands == [
+        (sys.executable, "info"),
+        (sys.executable, "image", "inspect", image),
+        (
+            sys.executable,
+            "run",
+            "--rm",
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--read-only",
+            "--user",
+            "65532:65532",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "128",
+            "--memory",
+            "1g",
+            "--cpus",
+            "1",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=256m,uid=65532,gid=65532,mode=0755",
+            "--tmpfs",
+            "/workspace:rw,noexec,nosuid,size=16m,uid=65532,gid=65532,mode=0755",
+            "--tmpfs",
+            "/output:rw,noexec,nosuid,size=2m,uid=65532,gid=65532,mode=0755",
+            "--entrypoint",
+            "/opt/venv/bin/python",
+            image,
+            "-I",
+            "-c",
+            probe,
+        ),
+    ]
+
+
+def test_required_live_linux_probe_propagates_probe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = "openworkproof/execution-test@sha256:" + "a" * 64
+
+    def fake_run(command, **kwargs):
+        command = tuple(command)
+        if command[1] in {"info", "image"}:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.CompletedProcess(command, 73, "partial\n", "denied\n")
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("OPENWORKPROOF_REQUIRE_LIVE_DOCKER", "1")
+    monkeypatch.setenv("OPENWORKPROOF_DOCKER", sys.executable)
+    monkeypatch.setenv("OPENWORKPROOF_DOCKER_TEST_IMAGE", image)
+
+    with pytest.raises(pytest.fail.Exception, match="exited 73.*denied"):
+        _run_required_live_linux_probe("raise SystemExit(73)", run=fake_run)
+
+
 def _linux_dev_null_stat(path: Path) -> SimpleNamespace:
     assert path == Path("/dev/null")
     return SimpleNamespace(
@@ -855,13 +1273,12 @@ def test_landlock_child_setup_failure_never_executes_candidate_or_publishes_resu
     assert not (output / "result.json").exists()
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux"),
-    reason="real Landlock enforcement requires Linux",
-)
 def test_landlock_blocks_forged_markers_aliases_and_workspace_writes(
     tmp_path: Path,
 ) -> None:
+    if not sys.platform.startswith("linux"):
+        _run_required_live_linux_probe(_FORGED_MARKER_LINUX_PROBE)
+        return
     workspace, output, _, contract = _write_workspace(tmp_path)
     scratch = tmp_path / "scratch"
     scratch.mkdir()
@@ -928,12 +1345,14 @@ def test_landlock_blocks_forged_markers_aliases_and_workspace_writes(
     assert not (scratch / "started-alias").exists()
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux")
-    or not Path(runner.FROZEN_VERIFIER_ARGV[0]).is_file(),
-    reason="exact frozen verifier Landlock regression requires the Linux execution image",
-)
 def test_exact_frozen_verifier_argv_runs_under_landlock(tmp_path: Path) -> None:
+    if not sys.platform.startswith("linux"):
+        _run_required_live_linux_probe(_EXACT_COMMAND_LINUX_PROBE)
+        return
+    if not Path(runner.FROZEN_VERIFIER_ARGV[0]).is_file():
+        pytest.skip(
+            "exact frozen verifier Landlock regression requires the Linux execution image"
+        )
     workspace, output, _, _ = _write_workspace(tmp_path)
     scratch = tmp_path / "scratch"
     scratch.mkdir()

@@ -1743,8 +1743,9 @@ def _verify_live_docker(inventory: dict[str, object]) -> None:
         names["execution"],
         "--user",
         str(execution["user"]),
-        str(execution["local_image_id"]),
+        "--entrypoint",
         "/opt/venv/bin/python",
+        str(execution["local_image_id"]),
         "-I",
         "-c",
         execution_check,
@@ -1817,6 +1818,110 @@ def _verify_live_docker(inventory: dict[str, object]) -> None:
     assert result.stdout == "" and result.stderr == ""
     for name in names.values():
         assert _docker(docker, "container", "inspect", name, check=False).returncode != 0
+
+
+def test_live_execution_probe_overrides_frozen_runner_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution = {
+        "candidate_name": "openworkproof/execution-test:revision",
+        "local_image_id": "sha256:" + "a" * 64,
+        "local_repo_digests": ["openworkproof/execution-test@sha256:" + "a" * 64],
+        "platform": "linux/arm64",
+        "user": "65532:65532",
+        "entrypoint": [
+            "/opt/venv/bin/python",
+            "-I",
+            "/opt/openworkproof/run_tests_runner.py",
+        ],
+        "cmd": ["execute"],
+        "labels": {"org.openworkproof.image.role": "execution-test"},
+    }
+    helper = {
+        "candidate_name": "openworkproof/trusted-helper-candidate:revision",
+        "local_image_id": "sha256:" + "b" * 64,
+        "local_repo_digests": [
+            "openworkproof/trusted-helper-candidate@sha256:" + "b" * 64
+        ],
+        "platform": "linux/arm64",
+        "user": "65532:65532",
+        "entrypoint": ["/opt/venv/bin/python", "-I", "/opt/openworkproof/dispatch.py"],
+        "cmd": None,
+        "labels": {"org.openworkproof.image.role": "trusted-helper"},
+    }
+    details = {
+        image["candidate_name"]: {
+            "Id": image["local_image_id"],
+            "RepoDigests": image["local_repo_digests"],
+            "Os": "linux",
+            "Architecture": "arm64",
+            "Config": {
+                "User": image["user"],
+                "Entrypoint": image["entrypoint"],
+                "Cmd": image["cmd"],
+                "Labels": image["labels"],
+            },
+        }
+        for image in (execution, helper)
+    }
+    commands: list[tuple[str, ...]] = []
+
+    def fake_docker(executable: str, *args: str, check: bool = True):
+        assert executable == "/usr/bin/docker"
+        commands.append(args)
+        if args == ("info",):
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:2] == ("image", "inspect"):
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                json.dumps([details[args[2]]]),
+                "",
+            )
+        if args[:2] == ("container", "inspect"):
+            return subprocess.CompletedProcess(args, 1, "", "missing")
+        assert args[0] == "run"
+        name = args[args.index("--name") + 1]
+        if name.endswith(("helper-empty", "helper-argv")):
+            return subprocess.CompletedProcess(args, 64, REQUEST_INVALID_RESPONSE, "")
+        if name.endswith("helper-git"):
+            return subprocess.CompletedProcess(args, 0, "git version 2.47.3\n", "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setenv("OPENWORKPROOF_DOCKER", "/usr/bin/docker")
+    monkeypatch.setattr(sys.modules[__name__], "_docker", fake_docker)
+
+    _verify_live_docker({"images": {"execution": execution, "trusted_helper": helper}})
+
+    execution_probe = next(
+        command
+        for command in commands
+        if command[:2] == ("run", "--rm")
+        and command[command.index("--name") + 1].endswith("-execution")
+    )
+    assert execution_probe == (
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--name",
+        f"owp-supplychain-{os.getpid()}-execution",
+        "--user",
+        "65532:65532",
+        "--entrypoint",
+        "/opt/venv/bin/python",
+        execution["local_image_id"],
+        "-I",
+        "-c",
+        (
+            "import importlib.util as u; import pytest; "
+            "assert pytest.__version__ == '9.1.1'; "
+            "assert u.find_spec('rich') is None; "
+            "assert u.find_spec('openworkproof') is None; "
+            "assert u.find_spec('mcp') is None"
+        ),
+    )
 
 
 def _build_context_identity(
