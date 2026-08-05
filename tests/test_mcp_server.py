@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 import hashlib
 import json
@@ -387,6 +388,272 @@ def _run_tests_contract(case) -> repo_tools.RunTestsExecutionContract:
     )
 
 
+def _run_tests_snapshot_request(
+    case,
+    runtime_root: Path,
+) -> repo_tools.CandidateExecutionSnapshotRequest:
+    return repo_tools.CandidateExecutionSnapshotRequest(
+        runtime_root=runtime_root,
+        workspace_id="c" * 64,
+        source_artifact_sha256=(
+            case["work_order"].replay_profile.source_artifact_sha256
+        ),
+        expected_head_commit=case["arguments"].candidate_commit,
+        expected_workspace_manifest_digest=(
+            case["arguments"].workspace_manifest_digest
+        ),
+    )
+
+
+def _run_tests_snapshot(case) -> repo_tools.CandidateExecutionSnapshot:
+    return repo_tools.CandidateExecutionSnapshot(
+        head_commit=case["arguments"].candidate_commit,
+        workspace_manifest_digest=case["arguments"].workspace_manifest_digest,
+        plan=repo_tools.ExecutionSnapshotPlan(
+            files=(),
+            read_only=True,
+            owner_uid=65532,
+            owner_gid=65532,
+            atime_unix_seconds=0,
+            mtime_unix_seconds=0,
+            clear_extended_attributes=True,
+            clear_posix_acls=True,
+            clear_file_capabilities=True,
+        ),
+    )
+
+
+def _closed_run_tests_outcome(
+    contract: repo_tools.RunTestsExecutionContract,
+    *,
+    actual_exit_code: int | None = 0,
+    failure_code: repo_tools.RunTestsFailureCode | None = None,
+) -> repo_tools.RunTestsExecutionOutcome:
+    contract_digest = hashlib.sha256(
+        repo_tools.encode_run_tests_execution_contract(contract)
+    ).hexdigest()
+    empty_digest = hashlib.sha256(b"").hexdigest()
+    return repo_tools.RunTestsExecutionOutcome(
+        "CLOSED_RESULT",
+        repo_tools.RunTestsResultEnvelope(
+            execution_id=contract.execution_id,
+            execution_contract_digest=contract_digest,
+            actual_exit_code=actual_exit_code,
+            failure_code=failure_code,
+            stdout_bytes=0,
+            stdout_sha256=empty_digest,
+            stderr_bytes=0,
+            stderr_sha256=empty_digest,
+        ),
+    )
+
+
+class _FakeRunTestsExecutionDriver:
+    def __init__(
+        self,
+        *,
+        actual_exit_code: int | None = 0,
+        failure_code: repo_tools.RunTestsFailureCode | None = None,
+        preparation_action: str = "READY_TO_START",
+        reconciliation_outcomes: tuple[
+            repo_tools.RunTestsExecutionOutcome, ...
+        ] = (),
+        cleanup_error: Exception | None = None,
+        reconciliation_error: Exception | None = None,
+        start_error: Exception | None = None,
+        start_outcome: repo_tools.RunTestsExecutionOutcome | None = None,
+        prepare_exit_code: int | None = None,
+        start_exit_code: int | None = None,
+    ) -> None:
+        self.actual_exit_code = actual_exit_code
+        self.failure_code = failure_code
+        self.preparation_action = preparation_action
+        self.reconciliation_outcomes = list(reconciliation_outcomes)
+        self.cleanup_error = cleanup_error
+        self.reconciliation_error = reconciliation_error
+        self.start_error = start_error
+        self.start_outcome = start_outcome
+        self.prepare_exit_code = prepare_exit_code
+        self.start_exit_code = start_exit_code
+        self.calls: list[tuple[object, ...]] = []
+
+    def prepare(self, contract, snapshot):
+        self.calls.append(("prepare", contract, snapshot))
+        if self.prepare_exit_code is not None:
+            os._exit(self.prepare_exit_code)
+        return repo_tools.RunTestsPreparationOutcome(self.preparation_action)
+
+    def start_and_wait(self, contract):
+        self.calls.append(("start_and_wait", contract))
+        if self.start_error is not None:
+            raise self.start_error
+        if self.start_exit_code is not None:
+            os._exit(self.start_exit_code)
+        if self.start_outcome is not None:
+            return self.start_outcome
+        return _closed_run_tests_outcome(
+            contract,
+            actual_exit_code=self.actual_exit_code,
+            failure_code=self.failure_code,
+        )
+
+    def reconcile(self, contract, journal_state, receipt_state):
+        self.calls.append(
+            ("reconcile", contract, journal_state, receipt_state)
+        )
+        if self.reconciliation_error is not None:
+            raise self.reconciliation_error
+        if self.reconciliation_outcomes:
+            return self.reconciliation_outcomes.pop(0)
+        return repo_tools.RunTestsExecutionOutcome("UNRESOLVED")
+
+    def cleanup(self, contract):
+        self.calls.append(("cleanup", contract))
+        if self.cleanup_error is not None:
+            raise self.cleanup_error
+
+
+@pytest.fixture(autouse=True)
+def _stub_candidate_execution_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def prepare(
+        request: repo_tools.CandidateExecutionSnapshotRequest,
+    ) -> repo_tools.CandidateExecutionSnapshot:
+        return repo_tools.CandidateExecutionSnapshot(
+            head_commit=request.expected_head_commit,
+            workspace_manifest_digest=(
+                request.expected_workspace_manifest_digest
+            ),
+            plan=repo_tools.ExecutionSnapshotPlan(
+                files=(),
+                read_only=True,
+                owner_uid=65532,
+                owner_gid=65532,
+                atime_unix_seconds=0,
+                mtime_unix_seconds=0,
+                clear_extended_attributes=True,
+                clear_posix_acls=True,
+                clear_file_capabilities=True,
+            ),
+        )
+
+    monkeypatch.setattr(
+        repo_tools,
+        "prepare_candidate_execution_snapshot",
+        prepare,
+    )
+
+
+def _reserve_run_tests_execution(case, *, started: bool) -> None:
+    contract = _run_tests_contract(case)
+    lock_descriptor = evidence._acquire_target_lock(case["ledger_path"])
+    try:
+        mcp_server._reserve_handler_execution(
+            case["ledger_path"],
+            lock_descriptor,
+            case["context"],
+            case["request"],
+            case["facts"],
+            contract,
+        )
+        if started:
+            mcp_server._mark_handler_started(
+                case["ledger_path"],
+                lock_descriptor,
+                contract.execution_id,
+            )
+    finally:
+        evidence._release_target_lock(lock_descriptor)
+
+
+def _current_run_tests_context(case, now: datetime):
+    receipts, grants, attempts = _grant_replay_inputs(
+        case["ledger_path"], case["work_order"]
+    )
+    committed = []
+    verified = []
+    for receipt in receipts:
+        for reference in receipt.evidence_refs:
+            path = (
+                case["evidence_root"]
+                / reference.path.removeprefix("evidence/")
+            )
+            payload = path.read_bytes()
+            committed.append(
+                CommittedEvidence(reference=reference, payload=payload)
+            )
+            if reference.path.startswith("evidence/verifier-result/"):
+                verified.append(ResultEvidence.model_validate_json(payload))
+    checkpoint = case["context"].replay_checkpoint
+    return derive_authorization_context(
+        case["work_order"],
+        AuthorizationLedgerPrefix(
+            effective_grants=tuple(
+                sorted(grants.values(), key=lambda item: item.grant_id)
+            ),
+            grant_attempts=tuple(
+                sorted(attempts.values(), key=lambda item: item.digest)
+            ),
+            receipts=receipts,
+        ),
+        tuple(committed),
+        ReplayCheckpoint(
+            files=checkpoint.files,
+            head_commit=checkpoint.head_commit,
+            workspace_manifest=checkpoint.workspace_manifest,
+            workspace_manifest_digest=checkpoint.workspace_manifest_digest,
+            verified_test_results=tuple(verified),
+        ),
+        now,
+    )
+
+
+def _execute_run_tests_case(
+    case,
+    tmp_path: Path,
+    role_keys,
+    execution_driver: _FakeRunTestsExecutionDriver,
+    *,
+    context=None,
+    request=None,
+    request_arguments=None,
+    execution_facts=None,
+    candidate_snapshot_request=None,
+    sidecar_private_key=None,
+    now: datetime | None = None,
+):
+    selected_context = case["context"] if context is None else context
+    return execute_run_tests(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=selected_context,
+        request=case["request"] if request is None else request,
+        request_arguments=(
+            case["arguments"]
+            if request_arguments is None
+            else request_arguments
+        ),
+        execution_facts=(
+            case["facts"] if execution_facts is None else execution_facts
+        ),
+        candidate_snapshot_request=(
+            _run_tests_snapshot_request(case, tmp_path.resolve())
+            if candidate_snapshot_request is None
+            else candidate_snapshot_request
+        ),
+        sidecar_private_key=(
+            role_keys["Sidecar"][0]
+            if sidecar_private_key is None
+            else sidecar_private_key
+        ),
+        execution_driver=execution_driver,
+        clock=lambda: (
+            selected_context.transaction_time if now is None else now
+        ),
+    )
+
+
 def _request_for_grant(case, grant, role_keys) -> AgentRequest:
     binding = next(
         item
@@ -418,6 +685,47 @@ def _request_for_grant(case, grant, role_keys) -> AgentRequest:
             },
             role_keys[role][0],
         )
+    )
+
+
+def _replacement_run_tests_request(case, role_keys) -> AgentRequest:
+    raw = case["request"].model_dump(
+        mode="json",
+        exclude={"digest", "signature_alg", "signer_key_id", "signature"},
+    )
+    raw.update(
+        {
+            "nonce": _grant_id("handler-loop:replacement-test-request"),
+            "model_id": "replacement-model",
+            "model_version": "2",
+            "prompt_template_digest": "d" * 64,
+            "context_source_digest": "e" * 64,
+        }
+    )
+    return AgentRequest.model_validate(
+        sign_payload("agent-request", raw, role_keys["Verifier"][0])
+    )
+
+
+def _run_tests_request_for_arguments(
+    case,
+    arguments: RunTestsArguments,
+    role_keys,
+) -> AgentRequest:
+    raw = case["request"].model_dump(
+        mode="json",
+        exclude={"digest", "signature_alg", "signer_key_id", "signature"},
+    )
+    raw.update(
+        {
+            "arguments_digest": request_arguments_digest(
+                "owp.run_tests", arguments
+            ),
+            "nonce": _grant_id("handler-loop:changed-test-request"),
+        }
+    )
+    return AgentRequest.model_validate(
+        sign_payload("agent-request", raw, role_keys["Verifier"][0])
     )
 
 
@@ -655,6 +963,7 @@ def test_handler_journal_persists_and_loads_exact_recovery_fields(
         execution_id=execution_id,
         request=case["request"],
         contract=contract,
+        execution_facts=case["facts"],
         reserved_at=fixed_now,
         state="RESERVED",
     )
@@ -676,6 +985,40 @@ def test_handler_journal_persists_and_loads_exact_recovery_fields(
         contract_bytes.decode("utf-8"),
         hashlib.sha256(contract_bytes).hexdigest(),
     )
+
+
+def test_generic_journal_recovery_never_discards_reserved_run_tests(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    _reserve_run_tests_execution(case, started=False)
+    lock_descriptor = evidence._acquire_target_lock(case["ledger_path"])
+    try:
+        with pytest.raises(
+            HandlerCoordinationError, match="RECOVERY_REQUIRED"
+        ):
+            mcp_server._recover_handler_executions(
+                case["ledger_path"], lock_descriptor
+            )
+    finally:
+        evidence._release_target_lock(lock_descriptor)
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT state FROM handler_executions"
+        ).fetchone() == ("RESERVED",)
+    finally:
+        connection.close()
 
 
 def test_handler_journal_recovery_fields_reject_mixed_tool_rows(
@@ -863,12 +1206,13 @@ def test_handler_journal_recovery_fields_reject_tampering(
         evidence._release_target_lock(lock_descriptor)
 
 
-def test_execute_run_tests_completes_authorize_handler_publish_loop(
+def test_execute_run_tests_completes_authorize_driver_publish_loop(
     tmp_path: Path,
     signed_work_order: WorkOrder,
     ephemeral_role_keys,
     sidecar_receipt_factory,
     fixed_now: datetime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     case = _run_tests_case(
         tmp_path=tmp_path,
@@ -877,26 +1221,30 @@ def test_execute_run_tests_completes_authorize_handler_publish_loop(
         sidecar_receipt_factory=sidecar_receipt_factory,
         now=fixed_now,
     )
-    calls = []
+    snapshot_request = _run_tests_snapshot_request(case, tmp_path.resolve())
+    snapshot = _run_tests_snapshot(case)
+    monkeypatch.setattr(
+        repo_tools,
+        "prepare_candidate_execution_snapshot",
+        lambda request: snapshot
+        if request == snapshot_request
+        else pytest.fail("unexpected candidate snapshot request"),
+    )
+    driver = _FakeRunTestsExecutionDriver()
 
-    def handler(arguments: RunTestsArguments) -> int:
-        calls.append(arguments)
-        return 0
-
-    receipt = execute_run_tests(
-        case["ledger_path"],
-        evidence_root=case["evidence_root"],
-        context=case["context"],
-        request=case["request"],
-        request_arguments=case["arguments"],
-        execution_contract=_run_tests_contract(case),
-        execution_facts=case["facts"],
-        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
-        handler=handler,
-        clock=lambda: fixed_now,
+    receipt = _execute_run_tests_case(
+        case,
+        tmp_path,
+        ephemeral_role_keys,
+        driver,
+        candidate_snapshot_request=snapshot_request,
     )
 
-    assert calls == [case["arguments"]]
+    assert [call[0] for call in driver.calls] == [
+        "prepare",
+        "start_and_wait",
+        "cleanup",
+    ]
     assert receipt.policy_decision == "allow"
     assert receipt.execution_status == "succeeded"
     assert receipt.state_before == "running"
@@ -926,7 +1274,185 @@ def test_execute_run_tests_completes_authorize_handler_publish_loop(
         connection.close()
 
 
-def test_execute_run_tests_commits_started_handler_failure_without_evidence(
+def test_execute_run_tests_recovers_old_closed_result_without_reauthorization(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    contract = _run_tests_contract(case)
+    lock_descriptor = evidence._acquire_target_lock(case["ledger_path"])
+    try:
+        mcp_server._reserve_handler_execution(
+            case["ledger_path"],
+            lock_descriptor,
+            case["context"],
+            case["request"],
+            case["facts"],
+            contract,
+        )
+        mcp_server._mark_handler_started(
+            case["ledger_path"], lock_descriptor, contract.execution_id
+        )
+    finally:
+        evidence._release_target_lock(lock_descriptor)
+    driver = _FakeRunTestsExecutionDriver(
+        reconciliation_outcomes=(_closed_run_tests_outcome(contract),)
+    )
+    replacement_request = _replacement_run_tests_request(
+        case, ephemeral_role_keys
+    )
+
+    receipt = _execute_run_tests_case(
+        case,
+        tmp_path,
+        ephemeral_role_keys,
+        driver,
+        request=replacement_request,
+    )
+
+    assert receipt.nested_claim == case["request"]
+    assert receipt.nonce == case["request"].nonce
+    assert receipt.nonce != replacement_request.nonce
+    assert [call[0] for call in driver.calls] == ["reconcile", "cleanup"]
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM grant_events WHERE receipt_id = ?",
+            (receipt.receipt_id,),
+        ).fetchone() == (1,)
+    finally:
+        connection.close()
+
+
+def test_execute_run_tests_receipt_mismatch_remains_unresolved(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    committed = _execute_run_tests_case(
+        case,
+        tmp_path,
+        ephemeral_role_keys,
+        _FakeRunTestsExecutionDriver(),
+    )
+    current_context = _current_run_tests_context(case, fixed_now)
+    stored_facts = ProspectiveExecutionFacts(
+        execution_context_id="9" * 64,
+        container_instance_id_digest="8" * 64,
+        controller_id=case["facts"].controller_id,
+    )
+    contract = replace(
+        _run_tests_contract(case),
+        execution_id=mcp_server._handler_execution_id(
+            case["request"], stored_facts
+        ),
+    )
+    lock_descriptor = evidence._acquire_target_lock(case["ledger_path"])
+    try:
+        mcp_server._reserve_handler_execution(
+            case["ledger_path"],
+            lock_descriptor,
+            current_context,
+            case["request"],
+            stored_facts,
+            contract,
+        )
+        mcp_server._mark_handler_started(
+            case["ledger_path"], lock_descriptor, contract.execution_id
+        )
+    finally:
+        evidence._release_target_lock(lock_descriptor)
+    driver = _FakeRunTestsExecutionDriver(
+        reconciliation_outcomes=(
+            repo_tools.RunTestsExecutionOutcome("UNRESOLVED"),
+        )
+    )
+
+    with pytest.raises(HandlerCoordinationError, match="RECOVERY_REQUIRED"):
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            driver,
+            context=current_context,
+            request=_replacement_run_tests_request(case, ephemeral_role_keys),
+        )
+
+    assert driver.calls[0][2:] == ("STARTED_UNCONFIRMED", "MISMATCH")
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT execution_id, state FROM handler_executions"
+        ).fetchone() == (contract.execution_id, "STARTED_UNCONFIRMED")
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE nonce = ?",
+            (case["request"].nonce,),
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT receipt_id FROM receipts WHERE nonce = ?",
+            (case["request"].nonce,),
+        ).fetchone() == (committed.receipt_id,)
+    finally:
+        connection.close()
+
+
+def test_execute_run_tests_wrong_recovery_sidecar_never_calls_driver(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    _reserve_run_tests_execution(case, started=True)
+    driver = _FakeRunTestsExecutionDriver()
+
+    with pytest.raises(HandlerCoordinationError, match="RECOVERY_REQUIRED"):
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            driver,
+            sidecar_private_key=ephemeral_role_keys["Maintainer"][0],
+        )
+    assert driver.calls == []
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT state FROM handler_executions"
+        ).fetchone() == ("STARTED_UNCONFIRMED",)
+    finally:
+        connection.close()
+
+
+def test_execute_run_tests_commits_unexpected_exit_as_needs_rework(
     tmp_path: Path,
     signed_work_order: WorkOrder,
     ephemeral_role_keys,
@@ -941,29 +1467,55 @@ def test_execute_run_tests_commits_started_handler_failure_without_evidence(
         now=fixed_now,
     )
 
-    def handler(arguments: RunTestsArguments) -> int:
-        del arguments
-        raise RuntimeError("secret infrastructure detail")
-
-    receipt = execute_run_tests(
-        case["ledger_path"],
-        evidence_root=case["evidence_root"],
-        context=case["context"],
-        request=case["request"],
-        request_arguments=case["arguments"],
-        execution_contract=_run_tests_contract(case),
-        execution_facts=case["facts"],
-        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
-        handler=handler,
-        clock=lambda: fixed_now,
+    receipt = _execute_run_tests_case(
+        case,
+        tmp_path,
+        ephemeral_role_keys,
+        _FakeRunTestsExecutionDriver(actual_exit_code=1),
     )
 
+    assert receipt.execution_status == "succeeded"
+    assert receipt.execution_error_code is None
+    assert receipt.state_before == "running"
+    assert receipt.state_after == "needs_rework"
+    assert len(receipt.evidence_refs) == 1
+    payload = (
+        case["evidence_root"]
+        / receipt.evidence_refs[0].path.removeprefix("evidence/")
+    ).read_bytes()
+    assert ResultEvidence.model_validate_json(payload).actual_exit_code == 1
+
+
+@pytest.mark.parametrize("failure_code", ("OUTPUT_LIMIT", "TIMEOUT", "DISK_LIMIT"))
+def test_execute_run_tests_commits_each_closed_infrastructure_failure(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+    failure_code: repo_tools.RunTestsFailureCode,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    receipt = _execute_run_tests_case(
+        case,
+        tmp_path,
+        ephemeral_role_keys,
+        _FakeRunTestsExecutionDriver(
+            actual_exit_code=None,
+            failure_code=failure_code,
+        ),
+    )
     assert receipt.execution_status == "failed"
-    assert receipt.execution_error_code == "HANDLER_ERROR"
-    assert receipt.state_before == receipt.state_after == "running"
+    assert receipt.execution_error_code == failure_code
     assert receipt.evidence_refs == ()
+    assert receipt.state_before == receipt.state_after == "running"
     assert receipt.quota_charge.remaining_after == 0
-    assert "secret" not in receipt.model_dump_json()
     connection = evidence.connect_ledger(case["ledger_path"])
     try:
         assert connection.execute(
@@ -974,6 +1526,143 @@ def test_execute_run_tests_commits_started_handler_failure_without_evidence(
             "SELECT COUNT(*) FROM grant_events WHERE receipt_id = ?",
             (receipt.receipt_id,),
         ).fetchone() == (1,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("action", ("WAIT_RUNNING", "UNRESOLVED"))
+def test_execute_run_tests_retains_started_journal_for_unclosed_outcome(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+    action: str,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    driver = _FakeRunTestsExecutionDriver(
+        start_outcome=repo_tools.RunTestsExecutionOutcome(action)
+    )
+    with pytest.raises(HandlerCoordinationError, match="RECOVERY_REQUIRED"):
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            driver,
+        )
+    assert [call[0] for call in driver.calls] == ["prepare", "start_and_wait"]
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT state FROM handler_executions"
+        ).fetchone() == ("STARTED_UNCONFIRMED",)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE nonce = ?",
+            (case["request"].nonce,),
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("recovery_action", ("SAFE_TO_RETRY", "UNRESOLVED"))
+def test_execute_run_tests_reconciles_uncertain_preparation_without_start(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+    recovery_action: str,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    driver = _FakeRunTestsExecutionDriver(
+        preparation_action="UNRESOLVED",
+        reconciliation_outcomes=(
+            repo_tools.RunTestsExecutionOutcome(recovery_action),
+        ),
+    )
+    with pytest.raises(HandlerCoordinationError, match="RECOVERY_REQUIRED"):
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            driver,
+        )
+    assert [call[0] for call in driver.calls] == ["prepare", "reconcile"]
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        expected_rows = 0 if recovery_action == "SAFE_TO_RETRY" else 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (expected_rows,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE nonce = ?",
+            (case["request"].nonce,),
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("failure_at", ("reconcile", "start"))
+def test_execute_run_tests_maps_driver_uncertainty_to_recovery_required(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+    failure_at: str,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    driver = _FakeRunTestsExecutionDriver(
+        preparation_action=(
+            "UNRESOLVED" if failure_at == "reconcile" else "READY_TO_START"
+        ),
+        reconciliation_error=(
+            RuntimeError("uncertain reconcile")
+            if failure_at == "reconcile"
+            else None
+        ),
+        start_error=(
+            RuntimeError("uncertain start") if failure_at == "start" else None
+        ),
+    )
+
+    with pytest.raises(HandlerCoordinationError, match="RECOVERY_REQUIRED"):
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            driver,
+        )
+
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT state FROM handler_executions"
+        ).fetchone() == (
+            "RESERVED" if failure_at == "reconcile" else "STARTED_UNCONFIRMED",
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE nonce = ?",
+            (case["request"].nonce,),
+        ).fetchone() == (0,)
     finally:
         connection.close()
 
@@ -1006,17 +1695,12 @@ def test_execute_run_tests_denial_never_starts_handler_or_writes(
         connection.close()
 
     with pytest.raises(ToolCallDenied) as captured:
-        execute_run_tests(
-            case["ledger_path"],
-            evidence_root=case["evidence_root"],
-            context=case["context"],
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            _FakeRunTestsExecutionDriver(),
             request=request,
-            request_arguments=case["arguments"],
-            execution_contract=_run_tests_contract(case),
-            execution_facts=case["facts"],
-            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
-            handler=lambda _: pytest.fail("denied handler started"),
-            clock=lambda: fixed_now,
         )
 
     assert captured.value.decision.error_code == "ROLE_DENIED"
@@ -1025,6 +1709,96 @@ def test_execute_run_tests_denial_never_starts_handler_or_writes(
         assert connection.execute(
             "SELECT COUNT(*), MAX(sequence) FROM receipts"
         ).fetchone() == before
+    finally:
+        connection.close()
+
+
+def test_execute_run_tests_wrong_frozen_command_never_calls_driver(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    arguments = case["arguments"].model_copy(
+        update={"command_digest": "0" * 64}
+    )
+    request = _run_tests_request_for_arguments(
+        case, arguments, ephemeral_role_keys
+    )
+    driver = _FakeRunTestsExecutionDriver()
+
+    with pytest.raises(ToolCallDenied):
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            driver,
+            request=request,
+            request_arguments=arguments,
+        )
+
+    assert driver.calls == []
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("source_artifact_sha256", "0" * 64),
+        ("expected_head_commit", "0" * 40),
+        ("expected_workspace_manifest_digest", "0" * 64),
+    ),
+)
+def test_execute_run_tests_rejects_snapshot_binding_before_driver(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+    field: str,
+    value: str,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    request = _run_tests_snapshot_request(case, tmp_path.resolve())
+    request = replace(request, **{field: value})
+    driver = _FakeRunTestsExecutionDriver()
+
+    with pytest.raises(
+        HandlerCoordinationError, match="execution binding is invalid"
+    ):
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            driver,
+            candidate_snapshot_request=request,
+        )
+    assert driver.calls == []
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
     finally:
         connection.close()
 
@@ -1043,34 +1817,22 @@ def test_execute_run_tests_rejects_stale_context_before_second_handler(
         sidecar_receipt_factory=sidecar_receipt_factory,
         now=fixed_now,
     )
-    execute_run_tests(
-        case["ledger_path"],
-        evidence_root=case["evidence_root"],
-        context=case["context"],
-        request=case["request"],
-        request_arguments=case["arguments"],
-        execution_contract=_run_tests_contract(case),
-        execution_facts=case["facts"],
-        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
-        handler=lambda _: 0,
-        clock=lambda: fixed_now,
+    _execute_run_tests_case(
+        case,
+        tmp_path,
+        ephemeral_role_keys,
+        _FakeRunTestsExecutionDriver(),
     )
 
     with pytest.raises(
         HandlerCoordinationError,
         match="current ledger snapshot",
     ):
-        execute_run_tests(
-            case["ledger_path"],
-            evidence_root=case["evidence_root"],
-            context=case["context"],
-            request=case["request"],
-            request_arguments=case["arguments"],
-            execution_contract=_run_tests_contract(case),
-            execution_facts=case["facts"],
-            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
-            handler=lambda _: pytest.fail("stale handler started"),
-            clock=lambda: fixed_now,
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            _FakeRunTestsExecutionDriver(),
         )
 
 
@@ -1110,21 +1872,67 @@ def test_execute_run_tests_rejects_missing_evidence_capacity_before_handler(
         HandlerCoordinationError,
         match="EVIDENCE_SLOT_UNAVAILABLE",
     ):
-        execute_run_tests(
-            case["ledger_path"],
-            evidence_root=case["evidence_root"],
-            context=case["context"],
-            request=case["request"],
-            request_arguments=case["arguments"],
-            execution_contract=_run_tests_contract(case),
-            execution_facts=case["facts"],
-            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
-            handler=lambda _: pytest.fail("unreserved handler started"),
-            clock=lambda: fixed_now,
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            _FakeRunTestsExecutionDriver(),
         )
 
 
-def test_execute_run_tests_blocks_after_started_handler_process_crash(
+def test_run_tests_capacity_preflight_builds_every_closed_receipt_shape(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    calls = []
+    real_build = mcp_server._build_run_tests_receipt
+
+    def record(*args, **kwargs):
+        calls.append(
+            (
+                kwargs["execution_status"],
+                kwargs["actual_exit_code"],
+                kwargs["execution_error_code"],
+            )
+        )
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(mcp_server, "_build_run_tests_receipt", record)
+    monkeypatch.setattr(mcp_server, "_MAX_RECEIPT_BYTES", 0)
+    driver = _FakeRunTestsExecutionDriver()
+
+    with pytest.raises(
+        HandlerCoordinationError, match="BUNDLE_CAPACITY_EXCEEDED"
+    ):
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            driver,
+        )
+
+    assert calls == [
+        ("succeeded", 0, None),
+        ("succeeded", 1, None),
+        ("failed", None, "OUTPUT_LIMIT"),
+        ("failed", None, "TIMEOUT"),
+        ("failed", None, "DISK_LIMIT"),
+    ]
+    assert driver.calls == []
+
+
+def test_execute_run_tests_retains_started_execution_while_driver_waits(
     tmp_path: Path,
     signed_work_order: WorkOrder,
     ephemeral_role_keys,
@@ -1138,25 +1946,7 @@ def test_execute_run_tests_blocks_after_started_handler_process_crash(
         sidecar_receipt_factory=sidecar_receipt_factory,
         now=fixed_now,
     )
-    child = os.fork()
-    if child == 0:
-        execute_run_tests(
-            case["ledger_path"],
-            evidence_root=case["evidence_root"],
-            context=case["context"],
-            request=case["request"],
-            request_arguments=case["arguments"],
-            execution_contract=_run_tests_contract(case),
-            execution_facts=case["facts"],
-            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
-            handler=lambda _: os._exit(73),
-            clock=lambda: fixed_now,
-        )
-        os._exit(74)
-
-    _, status = os.waitpid(child, 0)
-    assert os.WIFEXITED(status)
-    assert os.WEXITSTATUS(status) == 73
+    _reserve_run_tests_execution(case, started=True)
     connection = evidence.connect_ledger(case["ledger_path"])
     try:
         before = connection.execute(
@@ -1175,20 +1965,21 @@ def test_execute_run_tests_blocks_after_started_handler_process_crash(
     finally:
         connection.close()
 
+    driver = _FakeRunTestsExecutionDriver(
+        reconciliation_outcomes=(
+            repo_tools.RunTestsExecutionOutcome("WAIT_RUNNING"),
+        )
+    )
     with pytest.raises(HandlerCoordinationError, match="RECOVERY_REQUIRED"):
-        execute_run_tests(
-            case["ledger_path"],
-            evidence_root=case["evidence_root"],
-            context=case["context"],
-            request=case["request"],
-            request_arguments=case["arguments"],
-            execution_contract=_run_tests_contract(case),
-            execution_facts=case["facts"],
-            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
-            handler=lambda _: pytest.fail("uncertain handler restarted"),
-            clock=lambda: fixed_now,
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            driver,
         )
 
+    assert [call[0] for call in driver.calls] == ["reconcile"]
+    assert driver.calls[0][2:] == ("STARTED_UNCONFIRMED", "ABSENT")
     connection = evidence.connect_ledger(case["ledger_path"])
     try:
         assert connection.execute(
@@ -1201,13 +1992,12 @@ def test_execute_run_tests_blocks_after_started_handler_process_crash(
         connection.close()
 
 
-def test_execute_run_tests_retries_after_reserved_only_process_crash(
+def test_execute_run_tests_retries_after_safe_reserved_recovery(
     tmp_path: Path,
     signed_work_order: WorkOrder,
     ephemeral_role_keys,
     sidecar_receipt_factory,
     fixed_now: datetime,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     case = _run_tests_case(
         tmp_path=tmp_path,
@@ -1216,36 +2006,7 @@ def test_execute_run_tests_retries_after_reserved_only_process_crash(
         sidecar_receipt_factory=sidecar_receipt_factory,
         now=fixed_now,
     )
-    real_mark_started = mcp_server._mark_handler_started
-    monkeypatch.setattr(
-        mcp_server,
-        "_mark_handler_started",
-        lambda *_: os._exit(75),
-    )
-    child = os.fork()
-    if child == 0:
-        execute_run_tests(
-            case["ledger_path"],
-            evidence_root=case["evidence_root"],
-            context=case["context"],
-            request=case["request"],
-            request_arguments=case["arguments"],
-            execution_contract=_run_tests_contract(case),
-            execution_facts=case["facts"],
-            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
-            handler=lambda _: os._exit(76),
-            clock=lambda: fixed_now,
-        )
-        os._exit(77)
-
-    _, status = os.waitpid(child, 0)
-    assert os.WIFEXITED(status)
-    assert os.WEXITSTATUS(status) == 75
-    monkeypatch.setattr(
-        mcp_server,
-        "_mark_handler_started",
-        real_mark_started,
-    )
+    _reserve_run_tests_execution(case, started=False)
     connection = evidence.connect_ledger(case["ledger_path"])
     try:
         before = connection.execute(
@@ -1257,20 +2018,26 @@ def test_execute_run_tests_retries_after_reserved_only_process_crash(
     finally:
         connection.close()
 
-    receipt = execute_run_tests(
-        case["ledger_path"],
-        evidence_root=case["evidence_root"],
-        context=case["context"],
-        request=case["request"],
-        request_arguments=case["arguments"],
-        execution_contract=_run_tests_contract(case),
-        execution_facts=case["facts"],
-        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
-        handler=lambda _: 0,
-        clock=lambda: fixed_now,
+    driver = _FakeRunTestsExecutionDriver(
+        reconciliation_outcomes=(
+            repo_tools.RunTestsExecutionOutcome("SAFE_TO_RETRY"),
+        )
+    )
+    receipt = _execute_run_tests_case(
+        case,
+        tmp_path,
+        ephemeral_role_keys,
+        driver,
     )
 
     assert receipt.execution_status == "succeeded"
+    assert [call[0] for call in driver.calls] == [
+        "reconcile",
+        "prepare",
+        "start_and_wait",
+        "cleanup",
+    ]
+    assert driver.calls[0][2:] == ("RESERVED", "ABSENT")
     connection = evidence.connect_ledger(case["ledger_path"])
     try:
         assert connection.execute(
@@ -1280,6 +2047,210 @@ def test_execute_run_tests_retries_after_reserved_only_process_crash(
             "SELECT COUNT(*), MAX(sequence) FROM receipts"
         ).fetchone()
         assert after == (before[0] + 1, before[1] + 1)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    ("crash_step", "expected_state", "exit_code"),
+    (
+        ("reservation", "RESERVED", 75),
+        ("started_mark", "STARTED_UNCONFIRMED", 76),
+    ),
+)
+def test_execute_run_tests_recovers_journal_transition_crashes(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_step: str,
+    expected_state: str,
+    exit_code: int,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    target_name = (
+        "_reserve_handler_execution"
+        if crash_step == "reservation"
+        else "_mark_handler_started"
+    )
+    real_target = getattr(mcp_server, target_name)
+
+    def crash_after(*args, **kwargs):
+        result = real_target(*args, **kwargs)
+        os._exit(exit_code)
+
+    monkeypatch.setattr(mcp_server, target_name, crash_after)
+    child = os.fork()
+    if child == 0:
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            _FakeRunTestsExecutionDriver(),
+        )
+        os._exit(77)
+    _, status = os.waitpid(child, 0)
+    assert os.WIFEXITED(status)
+    assert os.WEXITSTATUS(status) == exit_code
+    monkeypatch.setattr(mcp_server, target_name, real_target)
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT state FROM handler_executions"
+        ).fetchone() == (expected_state,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE nonce = ?",
+            (case["request"].nonce,),
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+    recovery_driver = _FakeRunTestsExecutionDriver(
+        reconciliation_outcomes=(
+            repo_tools.RunTestsExecutionOutcome("SAFE_TO_RETRY"),
+        )
+    )
+    receipt = _execute_run_tests_case(
+        case,
+        tmp_path,
+        ephemeral_role_keys,
+        recovery_driver,
+    )
+    assert receipt.execution_status == "succeeded"
+    assert sum(
+        call[0] == "start_and_wait" for call in recovery_driver.calls
+    ) == 1
+
+
+@pytest.mark.parametrize(
+    "position",
+    (
+        "workspace_volume",
+        "staging_create",
+        "staging_removal",
+        "output_volume",
+        "execution_container",
+    ),
+)
+def test_execute_run_tests_recovers_each_preparation_crash_position(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+    position: str,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    child = os.fork()
+    if child == 0:
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            _FakeRunTestsExecutionDriver(
+                prepare_exit_code=71
+            ),
+        )
+        os._exit(72)
+    _, status = os.waitpid(child, 0)
+    assert os.WIFEXITED(status)
+    assert os.WEXITSTATUS(status) == 71
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT state FROM handler_executions"
+        ).fetchone() == ("RESERVED",)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE nonce = ?",
+            (case["request"].nonce,),
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+    recovery_driver = _FakeRunTestsExecutionDriver(
+        reconciliation_outcomes=(
+            repo_tools.RunTestsExecutionOutcome("SAFE_TO_RETRY"),
+        )
+    )
+    receipt = _execute_run_tests_case(
+        case,
+        tmp_path,
+        ephemeral_role_keys,
+        recovery_driver,
+    )
+    assert receipt.execution_status == "succeeded"
+    assert sum(
+        call[0] == "start_and_wait" for call in recovery_driver.calls
+    ) == 1
+
+
+def test_execute_run_tests_recovers_lost_start_ack_without_second_start(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    child = os.fork()
+    if child == 0:
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            _FakeRunTestsExecutionDriver(
+                start_exit_code=73
+            ),
+        )
+        os._exit(74)
+    _, status = os.waitpid(child, 0)
+    assert os.WIFEXITED(status)
+    assert os.WEXITSTATUS(status) == 73
+    contract = _run_tests_contract(case)
+    recovery_driver = _FakeRunTestsExecutionDriver(
+        reconciliation_outcomes=(_closed_run_tests_outcome(contract),)
+    )
+    receipt = _execute_run_tests_case(
+        case,
+        tmp_path,
+        ephemeral_role_keys,
+        recovery_driver,
+        request=_replacement_run_tests_request(case, ephemeral_role_keys),
+    )
+    assert receipt.nonce == case["request"].nonce
+    assert sum(
+        call[0] == "start_and_wait" for call in recovery_driver.calls
+    ) == 0
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE nonce = ?",
+            (case["request"].nonce,),
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM grant_events WHERE receipt_id = ?",
+            (receipt.receipt_id,),
+        ).fetchone() == (1,)
     finally:
         connection.close()
 
@@ -1306,36 +2277,20 @@ def test_execute_run_tests_recovers_committed_receipt_after_cleanup_crash(
         ).fetchone()
     finally:
         connection.close()
-    real_finalize = mcp_server._finalize_handler_execution
-    monkeypatch.setattr(
-        mcp_server,
-        "_finalize_handler_execution",
-        lambda *_: os._exit(78),
+    first_driver = _FakeRunTestsExecutionDriver(
+        cleanup_error=RuntimeError("injected cleanup failure")
     )
-    child = os.fork()
-    if child == 0:
-        execute_run_tests(
-            case["ledger_path"],
-            evidence_root=case["evidence_root"],
-            context=case["context"],
-            request=case["request"],
-            request_arguments=case["arguments"],
-            execution_contract=_run_tests_contract(case),
-            execution_facts=case["facts"],
-            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
-            handler=lambda _: 0,
-            clock=lambda: fixed_now,
+    with pytest.raises(
+        HandlerCoordinationError, match="RECOVERY_REQUIRED"
+    ) as captured:
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            first_driver,
         )
-        os._exit(79)
-
-    _, status = os.waitpid(child, 0)
-    assert os.WIFEXITED(status)
-    assert os.WEXITSTATUS(status) == 78
-    monkeypatch.setattr(
-        mcp_server,
-        "_finalize_handler_execution",
-        real_finalize,
-    )
+    assert isinstance(captured.value.__cause__, RuntimeError)
+    assert str(captured.value.__cause__) == "injected cleanup failure"
     connection = evidence.connect_ledger(case["ledger_path"])
     try:
         committed = connection.execute(
@@ -1358,28 +2313,106 @@ def test_execute_run_tests_recovers_committed_receipt_after_cleanup_crash(
     finally:
         connection.close()
 
-    with pytest.raises(
-        HandlerCoordinationError,
-        match="current ledger snapshot",
-    ):
-        execute_run_tests(
-            case["ledger_path"],
-            evidence_root=case["evidence_root"],
-            context=case["context"],
-            request=case["request"],
-            request_arguments=case["arguments"],
-            execution_contract=_run_tests_contract(case),
-            execution_facts=case["facts"],
-            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
-            handler=lambda _: pytest.fail("committed handler restarted"),
-            clock=lambda: fixed_now,
+    current_context = _current_run_tests_context(case, fixed_now)
+    recovery_driver = _FakeRunTestsExecutionDriver(
+        reconciliation_outcomes=(
+            repo_tools.RunTestsExecutionOutcome("CLOSED_RESULT", None),
+        )
+    )
+    with pytest.raises(ToolCallDenied):
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            recovery_driver,
+            context=current_context,
         )
 
+    assert [call[0] for call in recovery_driver.calls] == ["reconcile"]
+    assert recovery_driver.calls[0][2:] == (
+        "STARTED_UNCONFIRMED",
+        "MATCH",
+    )
     connection = evidence.connect_ledger(case["ledger_path"])
     try:
         assert connection.execute(
             "SELECT COUNT(*) FROM handler_executions"
         ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*), MAX(sequence) FROM receipts"
+        ).fetchone() == committed
+    finally:
+        connection.close()
+
+
+def test_execute_run_tests_crash_after_journal_cleanup_does_not_republish(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    real_delete = mcp_server._delete_handler_execution
+
+    def crash_after_delete(*args, **kwargs):
+        real_delete(*args, **kwargs)
+        os._exit(78)
+
+    monkeypatch.setattr(
+        mcp_server, "_delete_handler_execution", crash_after_delete
+    )
+    child = os.fork()
+    if child == 0:
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            _FakeRunTestsExecutionDriver(),
+        )
+        os._exit(79)
+    _, status = os.waitpid(child, 0)
+    assert os.WIFEXITED(status)
+    assert os.WEXITSTATUS(status) == 78
+    monkeypatch.setattr(
+        mcp_server, "_delete_handler_execution", real_delete
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        committed = connection.execute(
+            "SELECT COUNT(*), MAX(sequence) FROM receipts"
+        ).fetchone()
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM grant_events WHERE receipt_id = ("
+            "SELECT receipt_id FROM receipts WHERE nonce = ?) ",
+            (case["request"].nonce,),
+        ).fetchone() == (1,)
+    finally:
+        connection.close()
+
+    driver = _FakeRunTestsExecutionDriver()
+    with pytest.raises(ToolCallDenied):
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            driver,
+            context=_current_run_tests_context(case, fixed_now),
+            request=_replacement_run_tests_request(case, ephemeral_role_keys),
+        )
+    assert driver.calls == []
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
         assert connection.execute(
             "SELECT COUNT(*), MAX(sequence) FROM receipts"
         ).fetchone() == committed
@@ -1407,17 +2440,11 @@ def test_execute_run_tests_migrates_ledger_without_handler_journal(
     finally:
         connection.close()
 
-    receipt = execute_run_tests(
-        case["ledger_path"],
-        evidence_root=case["evidence_root"],
-        context=case["context"],
-        request=case["request"],
-        request_arguments=case["arguments"],
-        execution_contract=_run_tests_contract(case),
-        execution_facts=case["facts"],
-        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
-        handler=lambda _: 0,
-        clock=lambda: fixed_now,
+    receipt = _execute_run_tests_case(
+        case,
+        tmp_path,
+        ephemeral_role_keys,
+        _FakeRunTestsExecutionDriver(),
     )
 
     assert receipt.execution_status == "succeeded"
@@ -1452,17 +2479,12 @@ def _rollback_case(
         sidecar_receipt_factory=sidecar_receipt_factory,
         now=now,
     )
-    failure = execute_run_tests(
-        case["ledger_path"],
-        evidence_root=case["evidence_root"],
-        context=case["context"],
-        request=case["request"],
-        request_arguments=case["arguments"],
-        execution_contract=_run_tests_contract(case),
-        execution_facts=case["facts"],
-        sidecar_private_key=role_keys["Sidecar"][0],
-        handler=lambda _: 1,
-        clock=lambda: now,
+    failure = _execute_run_tests_case(
+        case,
+        tmp_path,
+        role_keys,
+        _FakeRunTestsExecutionDriver(actual_exit_code=1),
+        now=now,
     )
     receipts, grants, attempts = _grant_replay_inputs(
         case["ledger_path"],

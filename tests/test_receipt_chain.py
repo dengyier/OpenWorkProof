@@ -5734,22 +5734,114 @@ def _linked_tool_receipt(
     policy_error_code: str | None = None,
     actor_role: str = "Manager",
     execution_status: str = "succeeded",
+    execution_error_code: str = "HANDLER_ERROR",
     expected_state_version: int | None = None,
     remaining_after: int | None = None,
     requested_at: str = "2026-01-01T00:00:02Z",
     occurred_at: str = "2026-01-01T00:00:05Z",
 ):
-    from test_contract import agent_arguments_digest
+    from test_contract import agent_arguments_digest, predicate_result_data
     from test_state import _tool_receipt
 
     receipt = _tool_receipt(
-        tool_name=tool_name,
+        tool_name=(
+            "owp.repo_read" if tool_name == "owp.run_tests" else tool_name
+        ),
         actor_role=actor_role,
         signed_work_order=signed_work_order,
         sidecar_receipt_factory=sidecar_receipt_factory,
         ephemeral_role_keys=role_keys,
     )
     raw = receipt.model_dump(mode="json")
+    if tool_name == "owp.run_tests":
+        profile = next(
+            profile
+            for profile in signed_work_order.test_profiles
+            if profile.test_mode == "verifier"
+        )
+        arguments = {
+            "test_mode": "verifier",
+            "command_digest": profile.command_digest,
+            "source_commit": signed_work_order.source_commit,
+            "candidate_commit": "2" * 40,
+            "workspace_manifest_digest": "3" * 64,
+            "container_image_digest": profile.container_image_digest,
+            "fixed_test_source_digest": profile.fixed_test_source_digest,
+        }
+        raw["tool_name"] = tool_name
+        raw["request_arguments"] = arguments
+        raw["arguments_digest"] = agent_arguments_digest(
+            tool_name,
+            arguments,
+        )
+        raw["nested_claim"]["tool_name"] = tool_name
+        raw["nested_claim"]["arguments_digest"] = raw[
+            "arguments_digest"
+        ]
+        raw["correlation_factors"]["fixed_test_source_digest"] = (
+            profile.fixed_test_source_digest
+        )
+        applicable = sorted(
+            (
+                spec
+                for spec in (
+                    signed_work_order.preconditions
+                    + signed_work_order.invariants
+                    + signed_work_order.postconditions
+                )
+                if tool_name in spec.applies_to_tools
+            ),
+            key=lambda spec: spec.predicate_id,
+        )
+        results = []
+        for spec in applicable:
+            spec_data = spec.model_dump(mode="json")
+            if spec.name == "tool_allowed":
+                input_value = {"actual_tool_name": tool_name}
+                passed = True
+                error_code = None
+            elif spec.name == "quota_remaining":
+                input_value = {
+                    "grant_id": raw["grant_id"],
+                    "metric": "tool_calls",
+                    "amount": 1,
+                    "grant_remaining_before": 1,
+                    "ledger_prefix_digest": "2" * 64,
+                }
+                passed = True
+                error_code = None
+            elif spec.name == "tests_passed":
+                input_value = {
+                    "test_mode": "verifier",
+                    "command_digest": profile.command_digest,
+                    "expected_exit_code": profile.expected_exit_code,
+                    "actual_exit_code": None,
+                    "test_evidence_digest": None,
+                    "source_commit": arguments["source_commit"],
+                    "candidate_commit": arguments["candidate_commit"],
+                    "workspace_manifest_digest": arguments[
+                        "workspace_manifest_digest"
+                    ],
+                    "container_image_digest": (
+                        profile.container_image_digest
+                    ),
+                    "fixed_test_source_digest": (
+                        profile.fixed_test_source_digest
+                    ),
+                }
+                passed = False
+                error_code = "FAIL_CLOSED"
+            else:
+                raise AssertionError("unexpected run_tests predicate")
+            results.append(
+                predicate_result_data(
+                    spec_data,
+                    passed=passed,
+                    error_code=error_code,
+                    input_value=input_value,
+                )
+            )
+        raw["predicate_results"] = results
     raw.update(
         {
             "work_order_digest": signed_work_order.digest,
@@ -5774,7 +5866,7 @@ def _linked_tool_receipt(
                 else execution_status
             ),
             "execution_error_code": (
-                "HANDLER_ERROR"
+                execution_error_code
                 if execution_status == "failed"
                 else None
             ),
@@ -5785,7 +5877,7 @@ def _linked_tool_receipt(
                     _jcs_digest(
                         {
                             "status": "failed",
-                            "error_code": "HANDLER_ERROR",
+                            "error_code": execution_error_code,
                         }
                     )
                     if execution_status == "failed"
@@ -5844,6 +5936,7 @@ def _linked_tool_receipt(
     claim = raw["nested_claim"]
     claim["work_order_digest"] = signed_work_order.digest
     claim["grant_id"] = root.grant_id
+    claim["tool_name"] = tool_name
     claim["arguments_digest"] = raw["arguments_digest"]
     claim["nonce"] = raw["nonce"]
     claim["requested_at"] = requested_at
@@ -8424,6 +8517,69 @@ def test_started_failures_charge_and_metrics_replay_independently(
     )
     assert root.remaining_repair_rounds == 0
     assert replay[child.grant_id].remaining_tool_calls == 0
+
+
+@pytest.mark.parametrize(
+    "failure_code",
+    ("OUTPUT_LIMIT", "TIMEOUT", "DISK_LIMIT"),
+)
+def test_verifier_infrastructure_failures_replay_one_same_state_charge(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    signed_root_grant: CapabilityGrant,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+    fixed_now: datetime,
+    sidecar_receipt_factory,
+    failure_code: str,
+) -> None:
+    _, verifier, receipts, grants, attempts = _grant_replay_context(
+        tmp_path=tmp_path,
+        label=f"verifier-infrastructure-{failure_code}",
+        work_order=signed_work_order,
+        root=signed_root_grant,
+        role_keys=ephemeral_role_keys,
+        now=fixed_now,
+        with_child=True,
+        child_subject_role="Verifier",
+        child_updates={
+            "allowed_tools": ["owp.run_tests"],
+            "quota": {"tool_calls": 1, "repair_rounds": 0},
+        },
+    )
+    assert verifier is not None
+    failed = _linked_tool_receipt(
+        tool_name="owp.run_tests",
+        state_before="running",
+        state_after="running",
+        sequence=3,
+        previous_receipt=receipts[-1],
+        root=verifier,
+        signed_work_order=signed_work_order,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        role_keys=ephemeral_role_keys,
+        label=f"verifier-infrastructure-{failure_code}:receipt",
+        actor_role="Verifier",
+        execution_status="failed",
+        execution_error_code=failure_code,
+        remaining_after=0,
+    )
+
+    replay = _validate_grant_history_semantics(
+        signed_work_order,
+        (*receipts, failed),
+        grants,
+        attempts,
+    )
+
+    assert failed.execution_status == "failed"
+    assert failed.execution_error_code == failure_code
+    assert failed.state_before == failed.state_after == "running"
+    assert failed.evidence_refs == ()
+    assert failed.quota_charge is not None
+    assert failed.quota_charge.amount == 1
+    assert replay[verifier.grant_id].remaining_tool_calls == 0
 
 
 @pytest.mark.parametrize("receipt_kind", ("tool", "rollback"))
