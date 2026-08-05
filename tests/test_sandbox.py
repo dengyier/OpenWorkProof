@@ -2145,7 +2145,6 @@ def test_derive_docker_execution_plan_is_exact_and_deterministic() -> None:
 
     assert second == first
     assert first.workspace_volume.name == "owp-workspace-01"
-    assert first.workspace_volume.size_bytes == 512 * 1024 * 1024
     assert first.workspace_volume.mount_path == "/workspace"
     assert first.workspace_volume.read_only is True
     assert first.workspace_volume.create_argv == (
@@ -2154,18 +2153,11 @@ def test_derive_docker_execution_plan_is_exact_and_deterministic() -> None:
         "create",
         "--driver",
         "local",
-        "--opt",
-        "type=tmpfs",
-        "--opt",
-        "device=tmpfs",
-        "--opt",
-        "o=size=512m",
         "--label",
         "openworkproof.execution-owner=" + "b" * 64,
         "owp-workspace-01",
     )
     assert first.output_volume.name == "owp-output-01"
-    assert first.output_volume.size_bytes == 64 * 1024 * 1024
     assert first.output_volume.mount_path == "/output"
     assert first.output_volume.read_only is False
     assert first.output_volume.create_argv == (
@@ -2174,16 +2166,19 @@ def test_derive_docker_execution_plan_is_exact_and_deterministic() -> None:
         "create",
         "--driver",
         "local",
-        "--opt",
-        "type=tmpfs",
-        "--opt",
-        "device=tmpfs",
-        "--opt",
-        "o=size=64m",
         "--label",
         "openworkproof.execution-owner=" + "b" * 64,
         "owp-output-01",
     )
+    # Named-volume persistence is not a filesystem quota. Candidate staging
+    # and runner-envelope codecs enforce the 8 MiB / 1 MiB / 8 KiB limits.
+    assert not hasattr(first.workspace_volume, "size_bytes")
+    assert not hasattr(first.output_volume, "size_bytes")
+    for volume in (first.workspace_volume, first.output_volume):
+        joined_create = "\0".join(volume.create_argv)
+        assert "--opt" not in volume.create_argv
+        assert "tmpfs" not in joined_create
+        assert "size=" not in joined_create
     assert first.create_container_argv == (
         "/usr/local/bin/docker",
         "create",
@@ -2354,18 +2349,14 @@ def _docker_volume_inspection(
         if resource == "workspace_volume"
         else plan.output_volume
     )
-    size = "512m" if resource == "workspace_volume" else "64m"
     return {
         "Name": volume.name,
         "Driver": "local",
         "Labels": {
             "openworkproof.execution-owner": plan.ownership_token,
         },
-        "Options": {
-            "type": "tmpfs",
-            "device": "tmpfs",
-            "o": f"size={size}",
-        },
+        "Options": None,
+        "Scope": "local",
     }
 
 
@@ -2824,6 +2815,59 @@ def test_validate_docker_execution_inspections_accepts_exact_profile() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("resource", "mutation"),
+    (
+        ("workspace_volume", "tmpfs_options"),
+        ("output_volume", "custom_options"),
+        ("workspace_volume", "empty_options"),
+        ("output_volume", "custom_driver"),
+        ("workspace_volume", "missing_scope"),
+        ("output_volume", "wrong_scope"),
+        ("workspace_volume", "wrong_name"),
+        ("output_volume", "wrong_label"),
+    ),
+)
+def test_validate_docker_execution_inspections_rejects_nonpersistent_volume_profile(
+    resource: str,
+    mutation: str,
+) -> None:
+    plan = _docker_plan()
+    workspace = _docker_volume_inspection(plan, "workspace_volume")
+    output = _docker_volume_inspection(plan, "output_volume")
+    inspected = workspace if resource == "workspace_volume" else output
+    if mutation == "tmpfs_options":
+        inspected["Options"] = {
+            "type": "tmpfs",
+            "device": "tmpfs",
+            "o": "size=512m",
+        }
+    elif mutation == "custom_options":
+        inspected["Options"] = {"o": "bind", "device": "/host/path"}
+    elif mutation == "empty_options":
+        inspected["Options"] = {}
+    elif mutation == "custom_driver":
+        inspected["Driver"] = "custom"
+    elif mutation == "missing_scope":
+        del inspected["Scope"]
+    elif mutation == "wrong_scope":
+        inspected["Scope"] = "global"
+    elif mutation == "wrong_name":
+        inspected["Name"] += "-other"
+    else:
+        inspected["Labels"] = {
+            "openworkproof.execution-owner": "c" * 64,
+        }
+
+    with pytest.raises(ValueError, match="Docker inspection"):
+        repo_tools.validate_docker_execution_inspections(
+            plan,
+            _docker_container_inspection(plan),
+            workspace,
+            output,
+        )
+
+
 @pytest.mark.parametrize("read_only", (True, None, "false", 0, 1))
 def test_validate_docker_execution_inspections_rejects_explicit_invalid_output_readonly(
     read_only: object,
@@ -2935,7 +2979,7 @@ def test_validate_docker_execution_inspections_rejects_unsafe_profile(
     elif mutation == "wrong_volume_driver":
         workspace["Driver"] = "other"
     elif mutation == "wrong_volume_options":
-        output["Options"]["o"] = "size=65m"
+        output["Options"] = {"o": "size=65m"}
     else:
         container["Config"]["Labels"] = {}
 
@@ -3977,6 +4021,59 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
                 lifecycle,
                 resource,
             )
+        staging_name = f"owp-stage-{suffix}"
+        attempted_resources.append(("container", staging_name))
+        subprocess.run(
+            (
+                str(docker_binary),
+                "create",
+                "--name",
+                staging_name,
+                "--label",
+                f"openworkproof.execution-owner={ownership_token}",
+                "--pull",
+                "never",
+                "--network",
+                "none",
+                "--read-only",
+                "--user",
+                "0:0",
+                "--mount",
+                (
+                    f"type=volume,source={plan.output_volume.name},"
+                    "target=/output,volume-nocopy"
+                ),
+                image_reference,
+                "/bin/sh",
+                "-c",
+                "chown 65532:65532 /output && chmod 0700 /output",
+            ),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        staged = subprocess.run(
+            (str(docker_binary), "start", "--attach", staging_name),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert staged.returncode == 0, staged.stderr
+        subprocess.run(
+            (str(docker_binary), "rm", staging_name),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert subprocess.run(
+            (str(docker_binary), "inspect", staging_name),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).returncode != 0
+
         attempted_resources.append(("container", plan.container_name))
         subprocess.run(
             plan.create_container_argv,
@@ -4055,38 +4152,23 @@ def test_real_docker_enforces_frozen_containment_profile() -> None:
 
 @pytest.mark.docker
 @pytest.mark.parametrize(
-    ("limit_mebibytes", "write_mebibytes", "mount_path"),
+    ("resource", "mount_path"),
     (
-        (64, 65, "/output"),
-        (512, 513, "/workspace"),
+        ("workspace_volume", "/workspace"),
+        ("output_volume", "/output"),
     ),
 )
-def test_real_docker_enforces_tmpfs_volume_capacity(
-    limit_mebibytes: int,
-    write_mebibytes: int,
+def test_real_docker_named_volume_persists_across_short_lived_containers(
+    resource: str,
     mount_path: str,
 ) -> None:
     docker_binary, image_reference = _real_docker_cli_and_image()
 
-    suffix = f"capacity-{limit_mebibytes}-{os.getpid()}-{time.time_ns()}"
+    suffix = f"persist-{resource[:3]}-{os.getpid()}-{time.time_ns()}"
     ownership_token = hashlib.sha256(suffix.encode("ascii")).hexdigest()
-    expected_bytes = limit_mebibytes * 1024 * 1024
-    script = (
-        "set -u; "
-        "uid_gid=\"$(id -u):$(id -g)\"; "
-        "if touch /root-forbidden 2>/dev/null; then exit 42; fi; "
-        "test ! -e /var/run/docker.sock || exit 43; "
-        "set +e; "
-        f"LC_ALL=C dd if=/dev/zero of={mount_path}/capacity.bin "
-        f"bs=1048576 count={write_mebibytes} 2>/tmp/dd.stderr; "
-        "dd_status=$?; "
-        "set -e; "
-        f"file_bytes=\"$(wc -c < {mount_path}/capacity.bin)\"; "
-        "printf 'uid_gid=%s\\ndd_status=%s\\nfile_bytes=%s\\n' "
-        '"$uid_gid" "$dd_status" "$file_bytes"; '
-        "cat /tmp/dd.stderr >&2; "
-        'exit "$dd_status"'
-    )
+    marker = f"persistent-{resource}-{ownership_token[:16]}"
+    writer_name = f"owp-write-{suffix}"
+    reader_name = f"owp-read-{suffix}"
     plan = repo_tools.derive_docker_execution_plan(
         docker_binary=docker_binary,
         image_reference=image_reference,
@@ -4094,12 +4176,13 @@ def test_real_docker_enforces_tmpfs_volume_capacity(
         workspace_volume_name=f"owp-workspace-{suffix}",
         output_volume_name=f"owp-output-{suffix}",
         ownership_token=ownership_token,
-        command=("/bin/sh", "-c", script),
+        command=("/bin/sh", "-c", "true"),
     )
     target_volume = (
-        plan.output_volume if mount_path == "/output" else plan.workspace_volume
+        plan.workspace_volume
+        if resource == "workspace_volume"
+        else plan.output_volume
     )
-    assert target_volume.size_bytes == expected_bytes
     assert target_volume.mount_path == mount_path
 
     _require_real_docker_daemon_and_image(docker_binary, image_reference)
@@ -4151,141 +4234,112 @@ def test_real_docker_enforces_tmpfs_volume_capacity(
         assert inspected_volume["Labels"] == {
             "openworkproof.execution-owner": ownership_token,
         }
-        assert inspected_volume["Options"] == {
-            "type": "tmpfs",
-            "device": "tmpfs",
-            "o": f"size={limit_mebibytes}m",
-        }
+        assert inspected_volume["Options"] is None
+        assert inspected_volume["Scope"] == "local"
 
-        create_container_argv = (
-            str(docker_binary),
-            "create",
-            "--name",
-            plan.container_name,
-            "--label",
-            f"openworkproof.execution-owner={ownership_token}",
-            "--pull",
-            "never",
-            "--network",
-            "none",
-            "--read-only",
-            "--user",
-            "65532:65532",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
-            "--pids-limit",
-            "128",
-            "--memory",
-            "1g",
-            "--cpus",
-            "1",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,size=256m",
-            "--workdir",
-            mount_path,
-            "--mount",
-            (
-                f"type=volume,source={target_volume.name},"
-                f"target={mount_path},volume-nocopy"
-            ),
-            image_reference,
-            "/bin/sh",
-            "-c",
-            script,
-        )
-        attempted_resources.append(("container", plan.container_name))
+        attempted_resources.append(("container", writer_name))
         subprocess.run(
-            create_container_argv,
+            (
+                str(docker_binary),
+                "create",
+                "--name",
+                writer_name,
+                "--label",
+                f"openworkproof.execution-owner={ownership_token}",
+                "--pull",
+                "never",
+                "--network",
+                "none",
+                "--read-only",
+                "--user",
+                "0:0",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--tmpfs",
+                "/tmp:rw,noexec,nosuid,size=256m",
+                "--mount",
+                (
+                    f"type=volume,source={target_volume.name},"
+                    "target=/volume,volume-nocopy"
+                ),
+                image_reference,
+                "/bin/sh",
+                "-c",
+                f"printf %s {marker!r} > /volume/marker",
+            ),
             check=True,
             capture_output=True,
             text=True,
             timeout=15,
         )
-        inspected_container = json.loads(
-            subprocess.run(
-                (str(docker_binary), "inspect", plan.container_name),
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            ).stdout
-        )[0]
-        assert inspected_container["Config"]["Image"] == image_reference
-        assert inspected_container["Config"]["User"] == "65532:65532"
-        assert inspected_container["Config"]["Labels"].get(
-            "openworkproof.execution-owner"
-        ) == ownership_token
-        host = inspected_container["HostConfig"]
-        assert host["NetworkMode"] == "none"
-        assert host["Binds"] is None
-        assert host["ReadonlyRootfs"] is True
-        assert host["CapDrop"] == ["ALL"]
-        assert host["SecurityOpt"] in (
-            ["no-new-privileges"],
-            ["no-new-privileges:true"],
-        )
-        assert host["PidsLimit"] == 128
-        assert host["Memory"] == 1024 * 1024 * 1024
-        assert host["NanoCpus"] == 1_000_000_000
-        assert host["Tmpfs"] == {
-            "/tmp": "rw,noexec,nosuid,size=256m",
-        }
-        assert len(host["Mounts"]) == 1
-        configured_mount = host["Mounts"][0]
-        assert configured_mount["Type"] == "volume"
-        assert configured_mount["Source"] == target_volume.name
-        assert configured_mount["Target"] == mount_path
-        assert (
-            "ReadOnly" not in configured_mount
-            or configured_mount["ReadOnly"] is False
-        )
-        assert configured_mount["VolumeOptions"] == {"NoCopy": True}
-        assert len(inspected_container["Mounts"]) == 1
-        runtime_mount = inspected_container["Mounts"][0]
-        assert runtime_mount["Destination"] == mount_path
-        assert runtime_mount["Type"] == "volume"
-        assert runtime_mount["Name"] == target_volume.name
-        assert runtime_mount["RW"] is True
-        assert inspected_container["State"] == {
-            **inspected_container["State"],
-            "Status": "created",
-            "Running": False,
-            "Paused": False,
-            "Restarting": False,
-            "Dead": False,
-            "Pid": 0,
-            "ExitCode": 0,
-            "StartedAt": "0001-01-01T00:00:00Z",
-            "FinishedAt": "0001-01-01T00:00:00Z",
-        }
-
-        executed = subprocess.run(
-            (
-                str(docker_binary),
-                "start",
-                "--attach",
-                plan.container_name,
-            ),
+        written = subprocess.run(
+            (str(docker_binary), "start", "--attach", writer_name),
             capture_output=True,
             text=True,
-            timeout=45,
+            timeout=30,
         )
-        observations = dict(
-            line.split("=", 1)
-            for line in executed.stdout.splitlines()
-            if "=" in line
+        assert written.returncode == 0, written.stderr
+        subprocess.run(
+            (str(docker_binary), "rm", writer_name),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
-        assert executed.returncode != 0
-        assert observations["uid_gid"] == "65532:65532"
-        assert int(observations["dd_status"]) != 0
-        assert executed.returncode == int(observations["dd_status"])
-        assert int(observations["file_bytes"]) == expected_bytes
-        assert "No space left on device" in executed.stderr
-        assert (
-            f"{limit_mebibytes}+0 records out"
-            in executed.stderr.splitlines()
+
+        attempted_resources.append(("container", reader_name))
+        subprocess.run(
+            (
+                str(docker_binary),
+                "create",
+                "--name",
+                reader_name,
+                "--label",
+                f"openworkproof.execution-owner={ownership_token}",
+                "--pull",
+                "never",
+                "--network",
+                "none",
+                "--read-only",
+                "--user",
+                "65532:65532",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--tmpfs",
+                "/tmp:rw,noexec,nosuid,size=256m",
+                "--mount",
+                (
+                    f"type=volume,source={target_volume.name},"
+                    "target=/volume,readonly,volume-nocopy"
+                ),
+                image_reference,
+                "/bin/sh",
+                "-c",
+                "cat /volume/marker",
+            ),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        read_back = subprocess.run(
+            (str(docker_binary), "start", "--attach", reader_name),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert read_back.returncode == 0, read_back.stderr
+        assert read_back.stdout == marker
+        subprocess.run(
+            (str(docker_binary), "rm", reader_name),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
     finally:
         active_failure = sys.exc_info()[1]

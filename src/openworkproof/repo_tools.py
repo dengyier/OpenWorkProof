@@ -693,7 +693,6 @@ class BoundedProcessResult:
 @dataclass(frozen=True, slots=True)
 class DockerVolumePlan:
     name: str
-    size_bytes: int
     mount_path: str
     read_only: bool
     create_argv: tuple[str, ...]
@@ -4809,14 +4808,15 @@ def _docker_volume_plan(
     docker_binary: str,
     *,
     name: str,
-    size_mebibytes: int,
     mount_path: str,
     read_only: bool,
     ownership_token: str,
 ) -> DockerVolumePlan:
+    # Persistent named volumes carry lifecycle bytes between containers. Their
+    # bounds are logical protocol limits: 8 MiB total / 1 MiB per candidate
+    # file and 8 KiB runner envelopes, not a claimed filesystem quota.
     return DockerVolumePlan(
         name=name,
-        size_bytes=size_mebibytes * 1_024 * 1_024,
         mount_path=mount_path,
         read_only=read_only,
         create_argv=(
@@ -4825,12 +4825,6 @@ def _docker_volume_plan(
             "create",
             "--driver",
             "local",
-            "--opt",
-            "type=tmpfs",
-            "--opt",
-            "device=tmpfs",
-            "--opt",
-            f"o=size={size_mebibytes}m",
             "--label",
             f"{_DOCKER_OWNERSHIP_LABEL}={ownership_token}",
             name,
@@ -4953,7 +4947,6 @@ def derive_docker_execution_plan(
     workspace = _docker_volume_plan(
         docker,
         name=workspace_volume_name,
-        size_mebibytes=512,
         mount_path="/workspace",
         read_only=True,
         ownership_token=ownership_token,
@@ -4961,7 +4954,6 @@ def derive_docker_execution_plan(
     output = _docker_volume_plan(
         docker,
         name=output_volume_name,
-        size_mebibytes=64,
         mount_path="/output",
         read_only=False,
         ownership_token=ownership_token,
@@ -5199,12 +5191,12 @@ def _valid_docker_volume_inspection(
     *,
     resource: Literal["workspace_volume", "output_volume"],
 ) -> bool:
-    size = "512m" if resource == "workspace_volume" else "64m"
     return (
         _docker_resource_is_owned(plan, resource, inspection)
         and inspection.get("Driver") == "local"
-        and inspection.get("Options")
-        == {"type": "tmpfs", "device": "tmpfs", "o": f"size={size}"}
+        and inspection.get("Scope") == "local"
+        and "Options" in inspection
+        and inspection["Options"] is None
     )
 
 
