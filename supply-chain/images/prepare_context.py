@@ -205,6 +205,7 @@ def assemble(
         "execution_dockerfile": f"{EXECUTION_PREFIX}/Dockerfile",
         "execution_lock": f"{EXECUTION_PREFIX}/requirements.lock",
         "execution_runner": f"{EXECUTION_PREFIX}/run_tests_runner.py",
+        "execution_verifier_test": f"{EXECUTION_PREFIX}/verifier_test.py",
         "helper_dockerfile": f"{HELPER_PREFIX}/Dockerfile",
         "helper_lock": f"{HELPER_PREFIX}/requirements.lock",
         "debian_lock": f"{HELPER_PREFIX}/debian-packages.lock",
@@ -251,6 +252,20 @@ def assemble(
         _write(execution / "Dockerfile", blobs["execution_dockerfile"])
         _write(execution / "requirements.lock", blobs["execution_lock"])
         _write(execution / "run_tests_runner.py", blobs["execution_runner"])
+        _write(
+            execution / "verifier_test.py",
+            blobs["execution_verifier_test"],
+        )
+        execution_sums = "".join(
+            f"{hashlib.sha256(data).hexdigest()}  {name}\n"
+            for name, data in (
+                ("Dockerfile", blobs["execution_dockerfile"]),
+                ("requirements.lock", blobs["execution_lock"]),
+                ("run_tests_runner.py", blobs["execution_runner"]),
+                ("verifier_test.py", blobs["execution_verifier_test"]),
+            )
+        ).encode("utf-8")
+        _write(execution / "SHA256SUMS", execution_sums)
         _copy_selected(wheelhouse, execution / "wheels", execution_wheels)
 
         _write(helper / "Dockerfile", blobs["helper_dockerfile"])
@@ -281,6 +296,8 @@ def assemble(
             execution / "Dockerfile": blobs["execution_dockerfile"],
             execution / "requirements.lock": blobs["execution_lock"],
             execution / "run_tests_runner.py": blobs["execution_runner"],
+            execution / "verifier_test.py": blobs["execution_verifier_test"],
+            execution / "SHA256SUMS": execution_sums,
             helper / "Dockerfile": blobs["helper_dockerfile"],
             helper / "requirements.lock": blobs["helper_lock"],
         }

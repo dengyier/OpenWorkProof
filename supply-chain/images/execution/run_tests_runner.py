@@ -28,7 +28,25 @@ FROZEN_VERIFIER_ARGV = (
     "-m",
     "pytest",
     "-q",
+    "-c",
+    "/dev/null",
+    "--rootdir=/fixed-tests",
+    "--confcutdir=/fixed-tests",
+    "/fixed-tests/verifier_test.py",
 )
+FROZEN_VERIFIER_COMMAND = {
+    "argv": list(FROZEN_VERIFIER_ARGV),
+    "working_directory": "/workspace",
+    "env": {
+        "HOME": "/nonexistent",
+        "LC_ALL": "C.UTF-8",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "TZ": "UTC",
+    },
+}
+FIXED_TEST_ROOT = Path("/fixed-tests")
+FIXED_TEST_PATH = FIXED_TEST_ROOT / "verifier_test.py"
+MAX_FIXED_TEST_BYTES = 65_536
 MAX_CONTRACT_BYTES = 8192
 MAX_RESULT_BYTES = 8192
 MAX_COMBINED_STDIO_BYTES = 1048576
@@ -162,8 +180,8 @@ def _frozen_command_digest() -> str:
     return hashlib.sha256(
         _canonical(
             {
-                "domain": "openworkproof/verifier-command/v0.1",
-                "argv": list(FROZEN_VERIFIER_ARGV),
+                "domain": "openworkproof/test-command/v0.1",
+                "command": FROZEN_VERIFIER_COMMAND,
             }
         )
     ).hexdigest()
@@ -215,6 +233,52 @@ def _validated_root(path: Path, label: str) -> Path:
     if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
         raise RunnerError(f"{label} root is not a regular directory")
     return path
+
+
+def _validated_fixed_test(
+    root: Path,
+    path: Path,
+    expected_digest: str,
+) -> bytes:
+    if (
+        type(root) is not type(Path())
+        or type(path) is not type(Path())
+        or not root.is_absolute()
+        or not path.is_absolute()
+        or path.parent != root
+        or path.name != "verifier_test.py"
+    ):
+        raise RunnerError("fixed test path is not canonical")
+    root = _validated_root(root, "fixed test")
+    root_metadata = root.lstat()
+    if stat.S_IMODE(root_metadata.st_mode) & 0o222:
+        raise RunnerError("fixed test root is writable")
+    production_root = root == Path("/fixed-tests")
+    expected_owner_uid = 0 if production_root else root_metadata.st_uid
+    if production_root and root_metadata.st_uid != 0:
+        raise RunnerError("fixed test root is not root-owned")
+    content, metadata = _read_regular(path, MAX_FIXED_TEST_BYTES)
+    if (
+        metadata.st_uid != expected_owner_uid
+        or (production_root and metadata.st_gid != 0)
+        or stat.S_IMODE(metadata.st_mode) != 0o444
+    ):
+        raise RunnerError("fixed test ownership or mode is invalid")
+    if hashlib.sha256(content).hexdigest() != expected_digest:
+        raise RunnerError("fixed test digest does not match contract")
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RunnerError("fixed test is not canonical UTF-8") from error
+    if (
+        not content
+        or content.startswith(b"\xef\xbb\xbf")
+        or b"\x00" in content
+        or b"\r" in content
+        or not content.endswith(b"\n")
+    ):
+        raise RunnerError("fixed test text is not canonical")
+    return content
 
 
 def _validated_path(value: object) -> str:
@@ -865,7 +929,6 @@ def _run_process(
             env={
                 "HOME": "/nonexistent",
                 "LC_ALL": "C.UTF-8",
-                "PATH": "/opt/venv/bin:/usr/bin:/bin",
                 "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
                 "TZ": "UTC",
             },
@@ -1011,6 +1074,9 @@ def _execute(
     workspace: Path,
     output: Path,
     process_runner: Callable[[tuple[str, ...], Path], ProcessOutcome],
+    *,
+    fixed_test_root: Path | None = None,
+    fixed_test_path: Path | None = None,
 ) -> int:
     workspace = _validated_root(workspace, "workspace")
     output = _validated_root(output, "output")
@@ -1021,6 +1087,11 @@ def _execute(
     if f"{contract_metadata.st_mode:06o}" != "100644":
         raise RunnerError("run contract mode is not normalized")
     contract = _validated_contract(contract_raw)
+    _validated_fixed_test(
+        FIXED_TEST_ROOT if fixed_test_root is None else fixed_test_root,
+        FIXED_TEST_PATH if fixed_test_path is None else fixed_test_path,
+        contract["fixed_test_source_digest"],
+    )
     files = _scan_workspace(workspace)
     manifest_digest = _manifest_digest(files, contract["candidate_commit"])
     if manifest_digest != contract["workspace_manifest_digest"]:
@@ -1084,6 +1155,8 @@ def main(
     input_stream: BinaryIO | None = None,
     output_stream: BinaryIO | None = None,
     process_runner: Callable[[tuple[str, ...], Path], ProcessOutcome] | None = None,
+    fixed_test_root: Path | None = None,
+    fixed_test_path: Path | None = None,
 ) -> int:
     arguments = tuple(sys.argv[1:]) if argv is None else argv
     if arguments not in {("stage",), ("execute",)}:
@@ -1099,6 +1172,8 @@ def main(
             workspace_root,
             output_root,
             _run_process if process_runner is None else process_runner,
+            fixed_test_root=fixed_test_root,
+            fixed_test_path=fixed_test_path,
         )
     except (RunnerError, OSError, ValueError, TypeError) as error:
         print(f"run_tests_runner: {error}", file=sys.stderr)

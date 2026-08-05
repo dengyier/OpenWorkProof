@@ -9,6 +9,8 @@ import io
 import json
 import os
 from pathlib import Path
+import re
+import runpy
 import signal
 import stat
 import subprocess
@@ -25,6 +27,24 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNNER_PATH = (
     ROOT / "supply-chain" / "images" / "execution" / "run_tests_runner.py"
 )
+VERIFIER_TEST_PATH = (
+    ROOT / "supply-chain" / "images" / "execution" / "verifier_test.py"
+)
+FIXED_TEST_BYTES = VERIFIER_TEST_PATH.read_bytes()
+
+
+@pytest.fixture(autouse=True)
+def _fixed_test_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixed_root = tmp_path / "fixed-tests"
+    fixed_root.mkdir()
+    fixed_path = fixed_root / "verifier_test.py"
+    fixed_path.write_bytes(FIXED_TEST_BYTES)
+    fixed_path.chmod(0o444)
+    fixed_root.chmod(0o555)
+    monkeypatch.setattr(runner, "FIXED_TEST_ROOT", fixed_root, raising=False)
+    monkeypatch.setattr(runner, "FIXED_TEST_PATH", fixed_path, raising=False)
 
 
 def _load_runner():
@@ -55,8 +75,8 @@ def _command_digest() -> str:
     return hashlib.sha256(
         _canonical(
             {
-                "domain": "openworkproof/verifier-command/v0.1",
-                "argv": list(runner.FROZEN_VERIFIER_ARGV),
+                "domain": "openworkproof/test-command/v0.1",
+                "command": runner.FROZEN_VERIFIER_COMMAND,
             }
         )
     ).hexdigest()
@@ -125,7 +145,7 @@ def _contract(files: dict[str, tuple[str, bytes]]) -> dict[str, object]:
         "command_digest": _command_digest(),
         "container_image_digest": "sha256:" + "5" * 64,
         "execution_id": "6" * 64,
-        "fixed_test_source_digest": "7" * 64,
+        "fixed_test_source_digest": hashlib.sha256(FIXED_TEST_BYTES).hexdigest(),
         "request_digest": "8" * 64,
         "schema_version": "openworkproof-run-contract/0.1",
         "source_artifact_sha256": "9" * 64,
@@ -202,6 +222,27 @@ def _stream(
     )
 
 
+def test_signed_profile_repo_tools_and_runner_share_one_frozen_command(
+    signed_work_order,
+) -> None:
+    verifier = next(
+        profile
+        for profile in signed_work_order.test_profiles
+        if profile.test_mode == "verifier"
+    )
+    expected = verifier.command.model_dump(mode="json")
+
+    assert expected == repo_tools.FROZEN_VERIFIER_COMMAND
+    assert expected == runner.FROZEN_VERIFIER_COMMAND
+    assert verifier.command.argv == repo_tools.FROZEN_VERIFIER_ARGV
+    assert verifier.command.argv == runner.FROZEN_VERIFIER_ARGV
+    assert verifier.command_digest == repo_tools.frozen_verifier_command_digest()
+    assert verifier.command_digest == runner._frozen_command_digest()
+    assert verifier.command_digest == (
+        "ffff970faa57adccdf3bf9df83e4dd4bab330036123f2d1747c4328d24091589"
+    )
+
+
 def test_runner_constants_and_import_surface_are_frozen() -> None:
     assert runner.FROZEN_VERIFIER_ARGV == (
         "/opt/venv/bin/python",
@@ -209,6 +250,11 @@ def test_runner_constants_and_import_surface_are_frozen() -> None:
         "-m",
         "pytest",
         "-q",
+        "-c",
+        "/dev/null",
+        "--rootdir=/fixed-tests",
+        "--confcutdir=/fixed-tests",
+        "/fixed-tests/verifier_test.py",
     )
     assert runner.MAX_CONTRACT_BYTES == 8192
     assert runner.MAX_RESULT_BYTES == 8192
@@ -223,6 +269,66 @@ def test_runner_constants_and_import_surface_are_frozen() -> None:
     assert "close_fds=True" in source
     assert "pass_fds" not in source
     assert "preexec_fn=preexec" in source
+
+
+def test_tracked_verifier_test_has_closed_provenance_and_workspace_import() -> None:
+    source = VERIFIER_TEST_PATH.read_text(encoding="utf-8")
+
+    assert "https://github.com/Textualize/rich/issues/4196" in source
+    assert "9d8f9a372cc5916fd4781fec207ced7ddac2f08f" in source
+    assert 'sys.path.insert(0, "/workspace")' in source
+    assert "from rich._wrap import divide_line, words" in source
+    assert "NO-BREAK SPACE" in source
+
+
+def test_tracked_verifier_test_rejects_frozen_regex_and_accepts_nbsp_fix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import rich._wrap as rich_wrap
+
+    assert rich_wrap.re_word.pattern == r"\s*\S+\s*"
+    namespace = runpy.run_path(str(VERIFIER_TEST_PATH))
+    probe = namespace["test_non_breaking_space_stays_inside_one_wrapping_token"]
+
+    with pytest.raises(AssertionError):
+        probe()
+
+    monkeypatch.setattr(
+        rich_wrap,
+        "re_word",
+        re.compile(r"[^\S\u00a0]*(?:[^\s\u00a0]|\u00a0)+[^\S\u00a0]*"),
+    )
+    probe()
+
+
+def test_process_environment_is_exactly_the_signed_four_variables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, object] = {}
+
+    def reject_start(argv, **kwargs):
+        observed["argv"] = argv
+        observed.update(kwargs)
+        raise OSError(errno.EACCES, "injected")
+
+    monkeypatch.setattr(runner.subprocess, "Popen", reject_start)
+
+    with pytest.raises(runner.RunnerError, match="could not start"):
+        runner._run_process(
+            ("/bin/true",),
+            tmp_path,
+            descendant_cleaner=_no_descendant_cleanup,
+            child_preexec=_no_child_preexec,
+        )
+
+    assert observed["argv"] == ("/bin/true",)
+    assert observed["cwd"] == tmp_path
+    assert observed["env"] == {
+        "HOME": "/nonexistent",
+        "LC_ALL": "C.UTF-8",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "TZ": "UTC",
+    }
 
 
 def test_stage_writes_snapshot_and_exact_canonical_summary(tmp_path: Path) -> None:
@@ -1152,20 +1258,26 @@ def test_runner_rejects_all_nonfixed_argv(bad_argv: tuple[str, ...], tmp_path: P
 
 def test_execute_writes_exact_started_and_completed_result(tmp_path: Path) -> None:
     workspace, output, _, contract = _write_workspace(tmp_path)
+    observed: list[tuple[tuple[str, ...], Path]] = []
+
+    def process(argv, cwd):
+        observed.append((argv, cwd))
+        return runner.ProcessOutcome(
+            exit_code=0,
+            failure_code=None,
+            stdout=b"ok",
+            stderr=b"warning",
+        )
 
     result = runner.main(
         ("execute",),
         workspace_root=workspace,
         output_root=output,
-        process_runner=lambda argv, cwd: runner.ProcessOutcome(
-            exit_code=0,
-            failure_code=None,
-            stdout=b"ok",
-            stderr=b"warning",
-        ),
+        process_runner=process,
     )
 
     assert result == 0
+    assert observed == [(runner.FROZEN_VERIFIER_ARGV, workspace)]
     contract_digest = hashlib.sha256(_canonical(contract)).hexdigest()
     assert (output / "started.json").read_bytes() == _canonical(
         {
@@ -1239,6 +1351,126 @@ def test_execute_rejects_wrong_frozen_command_digest(tmp_path: Path) -> None:
     (workspace / "run-contract.json").write_bytes(_canonical(contract))
 
     assert runner.main(("execute",), workspace_root=workspace, output_root=output) != 0
+    assert not list(output.iterdir())
+
+
+def _rewrite_fixed_test_digest(workspace: Path, digest: str) -> None:
+    contract_path = workspace / "run-contract.json"
+    contract = json.loads(contract_path.read_bytes())
+    contract["fixed_test_source_digest"] = digest
+    contract_path.write_bytes(_canonical(contract))
+
+
+@pytest.mark.parametrize(
+    ("failure", "content"),
+    (
+        ("missing", None),
+        ("symlink", None),
+        ("writable-mode", None),
+        ("oversized", b"x" * 65_537),
+        ("utf8-bom", b"\xef\xbb\xbfprint('x')\n"),
+        ("nul", b"print('x')\x00\n"),
+        ("cr", b"print('x')\r\n"),
+        ("missing-final-lf", b"print('x')"),
+        ("invalid-utf8", b"# \xff\n"),
+        ("digest-mismatch", b"print('different')\n"),
+    ),
+)
+def test_execute_rejects_invalid_fixed_test_before_started_or_process(
+    tmp_path: Path,
+    failure: str,
+    content: bytes | None,
+) -> None:
+    workspace, output, _, _ = _write_workspace(tmp_path)
+    fixed_root = tmp_path / "fixed-tests"
+    fixed_path = fixed_root / "verifier_test.py"
+    process_called = False
+
+    fixed_root.chmod(0o755)
+    if failure == "missing":
+        fixed_path.unlink()
+    elif failure == "symlink":
+        fixed_path.unlink()
+        fixed_path.symlink_to(VERIFIER_TEST_PATH)
+    elif failure == "writable-mode":
+        fixed_path.chmod(0o644)
+    else:
+        assert content is not None
+        fixed_path.chmod(0o644)
+        fixed_path.write_bytes(content)
+        fixed_path.chmod(0o444)
+        if failure != "digest-mismatch":
+            _rewrite_fixed_test_digest(workspace, hashlib.sha256(content).hexdigest())
+    fixed_root.chmod(0o555)
+
+    def unexpected_process(argv, cwd):
+        nonlocal process_called
+        process_called = True
+        raise AssertionError("fixed-test rejection must precede process execution")
+
+    result = runner.main(
+        ("execute",),
+        workspace_root=workspace,
+        output_root=output,
+        process_runner=unexpected_process,
+    )
+
+    assert result != 0
+    assert not process_called
+    assert not list(output.iterdir())
+
+
+def test_execute_rejects_wrong_fixed_test_owner_before_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, output, _, _ = _write_workspace(tmp_path)
+    fixed_root = tmp_path / "fixed-tests"
+    original_lstat = Path.lstat
+
+    def wrong_root_owner(path: Path):
+        metadata = original_lstat(path)
+        if path == fixed_root:
+            values = list(metadata)
+            values[4] = metadata.st_uid + 1
+            return os.stat_result(values)
+        return metadata
+
+    monkeypatch.setattr(Path, "lstat", wrong_root_owner)
+
+    assert runner.main(
+        ("execute",),
+        workspace_root=workspace,
+        output_root=output,
+        process_runner=lambda argv, cwd: (_ for _ in ()).throw(
+            AssertionError("process must not run")
+        ),
+    ) != 0
+    assert not list(output.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("fixed_root", "fixed_path"),
+    (
+        (Path("fixed-tests"), Path("fixed-tests/verifier_test.py")),
+        (Path("/fixed-tests"), Path("/other/verifier_test.py")),
+        (Path("/fixed-tests"), Path("/fixed-tests/other.py")),
+    ),
+)
+def test_execute_rejects_noncanonical_fixed_test_seam(
+    tmp_path: Path, fixed_root: Path, fixed_path: Path
+) -> None:
+    workspace, output, _, _ = _write_workspace(tmp_path)
+
+    with pytest.raises(runner.RunnerError):
+        runner._execute(
+            workspace,
+            output,
+            lambda argv, cwd: (_ for _ in ()).throw(
+                AssertionError("process must not run")
+            ),
+            fixed_test_root=fixed_root,
+            fixed_test_path=fixed_path,
+        )
     assert not list(output.iterdir())
 
 

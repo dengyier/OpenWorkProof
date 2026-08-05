@@ -3276,12 +3276,17 @@ def test_frozen_verifier_command_digest_is_domain_separated() -> None:
         "-m",
         "pytest",
         "-q",
+        "-c",
+        "/dev/null",
+        "--rootdir=/fixed-tests",
+        "--confcutdir=/fixed-tests",
+        "/fixed-tests/verifier_test.py",
     )
     assert repo_tools.frozen_verifier_command_digest() == hashlib.sha256(
         rfc8785.dumps(
             {
-                "domain": "openworkproof/verifier-command/v0.1",
-                "argv": list(repo_tools.FROZEN_VERIFIER_ARGV),
+                "domain": "openworkproof/test-command/v0.1",
+                "command": repo_tools.FROZEN_VERIFIER_COMMAND,
             }
         )
     ).hexdigest()
@@ -3543,6 +3548,12 @@ def _docker_driver_contract_and_snapshot(
         _run_tests_execution_contract(),
         workspace_manifest_digest=manifest_digest,
         command_digest=repo_tools.frozen_verifier_command_digest(),
+        fixed_test_source_digest=hashlib.sha256(
+            (
+                Path(__file__).resolve().parents[1]
+                / "supply-chain/images/execution/verifier_test.py"
+            ).read_bytes()
+        ).hexdigest(),
     )
     snapshot = repo_tools.CandidateExecutionSnapshot(
         head_commit=contract.candidate_commit,
@@ -3560,6 +3571,101 @@ def _docker_driver_contract_and_snapshot(
         ),
     )
     return contract, snapshot
+
+
+def _rich_wrap_driver_contract_and_snapshot(
+    regex: bytes,
+    *,
+    execution_digit: str,
+    candidate_digit: str,
+) -> tuple[
+    repo_tools.RunTestsExecutionContract,
+    repo_tools.CandidateExecutionSnapshot,
+]:
+    files = (
+        repo_tools.SourceFile("rich/__init__.py", "100644", b""),
+        repo_tools.SourceFile(
+            "rich/_wrap.py",
+            "100644",
+            b"import re\n"
+            b"re_word = re.compile(" + repr(regex.decode("ascii")).encode("ascii") + b")\n"
+            b"def words(text):\n"
+            b"    position = 0\n"
+            b"    match = re_word.match(text, position)\n"
+            b"    while match is not None:\n"
+            b"        start, end = match.span()\n"
+            b"        yield start, end, match.group(0)\n"
+            b"        match = re_word.match(text, end)\n"
+            b"def divide_line(text, width, fold=True):\n"
+            b"    breaks = []\n"
+            b"    offset = 0\n"
+            b"    for start, _end, word in words(text):\n"
+            b"        word_length = len(word.rstrip())\n"
+            b"        if offset and word_length > width - offset:\n"
+            b"            breaks.append(start)\n"
+            b"            offset = len(word)\n"
+            b"        else:\n"
+            b"            offset += len(word)\n"
+            b"    return breaks\n",
+        ),
+    )
+    candidate_commit = candidate_digit * 40
+    records = [
+        repo_tools.WorkspaceScanRecord(
+            path_bytes=b"rich",
+            entry_type="directory",
+            posix_mode=stat.S_IFDIR | 0o755,
+            size_bytes=None,
+            content=None,
+            symlink_target=None,
+            link_count=1,
+            read_token_before="stable",
+            read_token_after="stable",
+        )
+    ]
+    records.extend(
+        repo_tools.WorkspaceScanRecord(
+            path_bytes=source_file.path.encode("ascii"),
+            entry_type="regular",
+            posix_mode=stat.S_IFREG | int(source_file.mode[-3:], 8),
+            size_bytes=len(source_file.content),
+            content=source_file.content,
+            symlink_target=None,
+            link_count=1,
+            read_token_before="stable",
+            read_token_after="stable",
+        )
+        for source_file in files
+    )
+    manifest = repo_tools.build_workspace_manifest(candidate_commit, records)
+    manifest_digest = repo_tools.workspace_manifest_digest(manifest)
+    fixed_test = (
+        Path(__file__).resolve().parents[1]
+        / "supply-chain/images/execution/verifier_test.py"
+    ).read_bytes()
+    contract = replace(
+        _run_tests_execution_contract(),
+        execution_id=execution_digit * 64,
+        candidate_commit=candidate_commit,
+        workspace_manifest_digest=manifest_digest,
+        command_digest=repo_tools.frozen_verifier_command_digest(),
+        fixed_test_source_digest=hashlib.sha256(fixed_test).hexdigest(),
+    )
+    return contract, repo_tools.CandidateExecutionSnapshot(
+        head_commit=candidate_commit,
+        workspace_manifest_digest=manifest_digest,
+        plan=repo_tools.ExecutionSnapshotPlan(
+            files=files,
+            read_only=True,
+            owner_uid=65532,
+            owner_gid=65532,
+            atime_unix_seconds=0,
+            mtime_unix_seconds=0,
+            clear_extended_attributes=True,
+            clear_posix_acls=True,
+            clear_file_capabilities=True,
+        ),
+    )
 
 
 def _docker_driver_tar(
@@ -5069,7 +5175,15 @@ def test_docker_run_tests_driver_required_live_detached_execution(
     assert daemon.returncode == 0, daemon.stderr
 
     repository = Path(__file__).resolve().parents[1]
-    task5_revision = "6cd8c340c9ea1086524b420b0b2bfbb3e4ae4325"
+    source_revision = os.environ.get("OPENWORKPROOF_SOURCE_REVISION")
+    if source_revision is None:
+        source_revision = subprocess.run(
+            ("git", "rev-parse", "HEAD"),
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
     artifact_root_text = os.environ.get(
         "OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT"
     )
@@ -5090,7 +5204,7 @@ def test_docker_run_tests_driver_required_live_detached_execution(
             "--repo",
             str(repository),
             "--source-revision",
-            task5_revision,
+            source_revision,
             "--wheelhouse",
             str(artifact_root / "wheelhouse/linux-arm64-cp312-full"),
             "--deb-closure",
@@ -5102,7 +5216,7 @@ def test_docker_run_tests_driver_required_live_detached_execution(
         timeout=60,
     )
     assert assembled.returncode == 0, assembled.stderr
-    tag = f"openworkproof/execution-test-dev:{task5_revision}"
+    tag = f"openworkproof/execution-test-dev:{source_revision}"
     assert subprocess.run(
         (str(docker_binary), "image", "inspect", tag),
         capture_output=True,
@@ -5122,7 +5236,7 @@ def test_docker_run_tests_driver_required_live_detached_execution(
                 "--platform",
                 "linux/arm64",
                 "--build-arg",
-                f"OWP_SOURCE_REVISION={task5_revision}",
+                f"OWP_SOURCE_REVISION={source_revision}",
                 "--tag",
                 tag,
                 str(context_root / "execution"),
@@ -5140,46 +5254,94 @@ def test_docker_run_tests_driver_required_live_detached_execution(
         image_id = json.loads(inspected.stdout)[0]["Id"]
         assert isinstance(image_id, str) and image_id.startswith("sha256:")
 
-        original_contract, snapshot = _docker_driver_contract_and_snapshot()
-        contract = replace(
-            original_contract,
-            container_image_digest=image_id,
+        fixed_test = subprocess.run(
+            (
+                "git",
+                "show",
+                f"{source_revision}:supply-chain/images/execution/verifier_test.py",
+            ),
+            cwd=repository,
+            check=True,
+            capture_output=True,
+        ).stdout
+        assert (context_root / "execution/verifier_test.py").read_bytes() == fixed_test
+        assert b'sys.path.insert(0, "/workspace")' in fixed_test
+        fixed_digest = hashlib.sha256(fixed_test).hexdigest()
+        baked = subprocess.run(
+            (
+                str(docker_binary),
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--read-only",
+                "--entrypoint",
+                "/bin/sh",
+                tag,
+                "-c",
+                "stat -c '%u:%g:%a' /fixed-tests /fixed-tests/verifier_test.py; "
+                "sha256sum /fixed-tests/verifier_test.py",
+            ),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
+        assert baked.stdout == (
+            "0:0:555\n0:0:444\n"
+            f"{fixed_digest}  /fixed-tests/verifier_test.py\n"
+        )
+
         executor = repo_tools.DockerRunTestsExecutor(
             docker_binary=docker_binary,
             candidate_runtime_root=tmp_path.resolve(),
             image_reference=image_id,
         )
-        assert executor.prepare(contract, snapshot).action == "READY_TO_START"
-        outcome = executor.start_and_wait(contract)
-        assert outcome.action == "CLOSED_RESULT"
-        assert outcome.result is not None
-        assert outcome.result.actual_exit_code == 0
-        executor.cleanup(contract)
-        binding = repo_tools.derive_run_tests_docker_binding(
-            contract.execution_id
-        )
-        for inspect_command in (
-            (str(docker_binary), "inspect", binding.staging_container_name),
-            (str(docker_binary), "inspect", binding.container_name),
+        for regex, execution_digit, candidate_digit, expected_exit in (
+            (br"\s*\S+\s*", "1", "7", 1),
             (
-                str(docker_binary),
-                "volume",
-                "inspect",
-                binding.workspace_volume_name,
-            ),
-            (
-                str(docker_binary),
-                "volume",
-                "inspect",
-                binding.output_volume_name,
+                br"[^\S\u00a0]*(?:[^\s\u00a0]|\u00a0)+[^\S\u00a0]*",
+                "2",
+                "8",
+                0,
             ),
         ):
-            assert subprocess.run(
-                inspect_command,
-                capture_output=True,
-                timeout=10,
-            ).returncode != 0
+            original_contract, snapshot = _rich_wrap_driver_contract_and_snapshot(
+                regex,
+                execution_digit=execution_digit,
+                candidate_digit=candidate_digit,
+            )
+            contract = replace(original_contract, container_image_digest=image_id)
+            assert executor.prepare(contract, snapshot).action == "READY_TO_START"
+            outcome = executor.start_and_wait(contract)
+            assert outcome.action == "CLOSED_RESULT"
+            assert outcome.result is not None
+            assert outcome.result.actual_exit_code == expected_exit
+            executor.cleanup(contract)
+            binding = repo_tools.derive_run_tests_docker_binding(
+                contract.execution_id
+            )
+            for inspect_command in (
+                (str(docker_binary), "inspect", binding.staging_container_name),
+                (str(docker_binary), "inspect", binding.container_name),
+                (
+                    str(docker_binary),
+                    "volume",
+                    "inspect",
+                    binding.workspace_volume_name,
+                ),
+                (
+                    str(docker_binary),
+                    "volume",
+                    "inspect",
+                    binding.output_volume_name,
+                ),
+            ):
+                assert subprocess.run(
+                    inspect_command,
+                    capture_output=True,
+                    timeout=10,
+                ).returncode != 0
     finally:
         if executor is not None and contract is not None:
             try:

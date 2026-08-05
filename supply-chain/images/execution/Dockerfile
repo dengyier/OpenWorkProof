@@ -13,6 +13,11 @@ ENV HOME=/nonexistent \
     PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
     TZ=UTC
 
+COPY Dockerfile requirements.lock run_tests_runner.py verifier_test.py SHA256SUMS /tmp/context/
+RUN cd /tmp/context/ \
+    && sha256sum -c SHA256SUMS \
+    && rm -rf /tmp/context
+
 COPY requirements.lock /tmp/requirements.lock
 COPY wheels/ /tmp/wheels/
 RUN cd /tmp/wheels/ \
@@ -31,6 +36,11 @@ RUN cd /tmp/wheels/ \
     && rm -rf /tmp/requirements.lock /tmp/wheels
 
 COPY run_tests_runner.py /opt/openworkproof/run_tests_runner.py
+COPY verifier_test.py /tmp/verifier_test.py
+
+RUN install -d -o 0 -g 0 -m 0555 /fixed-tests \
+    && install -o 0 -g 0 -m 0444 /tmp/verifier_test.py /fixed-tests/verifier_test.py \
+    && rm /tmp/verifier_test.py
 
 RUN install -d -o 65532 -g 65532 -m 0755 /workspace /output
 

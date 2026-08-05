@@ -515,11 +515,18 @@ def test_execution_image_contract_is_minimal_and_offline() -> None:
     dockerfile = _read("execution/Dockerfile")
     lock_text = _read("execution/requirements.lock")
     runner_path = IMAGE_ROOT / "execution" / "run_tests_runner.py"
+    verifier_test_path = IMAGE_ROOT / "execution" / "verifier_test.py"
     runner_mode = runner_path.lstat().st_mode
 
     assert f"FROM {BASE_IMAGE}" in dockerfile
     assert not dockerfile.startswith("# syntax=")
     assert "COPY wheels/ /tmp/wheels/" in dockerfile
+    assert (
+        "COPY Dockerfile requirements.lock run_tests_runner.py verifier_test.py "
+        "SHA256SUMS /tmp/context/" in dockerfile
+    )
+    assert "cd /tmp/context/" in dockerfile
+    assert "sha256sum -c SHA256SUMS" in dockerfile
     assert "sha256sum -c SHA256SUMS" in dockerfile
     assert "--no-index" in dockerfile
     assert "--require-hashes" in dockerfile
@@ -530,6 +537,15 @@ def test_execution_image_contract_is_minimal_and_offline() -> None:
     assert stat.S_ISREG(runner_mode) and not runner_path.is_symlink()
     assert runner_path.read_bytes()
     assert "COPY run_tests_runner.py /opt/openworkproof/run_tests_runner.py" in dockerfile
+    assert "COPY verifier_test.py /tmp/verifier_test.py" in dockerfile
+    assert (
+        "install -d -o 0 -g 0 -m 0555 /fixed-tests" in dockerfile
+        and "install -o 0 -g 0 -m 0444 /tmp/verifier_test.py "
+        "/fixed-tests/verifier_test.py" in dockerfile
+    )
+    assert stat.S_ISREG(verifier_test_path.lstat().st_mode)
+    assert not verifier_test_path.is_symlink()
+    assert verifier_test_path.read_bytes()
     _assert_fixed_execution_process_config(dockerfile)
     _assert_execution_copy_up_mountpoints(dockerfile)
     assert 'ENTRYPOINT ["/usr/bin/env", "--"]' not in dockerfile

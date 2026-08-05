@@ -13,6 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 ASSEMBLER = ROOT / "supply-chain" / "images" / "prepare_context.py"
 EXECUTION_RUNNER_BLOB = b"RUNNER = 'revision-bound'\n"
+EXECUTION_VERIFIER_TEST_BLOB = b"def test_revision_bound():\n    assert True\n"
 HELPER_SOURCE_BLOBS = {
     "src/openworkproof/__init__.py": b"PACKAGE = True\n",
     "src/openworkproof/models.py": b"MODELS = True\n",
@@ -80,6 +81,9 @@ def context_inputs(tmp_path: Path) -> dict[str, Path | str | bytes]:
         "supply-chain/images/execution/Dockerfile": b"FROM execution\n",
         "supply-chain/images/execution/run_tests_runner.py": (
             EXECUTION_RUNNER_BLOB
+        ),
+        "supply-chain/images/execution/verifier_test.py": (
+            EXECUTION_VERIFIER_TEST_BLOB
         ),
         "supply-chain/images/execution/requirements.lock": (
             b"pytest==1.0 \\\n"
@@ -183,6 +187,9 @@ def test_assembler_uses_git_blobs_and_ignores_worktree_source_drift(
     (repo / "supply-chain/images/execution/run_tests_runner.py").write_bytes(
         b"UNTRACKED_WORKTREE_DRIFT = True\n"
     )
+    (repo / "supply-chain/images/execution/verifier_test.py").write_bytes(
+        b"def test_worktree_drift():\n    assert False\n"
+    )
 
     result = _assemble(context_inputs, output)
 
@@ -209,11 +216,23 @@ def test_assembler_uses_git_blobs_and_ignores_worktree_source_drift(
     assert (
         output / "execution/run_tests_runner.py"
     ).read_bytes() == EXECUTION_RUNNER_BLOB
+    assert (
+        output / "execution/verifier_test.py"
+    ).read_bytes() == EXECUTION_VERIFIER_TEST_BLOB
+    assert (output / "execution/SHA256SUMS").read_text(encoding="utf-8") == (
+        f"{_sha256(b'FROM execution\n')}  Dockerfile\n"
+        f"{_sha256((output / 'execution/requirements.lock').read_bytes())}  "
+        "requirements.lock\n"
+        f"{_sha256(EXECUTION_RUNNER_BLOB)}  run_tests_runner.py\n"
+        f"{_sha256(EXECUTION_VERIFIER_TEST_BLOB)}  verifier_test.py\n"
+    )
     assert sorted(path.relative_to(output).as_posix() for path in output.rglob("*")) == [
         "execution",
         "execution/Dockerfile",
+        "execution/SHA256SUMS",
         "execution/requirements.lock",
         "execution/run_tests_runner.py",
+        "execution/verifier_test.py",
         "execution/wheels",
         "execution/wheels/SHA256SUMS",
         f"execution/wheels/{context_inputs['execution_wheel_name']}",

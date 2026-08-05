@@ -30,6 +30,7 @@ ALL_TRACKED_DEFINITION_PATHS = (
     "requirements-lock.txt",
     "supply-chain/images/execution/Dockerfile",
     "supply-chain/images/execution/requirements.lock",
+    "supply-chain/images/execution/verifier_test.py",
     "supply-chain/images/trusted-helper/Dockerfile",
     "supply-chain/images/trusted-helper/requirements.lock",
     "supply-chain/images/trusted-helper/debian-packages.lock",
@@ -1732,13 +1733,22 @@ def test_candidate_inventory_selector_rejects_zero_matches() -> None:
         _select_inventory_for_definition([], {})
 
 
-def test_candidate_inventory_selector_rejects_multiple_matches() -> None:
-    current_path, current = _select_current_inventory()
-    revision = current["source_revision"]
+def test_candidate_inventory_selector_rejects_multiple_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_path = INVENTORY_ROOT / (
+        "4460abf3615252077bd37f182c8b69acf5c9da70.json"
+    )
+    current = _load_candidate_inventory(current_path)
     definition = {
-        relative_path: _git_bytes(revision, relative_path)
+        relative_path: (ROOT / relative_path).read_bytes()
         for relative_path in CURRENT_DEFINITION_PATHS
     }
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_git_bytes",
+        lambda revision, relative_path: definition[relative_path],
+    )
 
     with pytest.raises(AssertionError, match="matched 2"):
         _select_inventory_for_definition(
@@ -1767,7 +1777,9 @@ def test_candidate_inventory_selector_covers_every_tracked_definition() -> None:
 def test_candidate_inventory_selector_rejects_other_revision_alias(
     tmp_path: Path,
 ) -> None:
-    _, current = _select_current_inventory()
+    current = _load_candidate_inventory(
+        INVENTORY_ROOT / "4460abf3615252077bd37f182c8b69acf5c9da70.json"
+    )
     alias_revision = subprocess.run(
         ["git", "rev-parse", f"{current['source_revision']}^"],
         cwd=ROOT,

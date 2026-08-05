@@ -7,7 +7,7 @@
 `candidates/4460abf3615252077bd37f182c8b69acf5c9da70.json`。历史清单
 `candidates/ed2da68a1009dd8b333025404e7198dc5a12660e.json` 与
 `candidates/33a485eacf4ab97b2507f00e5a824ba4a5c8c29c.json` 均保留并继续按其
-各自 revision 验证；只有当前七项构建定义及 `SOURCE_ALLOWLIST` 指向的四份
+各自 revision 验证；只有当前八项构建定义及 `SOURCE_ALLOWLIST` 指向的四份
 helper 源码 blob 全部逐字节匹配时，清单才可被选择为 current。清单绑定构建
 revision、基础镜像、全部 build-context 清单哈希、本地 image ID、原样
 `.RepoDigests`、运行配置、OCI manifest 和 archive 哈希。当前外部本地根为
@@ -28,9 +28,10 @@ candidate inventory 将前两个哈希记录在闭合的 `build_inputs.global` �
 
 `execution` 仅安装 pytest 与 Rich 15 源码测试在 Python 3.12 上的运行依赖，
 不安装被测 Rich wheel，也不安装 OpenWorkProof、MCP、pip-tools 或 setuptools。
-固定 Verifier test 必须在测试代码中显式把只读 `/workspace` 插入 `sys.path`
-后再 import Rich；镜像不使用 `.pth` 或 `sitecustomize.py` 隐式执行 workspace
-内容。`trusted-helper-candidate` 仅复制
+固定 Verifier test 从构建 revision 的 Git blob 写入 execution context，并以
+root:root、`0444` 烘焙到不可写的 `/fixed-tests/verifier_test.py`；测试代码显式
+把只读 `/workspace` 插入 `sys.path[0]` 后再 import Rich。镜像不使用 `.pth` 或
+`sitecustomize.py` 隐式执行 workspace 内容。`trusted-helper-candidate` 仅复制
 `SOURCE_ALLOWLIST` 中的四个 OpenWorkProof 文件及其 Python 运行闭包，并从
 仓库外精确 `.deb` closure 离线安装 `/usr/bin/git`；Dockerfile 中没有 apt
 更新或下载。
@@ -50,7 +51,9 @@ Git closure 由固定基础镜像中的 Debian 13 trixie sources 解析；实际
 `/Users/molin/Project/openWorkProof-day0/build-contexts/<source-revision>/` 之类的
 revision 专属仓库外目录。每个上下文包含其 Dockerfile、`requirements.lock`、`wheels/`；
 execution 另含从指定 Git revision blob 逐字节复制的 `run_tests_runner.py`，
-helper 另含 `debs/` 和 `helper-src/`。`wheels/SHA256SUMS` 只列上下文内 wheel，
+以及同一 revision 的 `verifier_test.py`；helper 另含 `debs/` 和 `helper-src/`。
+execution 根 `SHA256SUMS` 精确绑定 Dockerfile、requirements lock、runner 和
+Verifier test，Dockerfile 在安装前复核；`wheels/SHA256SUMS` 只列上下文内 wheel，
 `debs/SHA256SUMS` 只列上下文内 `.deb`。helper 源文件按 `SOURCE_ALLOWLIST`
 从指定 Git revision 的 blob 提取，禁止从 working tree 复制，也禁止复制整个
 `src/openworkproof`；`helper-src/SHA256SUMS` 必须按构建 revision 的四份精确
@@ -82,8 +85,12 @@ python "$OWP_REPO/supply-chain/images/prepare_context.py" \
 - execution-test candidate：`ENTRYPOINT ["/opt/venv/bin/python", "-I",
   "/opt/openworkproof/run_tests_runner.py"]`，`CMD ["execute"]`。runner 只接受
   `stage` 或 `execute`：前者从标准输入接收有界规范快照并复核 candidate
-  manifest，后者只运行固定的 `/opt/venv/bin/python -I -m pytest -q`，写入有界
-  `started.json` 和 `result.json`。它不安装或导入 OpenWorkProof，不接收 Sidecar
+  manifest，后者只运行签名 TestProfile 绑定的固定完整命令：
+  `/opt/venv/bin/python -I -m pytest -q -c /dev/null --rootdir=/fixed-tests
+  --confcutdir=/fixed-tests /fixed-tests/verifier_test.py`。runner 先确认固定测试是
+  预期路径下 root-owned、`0444` 的有界规范文本，并且 SHA-256 与 run contract
+  的 `fixed_test_source_digest` 相等，才写入 `started.json` 和运行 pytest。
+  它不安装或导入 OpenWorkProof，不接收 Sidecar
   key、Docker socket、网络或任意命令字符串；它不是最终 trusted helper，也
   不构成 registry 推送证据、不构成 Acceptor 独立验收证据、不构成 D8 证据、
   不构成 Day 0 证据。execute runner 必须是 Linux 容器私有 PID namespace 的

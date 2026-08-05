@@ -915,15 +915,30 @@ FROZEN_VERIFIER_ARGV = (
     "-m",
     "pytest",
     "-q",
+    "-c",
+    "/dev/null",
+    "--rootdir=/fixed-tests",
+    "--confcutdir=/fixed-tests",
+    "/fixed-tests/verifier_test.py",
 )
+FROZEN_VERIFIER_COMMAND = {
+    "argv": list(FROZEN_VERIFIER_ARGV),
+    "working_directory": "/workspace",
+    "env": {
+        "HOME": "/nonexistent",
+        "LC_ALL": "C.UTF-8",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "TZ": "UTC",
+    },
+}
 
 
 def frozen_verifier_command_digest() -> str:
     return hashlib.sha256(
         rfc8785.dumps(
             {
-                "domain": "openworkproof/verifier-command/v0.1",
-                "argv": list(FROZEN_VERIFIER_ARGV),
+                "domain": "openworkproof/test-command/v0.1",
+                "command": FROZEN_VERIFIER_COMMAND,
             }
         )
     ).hexdigest()
