@@ -2360,6 +2360,7 @@ def _docker_container_inspection(
     plan: repo_tools.DockerExecutionPlan,
 ) -> dict:
     return {
+        "Id": "a" * 64,
         "Name": f"/{plan.container_name}",
         "State": {
             "Status": "created",
@@ -3663,6 +3664,8 @@ def test_docker_run_tests_driver_uses_exact_detached_lifecycle_transcript(
         + contract.container_image_digest
     )
     local_image_id = "sha256:" + "8" * 64
+    staging_id = "b" * 64
+    execution_container_id = "a" * 64
     command_plan = repo_tools._run_tests_docker_command_plan(
         repo_tools.DockerRunTestsExecutor(
             docker_binary=docker_binary,
@@ -3680,9 +3683,19 @@ def test_docker_run_tests_driver_uses_exact_detached_lifecycle_transcript(
         command_plan.create_workspace_volume_argv,
         command_plan.inspect_workspace_volume_argv,
         command_plan.create_staging_container_argv,
-        command_plan.start_staging_container_argv,
-        command_plan.inspect_staging_container_argv,
-        command_plan.remove_staging_container_argv,
+        repo_tools._docker_command_with_container_id(
+            command_plan.inspect_staging_container_argv, staging_id
+        ),
+        command_plan.inspect_workspace_volume_argv,
+        repo_tools._docker_command_with_container_id(
+            command_plan.start_staging_container_argv, staging_id
+        ),
+        repo_tools._docker_command_with_container_id(
+            command_plan.inspect_staging_container_argv, staging_id
+        ),
+        repo_tools._docker_command_with_container_id(
+            command_plan.remove_staging_container_argv, staging_id
+        ),
         command_plan.inspect_staging_container_argv,
         command_plan.create_output_volume_argv,
         command_plan.create_execution_container_argv,
@@ -3692,50 +3705,84 @@ def test_docker_run_tests_driver_uses_exact_detached_lifecycle_transcript(
         command_plan.inspect_output_volume_argv,
         command_plan.inspect_image_argv,
         command_plan.inspect_execution_container_argv,
-        command_plan.start_execution_container_argv,
-        command_plan.wait_execution_container_argv,
-        command_plan.inspect_execution_container_argv,
-        command_plan.copy_output_envelopes_argv,
+        repo_tools._docker_command_with_container_id(
+            command_plan.start_execution_container_argv,
+            execution_container_id,
+        ),
+        repo_tools._docker_command_with_container_id(
+            command_plan.wait_execution_container_argv,
+            execution_container_id,
+        ),
+        repo_tools._docker_command_with_container_id(
+            command_plan.inspect_execution_container_argv,
+            execution_container_id,
+        ),
+        repo_tools._docker_command_with_container_id(
+            command_plan.copy_output_envelopes_argv,
+            execution_container_id,
+        ),
     )
     observed: list[tuple[tuple[str, ...], bytes | None, float]] = []
     command_index = 0
+    staging_inspections = 0
 
     def run(
         command: tuple[str, ...],
         input_bytes: bytes | None,
         timeout: float,
     ) -> subprocess.CompletedProcess[bytes]:
-        nonlocal command_index
+        nonlocal command_index, staging_inspections
         assert command == expected_commands[command_index]
         command_index += 1
         observed.append((command, input_bytes, timeout))
         if command in plan.preflight_absent_argv:
             return subprocess.CompletedProcess(command, 0, b"", b"")
-        if command == (str(docker_binary), "inspect", binding.staging_container_name):
-            if command_index == 7:
-                inspection = {
-                    "Name": f"/{binding.staging_container_name}",
-                    "Config": {
-                        "Image": image_reference,
-                        "User": "65532:65532",
-                        "Labels": {
-                            "openworkproof.execution-owner": binding.ownership_token,
-                        },
+        if command == command_plan.create_staging_container_argv:
+            return subprocess.CompletedProcess(
+                command, 0, (staging_id + "\n").encode(), b""
+            )
+        if command == command_plan.create_execution_container_argv:
+            return subprocess.CompletedProcess(
+                command, 0, (execution_container_id + "\n").encode(), b""
+            )
+        if command[1] == "inspect" and command[-1] == staging_id:
+            staging_inspections += 1
+            inspection = {
+                "Id": staging_id,
+                "Name": f"/{binding.staging_container_name}",
+                "Config": {
+                    "Image": image_reference,
+                    "User": "65532:65532",
+                    "Labels": {
+                        "openworkproof.execution-owner": binding.ownership_token,
                     },
-                    "HostConfig": {"NetworkMode": "none", "ReadonlyRootfs": True},
-                    "Mounts": [
-                        {
-                            "Destination": "/workspace",
-                            "Type": "volume",
-                            "Name": binding.workspace_volume_name,
-                            "RW": True,
-                        }
-                    ],
-                    "State": {"Status": "exited", "ExitCode": 0},
-                }
-                return subprocess.CompletedProcess(
-                    command, 0, json.dumps([inspection]).encode(), b""
-                )
+                },
+                "HostConfig": {"NetworkMode": "none", "ReadonlyRootfs": True},
+                "Mounts": [
+                    {
+                        "Destination": "/workspace",
+                        "Type": "volume",
+                        "Name": binding.workspace_volume_name,
+                        "RW": True,
+                    }
+                ],
+                "State": (
+                    {
+                        "Status": "created",
+                        "Running": False,
+                        "Pid": 0,
+                        "ExitCode": 0,
+                        "StartedAt": "0001-01-01T00:00:00Z",
+                        "FinishedAt": "0001-01-01T00:00:00Z",
+                    }
+                    if staging_inspections == 1
+                    else {"Status": "exited", "ExitCode": 0}
+                ),
+            }
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps([inspection]).encode(), b""
+            )
+        if command == (str(docker_binary), "inspect", binding.staging_container_name):
             return _docker_driver_absent(command)
         if command == (str(docker_binary), "image", "inspect", image_reference):
             return subprocess.CompletedProcess(
@@ -3746,8 +3793,11 @@ def test_docker_run_tests_driver_uses_exact_detached_lifecycle_transcript(
                 ]).encode(),
                 b"",
             )
-        if command == (str(docker_binary), "inspect", binding.container_name):
-            status = "created" if command_index in {13, 17} else "exited"
+        if command[1] == "inspect" and command[-1] in {
+            binding.container_name,
+            execution_container_id,
+        }:
+            status = "created" if command[-1] == binding.container_name else "exited"
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -3773,15 +3823,9 @@ def test_docker_run_tests_driver_uses_exact_detached_lifecycle_transcript(
                 json.dumps([_docker_volume_inspection(plan, resource)]).encode(),
                 b"",
             )
-        if command == (str(docker_binary), "wait", binding.container_name):
+        if command[1] == "wait":
             return subprocess.CompletedProcess(command, 0, b"0\n", b"")
-        if command == (
-            str(docker_binary),
-            "start",
-            "--attach",
-            "--interactive",
-            binding.staging_container_name,
-        ):
+        if command[1:4] == ("start", "--attach", "--interactive"):
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -3818,7 +3862,11 @@ def test_docker_run_tests_driver_uses_exact_detached_lifecycle_transcript(
     assert outcome.action == "CLOSED_RESULT"
     assert outcome.result is not None and outcome.result.actual_exit_code == 0
     assert tuple(command for command, _, _ in observed) == expected_commands
-    staging_input = observed[5][1]
+    staging_input = next(
+        input_bytes
+        for command, input_bytes, _ in observed
+        if command[1:4] == ("start", "--attach", "--interactive")
+    )
     assert staging_input is not None and len(staging_input) <= 8_527_872
     assert all(timeout > 0 for _, _, timeout in observed)
 
@@ -3954,6 +4002,7 @@ def test_docker_run_tests_driver_cleans_owned_partial_after_staging_timeout(
         command=("execute",),
     )
     commands: list[tuple[str, ...]] = []
+    staging_id = "b" * 64
     stage_present = True
     workspace_present = True
 
@@ -3963,19 +4012,46 @@ def test_docker_run_tests_driver_cleans_owned_partial_after_staging_timeout(
         commands.append(command)
         if command in plan.preflight_absent_argv:
             return subprocess.CompletedProcess(command, 0, b"", b"")
-        if command[1:5] == ("start", "--attach", "--interactive", binding.staging_container_name):
+        if command[1] == "create" and "--interactive" in command:
+            return subprocess.CompletedProcess(
+                command, 0, (staging_id + "\n").encode(), b""
+            )
+        if command[1:4] == ("start", "--attach", "--interactive"):
             raise subprocess.TimeoutExpired(command, timeout)
         if command == (str(docker_binary), "inspect", binding.container_name):
             return _docker_driver_absent(command)
-        if command == (str(docker_binary), "inspect", binding.staging_container_name):
+        if command[1] == "inspect" and command[-1] in {
+            binding.staging_container_name,
+            staging_id,
+        }:
             if not stage_present:
                 return _docker_driver_absent(command)
             inspection = {
+                "Id": staging_id,
                 "Name": f"/{binding.staging_container_name}",
                 "Config": {
+                    "Image": image_reference,
+                    "User": "65532:65532",
                     "Labels": {
                         "openworkproof.execution-owner": binding.ownership_token,
                     }
+                },
+                "HostConfig": {"NetworkMode": "none", "ReadonlyRootfs": True},
+                "Mounts": [
+                    {
+                        "Destination": "/workspace",
+                        "Type": "volume",
+                        "Name": binding.workspace_volume_name,
+                        "RW": True,
+                    }
+                ],
+                "State": {
+                    "Status": "created",
+                    "Running": False,
+                    "Pid": 0,
+                    "ExitCode": 0,
+                    "StartedAt": "0001-01-01T00:00:00Z",
+                    "FinishedAt": "0001-01-01T00:00:00Z",
                 },
             }
             return subprocess.CompletedProcess(
@@ -4004,7 +4080,7 @@ def test_docker_run_tests_driver_cleans_owned_partial_after_staging_timeout(
                 ]).encode(),
                 b"",
             )
-        if command[1:3] == ("rm", "--force"):
+        if command[1] == "rm":
             stage_present = False
         if command[1:3] == ("volume", "rm"):
             workspace_present = False
@@ -4018,7 +4094,13 @@ def test_docker_run_tests_driver_cleans_owned_partial_after_staging_timeout(
     )
 
     assert executor.prepare(contract, snapshot).action == "UNRESOLVED"
-    assert (docker_binary.as_posix(), "rm", "--force", "--volumes", binding.staging_container_name) in commands
+    assert (
+        docker_binary.as_posix(),
+        "rm",
+        "--force",
+        "--volumes",
+        staging_id,
+    ) in commands
     assert (docker_binary.as_posix(), "volume", "rm", binding.workspace_volume_name) in commands
     assert plan.output_volume.create_argv not in commands
 
@@ -4045,12 +4127,12 @@ def test_docker_run_tests_driver_cleans_every_partial_create_position(
         run=lambda command, input_bytes, timeout: None,
     )
     commands = repo_tools._run_tests_docker_command_plan(executor, contract)
-    present = {
-        "workspace": False,
-        "staging": False,
-        "output": False,
-        "execution": False,
-    }
+    staging_id = "b" * 64
+    execution_container_id = "a" * 64
+    staging_started = False
+    present = dict.fromkeys(
+        ("workspace", "staging", "output", "execution"), False
+    )
     create_for = {
         commands.create_workspace_volume_argv: "workspace",
         commands.create_staging_container_argv: "staging",
@@ -4062,16 +4144,29 @@ def test_docker_run_tests_driver_cleans_every_partial_create_position(
         commands.inspect_staging_container_argv: "staging",
         commands.inspect_output_volume_argv: "output",
         commands.inspect_execution_container_argv: "execution",
+        repo_tools._docker_command_with_container_id(
+            commands.inspect_staging_container_argv, staging_id
+        ): "staging",
+        repo_tools._docker_command_with_container_id(
+            commands.inspect_execution_container_argv, execution_container_id
+        ): "execution",
     }
     remove_for = {
         commands.remove_workspace_volume_argv: "workspace",
-        commands.remove_staging_container_force_argv: "staging",
         commands.remove_output_volume_argv: "output",
-        commands.remove_execution_container_argv: "execution",
-        commands.remove_staging_container_argv: "staging",
+        repo_tools._docker_command_with_container_id(
+            commands.remove_staging_container_argv, staging_id
+        ): "staging",
+        repo_tools._docker_command_with_container_id(
+            commands.remove_staging_container_force_argv, staging_id
+        ): "staging",
+        repo_tools._docker_command_with_container_id(
+            commands.remove_execution_container_argv, execution_container_id
+        ): "execution",
     }
 
     def run(command, input_bytes, timeout):
+        nonlocal staging_started
         command = tuple(command)
         if command in commands.preflight_absent_argv:
             return subprocess.CompletedProcess(command, 0, b"", b"")
@@ -4083,8 +4178,18 @@ def test_docker_run_tests_driver_cleans_every_partial_create_position(
                     raise subprocess.TimeoutExpired(command, timeout)
                 return subprocess.CompletedProcess(command, 1, b"", b"failed")
             present[resource] = True
-            return subprocess.CompletedProcess(command, 0, b"", b"")
-        if command == commands.start_staging_container_argv:
+            created_id = {
+                "staging": staging_id,
+                "execution": execution_container_id,
+            }.get(resource)
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                b"" if created_id is None else (created_id + "\n").encode(),
+                b"",
+            )
+        if command[1:4] == ("start", "--attach", "--interactive"):
+            staging_started = True
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -4092,16 +4197,14 @@ def test_docker_run_tests_driver_cleans_every_partial_create_position(
                     {
                         "execution_contract_digest": commands.contract_digest,
                         "execution_id": contract.execution_id,
-                        "workspace_manifest_digest": (
-                            contract.workspace_manifest_digest
-                        ),
+                        "workspace_manifest_digest": contract.workspace_manifest_digest,
                     }
                 )
                 + b"\n",
                 b"",
             )
-        if command in inspect_for:
-            resource = inspect_for[command]
+        resource = inspect_for.get(command)
+        if resource is not None:
             if not present[resource]:
                 return _docker_driver_absent(command)
             if resource == "workspace":
@@ -4118,6 +4221,7 @@ def test_docker_run_tests_driver_cleans_every_partial_create_position(
                 )
             else:
                 inspection = {
+                    "Id": staging_id,
                     "Name": f"/{commands.binding.staging_container_name}",
                     "Config": {
                         "Image": commands.execution_plan.image_reference,
@@ -4140,7 +4244,18 @@ def test_docker_run_tests_driver_cleans_every_partial_create_position(
                             "RW": True,
                         }
                     ],
-                    "State": {"Status": "exited", "ExitCode": 0},
+                    "State": (
+                        {"Status": "exited", "ExitCode": 0}
+                        if staging_started
+                        else {
+                            "Status": "created",
+                            "Running": False,
+                            "Pid": 0,
+                            "ExitCode": 0,
+                            "StartedAt": "0001-01-01T00:00:00Z",
+                            "FinishedAt": "0001-01-01T00:00:00Z",
+                        }
+                    ),
                 }
             return subprocess.CompletedProcess(
                 command, 0, json.dumps([inspection]).encode(), b""
@@ -4173,8 +4288,12 @@ def test_docker_run_tests_driver_rejects_unowned_workspace_volume_create_race(
     )
     commands = repo_tools._run_tests_docker_command_plan(executor, contract)
     observed = []
+    staging_id = "b" * 64
+    workspace_inspections = 0
+    staging_present = False
 
     def run(command, input_bytes, timeout):
+        nonlocal workspace_inspections, staging_present
         command = tuple(command)
         observed.append((command, input_bytes))
         if command in commands.preflight_absent_argv:
@@ -4187,23 +4306,73 @@ def test_docker_run_tests_driver_rejects_unowned_workspace_volume_create_race(
                 b"",
             )
         if command == commands.inspect_workspace_volume_argv:
+            workspace_inspections += 1
             inspection = _docker_volume_inspection(
                 commands.execution_plan, "workspace_volume"
             )
-            inspection["Labels"]["openworkproof.execution-owner"] = "f" * 64
+            if workspace_inspections > 1:
+                inspection["Labels"]["openworkproof.execution-owner"] = "f" * 64
             return subprocess.CompletedProcess(
                 command, 0, json.dumps([inspection]).encode(), b""
             )
+        if command == commands.create_staging_container_argv:
+            staging_present = True
+            return subprocess.CompletedProcess(
+                command, 0, (staging_id + "\n").encode(), b""
+            )
+        if command[1] == "inspect" and command[-1] in {
+            staging_id,
+            commands.binding.staging_container_name,
+        }:
+            if not staging_present:
+                return _docker_driver_absent(command)
+            inspection = {
+                "Id": staging_id,
+                "Name": f"/{commands.binding.staging_container_name}",
+                "Config": {
+                    "Image": commands.execution_plan.image_reference,
+                    "User": "65532:65532",
+                    "Labels": {
+                        "openworkproof.execution-owner": (
+                            commands.binding.ownership_token
+                        )
+                    },
+                },
+                "HostConfig": {"NetworkMode": "none", "ReadonlyRootfs": True},
+                "Mounts": [
+                    {
+                        "Destination": "/workspace",
+                        "Type": "volume",
+                        "Name": commands.binding.workspace_volume_name,
+                        "RW": True,
+                    }
+                ],
+                "State": {
+                    "Status": "created",
+                    "Running": False,
+                    "Pid": 0,
+                    "ExitCode": 0,
+                    "StartedAt": "0001-01-01T00:00:00Z",
+                    "FinishedAt": "0001-01-01T00:00:00Z",
+                },
+            }
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps([inspection]).encode(), b""
+            )
+        if command[1] == "rm":
+            staging_present = False
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+        if command[1] == "start":
+            return subprocess.CompletedProcess(command, 1, b"", b"unsafe")
         return _docker_driver_absent(command)
 
     executor._run = run
 
     assert executor.prepare(contract, snapshot).action == "UNRESOLVED"
-    assert all(
-        command != commands.create_staging_container_argv
-        and command != commands.start_staging_container_argv
-        for command, _ in observed
-    )
+    assert commands.create_staging_container_argv in {
+        command for command, _ in observed
+    }
+    assert all(command[1] != "start" for command, _ in observed)
     assert all(input_bytes is None for _, input_bytes in observed)
     assert commands.remove_workspace_volume_argv not in {
         command for command, _ in observed
@@ -4343,7 +4512,9 @@ def test_docker_run_tests_driver_match_cleans_stopped_container_without_cp(
             return subprocess.CompletedProcess(
                 command, 0, json.dumps([inspection]).encode(), b""
             )
-        if command == commands.remove_execution_container_argv:
+        if command == repo_tools._docker_command_with_container_id(
+            commands.remove_execution_container_argv, "a" * 64
+        ):
             container_present = False
             return subprocess.CompletedProcess(command, 0, b"", b"")
         return _docker_driver_absent(command)
@@ -4353,7 +4524,9 @@ def test_docker_run_tests_driver_match_cleans_stopped_container_without_cp(
     assert executor.reconcile(contract, "STARTED_UNCONFIRMED", "MATCH") == (
         repo_tools.RunTestsExecutionOutcome("CLOSED_RESULT", None)
     )
-    assert commands.remove_execution_container_argv in observed
+    assert repo_tools._docker_command_with_container_id(
+        commands.remove_execution_container_argv, "a" * 64
+    ) in observed
     assert all(command[1] != "cp" for command in observed)
 
 
@@ -4671,7 +4844,7 @@ def test_docker_run_tests_driver_reconcile_running_and_result_uncertainty(
             inspection = _docker_volume_inspection(
                 commands.execution_plan, "output_volume"
             )
-        elif command == commands.copy_output_envelopes_argv:
+        elif command[1] == "cp":
             payload = (
                 _docker_driver_tar(contract)
                 if archive == "valid"
@@ -4709,11 +4882,15 @@ def test_docker_run_tests_cleanup_removes_only_exact_owned_names_in_reverse_orde
         commands.inspect_workspace_volume_argv: True,
     }
     remove_to_inspect = {
-        commands.remove_execution_container_argv: (
+        repo_tools._docker_command_with_container_id(
+            commands.remove_execution_container_argv, "a" * 64
+        ): (
             commands.inspect_execution_container_argv
         ),
         commands.remove_output_volume_argv: commands.inspect_output_volume_argv,
-        commands.remove_staging_container_force_argv: (
+        repo_tools._docker_command_with_container_id(
+            commands.remove_staging_container_force_argv, "b" * 64
+        ): (
             commands.inspect_staging_container_argv
         ),
         commands.remove_workspace_volume_argv: (
@@ -4745,6 +4922,7 @@ def test_docker_run_tests_cleanup_removes_only_exact_owned_names_in_reverse_orde
                 )
             else:
                 inspection = {
+                    "Id": "b" * 64,
                     "Name": f"/{commands.binding.staging_container_name}",
                     "Config": {
                         "Labels": {
@@ -4763,9 +4941,13 @@ def test_docker_run_tests_cleanup_removes_only_exact_owned_names_in_reverse_orde
     executor.cleanup(contract)
 
     assert removals == [
-        commands.remove_execution_container_argv,
+        repo_tools._docker_command_with_container_id(
+            commands.remove_execution_container_argv, "a" * 64
+        ),
         commands.remove_output_volume_argv,
-        commands.remove_staging_container_force_argv,
+        repo_tools._docker_command_with_container_id(
+            commands.remove_staging_container_force_argv, "b" * 64
+        ),
         commands.remove_workspace_volume_argv,
     ]
     assert all("*" not in value for command in removals for value in command)

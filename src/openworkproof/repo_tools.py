@@ -5908,18 +5908,71 @@ def _run_tests_docker_command_plan(
     )
 
 
-def _valid_staging_inspection(
+def _docker_command_with_container_id(
+    argv: tuple[str, ...],
+    container_id: str,
+) -> tuple[str, ...]:
+    if (
+        type(argv) is not tuple
+        or len(argv) < 3
+        or type(container_id) is not str
+        or _DIGEST_PATTERN.fullmatch(container_id) is None
+    ):
+        raise ValueError("Docker container command is invalid")
+    if argv[1] == "cp":
+        if len(argv) != 4 or not argv[2].endswith(":/output/.") or argv[3] != "-":
+            raise ValueError("Docker container command is invalid")
+        return (argv[0], "cp", f"{container_id}:/output/.", "-")
+    if argv[1] not in {"inspect", "start", "wait", "rm"}:
+        raise ValueError("Docker container command is invalid")
+    return (*argv[:-1], container_id)
+
+
+def _docker_created_container_id(raw: bytes) -> str:
+    try:
+        container_id = raw.strip().decode("ascii")
+    except UnicodeDecodeError as error:
+        raise ValueError("Docker create container ID is invalid") from error
+    if (
+        raw != (container_id + "\n").encode()
+        or _DIGEST_PATTERN.fullmatch(container_id) is None
+    ):
+        raise ValueError("Docker create container ID is invalid")
+    return container_id
+
+
+def _docker_inspected_container_id(
+    inspection: object,
+    *,
+    expected: str | None = None,
+) -> str | None:
+    if type(inspection) is not dict:
+        return None
+    container_id = inspection.get("Id")
+    if (
+        type(container_id) is not str
+        or _DIGEST_PATTERN.fullmatch(container_id) is None
+        or (expected is not None and container_id != expected)
+    ):
+        return None
+    return container_id
+
+
+def _valid_staging_configuration(
     inspection: object,
     binding: RunTestsDockerBinding,
     plan: DockerExecutionPlan,
+    expected_container_id: str,
 ) -> bool:
     try:
         config = inspection["Config"]
         host = inspection["HostConfig"]
         mounts = inspection["Mounts"]
-        state = inspection["State"]
         return (
-            type(inspection) is dict
+            _docker_inspected_container_id(
+                inspection, expected=expected_container_id
+            )
+            == expected_container_id
             and inspection.get("Name") == f"/{binding.staging_container_name}"
             and type(config) is dict
             and config.get("Image") == plan.image_reference
@@ -5936,6 +5989,47 @@ def _valid_staging_inspection(
             and mounts[0].get("Type") == "volume"
             and mounts[0].get("Name") == binding.workspace_volume_name
             and mounts[0].get("RW") is True
+        )
+    except (KeyError, TypeError, AttributeError):
+        return False
+
+
+def _valid_staging_prestart_inspection(
+    inspection: object,
+    binding: RunTestsDockerBinding,
+    plan: DockerExecutionPlan,
+    expected_container_id: str,
+) -> bool:
+    try:
+        state = inspection["State"]
+        return (
+            _valid_staging_configuration(
+                inspection, binding, plan, expected_container_id
+            )
+            and type(state) is dict
+            and state.get("Status") == "created"
+            and state.get("Running") is False
+            and state.get("Pid") == 0
+            and state.get("ExitCode") == 0
+            and state.get("StartedAt") == "0001-01-01T00:00:00Z"
+            and state.get("FinishedAt") == "0001-01-01T00:00:00Z"
+        )
+    except (KeyError, TypeError, AttributeError):
+        return False
+
+
+def _valid_staging_inspection(
+    inspection: object,
+    binding: RunTestsDockerBinding,
+    plan: DockerExecutionPlan,
+    expected_container_id: str,
+) -> bool:
+    try:
+        state = inspection["State"]
+        return (
+            _valid_staging_configuration(
+                inspection, binding, plan, expected_container_id
+            )
             and type(state) is dict
             and state.get("Status") == "exited"
             and state.get("ExitCode") == 0
@@ -6178,10 +6272,41 @@ def _prepare_run_tests_docker(
             resource="workspace_volume",
         ):
             raise ValueError("Docker workspace volume ownership is invalid")
-        _docker_checked(executor, commands.create_staging_container_argv)
+        staging_id = _docker_created_container_id(
+            _docker_checked(
+                executor, commands.create_staging_container_argv
+            ).stdout
+        )
+        staging_inspect_by_id = _docker_command_with_container_id(
+            commands.inspect_staging_container_argv, staging_id
+        )
+        staging_prestart = _docker_inspection(
+            _docker_checked(executor, staging_inspect_by_id).stdout
+        )
+        if not _valid_staging_prestart_inspection(
+            staging_prestart,
+            binding,
+            plan,
+            staging_id,
+        ):
+            raise ValueError("Docker staging pre-start inspection is invalid")
+        workspace_pinned = _docker_inspection(
+            _docker_checked(
+                executor,
+                commands.inspect_workspace_volume_argv,
+            ).stdout
+        )
+        if not _valid_docker_volume_inspection(
+            plan,
+            workspace_pinned,
+            resource="workspace_volume",
+        ):
+            raise ValueError("Docker pinned workspace volume is invalid")
         staged = _docker_checked(
             executor,
-            commands.start_staging_container_argv,
+            _docker_command_with_container_id(
+                commands.start_staging_container_argv, staging_id
+            ),
             input_bytes=stream,
             timeout=30.0,
         )
@@ -6197,14 +6322,18 @@ def _prepare_run_tests_docker(
         stage_inspection = _docker_inspection(
             _docker_checked(
                 executor,
-                commands.inspect_staging_container_argv,
+                staging_inspect_by_id,
             ).stdout
         )
-        if not _valid_staging_inspection(stage_inspection, binding, plan):
+        if not _valid_staging_inspection(
+            stage_inspection, binding, plan, staging_id
+        ):
             raise ValueError("Docker staging inspection is invalid")
         _docker_checked(
             executor,
-            commands.remove_staging_container_argv,
+            _docker_command_with_container_id(
+                commands.remove_staging_container_argv, staging_id
+            ),
         )
         absent = _inspect_optional(
             executor,
@@ -6299,6 +6428,7 @@ def _start_and_wait_run_tests_docker(
                 commands.inspect_execution_container_argv,
             ).stdout
         )
+        container_id = _docker_inspected_container_id(inspected)
         observation = _execution_observation(
             inspected,
             binding,
@@ -6308,7 +6438,8 @@ def _start_and_wait_run_tests_docker(
         )
         state = inspected.get("State")
         if (
-            observation is None
+            container_id is None
+            or observation is None
             or observation["status"] != "created"
             or observation["ever_started"] is not False
             or type(state) is not dict
@@ -6321,11 +6452,15 @@ def _start_and_wait_run_tests_docker(
             return RunTestsExecutionOutcome("UNRESOLVED")
         _docker_checked(
             executor,
-            commands.start_execution_container_argv,
+            _docker_command_with_container_id(
+                commands.start_execution_container_argv, container_id
+            ),
         )
         waited = _docker_checked(
             executor,
-            commands.wait_execution_container_argv,
+            _docker_command_with_container_id(
+                commands.wait_execution_container_argv, container_id
+            ),
             timeout=140.0,
         )
         try:
@@ -6337,7 +6472,9 @@ def _start_and_wait_run_tests_docker(
         after = _docker_inspection(
             _docker_checked(
                 executor,
-                commands.inspect_execution_container_argv,
+                _docker_command_with_container_id(
+                    commands.inspect_execution_container_argv, container_id
+                ),
             ).stdout
         )
         after_observation = _execution_observation(
@@ -6347,7 +6484,10 @@ def _start_and_wait_run_tests_docker(
             contract_digest,
             local_image_id,
         )
-        if after_observation is None:
+        if (
+            _docker_inspected_container_id(after, expected=container_id) is None
+            or after_observation is None
+        ):
             return RunTestsExecutionOutcome("UNRESOLVED")
         if after_observation["status"] in {"running", "paused", "restarting"}:
             return RunTestsExecutionOutcome("WAIT_RUNNING")
@@ -6358,7 +6498,9 @@ def _start_and_wait_run_tests_docker(
             return RunTestsExecutionOutcome("UNRESOLVED")
         archive = _docker_checked(
             executor,
-            commands.copy_output_envelopes_argv,
+            _docker_command_with_container_id(
+                commands.copy_output_envelopes_argv, container_id
+            ),
         ).stdout
         _, result = _extract_run_tests_output_tar(contract, archive)
         if not _run_tests_result_matches_exit(result, wait_exit):
@@ -6472,12 +6614,20 @@ def _reconcile_run_tests_docker(
             return RunTestsExecutionOutcome("UNRESOLVED")
         staging = None
         if staging_raw is not None:
+            staging_id = _docker_inspected_container_id(staging_raw)
+            if staging_id is None:
+                return RunTestsExecutionOutcome("UNRESOLVED")
             staging = _resource_observation(
                 staging_raw,
                 name=binding.staging_container_name,
                 ownership_token=binding.ownership_token,
-                configuration_matches=_valid_staging_inspection(
-                    staging_raw, binding, plan
+                configuration_matches=(
+                    _valid_staging_prestart_inspection(
+                        staging_raw, binding, plan, staging_id
+                    )
+                    or _valid_staging_inspection(
+                        staging_raw, binding, plan, staging_id
+                    )
                 ),
             )
             if staging is None:
@@ -6486,6 +6636,9 @@ def _reconcile_run_tests_docker(
         started = None
         result = None
         if container_raw is not None:
+            container_id = _docker_inspected_container_id(container_raw)
+            if container_id is None:
+                return RunTestsExecutionOutcome("UNRESOLVED")
             container = _execution_observation(
                 container_raw,
                 binding,
@@ -6498,7 +6651,9 @@ def _reconcile_run_tests_docker(
             if container["ever_started"] is True:
                 copied = _docker_checked(
                     executor,
-                    commands.copy_output_envelopes_argv,
+                    _docker_command_with_container_id(
+                        commands.copy_output_envelopes_argv, container_id
+                    ),
                 )
                 try:
                     started, result = _extract_run_tests_output_tar(
@@ -6617,16 +6772,22 @@ def _cleanup_run_tests_docker(
         inspection = _inspect_optional(executor, inspect_argv)
         if inspection is None:
             continue
+        container_id = (
+            _docker_inspected_container_id(inspection)
+            if resource in {"container", "staging"}
+            else None
+        )
         if resource == "container":
             owned = _owned_run_tests_execution_container(
                 inspection,
                 binding,
                 commands.contract_digest,
-            )
+            ) and container_id is not None
         elif resource == "staging":
             labels = inspection.get("Config", {}).get("Labels", {})
             owned = (
-                inspection.get("Name") == f"/{name}"
+                container_id is not None
+                and inspection.get("Name") == f"/{name}"
                 and type(labels) is dict
                 and labels.get(_DOCKER_OWNERSHIP_LABEL)
                 == binding.ownership_token
@@ -6635,6 +6796,10 @@ def _cleanup_run_tests_docker(
             owned = _docker_resource_is_owned(plan, resource, inspection)
         if not owned:
             raise RuntimeError(f"retained unowned Docker resource: {name}")
+        if container_id is not None:
+            remove_argv = _docker_command_with_container_id(
+                remove_argv, container_id
+            )
         _docker_checked(executor, remove_argv)
         if _inspect_optional(executor, inspect_argv) is not None:
             raise RuntimeError(f"Docker resource remains after cleanup: {name}")
