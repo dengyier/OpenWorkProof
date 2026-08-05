@@ -2935,7 +2935,8 @@ def test_validate_docker_execution_inspections_keeps_workspace_readonly_explicit
         "image_volume",
         "extra_mount",
         "wrong_mount_access",
-        "wrong_nocopy",
+        "workspace_nocopy",
+        "output_nocopy",
         "extra_tmpfs",
         "wrong_volume_driver",
         "wrong_volume_options",
@@ -2962,8 +2963,9 @@ def test_validate_docker_execution_inspections_rejects_unsafe_profile(
         )
     elif mutation == "wrong_mount_access":
         container["Mounts"][0]["RW"] = True
-    elif mutation == "wrong_nocopy":
-        container["HostConfig"]["Mounts"][0]["VolumeOptions"] = {
+    elif mutation in {"workspace_nocopy", "output_nocopy"}:
+        mount_index = 0 if mutation == "workspace_nocopy" else 1
+        container["HostConfig"]["Mounts"][mount_index]["VolumeOptions"] = {
             "NoCopy": True,
         }
     elif mutation == "extra_tmpfs":
