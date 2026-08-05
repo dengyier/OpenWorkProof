@@ -749,6 +749,8 @@ def test_supply_chain_record_keeps_day0_and_acceptor_claims_closed() -> None:
     assert "零后代" in record
     assert "Landlock ABI" in record
     assert "只允许在 `/tmp` 下写入" in record
+    assert "Linux `/dev/null` 字符设备" in record
+    assert "不开放 `/dev`" in record
 
 
 @pytest.mark.parametrize("inventory_path", CANDIDATE_PATHS, ids=lambda path: path.stem)

@@ -10,9 +10,11 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -514,6 +516,14 @@ def _no_child_preexec() -> None:
     return None
 
 
+def _linux_dev_null_stat(path: Path) -> SimpleNamespace:
+    assert path == Path("/dev/null")
+    return SimpleNamespace(
+        st_mode=stat.S_IFCHR | 0o666,
+        st_rdev=os.makedev(1, 3),
+    )
+
+
 def test_landlock_policy_requires_linux_and_supported_abi(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -567,6 +577,7 @@ def test_landlock_syscall_failures_are_controlled(
         prctl=lambda *args: 0,
         opener=lambda *args: 72,
         closer=lambda descriptor: None,
+        statter=_linux_dev_null_stat,
     )
     with pytest.raises(runner.RunnerError, match="Landlock"):
         preexec()
@@ -576,6 +587,8 @@ def test_landlock_policy_handles_every_supported_write_right(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     masks: list[int] = []
+    rules: list[tuple[int, int]] = []
+    opened_paths: list[Path] = []
     prctls: list[tuple[int, ...]] = []
 
     def syscall(number: int, *args) -> int:
@@ -586,24 +599,64 @@ def test_landlock_policy_handles_every_supported_write_right(
             return 71
         if number == runner._SYS_LANDLOCK_ADD_RULE:
             masks.append(args[2]._obj.allowed_access)
+            rules.append((args[2]._obj.parent_fd, args[2]._obj.allowed_access))
         return 0
+
+    def opener(path: Path, flags: int) -> int:
+        opened_paths.append(Path(path))
+        return 71 + len(opened_paths)
 
     monkeypatch.setattr(runner.sys, "platform", "linux")
     preexec = runner._production_child_preexec(
         writable_root=tmp_path,
         syscall=syscall,
         prctl=lambda *args: prctls.append(args) or 0,
-        opener=lambda *args: 72,
+        opener=opener,
         closer=lambda descriptor: None,
+        statter=_linux_dev_null_stat,
     )
     preexec()
 
     expected = runner._landlock_write_access(5)
-    assert masks == [expected, expected]
+    dev_null_access = (
+        runner._LANDLOCK_ACCESS_FS_WRITE_FILE
+        | runner._LANDLOCK_ACCESS_FS_IOCTL_DEV
+    )
+    assert runner._landlock_dev_null_access(3) == (
+        runner._LANDLOCK_ACCESS_FS_WRITE_FILE
+    )
+    assert runner._landlock_dev_null_access(5) == dev_null_access
+    assert masks == [expected, expected, dev_null_access]
+    assert rules == [(72, expected), (73, dev_null_access)]
+    assert opened_paths == [tmp_path, Path("/dev/null")]
+    assert Path("/dev") not in opened_paths
+    assert tmp_path / "output" not in opened_paths
     assert prctls == [
         (runner._PR_SET_DUMPABLE, 0, 0, 0, 0),
         (runner._PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0),
     ]
+
+
+@pytest.mark.parametrize(
+    ("mode", "device"),
+    (
+        (stat.S_IFLNK | 0o777, os.makedev(1, 3)),
+        (stat.S_IFREG | 0o666, 0),
+        (stat.S_IFCHR | 0o666, os.makedev(1, 5)),
+    ),
+)
+def test_landlock_rejects_noncanonical_dev_null(
+    tmp_path: Path, mode: int, device: int
+) -> None:
+    metadata = SimpleNamespace(st_mode=mode, st_rdev=device)
+
+    with pytest.raises(runner.RunnerError, match="/dev/null"):
+        runner._build_landlock_preexec(
+            5,
+            tmp_path,
+            device_null=Path("/dev/null"),
+            statter=lambda path: metadata,
+        )
 
 
 @pytest.mark.parametrize("failure_stage", ["dumpable", "no_new_privs"])
@@ -634,6 +687,7 @@ def test_landlock_prctl_failures_are_controlled(
         prctl=prctl,
         opener=lambda *args: 72,
         closer=lambda descriptor: None,
+        statter=_linux_dev_null_stat,
     )
     with pytest.raises(runner.RunnerError, match="no_new_privs"):
         preexec()
@@ -766,6 +820,41 @@ def test_landlock_blocks_forged_markers_aliases_and_workspace_writes(
     assert published != forged
     assert json.loads(published)["execution_id"] == contract["execution_id"]
     assert not (scratch / "started-alias").exists()
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux")
+    or not Path(runner.FROZEN_VERIFIER_ARGV[0]).is_file(),
+    reason="exact frozen verifier Landlock regression requires the Linux execution image",
+)
+def test_exact_frozen_verifier_argv_runs_under_landlock(tmp_path: Path) -> None:
+    workspace, output, _, _ = _write_workspace(tmp_path)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    try:
+        abi = runner._query_landlock_abi()
+        preexec = runner._build_landlock_preexec(abi, scratch)
+    except runner.RunnerError as error:
+        pytest.skip(f"Landlock unavailable: {error}")
+
+    def process(argv, cwd):
+        assert argv == runner.FROZEN_VERIFIER_ARGV
+        return runner._run_process(
+            argv,
+            cwd,
+            descendant_cleaner=_no_descendant_cleanup,
+            child_preexec=preexec,
+        )
+
+    result = runner.main(
+        ("execute",),
+        workspace_root=workspace,
+        output_root=output,
+        process_runner=process,
+    )
+
+    assert result == 0
+    assert json.loads((output / "result.json").read_bytes())["actual_exit_code"] == 0
 
 
 @pytest.mark.parametrize("escape", ["setsid", "double_fork"])

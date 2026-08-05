@@ -729,20 +729,47 @@ def _landlock_write_access(abi: int) -> int:
     return access
 
 
+def _landlock_dev_null_access(abi: int) -> int:
+    _landlock_write_access(abi)
+    access = _LANDLOCK_ACCESS_FS_WRITE_FILE
+    if abi >= 5:
+        access |= _LANDLOCK_ACCESS_FS_IOCTL_DEV
+    return access
+
+
+def _validate_dev_null(
+    path: Path,
+    statter: Callable[[Path], os.stat_result],
+) -> None:
+    if path != Path("/dev/null"):
+        raise RunnerError("Landlock /dev/null rule path is not exact")
+    metadata = statter(path)
+    if (
+        not stat.S_ISCHR(metadata.st_mode)
+        or os.major(metadata.st_rdev) != 1
+        or os.minor(metadata.st_rdev) != 3
+    ):
+        raise RunnerError("Landlock /dev/null is not the expected character device")
+
+
 def _build_landlock_preexec(
     abi: int,
     writable_root: Path,
     *,
+    device_null: Path = Path("/dev/null"),
     syscall: Callable[..., int] = _linux_syscall,
     prctl: Callable[..., int] = _linux_prctl,
     opener: Callable[..., int] = os.open,
     closer: Callable[[int], None] = os.close,
+    statter: Callable[[Path], os.stat_result] = os.lstat,
 ) -> Callable[[], None]:
     access = _landlock_write_access(abi)
+    dev_null_access = _landlock_dev_null_access(abi)
     writable_root = writable_root.absolute()
     metadata = writable_root.lstat()
     if writable_root.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
         raise RunnerError("Landlock writable root is not a regular directory")
+    _validate_dev_null(device_null, statter)
 
     def restrict_child() -> None:
         if prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
@@ -756,32 +783,34 @@ def _build_landlock_preexec(
         )
         if ruleset_fd < 0:
             raise RunnerError("Landlock ruleset creation failed")
-        path_fd = -1
         try:
-            path_fd = opener(
-                writable_root,
-                getattr(os, "O_PATH", 0)
-                | os.O_CLOEXEC
-                | getattr(os, "O_DIRECTORY", 0),
-            )
-            path_rule = _LandlockPathBeneathAttr(
-                allowed_access=access,
-                parent_fd=path_fd,
-                reserved=0,
-            )
-            if syscall(
-                _SYS_LANDLOCK_ADD_RULE,
-                ruleset_fd,
-                _LANDLOCK_RULE_PATH_BENEATH,
-                ctypes.byref(path_rule),
-                0,
-            ) != 0:
-                raise RunnerError("Landlock path rule failed")
+            for path, allowed_access, directory_flags in (
+                (writable_root, access, getattr(os, "O_DIRECTORY", 0)),
+                (device_null, dev_null_access, getattr(os, "O_NOFOLLOW", 0)),
+            ):
+                path_fd = opener(
+                    path,
+                    getattr(os, "O_PATH", 0) | os.O_CLOEXEC | directory_flags,
+                )
+                try:
+                    path_rule = _LandlockPathBeneathAttr(
+                        allowed_access=allowed_access,
+                        parent_fd=path_fd,
+                        reserved=0,
+                    )
+                    if syscall(
+                        _SYS_LANDLOCK_ADD_RULE,
+                        ruleset_fd,
+                        _LANDLOCK_RULE_PATH_BENEATH,
+                        ctypes.byref(path_rule),
+                        0,
+                    ) != 0:
+                        raise RunnerError("Landlock path rule failed")
+                finally:
+                    closer(path_fd)
             if syscall(_SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0) != 0:
                 raise RunnerError("Landlock restrict_self failed")
         finally:
-            if path_fd >= 0:
-                closer(path_fd)
             closer(ruleset_fd)
 
     return restrict_child
@@ -790,10 +819,12 @@ def _build_landlock_preexec(
 def _production_child_preexec(
     writable_root: Path = Path("/tmp"),
     *,
+    device_null: Path = Path("/dev/null"),
     syscall: Callable[..., int] = _linux_syscall,
     prctl: Callable[..., int] = _linux_prctl,
     opener: Callable[..., int] = os.open,
     closer: Callable[[int], None] = os.close,
+    statter: Callable[[Path], os.stat_result] = os.lstat,
 ) -> Callable[[], None]:
     abi = _query_landlock_abi(syscall)
     if prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
@@ -801,10 +832,12 @@ def _production_child_preexec(
     return _build_landlock_preexec(
         abi,
         writable_root,
+        device_null=device_null,
         syscall=syscall,
         prctl=prctl,
         opener=opener,
         closer=closer,
+        statter=statter,
     )
 
 

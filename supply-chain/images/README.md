@@ -90,8 +90,10 @@ python "$OWP_REPO/supply-chain/images/prepare_context.py" \
   PID 1；runner 与 pytest 同为 UID/GID 65532，且不给 pytest 增加 capability。
   PID 1 在启动 pytest 前关闭自身 dumpability；pytest 在 exec 前以
   `no_new_privs` 加载 unprivileged Landlock 规则，处理当前已知的全部写入、创建、
-  删除、跨目录引用、截断及设备 ioctl 权限，只允许在 `/tmp` 下写入。非 Linux、
-  Landlock ABI 低于 3 或高于 runner 已知版本、规则加载或 `restrict_self` 失败时，
+  删除、跨目录引用、截断及设备 ioctl 权限，只允许在 `/tmp` 下写入；另对精确的
+  Linux `/dev/null` 字符设备仅开放写入及 ABI 支持的设备 ioctl，不开放 `/dev`
+  目录或任何创建、删除、引用、截断权限。非 Linux、Landlock ABI 低于 3 或高于
+  runner 已知版本、设备身份、规则加载或 `restrict_self` 失败时，
   均不得执行候选测试或生成 result。pytest 结束后，PID 1 再对 `/proc` 中全部其他
   PID 执行有界 TERM/KILL 和回收，连续确认零后代，复核 `started.json` 的 inode、
   metadata 与精确 bytes，最后才原子发布 `result.json`。PID 1、`/proc`、清理或
