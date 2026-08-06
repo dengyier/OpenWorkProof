@@ -7,7 +7,7 @@ committed.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -39,6 +39,7 @@ from openworkproof.models import (
     SystemEventReceipt,
     TestResultEvidence,
     ToolCallReceipt,
+    WorkOrder,
     request_arguments_digest,
 )
 from openworkproof.policy import (
