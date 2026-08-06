@@ -349,18 +349,22 @@ def verify_work_order_identity_bindings(work_order: WorkOrder) -> bool:
                 "Developer",
                 "Verifier",
                 "Sidecar",
+                "Acceptor",
             )
-            or len({binding.key_id for binding in bindings}) != 5
+            or len({binding.key_id for binding in bindings}) != 6
+            or len({binding.subject_id for binding in bindings}) != 6
         ):
             return False
         public_keys = [
             decode_and_verify_key_binding(binding) for binding in bindings
         ]
         maintainer = bindings[0]
+        acceptor = bindings[5]
         if (
             work_order.issuer_id != maintainer.subject_id
             or work_order.signer_key_id != maintainer.key_id
-            or work_order.acceptor_key_ids != (maintainer.key_id,)
+            or work_order.acceptor_key_ids != (acceptor.key_id,)
+            or acceptor.key_id == maintainer.key_id
         ):
             return False
         return verify_payload(

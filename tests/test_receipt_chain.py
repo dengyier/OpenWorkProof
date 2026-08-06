@@ -589,7 +589,7 @@ def test_validate_grant_chain_accepts_signed_root_history(
     assert dataclasses.is_dataclass(evidence.AuthorizationChainResult)
     assert dataclasses.fields(evidence.AuthorizationChainResult) == ()
     assert supplied_keys.iter_calls == 1
-    assert supplied_keys.yielded == 5
+    assert supplied_keys.yielded == 6
     assert supplied_keys.value_reads == {
         binding.key_id: 1 for binding in signed_work_order.key_bindings
     }
@@ -684,7 +684,7 @@ def test_validate_grant_chain_stops_at_six_public_keys(
         )
 
     assert supplied.iter_calls == 1
-    assert supplied.yielded == 6
+    assert supplied.yielded == 7
     assert supplied.value_reads == {}
     assert builder_called is False
 

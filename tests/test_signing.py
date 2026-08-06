@@ -35,7 +35,14 @@ from openworkproof.signing import (
 )
 
 
-ROLES = ("Maintainer", "Manager", "Developer", "Verifier", "Sidecar")
+ROLES = (
+    "Maintainer",
+    "Manager",
+    "Developer",
+    "Verifier",
+    "Sidecar",
+    "Acceptor",
+)
 
 
 def _b64url(raw: bytes) -> str:
@@ -72,10 +79,11 @@ def _signed_work_order(
     bindings = [copy.deepcopy(role_keys[role][1]) for role in ROLES]
     maintainer = bindings[0]
     manager = bindings[1]
+    acceptor = bindings[5]
     candidate["key_bindings"] = bindings
     candidate["issuer_id"] = maintainer["subject_id"]
     candidate["signer_key_id"] = maintainer["key_id"]
-    candidate["acceptor_key_ids"] = [maintainer["key_id"]]
+    candidate["acceptor_key_ids"] = [acceptor["key_id"]]
     candidate["root_grant_template"]["issuer_key_id"] = maintainer["key_id"]
     candidate["root_grant_template"]["subject_agent_id"] = manager["subject_id"]
     candidate["root_grant_template"]["subject_key_id"] = manager["key_id"]

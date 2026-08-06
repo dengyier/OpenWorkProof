@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from openworkproof.models import (
     ACTION_RECEIPT_ADAPTER,
@@ -1549,6 +1550,73 @@ def test_acceptance_fails_closed_until_ledger_suffix_context_exists(
 
     assert decision.allowed is False
     assert decision.error_code == "TRANSITION_CONTEXT_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("wrong_role", ["Maintainer", "Manager", "Developer", "Verifier", "Sidecar"])
+def test_acceptance_rejects_every_non_acceptor_signer(
+    signed_work_order: WorkOrder,
+    signed_acceptance_receipt: AcceptanceReceipt,
+    ephemeral_role_keys: dict,
+    public_keys: dict,
+    fixed_now: datetime,
+    wrong_role: str,
+) -> None:
+    raw = signed_acceptance_receipt.model_dump(mode="json")
+    binding = ephemeral_role_keys[wrong_role][1]
+    raw["signer_key_id"] = binding["key_id"]
+    wrong = AcceptanceReceipt.model_validate(
+        sign_payload(
+            "acceptance-receipt",
+            raw,
+            ephemeral_role_keys[wrong_role][0],
+        )
+    )
+    decision = _validate(
+        _api(),
+        work_order=signed_work_order,
+        state_before="awaiting_human",
+        state_after="accepted",
+        receipt=None,
+        acceptance=wrong,
+        public_keys=public_keys,
+        now=fixed_now,
+    )
+
+    assert decision.allowed is False
+    assert decision.error_code == "INVALID_EVIDENCE"
+
+
+def test_acceptance_requires_the_bound_acceptor_key(
+    signed_work_order: WorkOrder,
+    signed_acceptance_receipt: AcceptanceReceipt,
+    ephemeral_role_keys: dict,
+    public_keys: dict,
+    fixed_now: datetime,
+) -> None:
+    # A valid external key that is NOT bound to the WorkOrder Acceptor role
+    # must still be rejected for acceptance signing.
+    unbound_private_key = Ed25519PrivateKey.generate()
+    raw = signed_acceptance_receipt.model_dump(mode="json")
+    unbound = AcceptanceReceipt.model_validate(
+        sign_payload(
+            "acceptance-receipt",
+            raw,
+            unbound_private_key,
+        )
+    )
+    decision = _validate(
+        _api(),
+        work_order=signed_work_order,
+        state_before="awaiting_human",
+        state_after="accepted",
+        receipt=None,
+        acceptance=unbound,
+        public_keys=public_keys,
+        now=fixed_now,
+    )
+
+    assert decision.allowed is False
+    assert decision.error_code == "INVALID_EVIDENCE"
 
 
 @pytest.mark.parametrize("naive_hour", [0, 8])

@@ -5551,15 +5551,15 @@ def _authorization_public_keys_snapshot(
         binding.key_id for binding in work_order.key_bindings
     )
     if (
-        len(expected_key_ids) != 5
+        len(expected_key_ids) != 6
         or any(
             not isinstance(key_id_value, str)
             for key_id_value in expected_key_ids
         )
-        or len(set(expected_key_ids)) != 5
+        or len(set(expected_key_ids)) != 6
     ):
         raise _child_issuance_error(
-            "WorkOrder must bind exactly five unique public keys"
+            "WorkOrder must bind exactly six unique public keys"
         )
     try:
         supplied_key_ids = tuple(

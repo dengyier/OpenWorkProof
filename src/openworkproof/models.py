@@ -115,7 +115,14 @@ _EVIDENCE_DIMENSIONS = (
     "result",
     "independent_result",
 )
-_KEY_ROLES = ("Maintainer", "Manager", "Developer", "Verifier", "Sidecar")
+_KEY_ROLES = (
+    "Maintainer",
+    "Manager",
+    "Developer",
+    "Verifier",
+    "Sidecar",
+    "Acceptor",
+)
 _PURPOSE_ORDER = {
     "patch_input": 0,
     "patch_result": 1,
@@ -839,7 +846,14 @@ class PredicateResult(ProtocolModel):
 
 
 class KeyBinding(ProtocolModel):
-    role: Literal["Maintainer", "Manager", "Developer", "Verifier", "Sidecar"]
+    role: Literal[
+        "Maintainer",
+        "Manager",
+        "Developer",
+        "Verifier",
+        "Sidecar",
+        "Acceptor",
+    ]
     subject_id: Identifier
     key_id: KeyId
     public_key_b64url: str
@@ -1296,16 +1310,22 @@ class WorkOrder(SignedProtocolModel):
         roles = tuple(binding.role for binding in self.key_bindings)
         if roles != _KEY_ROLES:
             raise ValueError("key bindings must use the fixed role order")
+        subject_ids = tuple(binding.subject_id for binding in self.key_bindings)
         key_ids = tuple(binding.key_id for binding in self.key_bindings)
-        if len(set(key_ids)) != 5:
-            raise ValueError("key binding keys must be unique")
-        maintainer, manager, *_ = self.key_bindings
+        if (
+            len(set(subject_ids)) != 6
+            or len(set(key_ids)) != 6
+        ):
+            raise ValueError("key binding subjects and keys must be unique")
+        maintainer, manager, _, _, _, acceptor = self.key_bindings
         if (
             self.issuer_id != maintainer.subject_id
             or self.signer_key_id != maintainer.key_id
-            or self.acceptor_key_ids != (maintainer.key_id,)
+            or self.acceptor_key_ids != (acceptor.key_id,)
         ):
-            raise ValueError("Maintainer must be sole issuer, signer, and acceptor")
+            raise ValueError(
+                "Maintainer must issue/sign and Acceptor must accept"
+            )
 
         template = self.root_grant_template
         if (
@@ -2717,7 +2737,7 @@ class ApprovalRequestedReceipt(AgentReceiptEnvelope):
     grant_id: Digest64
     request_kind: Literal["high_risk_action", "final_acceptance"]
     target_action_digest: Digest64
-    required_role: Literal["Maintainer"]
+    required_role: Literal["Maintainer", "Acceptor"]
     requested_scope: FrozenDict
     expires_at: CanonicalUTCTime
 
@@ -2774,6 +2794,13 @@ class ApprovalRequestedReceipt(AgentReceiptEnvelope):
             )
         if self.target_action_digest != expected:
             raise ValueError("approval target_action_digest does not match scope")
+        expected_role = (
+            "Maintainer"
+            if self.request_kind == "high_risk_action"
+            else "Acceptor"
+        )
+        if self.required_role != expected_role:
+            raise ValueError("approval request role does not match request kind")
         if self.policy_decision == "deny":
             if self.quota_charge is not None:
                 raise ValueError("denied approval request cannot charge quota")
@@ -3074,9 +3101,11 @@ class AcceptanceReceipt(SignedProtocolModel):
 
     def validate_against_work_order(self, work_order: WorkOrder) -> AcceptanceReceipt:
         maintainer = work_order.key_bindings[0]
+        acceptor = work_order.key_bindings[5]
         if (
             self.work_order_digest != work_order.digest
-            or self.signer_key_id != maintainer.key_id
+            or self.signer_key_id != acceptor.key_id
+            or self.signer_key_id == maintainer.key_id
             or set(self.evidence_coverage)
             != set(work_order.required_evidence_dimensions)
             or [result.predicate_id for result in self.global_postconditions]

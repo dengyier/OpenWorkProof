@@ -45,16 +45,16 @@ FROZEN_V01_DIGESTS = {
         "5436e77e03d64cf131f2273b7527e63aa854f9c3de7b60aeae8751024267ff0e"
     ),
     "action-receipt.schema.json": (
-        "fac732ff13f30ccbd95aefdf6d92b7084c336d498e0845e020893dc6cf319ebe"
+        "1aba0e2a9cf3b55478d5def0ef7f89d84976fc22798bb6d709d21afb31cedde8"
     ),
     "capability-grant.schema.json": (
         "f7c01f4ed227954f6310fd03ab5cbf52916510971c01c7f22ff9115e358cd17e"
     ),
     "schema-registry.json": (
-        "20b3114531176064a059253d94694067d7fb2c43d7c161698564293efe442260"
+        "89b5014cb6b259fa5886cec3e243a590b8abca759992e35336a5b156cb637c9b"
     ),
     "work-order.schema.json": (
-        "1f20662f25f1e11df2c407b924b76cffb8f863e6717939b499326c227cef94d0"
+        "171b59390c66d586d7ee387d783ca8bc759779a08c36d31c85cf232998568013"
     ),
 }
 TRANSACTION_PREFIXES = (

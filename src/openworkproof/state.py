@@ -267,8 +267,8 @@ def _validate_acceptance(
             acceptance.model_dump(mode="json")
         )
         parsed.validate_against_work_order(work_order)
-        maintainer = work_order.key_bindings[0]
-        public_key = _public_key(public_keys, maintainer.key_id)
+        acceptor = work_order.key_bindings[5]
+        public_key = _public_key(public_keys, acceptor.key_id)
         return (
             public_key is not None
             and verify_payload(

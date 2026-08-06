@@ -20,6 +20,7 @@ from conftest import (
     SHA256_D,
     SHA256_E,
     VERIFIER_ARGV,
+    deterministic_key_binding,
     evidence_artifact,
     jcs_digest,
     make_test_command,
@@ -1033,6 +1034,36 @@ def test_work_order_maintainer_is_sole_issuer_signer_and_acceptor(
     assert_rejected(
         WorkOrder, mutate(work_order_dict, ("acceptor_key_ids",), [manager["key_id"]])
     )
+
+
+def test_work_order_binds_distinct_acceptor(
+    work_order_dict: dict,
+    key_bindings: list[dict],
+) -> None:
+    acceptor = deterministic_key_binding("Acceptor", "acceptor-local", 6)
+    candidate = copy.deepcopy(work_order_dict)
+    candidate["key_bindings"] = [*key_bindings[:5], acceptor]
+    candidate["acceptor_key_ids"] = [acceptor["key_id"]]
+
+    parsed = contract_models.WorkOrder.model_validate(candidate)
+
+    assert parsed.key_bindings[-1].role == "Acceptor"
+    assert parsed.acceptor_key_ids == (acceptor["key_id"],)
+
+
+def test_work_order_rejects_acceptor_alias_of_another_role(
+    work_order_dict: dict,
+    key_bindings: list[dict],
+) -> None:
+    # Acceptor must not reuse the Maintainer subject or key.
+    for acceptor in (
+        key_bindings[0],
+        deterministic_key_binding("Acceptor", "maintainer", 1),
+    ):
+        candidate = copy.deepcopy(work_order_dict)
+        candidate["key_bindings"] = [*key_bindings[:5], acceptor]
+        candidate["acceptor_key_ids"] = [acceptor["key_id"]]
+        assert_rejected(WorkOrder, candidate)
 
 
 def test_root_grant_template_is_closed_and_bound_to_work_order(
@@ -2062,6 +2093,7 @@ def test_final_acceptance_request_cannot_masquerade_as_pr_request(
     final_request.update(
         {
             "request_kind": "final_acceptance",
+            "required_role": "Acceptor",
             "requested_scope": scope,
             "target_action_digest": jcs_digest(
                 {
@@ -2088,7 +2120,11 @@ def test_final_acceptance_request_cannot_masquerade_as_pr_request(
     contract_models.ACTION_RECEIPT_ADAPTER.validate_python(final_request)
     with pytest.raises(ValidationError):
         contract_models.ACTION_RECEIPT_ADAPTER.validate_python(
-            {**final_request, "request_kind": "high_risk_action"}
+            {
+                **final_request,
+                "request_kind": "high_risk_action",
+                "required_role": "Maintainer",
+            }
         )
 
 

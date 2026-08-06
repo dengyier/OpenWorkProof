@@ -106,6 +106,7 @@ def key_bindings() -> list[dict[str, str]]:
         deterministic_key_binding("Developer", "developer", 3),
         deterministic_key_binding("Verifier", "verifier", 4),
         deterministic_key_binding("Sidecar", "sidecar", 5),
+        deterministic_key_binding("Acceptor", "acceptor-local", 6),
     ]
 
 
@@ -361,7 +362,7 @@ def work_order_dict(
         "protocol_version": "0.1",
         "issuer_id": key_bindings[0]["subject_id"],
         "signer_key_id": key_bindings[0]["key_id"],
-        "acceptor_key_ids": [key_bindings[0]["key_id"]],
+        "acceptor_key_ids": [key_bindings[5]["key_id"]],
         "objective": "Apply a deterministic patch and verify it.",
         "preconditions": preconditions,
         "invariants": invariants,
@@ -491,6 +492,7 @@ EPHEMERAL_ROLES = (
     "Developer",
     "Verifier",
     "Sidecar",
+    "Acceptor",
 )
 
 
@@ -535,10 +537,11 @@ def signed_work_order(
     ]
     maintainer = bindings[0]
     manager = bindings[1]
+    acceptor = bindings[5]
     candidate["key_bindings"] = bindings
     candidate["issuer_id"] = maintainer["subject_id"]
     candidate["signer_key_id"] = maintainer["key_id"]
-    candidate["acceptor_key_ids"] = [maintainer["key_id"]]
+    candidate["acceptor_key_ids"] = [acceptor["key_id"]]
     candidate["root_grant_template"]["issuer_key_id"] = maintainer["key_id"]
     candidate["root_grant_template"]["subject_agent_id"] = manager["subject_id"]
     candidate["root_grant_template"]["subject_key_id"] = manager["key_id"]
@@ -890,6 +893,7 @@ def sidecar_receipt_factory(
                 )
                 tool_name = "owp.request_acceptance"
                 request_kind = "final_acceptance"
+                required_role = "Acceptor"
             else:
                 scope = {
                     "work_order_digest": signed_work_order.digest,
@@ -899,6 +903,7 @@ def sidecar_receipt_factory(
                 target_domain = "openworkproof/high-risk-action/v0.1"
                 tool_name = "owp.request_pr_proposal"
                 request_kind = "high_risk_action"
+                required_role = "Maintainer"
             target_payload = {
                 "domain": target_domain,
                 "requested_scope": scope,
@@ -910,13 +915,14 @@ def sidecar_receipt_factory(
                 {
                     "request_kind": request_kind,
                     "target_action_digest": target_action_digest,
+                    "required_role": required_role,
                     "requested_scope": scope,
                 }
             )
             arguments = {
                 "request_kind": request_kind,
                 "target_action_digest": target_action_digest,
-                "required_role": raw["required_role"],
+                "required_role": required_role,
                 "requested_scope": scope,
                 "expires_at": raw["expires_at"],
             }
@@ -994,6 +1000,6 @@ def signed_acceptance_receipt(
         sign_payload(
             "acceptance-receipt",
             raw,
-            ephemeral_role_keys["Maintainer"][0],
+            ephemeral_role_keys["Acceptor"][0],
         )
     )
