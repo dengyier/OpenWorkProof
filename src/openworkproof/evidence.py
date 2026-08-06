@@ -36,6 +36,7 @@ from openworkproof.models import (
     ApprovalRequestedReceipt,
     CapabilityGrant,
     CompositionCause,
+    CompositionReport,
     ComposeProofArguments,
     CreatePrProposalArguments,
     GrantConsumedReceipt,
@@ -533,6 +534,18 @@ _SCHEMA = (
         work_order_digest TEXT NOT NULL UNIQUE
             REFERENCES work_orders(work_order_digest),
         acceptance_json TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE composition_reports (
+        report_digest TEXT PRIMARY KEY,
+        work_order_digest TEXT NOT NULL
+            REFERENCES work_orders(work_order_digest),
+        initiator_receipt_id TEXT NOT NULL UNIQUE
+            REFERENCES receipts(receipt_id),
+        initiator_receipt_digest TEXT NOT NULL,
+        source_state_version INTEGER NOT NULL CHECK (source_state_version >= 0),
+        report_json TEXT NOT NULL
     )
     """,
     """
@@ -4937,6 +4950,66 @@ def _validated_acceptance_receipts(
             )
         receipts.append(receipt)
     return tuple(receipts)
+
+
+def _validated_composition_reports(
+    connection: sqlite3.Connection,
+    work_order: WorkOrder,
+) -> tuple[CompositionReport, ...]:
+    rows = _bounded_rows(
+        connection,
+        count_sql="SELECT COUNT(*) FROM composition_reports",
+        select_sql="""
+        SELECT
+            report_digest,
+            work_order_digest,
+            initiator_receipt_id,
+            initiator_receipt_digest,
+            source_state_version,
+            report_json
+        FROM composition_reports
+        ORDER BY source_state_version
+        """,
+        cap=MAX_RECEIPTS,
+        label="Composition reports",
+    )
+    receipts = _validated_receipt_prefix(connection, work_order)
+    by_id = {receipt.receipt_id: receipt for receipt in receipts}
+    reports = []
+    for (
+        stored_digest,
+        stored_work_order,
+        initiator_id,
+        initiator_digest,
+        stored_version,
+        stored_json,
+    ) in rows:
+        try:
+            report = CompositionReport.model_validate_json(stored_json)
+            canonical = _canonical_json(report.model_dump(mode="json"))
+            recomputed = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        except Exception as error:
+            raise _child_issuance_error(
+                "Composition report row is malformed"
+            ) from error
+        initiator = by_id.get(initiator_id)
+        if (
+            stored_digest != recomputed
+            or stored_work_order != work_order.digest
+            or report.work_order_digest != work_order.digest
+            or stored_json != canonical
+            or type(stored_version) is not int
+            or stored_version < 0
+            or initiator is None
+            or initiator.digest != initiator_digest
+            or report.initiator_receipt_id != initiator_id
+            or report.initiator_receipt_digest != initiator_digest
+        ):
+            raise _child_issuance_error(
+                "Composition report row failed integrity verification"
+            )
+        reports.append(report)
+    return tuple(reports)
 
 
 def _validated_receipt_prefix(

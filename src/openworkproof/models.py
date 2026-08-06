@@ -2996,6 +2996,121 @@ _WARNING_CODES = {
 }
 
 
+class CompositionReport(ProtocolModel):
+    schema_version: Literal["openworkproof-composition-report/0.1"]
+    work_order_digest: Digest64
+    initiator_receipt_id: Digest64
+    initiator_receipt_digest: Digest64
+    final_artifact: FinalArtifact
+    artifact_digests: tuple[EvidenceRef, ...]
+    evidence_snapshot_digest: Digest64
+    receipt_digests: tuple[Digest64, ...]
+    causal_graph_root: Digest64
+    causal_complete: bool
+    evidence_coverage: FrozenDict
+    independence_assessment: IndependenceAssessment
+    test_evidence_refs: tuple[EvidenceRef, ...]
+    unresolved_failures: tuple[ReportDiagnostic, ...]
+    warnings: tuple[ReportDiagnostic, ...]
+    global_postconditions: tuple[PredicateResult, ...]
+    global_postconditions_satisfied: bool
+    verifier_conclusion: Literal["proof_ready", "evidence_incomplete"]
+    composed_at: CanonicalUTCTime
+
+    @model_validator(mode="after")
+    def _validate_report(self) -> CompositionReport:
+        coverage = dict(self.evidence_coverage)
+        if (
+            not coverage
+            or not set(coverage).issubset(_EVIDENCE_DIMENSIONS)
+            or any(type(value) is not bool for value in coverage.values())
+        ):
+            raise ValueError("report evidence coverage must be closed")
+        for values, key in (
+            (self.artifact_digests, lambda item: item.path.encode("utf-8")),
+            (self.test_evidence_refs, lambda item: item.path.encode("utf-8")),
+            (
+                self.warnings,
+                lambda item: (
+                    item.code.encode("utf-8"),
+                    item.subject_ref.encode("utf-8"),
+                ),
+            ),
+            (
+                self.unresolved_failures,
+                lambda item: (
+                    item.code.encode("utf-8"),
+                    item.subject_ref.encode("utf-8"),
+                ),
+            ),
+            (
+                self.global_postconditions,
+                lambda item: item.predicate_id.encode("utf-8"),
+            ),
+        ):
+            keys = [key(item) for item in values]
+            if keys != sorted(keys) or len(keys) != len(set(keys)):
+                raise ValueError("report arrays must be sorted and unique")
+        if (
+            not self.receipt_digests
+            or len(set(self.receipt_digests)) != len(self.receipt_digests)
+        ):
+            raise ValueError("report receipt digests must be non-empty and unique")
+        if any(item.code not in _WARNING_CODES for item in self.warnings):
+            raise ValueError("report warnings use the warning registry only")
+        shared_factors, shared_values = _recompute_shared_factors(
+            self.independence_assessment
+        )
+        warning_codes = {
+            "model": "SHARED_MODEL",
+            "prompt_template": "SHARED_PROMPT_TEMPLATE",
+            "context_source": "SHARED_CONTEXT_SOURCE",
+            "toolchain": "SHARED_TOOLCHAIN",
+            "execution_context": "SHARED_EXECUTION_CONTEXT",
+            "controller": "SHARED_CONTROLLER",
+            "test_source": "SHARED_TEST_SOURCE",
+        }
+        expected_warnings = tuple(
+            sorted(
+                (
+                    ReportDiagnostic(
+                        code=warning_codes[factor],
+                        subject_ref=_jcs_digest(
+                            {
+                                "domain": "openworkproof/shared-factor-ref/v0.1",
+                                "factor": factor,
+                                "value": shared_values[factor],
+                            }
+                        ),
+                    )
+                    for factor in shared_factors
+                ),
+                key=lambda item: (
+                    item.code.encode("utf-8"),
+                    item.subject_ref.encode("utf-8"),
+                ),
+            )
+        )
+        if self.warnings != expected_warnings:
+            raise ValueError("report warnings do not match shared factors")
+        if self.verifier_conclusion == "proof_ready":
+            if (
+                not self.causal_complete
+                or self.unresolved_failures
+                or not self.independence_assessment.satisfied
+                or not self.global_postconditions_satisfied
+                or any(
+                    type(value) is not bool or not value
+                    for value in coverage.values()
+                )
+            ):
+                raise ValueError("proof-ready report is not closed")
+        else:
+            if not self.unresolved_failures:
+                raise ValueError("incomplete report requires closed diagnostics")
+        return self
+
+
 class AcceptanceReceipt(SignedProtocolModel):
     protocol_version: Literal["0.1"]
     acceptance_id: Digest64
@@ -3159,6 +3274,7 @@ __all__ = [
     "BUNDLE_FINALIZATION_GRACE_SECONDS",
     "CapabilityGrant",
     "Command",
+    "CompositionReport",
     "CorrelationFactors",
     "EvidencePolicy",
     "EvidenceRef",
