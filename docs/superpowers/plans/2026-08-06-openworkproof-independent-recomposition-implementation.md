@@ -927,7 +927,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 - Modify: `src/openworkproof/acceptance.py`
 - Modify: `tests/test_independent_recomposition.py`
 
-- [ ] **Step 1: Write RED offline replay test**
+- [x] **Step 1: Write RED offline replay test**
 
   Build a complete bundle containing the WorkOrder, all Grants, every
   ActionReceipt, both CompositionReports, every committed evidence
@@ -946,7 +946,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   - the second report concludes `proof_ready` with five-dimension
     coverage and the correct `test_evidence_refs`.
 
-- [ ] **Step 2: Write RED tamper tests**
+- [x] **Step 2: Write RED tamper tests**
 
   For the copied bundle, independently mutate one report, one receipt, the
   independent payload, one correlation factor, and one public key; each call
@@ -955,12 +955,12 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   `evidence_publications`; rebuilding the authorization context must fail
   before any new receipt, quota event, report, state, or sequence write.
 
-- [ ] **Step 3: Run RED**
+- [x] **Step 3: Run RED**
 
   Expected: FAIL because `verify_acceptance_bundle` accepts only one current
   report and therefore cannot prove both signed report-to-trigger bindings.
 
-- [ ] **Step 4: Implement exact two-report offline binding**
+- [x] **Step 4: Implement exact two-report offline binding**
 
   Extract the report-prefix checks already present in
   `validate_acceptance_bindings` into a pure private helper:
@@ -1024,7 +1024,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   Pydantic validation, so the test proves either model validation or protocol
   replay fails closed for the right layer.
 
-- [ ] **Step 5: Run GREEN**
+- [x] **Step 5: Run GREEN**
 
   Run:
 
@@ -1034,7 +1034,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 
   Expected: PASS.
 
-- [ ] **Step 6: Commit offline replay support**
+- [x] **Step 6: Commit offline replay support**
 
   ```bash
   git add src/openworkproof/acceptance.py tests/test_independent_recomposition.py

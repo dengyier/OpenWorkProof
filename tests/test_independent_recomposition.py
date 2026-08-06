@@ -20,6 +20,7 @@ from openworkproof.models import (
     ComposeProofArguments,
     request_arguments_digest,
 )
+from openworkproof.policy import CommittedEvidence
 from openworkproof.policy import ProspectiveExecutionFacts
 
 from openworkproof.signing import sign_payload
@@ -1045,3 +1046,170 @@ def test_non_passing_independent_result_seals_the_episode(
     finally:
         connection.close()
     assert reports_after == reports_before
+
+
+def _offline_bundle(case, work_order, first, second):
+    """Copy the authoritative inputs for offline verification."""
+    from openworkproof.policy import CommittedEvidence
+    from test_mcp_server import _grant_replay_inputs
+
+    receipts, grants, attempts = _grant_replay_inputs(
+        case["ledger_path"], work_order
+    )
+    committed = []
+    for receipt in receipts:
+        for reference in receipt.evidence_refs:
+            payload = (
+                case["evidence_root"]
+                / reference.path.removeprefix("evidence/")
+            ).read_bytes()
+            committed.append(
+                CommittedEvidence(reference=reference, payload=payload)
+            )
+    committed.sort(key=lambda item: item.reference.path.encode())
+    from openworkproof.signing import decode_and_verify_key_binding
+
+    public_keys = {
+        binding.key_id: decode_and_verify_key_binding(binding)
+        for binding in work_order.key_bindings
+    }
+    return (
+        tuple(sorted(grants.values(), key=lambda item: item.grant_id)),
+        tuple(sorted(attempts.values(), key=lambda item: item.digest)),
+        receipts,
+        tuple(committed),
+        public_keys,
+    )
+
+
+def test_two_report_bundle_verifies_offline(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, refreshed, receipt, first_digest = (
+        _run_independent_and_recompose(
+            tmp_path,
+            signed_work_order,
+            ephemeral_role_keys,
+            sidecar_receipt_factory,
+            fixed_now,
+            monkeypatch,
+        )
+    )
+    second = acceptance.compose_proof_transaction(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=refreshed,
+        request=_recompose_request(
+            case, refreshed, ephemeral_role_keys, fixed_now,
+            previous_report_digest=first_digest,
+            nonce_label="recompose:offline",
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        clock=lambda: fixed_now,
+    )
+    work_order = case["work_order"]
+    effective_grants, grant_attempts, receipts, committed, public_keys = (
+        _offline_bundle(case, work_order, first, second)
+    )
+    verified = acceptance.verify_composition_bundle(
+        work_order=work_order,
+        effective_grants=effective_grants,
+        grant_attempts=grant_attempts,
+        receipts=receipts,
+        committed_evidence=committed,
+        reports=(first.report, second.report),
+        public_keys=public_keys,
+    )
+    assert verified == second.report
+    assert verified.verifier_conclusion == "proof_ready"
+    assert dict(verified.evidence_coverage)["independent_result"] is True
+    test_paths = [item.path for item in verified.test_evidence_refs]
+    assert any("verifier-independent-result" in path for path in test_paths)
+
+
+def test_two_report_bundle_tampering_fails_closed(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, refreshed, receipt, first_digest = (
+        _run_independent_and_recompose(
+            tmp_path,
+            signed_work_order,
+            ephemeral_role_keys,
+            sidecar_receipt_factory,
+            fixed_now,
+            monkeypatch,
+        )
+    )
+    second = acceptance.compose_proof_transaction(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=refreshed,
+        request=_recompose_request(
+            case, refreshed, ephemeral_role_keys, fixed_now,
+            previous_report_digest=first_digest,
+            nonce_label="recompose:tamper",
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        clock=lambda: fixed_now,
+    )
+    work_order = case["work_order"]
+    effective_grants, grant_attempts, receipts, committed, public_keys = (
+        _offline_bundle(case, work_order, first, second)
+    )
+
+    def mutate_report(report, index):
+        raw = report.model_dump(mode="json")
+        raw["causal_graph_root"] = "0" * 64
+        return type(report).model_validate(raw)
+
+    mutated_first = mutate_report(first.report, 0)
+    with pytest.raises(acceptance.AcceptanceTransactionError):
+        acceptance.verify_composition_bundle(
+            work_order=work_order,
+            effective_grants=effective_grants,
+            grant_attempts=grant_attempts,
+            receipts=receipts,
+            committed_evidence=committed,
+            reports=(mutated_first, second.report),
+            public_keys=public_keys,
+        )
+
+    tampered_evidence = list(committed)
+    item = tampered_evidence[-1]
+    payload = item.payload + b"\ntampered"
+    tampered_evidence[-1] = CommittedEvidence(
+        reference=item.reference,
+        payload=payload,
+    )
+    with pytest.raises(acceptance.AcceptanceTransactionError):
+        acceptance.verify_composition_bundle(
+            work_order=work_order,
+            effective_grants=effective_grants,
+            grant_attempts=grant_attempts,
+            receipts=receipts,
+            committed_evidence=tuple(tampered_evidence),
+            reports=(first.report, second.report),
+            public_keys=public_keys,
+        )
+
+    wrong_reports = (first.report,)
+    with pytest.raises(acceptance.AcceptanceTransactionError):
+        acceptance.verify_composition_bundle(
+            work_order=work_order,
+            effective_grants=effective_grants,
+            grant_attempts=grant_attempts,
+            receipts=receipts,
+            committed_evidence=committed,
+            reports=wrong_reports,
+            public_keys=public_keys,
+        )

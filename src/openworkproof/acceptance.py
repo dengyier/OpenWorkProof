@@ -2165,9 +2165,9 @@ def verify_acceptance_bundle(
     committed_evidence: tuple,
     acceptance_receipt: AcceptanceReceipt,
     public_keys: Mapping,
+    reports: tuple[CompositionReport, ...] | None = None,
 ) -> AcceptanceReceipt:
     """Verify a copied acceptance bundle without a live ledger."""
-    from openworkproof.evidence import validate_grant_chain  # noqa: PLC0415
     from openworkproof.policy import (  # noqa: PLC0415
         AuthorizationLedgerPrefix,
         CommittedEvidence,
@@ -2186,24 +2186,21 @@ def verify_acceptance_bundle(
         raise AcceptanceTransactionError(
             "offline acceptance bundle is malformed"
         )
+    selected_reports = reports if reports is not None else (report,)
     try:
-        validate_grant_chain(
-            work_order,
-            effective_grants,
-            grant_attempts,
-            receipts,
-            public_keys,
-        )
-        prefix = AuthorizationLedgerPrefix(
+        final_report = verify_composition_bundle(
+            work_order=work_order,
             effective_grants=effective_grants,
             grant_attempts=grant_attempts,
             receipts=receipts,
+            committed_evidence=committed_evidence,
+            reports=selected_reports,
+            public_keys=public_keys,
         )
-        _validate_committed_evidence(
-            work_order,
-            prefix,
-            committed_evidence,
-        )
+        if final_report != report:
+            raise AcceptanceTransactionError(
+                "offline bundle final report does not match the acceptance report"
+            )
         return validate_acceptance_bindings(
             work_order=work_order,
             report=report,
@@ -2351,3 +2348,127 @@ def _readback_acceptance_committed(
         current_work_order == work_order
         and acceptances == (acceptance,)
     )
+
+
+def _validate_composition_report_binding(
+    *,
+    work_order,
+    report: CompositionReport,
+    receipts: tuple[ActionReceiptEnvelope, ...],
+) -> CompositionReport:
+    """Validate one CompositionReport against its exact signed prefix."""
+    initiator_indexes = tuple(
+        index
+        for index, receipt in enumerate(receipts)
+        if receipt.receipt_id == report.initiator_receipt_id
+        and receipt.digest == report.initiator_receipt_digest
+    )
+    if len(initiator_indexes) != 1:
+        raise AcceptanceTransactionError(
+            "composition report initiator is not unique"
+        )
+    initiator_index = initiator_indexes[0]
+    trigger = (
+        receipts[initiator_index + 1]
+        if initiator_index + 1 < len(receipts)
+        else None
+    )
+    report_digest = composition_report_digest(report)
+    report_prefix = receipts[: initiator_index + 1]
+    report_refs = _sorted_unique_evidence_refs(report_prefix)
+    if (
+        report.work_order_digest != work_order.digest
+        or not isinstance(trigger, SystemEventReceipt)
+        or trigger.system_event_name != "proof_composed"
+        or getattr(trigger.cause, "composition_report_digest", None)
+        != report_digest
+        or report.receipt_digests
+        != tuple(receipt.digest for receipt in report_prefix)
+        or report.causal_graph_root != causal_graph_root(report_prefix)
+        or report.evidence_snapshot_digest
+        != evidence_snapshot_digest(report_refs)
+    ):
+        raise AcceptanceTransactionError(
+            "composition report does not match its authoritative prefix"
+        )
+    return report
+
+
+def verify_composition_bundle(
+    *,
+    work_order,
+    effective_grants: tuple,
+    grant_attempts: tuple,
+    receipts: tuple[ActionReceiptEnvelope, ...],
+    committed_evidence: tuple,
+    reports: tuple[CompositionReport, ...],
+    public_keys: Mapping,
+) -> CompositionReport:
+    """Verify a copied multi-report bundle without a live ledger."""
+    from openworkproof.evidence import validate_grant_chain  # noqa: PLC0415
+    from openworkproof.policy import (  # noqa: PLC0415
+        AuthorizationLedgerPrefix,
+        CommittedEvidence,
+        _validate_committed_evidence,
+    )
+    from openworkproof.composition import replay_authorization_causality  # noqa: PLC0415
+
+    if (
+        type(effective_grants) is not tuple
+        or type(grant_attempts) is not tuple
+        or type(committed_evidence) is not tuple
+        or type(reports) is not tuple
+        or not reports
+        or any(
+            not isinstance(item, CommittedEvidence)
+            for item in committed_evidence
+        )
+        or any(
+            not isinstance(item, CompositionReport) for item in reports
+        )
+    ):
+        raise AcceptanceTransactionError(
+            "offline composition bundle is malformed"
+        )
+    try:
+        validate_grant_chain(
+            work_order,
+            effective_grants,
+            grant_attempts,
+            receipts,
+            public_keys,
+        )
+        prefix = AuthorizationLedgerPrefix(
+            effective_grants=effective_grants,
+            grant_attempts=grant_attempts,
+            receipts=receipts,
+        )
+        _validate_committed_evidence(
+            work_order,
+            prefix,
+            committed_evidence,
+        )
+        replay_authorization_causality(work_order, receipts)
+        triggers = tuple(
+            receipt
+            for receipt in receipts
+            if isinstance(receipt, SystemEventReceipt)
+            and receipt.system_event_name == "proof_composed"
+        )
+        if len(triggers) != len(reports):
+            raise AcceptanceTransactionError(
+                "composition report count does not match the trigger count"
+            )
+        for report in reports:
+            _validate_composition_report_binding(
+                work_order=work_order,
+                report=report,
+                receipts=receipts,
+            )
+        return reports[-1]
+    except AcceptanceTransactionError:
+        raise
+    except Exception as error:
+        raise AcceptanceTransactionError(
+            "offline composition bundle failed verification"
+        ) from error
