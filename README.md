@@ -96,7 +96,7 @@ WorkOrder            CapabilityGrant        ActionReceipt          AcceptanceRec
   （Manager 发起收据 + 报告 + proof_composed 收据一次提交）
 - 原子 final-acceptance 请求、无密钥外部签名草稿与 Acceptor 签名验收提交
   （proof_ready → awaiting_human → accepted，本地合成 Acceptor 验证）
-- **全量测试：2158 passed、0 failed、0 skip**（required-live Docker 模式，
+- **全量测试：2166 passed、0 failed、0 skip**（required-live Docker 模式，
   含冻结计划规定的 candidate-inventory 供应链门，退出码 0）
 
 **尚未完成：** Acceptor 拒绝路径、独立结果（independent-result）执行 episode、

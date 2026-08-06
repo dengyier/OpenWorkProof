@@ -107,16 +107,23 @@
 
 ## 当前验证快照
 
-- Policy 专项：101 passed；
-- Policy、Composition 与 Receipt-chain 专项：540 passed；
-- Receipt-chain 专项：407 passed；
-- 全量测试（required-live Docker，0 skip）：2158 passed、0 failed，
-  退出码 0；含 candidate-inventory 供应链门（candidate 集成专项
-  83 passed，绑定本分支 revision 的新不可变库存）；
+- Acceptance 事务专项：40 passed；
+- Acceptance、Contract、Signing、State、Composition、Policy、
+  Receipt-chain、MCP 与 Schema focused 门：1002 passed；
+- candidate-inventory 供应链专项（required-live Docker）：142 passed；
+- 全量测试（required-live Docker，0 skip）：2166 passed、0 failed，
+  退出码 0；固定 execution RepoDigest 与外部 artifact root 均按冻结计划提供；
+- 本轮精确验收修复提交：`cac4b51739d1bd1f18069fc957fe116bb8bb2d42`；
 - 独立规格复核：7B4_SPEC_PASS；
 - 独立质量复核：7B4_QUALITY_PASS；
 - pip check、compileall 和 git diff check：通过；
 - OpenWorkProof Docker 容器与卷残留：0。
+
+同一验证窗口的前两轮全量测试分别暴露一个未修改测试夹具的进程竞态：
+schema registry 交叉进程写入用例，以及 detached-survivor pidfile 就绪用例。
+两项均在不改代码的情况下独立重复 5 次并全部通过；最终完整 required-live
+门取得上述 2166/2166 结果。该记录保留失败历史，不把一次最终绿灯改写成
+“从未出现过不稳定性”。
 
 ## 重要边界
 
