@@ -21,6 +21,7 @@ import rfc8785
 from openworkproof.models import (
     ACTION_RECEIPT_ADAPTER,
     AcceptanceReceipt,
+    AcceptanceRejectionReceipt,
     CapabilityGrant,
     WorkOrder,
 )
@@ -31,6 +32,9 @@ _REGISTRY_FILENAME = "schema-registry.json"
 _REGISTRY_SCHEMA_VERSION = "openworkproof-schema-registry/0.1"
 _OBJECT_PATHS = {
     "acceptance-receipt": "acceptance-receipt.schema.json",
+    "acceptance-rejection-receipt": (
+        "acceptance-rejection-receipt.schema.json"
+    ),
     "action-receipt": "action-receipt.schema.json",
     "capability-grant": "capability-grant.schema.json",
     "work-order": "work-order.schema.json",
@@ -41,6 +45,9 @@ _FROZEN_V01_DIGESTS = {
     "acceptance-receipt.schema.json": (
         "5436e77e03d64cf131f2273b7527e63aa854f9c3de7b60aeae8751024267ff0e"
     ),
+    "acceptance-rejection-receipt.schema.json": (
+        "cab320167c5af36afcc06506d13cbaa85c3dd9f6b470c4db12d127726fa86ae8"
+    ),
     "action-receipt.schema.json": (
         "1aba0e2a9cf3b55478d5def0ef7f89d84976fc22798bb6d709d21afb31cedde8"
     ),
@@ -48,7 +55,7 @@ _FROZEN_V01_DIGESTS = {
         "f7c01f4ed227954f6310fd03ab5cbf52916510971c01c7f22ff9115e358cd17e"
     ),
     "schema-registry.json": (
-        "89b5014cb6b259fa5886cec3e243a590b8abca759992e35336a5b156cb637c9b"
+        "b543abb2d972a84d3fffe97e6f9381f33b5cfe40fe0c8c7c046f91354f849000"
     ),
     "work-order.schema.json": (
         "171b59390c66d586d7ee387d783ca8bc759779a08c36d31c85cf232998568013"
@@ -68,6 +75,9 @@ _FROZEN_V01_REGISTRY = {
 }
 _SCHEMA_FACTORIES: dict[str, Callable[[], dict[str, Any]]] = {
     "acceptance-receipt": AcceptanceReceipt.model_json_schema,
+    "acceptance-rejection-receipt": (
+        AcceptanceRejectionReceipt.model_json_schema
+    ),
     "action-receipt": ACTION_RECEIPT_ADAPTER.json_schema,
     "capability-grant": CapabilityGrant.model_json_schema,
     "work-order": WorkOrder.model_json_schema,

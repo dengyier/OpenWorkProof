@@ -3251,6 +3251,53 @@ class AcceptanceReceipt(SignedProtocolModel):
         return self
 
 
+class AcceptanceRejectionReceipt(SignedProtocolModel):
+    protocol_version: Literal["0.1"]
+    rejection_id: Digest64
+    work_order_digest: Digest64
+    acceptance_request_receipt_id: Digest64
+    acceptance_request_receipt_digest: Digest64
+    composition_report_digest: Digest64
+    evidence_snapshot_digest: Digest64
+    receipt_digests: tuple[Digest64, ...]
+    causal_graph_root: Digest64
+    reason_code: Literal[
+        "EVIDENCE_INSUFFICIENT",
+        "INDEPENDENCE_UNSATISFIED",
+        "GLOBAL_POSTCONDITION_FAILED",
+        "BUSINESS_DECISION",
+    ]
+    reason_detail: str
+    decision: Literal["rejected"]
+    rejected_at: CanonicalUTCTime
+
+    @model_validator(mode="after")
+    def _validate_rejection(self) -> AcceptanceRejectionReceipt:
+        if type(self.reason_detail) is not str or len(self.reason_detail) > 1024:
+            raise ValueError("rejection reason detail is invalid")
+        if (
+            not self.receipt_digests
+            or len(set(self.receipt_digests)) != len(self.receipt_digests)
+        ):
+            raise ValueError("receipt digests must be non-empty and unique")
+        return self
+
+    def validate_against_work_order(
+        self, work_order: WorkOrder
+    ) -> AcceptanceRejectionReceipt:
+        maintainer = work_order.key_bindings[0]
+        acceptor = work_order.key_bindings[5]
+        if (
+            self.work_order_digest != work_order.digest
+            or self.signer_key_id != acceptor.key_id
+            or self.signer_key_id == maintainer.key_id
+        ):
+            raise ValueError(
+                "AcceptanceRejectionReceipt does not match WorkOrder"
+            )
+        return self
+
+
 class PolicyDecision(ProtocolModel):
     allowed: bool
     decision: Literal["allow", "deny"]

@@ -31,6 +31,7 @@ ALLOWED_CANONICAL_DOMAINS = frozenset(
         "capability-grant",
         "action-receipt",
         "acceptance-receipt",
+        "acceptance-rejection-receipt",
         "agent-request",
         "human-decision",
         "sidecar-event",
