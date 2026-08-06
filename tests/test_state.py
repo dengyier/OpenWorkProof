@@ -1106,7 +1106,7 @@ def test_ordinary_same_state_actions_reject_wrong_role(
         ("evidence_incomplete", "frozen", "security_violation"),
     ],
 )
-def test_composition_derived_transitions_fail_closed_until_task9(
+def test_composition_derived_transitions_are_authorized_by_receipt(
     signed_work_order: WorkOrder,
     sidecar_receipt_factory,
     public_keys: dict,
@@ -1133,8 +1133,9 @@ def test_composition_derived_transitions_fail_closed_until_task9(
         now=fixed_now,
     )
 
-    assert decision.allowed is False
-    assert decision.error_code == "COMPOSITION_VALIDATOR_UNAVAILABLE"
+    # Task 9 authorizes composition-derived transitions at the receipt level;
+    # report recomputation is enforced by the compose/commit transactions.
+    assert decision.allowed is True
 
 
 def test_retry_transition_fails_closed_without_episode_history_context(
@@ -1205,8 +1206,9 @@ def test_only_exact_final_request_can_enter_awaiting_human(
         now=fixed_now,
     )
 
-    assert accepted.allowed is False
-    assert accepted.error_code == "TRANSITION_CONTEXT_UNAVAILABLE"
+    # Task 9 authorizes the exact final-request transition at the receipt
+    # level while a high-risk PR request stays invalid for the same path.
+    assert accepted.allowed is True
     assert rejected.allowed is False
     assert rejected.error_code == "INVALID_EVIDENCE"
 
@@ -1246,10 +1248,10 @@ def test_final_request_cannot_self_report_or_bypass_missing_history(
         now=fixed_now,
     )
 
-    assert first.allowed is False
-    assert first.error_code == "TRANSITION_CONTEXT_UNAVAILABLE"
-    assert replay.allowed is False
-    assert replay.error_code == "TRANSITION_CONTEXT_UNAVAILABLE"
+    # Task 9 authorizes the deterministic final-request receipt repeatedly;
+    # ledger-level single-request enforcement lives in the transaction layer.
+    assert first.allowed is True
+    assert replay.allowed is True
 
 
 @pytest.mark.parametrize("state_before", EXPIRABLE_STATES)
@@ -1531,7 +1533,7 @@ def test_terminal_states_cannot_transition(
     assert decision.error_code == "INVALID_TRANSITION"
 
 
-def test_acceptance_fails_closed_until_ledger_suffix_context_exists(
+def test_acceptance_is_authorized_by_acceptor_signature(
     signed_work_order: WorkOrder,
     signed_acceptance_receipt: AcceptanceReceipt,
     public_keys: dict,
@@ -1548,8 +1550,10 @@ def test_acceptance_fails_closed_until_ledger_suffix_context_exists(
         now=fixed_now,
     )
 
-    assert decision.allowed is False
-    assert decision.error_code == "TRANSITION_CONTEXT_UNAVAILABLE"
+    # Task 9 authorizes the accepted transition when the bound Acceptor
+    # signed the AcceptanceReceipt; ledger-suffix enforcement lives in the
+    # commit_acceptance transaction.
+    assert decision.allowed is True
 
 
 @pytest.mark.parametrize("wrong_role", ["Maintainer", "Manager", "Developer", "Verifier", "Sidecar"])

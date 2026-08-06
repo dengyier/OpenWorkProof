@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 
 import pytest
@@ -324,6 +325,43 @@ def test_composition_report_recomputes_shared_factor_warnings() -> None:
         )
 
 
+def _four_dimension_work_order(
+    signed_work_order,
+    ephemeral_role_keys,
+):
+    """Return a WorkOrder variant without the independent_result dimension."""
+    from test_receipt_chain import _resigned_work_order  # noqa: PLC0415
+
+    work_order = signed_work_order
+    dimensions = [
+        dimension
+        for dimension in work_order.required_evidence_dimensions
+        if dimension != "independent_result"
+    ]
+    artifacts = tuple(
+        artifact
+        for artifact in work_order.evidence_policy.artifacts
+        if artifact.purpose != "verifier_independent_result"
+    )
+    policy = work_order.evidence_policy.model_copy(
+        update={"artifacts": artifacts}
+    )
+    return _resigned_work_order(
+        work_order,
+        ephemeral_role_keys["Maintainer"][0],
+        json_updates={
+            "required_evidence_dimensions": dimensions,
+            "independence_policy": "disclose_only",
+            "evidence_policy": policy.model_dump(mode="json"),
+        },
+        model_updates={
+            "required_evidence_dimensions": tuple(dimensions),
+            "independence_policy": "disclose_only",
+            "evidence_policy": policy,
+        },
+    )
+
+
 def _compose_case(
     tmp_path,
     signed_work_order,
@@ -331,6 +369,7 @@ def _compose_case(
     sidecar_receipt_factory,
     now,
     monkeypatch=None,
+    work_order=None,
 ):
     from test_mcp_server import (  # noqa: PLC0415
         _FakeRunTestsExecutionDriver,
@@ -345,9 +384,14 @@ def _compose_case(
     )
     from openworkproof.signing import sign_payload  # noqa: PLC0415
 
+    selected_work_order = (
+        work_order
+        if work_order is not None
+        else signed_work_order
+    )
     case = _run_tests_case(
         tmp_path=tmp_path,
-        signed_work_order=signed_work_order,
+        signed_work_order=selected_work_order,
         role_keys=ephemeral_role_keys,
         sidecar_receipt_factory=sidecar_receipt_factory,
         now=now,
@@ -616,5 +660,466 @@ def test_compose_requires_manager_and_current_context(
             context=stale,
             request=request,
             sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            clock=lambda: fixed_now,
+        )
+
+
+def _request_case(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+):
+    """Build a proof_ready ledger via the four-dimension WorkOrder variant."""
+    from openworkproof.models import request_arguments_digest  # noqa: PLC0415
+    from openworkproof.signing import sign_payload  # noqa: PLC0415
+    from test_mcp_server import _grant_id  # noqa: PLC0415
+
+    work_order = _four_dimension_work_order(
+        signed_work_order, ephemeral_role_keys
+    )
+    case, context, compose_request = _compose_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+        work_order=work_order,
+    )
+    composed = acceptance.compose_proof_transaction(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        request=compose_request,
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        clock=lambda: fixed_now,
+    )
+    assert composed.report.verifier_conclusion == "proof_ready"
+    from test_mcp_server import _current_run_tests_context  # noqa: PLC0415
+
+    proof_ready_context = _current_run_tests_context(case, fixed_now)
+    assert proof_ready_context.current_state == "proof_ready"
+    manager = ephemeral_role_keys["Manager"][1]
+    scope = {
+        "work_order_digest": case["work_order"].digest,
+        "operation": "submit_final_acceptance",
+        "composition_report_digest": acceptance.composition_report_digest(
+            composed.report
+        ),
+    }
+    target_action_digest = hashlib.sha256(
+        rfc8785.dumps(
+            {
+                "domain": "openworkproof/final-acceptance-action/v0.1",
+                "requested_scope": scope,
+            }
+        )
+    ).hexdigest()
+    arguments = {
+        "request_kind": "final_acceptance",
+        "target_action_digest": target_action_digest,
+        "required_role": "Acceptor",
+        "requested_scope": scope,
+        "expires_at": "2026-01-01T00:30:00Z",
+    }
+    request = AgentRequest.model_validate(
+        sign_payload(
+            "agent-request",
+            {
+                "claim_type": "agent-request",
+                "work_order_digest": case["work_order"].digest,
+                "grant_id": case["root"].grant_id,
+                "actor_id": manager["subject_id"],
+                "actor_key_id": manager["key_id"],
+                "tool_name": "owp.request_acceptance",
+                "arguments_digest": request_arguments_digest(
+                    "owp.request_acceptance", arguments
+                ),
+                "nonce": _grant_id("acceptance:request"),
+                "requested_at": fixed_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "authentication_method": "agent_signature",
+                "model_id": "model",
+                "model_version": "1",
+                "prompt_template_digest": "a" * 64,
+                "context_source_digest": "b" * 64,
+            },
+            ephemeral_role_keys["Manager"][0],
+        )
+    )
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    expires_at = datetime(2026, 1, 1, 0, 30, 0, tzinfo=timezone.utc)
+    return case, proof_ready_context, request, composed, expires_at
+
+
+def test_request_acceptance_commits_awaiting_human(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, context, request, composed, expires_at = _request_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    request_receipt = acceptance.request_acceptance_transaction(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        request=request,
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        expires_at=expires_at,
+        clock=lambda: fixed_now,
+    )
+    assert request_receipt.request_kind == "final_acceptance"
+    assert request_receipt.required_role == "Acceptor"
+
+    import sqlite3  # noqa: PLC0415
+
+    connection = sqlite3.connect(case["ledger_path"])
+    try:
+        state = connection.execute(
+            "SELECT current_state, version FROM work_order_state WHERE singleton = 1"
+        ).fetchone()
+        count = connection.execute(
+            "SELECT COUNT(*) FROM grant_events"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert state == ("awaiting_human", 7)
+    assert count >= 1
+
+
+def test_request_acceptance_requires_proof_ready(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, context, request, composed, expires_at = _request_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    # Rewind the context to before composition (locally_verified) and
+    # rewind the ledger state to match.
+    import sqlite3  # noqa: PLC0415
+
+    connection = sqlite3.connect(case["ledger_path"])
+    try:
+        connection.execute(
+            "UPDATE work_order_state SET current_state = ?, version = version - 1 "
+            "WHERE singleton = 1",
+            ("locally_verified",),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    stale_context = dataclasses.replace(
+        context,
+        current_state="locally_verified",
+        transaction_time=datetime(2026, 1, 1, 0, 0, 4, tzinfo=timezone.utc),
+    )
+    with pytest.raises(acceptance.AcceptanceTransactionError):
+        acceptance.request_acceptance_transaction(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=stale_context,
+            request=request,
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            expires_at=expires_at,
+            clock=lambda: fixed_now,
+        )
+
+
+def _awaiting_case(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+):
+    """Build an awaiting_human ledger via request_acceptance_transaction."""
+    case, context, request, composed, expires_at = _request_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    request_receipt = acceptance.request_acceptance_transaction(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        request=request,
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        expires_at=expires_at,
+        clock=lambda: fixed_now,
+    )
+    from test_mcp_server import _current_run_tests_context  # noqa: PLC0415
+
+    awaiting_context = _current_run_tests_context(case, fixed_now)
+    assert awaiting_context.current_state == "awaiting_human"
+    return case, awaiting_context, composed, request_receipt
+
+
+def test_prepare_acceptance_returns_deterministic_keyless_draft(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    draft = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    repeat = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    assert draft.signing_domain == "acceptance-receipt"
+    assert draft.canonical_payload == repeat.canonical_payload
+    assert draft.acceptance_id == repeat.acceptance_id
+    # The draft must not contain any credential material.
+    import inspect  # noqa: PLC0415
+
+    signature = inspect.signature(acceptance.prepare_acceptance)
+    assert "private_key" not in signature.parameters
+    assert b"-----BEGIN" not in draft.canonical_payload
+
+
+def test_prepare_acceptance_rejects_wrong_state(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, context, request, composed, expires_at = _request_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    # Still proof_ready, not awaiting_human.
+    with pytest.raises(acceptance.AcceptanceTransactionError):
+        acceptance.prepare_acceptance(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            clock=lambda: fixed_now,
+        )
+
+
+def _sign_draft(draft, ephemeral_role_keys, role="Acceptor"):
+    from openworkproof.models import AcceptanceReceipt  # noqa: PLC0415
+    from openworkproof.signing import sign_payload  # noqa: PLC0415
+
+    return AcceptanceReceipt.model_validate(
+        sign_payload(
+            draft.signing_domain,
+            dict(draft.payload),
+            ephemeral_role_keys[role][0],
+        )
+    )
+
+
+def test_commit_acceptance_reaches_accepted(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    draft = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    signed = _sign_draft(draft, ephemeral_role_keys)
+    committed = acceptance.commit_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        acceptance=signed,
+        public_keys=None,
+        clock=lambda: fixed_now,
+    )
+    assert committed == signed
+
+    import sqlite3  # noqa: PLC0415
+
+    connection = sqlite3.connect(case["ledger_path"])
+    try:
+        state = connection.execute(
+            "SELECT current_state, version FROM work_order_state WHERE singleton = 1"
+        ).fetchone()
+        acceptances = connection.execute(
+            "SELECT COUNT(*) FROM acceptance_receipts"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert state == ("accepted", 8)
+    assert acceptances == 1
+
+
+def test_commit_acceptance_rejects_wrong_signer(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    draft = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    for role in ("Maintainer", "Manager", "Developer", "Verifier", "Sidecar"):
+        signed = _sign_draft(draft, ephemeral_role_keys, role=role)
+        with pytest.raises(acceptance.AcceptanceTransactionError):
+            acceptance.commit_acceptance(
+                case["ledger_path"],
+                evidence_root=case["evidence_root"],
+                context=context,
+                acceptance=signed,
+                public_keys=None,
+                clock=lambda: fixed_now,
+            )
+
+
+def test_commit_acceptance_rejects_stale_signature(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    draft = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    signed = _sign_draft(draft, ephemeral_role_keys)
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    later = datetime(2026, 1, 1, 0, 5, 5, tzinfo=timezone.utc)
+    with pytest.raises(acceptance.AcceptanceTransactionError):
+        acceptance.commit_acceptance(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            acceptance=signed,
+            public_keys=None,
+            clock=lambda: later,
+        )
+
+
+def test_commit_acceptance_rejects_duplicate(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    draft = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    signed = _sign_draft(draft, ephemeral_role_keys)
+    acceptance.commit_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        acceptance=signed,
+        public_keys=None,
+        clock=lambda: fixed_now,
+    )
+    # A second commit against a stale awaiting_human context must fail
+    # closed: either the transaction rejects it or the stale-context
+    # revalidation refuses to proceed.
+    with pytest.raises((acceptance.AcceptanceTransactionError, RuntimeError)):
+        acceptance.commit_acceptance(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            acceptance=signed,
+            public_keys=None,
             clock=lambda: fixed_now,
         )

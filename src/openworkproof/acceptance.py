@@ -38,6 +38,7 @@ from openworkproof.models import (
     PredicateResult,
     SystemEventReceipt,
     ToolCallReceipt,
+    request_arguments_digest,
 )
 from openworkproof.policy import AuthorizationContext
 from openworkproof.runtime_context import RuntimeContextError, require_current_context
@@ -490,7 +491,10 @@ def _evaluate_postconditions(
             ),
             fixed_test_source_digest=arguments["fixed_test_source_digest"],
         ).model_dump(mode="json")
-    evaluation = EvaluationContext(inputs=inputs)
+    evaluation = EvaluationContext(
+        inputs=inputs,
+        authoritative_inputs=inputs,
+    )
     return evaluate_required_predicates(
         context.work_order.postconditions,
         evaluation,
@@ -984,3 +988,762 @@ def compose_proof_transaction(
                 raise AcceptanceCommitIndeterminateError(
                     "composition target lock release failed"
                 ) from release_errors[0]
+
+
+def _current_report(
+    ledger_path: Path,
+    work_order,
+) -> CompositionReport:
+    connection = evidence.connect_ledger(ledger_path)
+    try:
+        reports = evidence._validated_composition_reports(
+            connection,
+            work_order,
+        )
+    finally:
+        connection.close()
+    if not reports:
+        raise AcceptanceTransactionError(
+            "final acceptance requires a current composition report"
+        )
+    return reports[-1]
+
+
+def _build_acceptance_request_receipt(
+    context: AuthorizationContext,
+    request: AgentRequest,
+    report: CompositionReport,
+    *,
+    expires_at: datetime,
+    sidecar_private_key: Ed25519PrivateKey,
+    sequence: int,
+    previous_digest: str,
+) -> ApprovalRequestedReceipt:
+    scope = {
+        "work_order_digest": context.work_order.digest,
+        "operation": "submit_final_acceptance",
+        "composition_report_digest": composition_report_digest(report),
+    }
+    target_action_digest = hashlib.sha256(
+        rfc8785.dumps(
+            {
+                "domain": "openworkproof/final-acceptance-action/v0.1",
+                "requested_scope": scope,
+            }
+        )
+    ).hexdigest()
+    arguments = {
+        "request_kind": "final_acceptance",
+        "target_action_digest": target_action_digest,
+        "required_role": "Acceptor",
+        "requested_scope": scope,
+        "expires_at": expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if request.arguments_digest != request_arguments_digest(
+        "owp.request_acceptance", arguments
+    ):
+        raise AcceptanceTransactionError(
+            "acceptance request arguments do not match current report"
+        )
+    remaining_before = _remaining_tool_calls(context, request.grant_id)
+    sidecar_key_id = key_id(sidecar_private_key.public_key())
+    receipt_id = hashlib.sha256(
+        rfc8785.dumps(
+            {
+                "domain": "openworkproof/receipt-id/v0.1",
+                "request_digest": request.digest,
+                "entropy": secrets.token_hex(32),
+            }
+        )
+    ).hexdigest()
+    raw = {
+        "protocol_version": "0.1",
+        "receipt_id": receipt_id,
+        "work_order_digest": context.work_order.digest,
+        "actor_type": "agent",
+        "actor_id": request.actor_id,
+        "actor_key_id": request.actor_key_id,
+        "nested_claim_type": "agent-request",
+        "nested_claim_digest": request.digest,
+        "nested_claim": request.model_dump(mode="json"),
+        "gateway_signer_key_id": sidecar_key_id,
+        "event_type": "approval_requested",
+        "policy_decision": "allow",
+        "policy_error_code": None,
+        "execution_status": "succeeded",
+        "execution_error_code": None,
+        "quota_charge": {
+            "grant_id": request.grant_id,
+            "metric": "tool_calls",
+            "amount": 1,
+            "remaining_after": remaining_before - 1,
+        },
+        "state_before": context.current_state,
+        "state_after": "awaiting_human",
+        "parent_receipt_ids": list(
+            _request_parents(context, report, request.grant_id)
+        ),
+        "correlation_factors": None,
+        "evidence_refs": [],
+        "occurred_at": context.transaction_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "sequence": sequence,
+        "nonce": request.nonce,
+        "previous_receipt_digest": previous_digest,
+        "grant_id": request.grant_id,
+        "request_kind": "final_acceptance",
+        "target_action_digest": target_action_digest,
+        "required_role": "Acceptor",
+        "requested_scope": scope,
+        "expires_at": expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    return evidence.ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload("action-receipt", raw, sidecar_private_key)
+    )
+
+
+def _request_parents(
+    context: AuthorizationContext,
+    report: CompositionReport,
+    grant_id: str,
+) -> tuple[ActionReceiptEnvelope, ...]:
+    """Final-request causal parents: grant issuance + proof_composed trigger."""
+    receipts = context.ledger_prefix.receipts
+    parents: dict[str, ActionReceiptEnvelope] = {}
+    issuance = next(
+        (
+            receipt
+            for receipt in receipts
+            if isinstance(receipt, GrantIssuedReceipt)
+            and receipt.policy_decision == "allow"
+            and receipt.issued_grant_id == grant_id
+        ),
+        None,
+    )
+    if issuance is None:
+        raise AcceptanceTransactionError(
+            "acceptance request grant issuance is unavailable"
+        )
+    parents[issuance.receipt_id] = issuance
+    # The trigger is the proof_composed SystemEventReceipt that bound the
+    # current report digest.
+    trigger = next(
+        (
+            receipt
+            for receipt in receipts
+            if isinstance(receipt, SystemEventReceipt)
+            and receipt.system_event_name == "proof_composed"
+            and getattr(receipt.cause, "composition_report_digest", None)
+            == composition_report_digest(report)
+        ),
+        None,
+    )
+    if trigger is not None:
+        parents[trigger.receipt_id] = trigger
+    return tuple(
+        receipt.receipt_id
+        for receipt in sorted(
+            parents.values(),
+            key=lambda item: item.sequence,
+        )
+    )
+
+
+def request_acceptance_transaction(
+    ledger_path: Path,
+    *,
+    evidence_root: Path,
+    context: AuthorizationContext,
+    request: AgentRequest,
+    sidecar_private_key: Ed25519PrivateKey,
+    expires_at: datetime,
+    clock: Callable[[], datetime],
+) -> ApprovalRequestedReceipt:
+    """Atomically request final acceptance from proof_ready."""
+    path = Path(ledger_path)
+    if not path.is_file():
+        raise AcceptanceTransactionError("acceptance request ledger is unavailable")
+    lock_descriptor: int | None = None
+    owns_lock = False
+    connection: sqlite3.Connection | None = None
+    try:
+        lock_descriptor, owns_lock = evidence._borrow_or_acquire_target_lock(
+            path, None
+        )
+        now = _freeze_second(clock())
+        if context.transaction_time != now:
+            raise AcceptanceTransactionError(
+                "authorization context time is stale"
+            )
+        require_current_context(
+            path,
+            evidence_root,
+            context,
+            now,
+            lock_descriptor,
+        )
+        if context.current_state != "proof_ready":
+            raise AcceptanceTransactionError(
+                "final acceptance requires proof_ready"
+            )
+        if request.tool_name != "owp.request_acceptance":
+            raise AcceptanceTransactionError(
+                "acceptance request tool is invalid"
+            )
+        if expires_at.tzinfo is None or expires_at.utcoffset() is None:
+            raise AcceptanceTransactionError("request expiry must be UTC")
+        expiry = expires_at.astimezone(timezone.utc)
+        validity = (expiry - now).total_seconds()
+        if not 0 <= validity <= 3600:
+            raise AcceptanceTransactionError(
+                "request expiry must be within one hour"
+            )
+        if expiry > context.work_order.deadline:
+            raise AcceptanceTransactionError(
+                "request expiry exceeds the WorkOrder deadline"
+            )
+        work_order, receipts, _, _ = evidence._replay_receipt_publication_ledger(
+            evidence.connect_ledger(path)
+        )
+        report = _current_report(path, work_order)
+        prefix_len = len(context.ledger_prefix.receipts)
+        request_receipt = _build_acceptance_request_receipt(
+            context,
+            request,
+            report,
+            expires_at=expiry,
+            sidecar_private_key=sidecar_private_key,
+            sequence=prefix_len + 1,
+            previous_digest=(
+                context.ledger_prefix.receipts[-1].digest
+                if context.ledger_prefix.receipts
+                else None
+            ),
+        )
+        connection = evidence.connect_ledger(path)
+        connection.execute("BEGIN IMMEDIATE")
+        work_order, receipts, _, _ = (
+            evidence._replay_receipt_publication_ledger(connection)
+        )
+        state_row = connection.execute(
+            "SELECT current_state, version FROM work_order_state WHERE singleton = 1"
+        ).fetchone()
+        expected_version = evidence._derive_protocol_transaction_version(
+            action_receipts=receipts,
+            acceptance_receipts=(),
+        )
+        if (
+            work_order != context.work_order
+            or len(receipts) != prefix_len
+            or state_row != (context.current_state, expected_version)
+        ):
+            raise AcceptanceTransactionError(
+                "acceptance request ledger changed under the target lock"
+            )
+        _insert_request_rows(
+            connection,
+            work_order=work_order,
+            request_receipt=request_receipt,
+            current_state=context.current_state,
+            current_version=state_row[1],
+        )
+        connection.execute("COMMIT")
+        return request_receipt
+    except (RuntimeContextError, AcceptanceTransactionError):
+        rollback_error = evidence._best_effort_rollback(connection)
+        if rollback_error is not None:
+            raise AcceptanceTransactionError(
+                "acceptance request rollback failed"
+            ) from rollback_error
+        raise
+    finally:
+        close_error = evidence._best_effort_close(connection)
+        if close_error is not None:
+            raise AcceptanceCommitIndeterminateError(
+                "acceptance request connection close failed"
+            ) from close_error
+        if owns_lock:
+            _, release_errors = evidence._release_target_lock(lock_descriptor)
+            if release_errors:
+                raise AcceptanceCommitIndeterminateError(
+                    "acceptance request target lock release failed"
+                ) from release_errors[0]
+
+
+def _insert_request_rows(
+    connection: sqlite3.Connection,
+    *,
+    work_order,
+    request_receipt: ApprovalRequestedReceipt,
+    current_state: str,
+    current_version: int,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO receipts (
+            receipt_id, work_order_digest, nonce, sequence,
+            previous_digest, receipt_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            request_receipt.receipt_id,
+            work_order.digest,
+            request_receipt.nonce,
+            request_receipt.sequence,
+            request_receipt.previous_receipt_digest,
+            evidence._canonical_json(request_receipt.model_dump(mode="json")),
+        ),
+    )
+    for parent_id in request_receipt.parent_receipt_ids:
+        connection.execute(
+            """
+            INSERT INTO receipt_parents (child_receipt_id, parent_receipt_id)
+            VALUES (?, ?)
+            """,
+            (request_receipt.receipt_id, parent_id),
+        )
+    charge = request_receipt.quota_charge
+    if charge is None:
+        raise AcceptanceTransactionError(
+            "acceptance request must charge quota"
+        )
+    connection.execute(
+        """
+        INSERT INTO grant_events (
+            event_id, receipt_id, grant_id, event_type, metric, amount
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            hashlib.sha256(
+                f"grant-event:{request_receipt.receipt_id}".encode("ascii")
+            ).hexdigest(),
+            request_receipt.receipt_id,
+            charge.grant_id,
+            request_receipt.event_type,
+            charge.metric,
+            charge.amount,
+        ),
+    )
+    state_update = connection.execute(
+        """
+        UPDATE work_order_state
+        SET current_state = ?, version = version + 1
+        WHERE singleton = 1
+          AND work_order_digest = ?
+          AND current_state = ?
+          AND version = ?
+        """,
+        (
+            request_receipt.state_after,
+            work_order.digest,
+            current_state,
+            current_version,
+        ),
+    )
+    sequence_update = connection.execute(
+        """
+        UPDATE sequence_counter
+        SET next_sequence = next_sequence + 1
+        WHERE singleton = 1 AND next_sequence = ?
+        """,
+        (request_receipt.sequence,),
+    )
+    if state_update.rowcount != 1 or sequence_update.rowcount != 1:
+        raise AcceptanceTransactionError(
+            "acceptance request counters could not be advanced"
+        )
+
+
+def _current_acceptance_request(
+    ledger_path: Path,
+    work_order,
+) -> ApprovalRequestedReceipt:
+    connection = evidence.connect_ledger(ledger_path)
+    try:
+        _, receipts, _, _ = evidence._replay_receipt_publication_ledger(connection)
+    finally:
+        connection.close()
+    requests = [
+        receipt
+        for receipt in receipts
+        if isinstance(receipt, ApprovalRequestedReceipt)
+        and receipt.request_kind == "final_acceptance"
+        and receipt.policy_decision == "allow"
+        and receipt.execution_status == "succeeded"
+    ]
+    if not requests:
+        raise AcceptanceTransactionError(
+            "acceptance requires a current final-acceptance request"
+        )
+    return requests[-1]
+
+
+def prepare_acceptance(
+    ledger_path: Path,
+    *,
+    evidence_root: Path,
+    context: AuthorizationContext,
+    clock: Callable[[], datetime],
+) -> AcceptanceSigningDraft:
+    """Return the exact externally signable AcceptanceReceipt draft."""
+    path = Path(ledger_path)
+    if not path.is_file():
+        raise AcceptanceTransactionError("acceptance ledger is unavailable")
+    lock_descriptor: int | None = None
+    owns_lock = False
+    try:
+        lock_descriptor, owns_lock = evidence._borrow_or_acquire_target_lock(
+            path, None
+        )
+        now = _freeze_second(clock())
+        if context.transaction_time != now:
+            raise AcceptanceTransactionError(
+                "authorization context time is stale"
+            )
+        require_current_context(
+            path,
+            evidence_root,
+            context,
+            now,
+            lock_descriptor,
+        )
+        if context.current_state != "awaiting_human":
+            raise AcceptanceTransactionError(
+                "acceptance preparation requires awaiting_human"
+            )
+        work_order, receipts, _, _ = evidence._replay_receipt_publication_ledger(
+            evidence.connect_ledger(path)
+        )
+        report = _current_report(path, work_order)
+        request = _current_acceptance_request(path, work_order)
+        if request.expires_at < now:
+            raise AcceptanceTransactionError(
+                "acceptance request has expired"
+            )
+        if context.ledger_prefix.receipts[-1].digest != request.digest:
+            raise AcceptanceTransactionError(
+                "acceptance request is not the current ledger tip"
+            )
+        prefix = context.ledger_prefix.receipts
+        refs = _sorted_unique_evidence_refs(prefix)
+        snapshot = evidence_snapshot_digest(refs)
+        acceptance_id_value = acceptance_id(
+            work_order_digest=work_order.digest,
+            request_receipt_id=request.receipt_id,
+            request_receipt_digest=request.digest,
+            report_digest=composition_report_digest(report),
+            evidence_snapshot=snapshot,
+        )
+        payload = {
+            "protocol_version": "0.1",
+            "acceptance_id": acceptance_id_value,
+            "work_order_digest": work_order.digest,
+            "acceptance_request_receipt_id": request.receipt_id,
+            "acceptance_request_receipt_digest": request.digest,
+            "composition_report_digest": composition_report_digest(report),
+            "final_artifact": report.final_artifact.model_dump(mode="json"),
+            "artifact_digests": [
+                item.model_dump(mode="json") for item in report.artifact_digests
+            ],
+            "evidence_snapshot_digest": snapshot,
+            "receipt_digests": [item.digest for item in prefix],
+            "causal_graph_root": report.causal_graph_root,
+            "causal_complete": True,
+            "evidence_coverage": dict(report.evidence_coverage),
+            "independence_assessment": (
+                report.independence_assessment.model_dump(mode="json")
+            ),
+            "test_evidence_refs": [
+                item.model_dump(mode="json") for item in report.test_evidence_refs
+            ],
+            "decision": "accepted",
+            "unresolved_failures": [],
+            "warnings": [item.model_dump(mode="json") for item in report.warnings],
+            "global_postconditions": [
+                item.model_dump(mode="json")
+                for item in report.global_postconditions
+            ],
+            "global_postconditions_satisfied": True,
+            "verifier_conclusion": "proof_ready",
+            "accepted_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        canonical = rfc8785.dumps(payload)
+        return AcceptanceSigningDraft(
+            signing_domain="acceptance-receipt",
+            acceptance_id=acceptance_id_value,
+            payload=FrozenDict(payload),
+            canonical_payload=canonical,
+        )
+    except (RuntimeContextError, AcceptanceTransactionError):
+        raise
+    finally:
+        if owns_lock:
+            _, release_errors = evidence._release_target_lock(lock_descriptor)
+            if release_errors:
+                raise AcceptanceCommitIndeterminateError(
+                    "acceptance preparation target lock release failed"
+                ) from release_errors[0]
+
+
+def commit_acceptance(
+    ledger_path: Path,
+    *,
+    evidence_root: Path,
+    context: AuthorizationContext,
+    acceptance: AcceptanceReceipt,
+    public_keys,
+    clock: Callable[[], datetime],
+) -> AcceptanceReceipt:
+    """Atomically commit the Acceptor-signed AcceptanceReceipt."""
+    from openworkproof.signing import decode_and_verify_key_binding, verify_payload  # noqa: PLC0415
+
+    path = Path(ledger_path)
+    if not path.is_file():
+        raise AcceptanceTransactionError("acceptance ledger is unavailable")
+    lock_descriptor: int | None = None
+    owns_lock = False
+    connection: sqlite3.Connection | None = None
+    try:
+        lock_descriptor, owns_lock = evidence._borrow_or_acquire_target_lock(
+            path, None
+        )
+        now = _freeze_second(clock())
+        if context.transaction_time != now:
+            raise AcceptanceTransactionError(
+                "authorization context time is stale"
+            )
+        require_current_context(
+            path,
+            evidence_root,
+            context,
+            now,
+            lock_descriptor,
+        )
+        if context.current_state != "awaiting_human":
+            raise AcceptanceTransactionError(
+                "acceptance requires awaiting_human"
+            )
+        work_order, receipts, _, _ = evidence._replay_receipt_publication_ledger(
+            evidence.connect_ledger(path)
+        )
+        report = _current_report(path, work_order)
+        request = _current_acceptance_request(path, work_order)
+        if request.expires_at < now:
+            raise AcceptanceTransactionError(
+                "acceptance request has expired"
+            )
+        if context.ledger_prefix.receipts[-1].digest != request.digest:
+            raise AcceptanceTransactionError(
+                "acceptance request is not the current ledger tip"
+            )
+        acceptor = work_order.key_bindings[5]
+        if acceptance.signer_key_id != acceptor.key_id:
+            raise AcceptanceTransactionError(
+                "acceptance must be signed by the bound Acceptor"
+            )
+        parsed = AcceptanceReceipt.model_validate(
+            acceptance.model_dump(mode="json")
+        )
+        parsed.validate_against_work_order(work_order)
+        accepted_at = parsed.accepted_at
+        if accepted_at < request.occurred_at:
+            raise AcceptanceTransactionError(
+                "accepted_at precedes the acceptance request"
+            )
+        if accepted_at > now:
+            raise AcceptanceTransactionError(
+                "accepted_at is in the future"
+            )
+        if (now - accepted_at).total_seconds() > 300:
+            raise AcceptanceTransactionError(
+                "acceptance signature is stale"
+            )
+        if accepted_at > request.expires_at:
+            raise AcceptanceTransactionError(
+                "acceptance signature exceeds request expiry"
+            )
+        if accepted_at > work_order.deadline:
+            raise AcceptanceTransactionError(
+                "acceptance signature exceeds the WorkOrder deadline"
+            )
+        prefix = context.ledger_prefix.receipts
+        refs = _sorted_unique_evidence_refs(prefix)
+        snapshot = evidence_snapshot_digest(refs)
+        expected_id = acceptance_id(
+            work_order_digest=work_order.digest,
+            request_receipt_id=request.receipt_id,
+            request_receipt_digest=request.digest,
+            report_digest=composition_report_digest(report),
+            evidence_snapshot=snapshot,
+        )
+        if parsed.acceptance_id != expected_id:
+            raise AcceptanceTransactionError(
+                "acceptance ID does not match the authoritative snapshot"
+            )
+        expected_payload = _expected_acceptance_payload(
+            work_order,
+            report,
+            request,
+            snapshot,
+            expected_id,
+            accepted_at,
+            prefix,
+        )
+        actual_payload = {
+            key: value
+            for key, value in parsed.model_dump(mode="json").items()
+            if key not in {"digest", "signature_alg", "signer_key_id", "signature"}
+        }
+        if actual_payload != expected_payload:
+            raise AcceptanceTransactionError(
+                "acceptance payload does not match the authoritative snapshot"
+            )
+        acceptor_key = decode_and_verify_key_binding(acceptor)
+        if not verify_payload(
+            "acceptance-receipt",
+            parsed.model_dump(mode="json"),
+            acceptor_key,
+        ):
+            raise AcceptanceTransactionError(
+                "acceptance signature verification failed"
+            )
+        connection = evidence.connect_ledger(path)
+        connection.execute("BEGIN IMMEDIATE")
+        existing = connection.execute(
+            "SELECT COUNT(*) FROM acceptance_receipts"
+        ).fetchone()
+        if existing is not None and existing[0] != 0:
+            raise AcceptanceTransactionError(
+                "WorkOrder already has an acceptance"
+            )
+        state_row = connection.execute(
+            "SELECT current_state, version FROM work_order_state WHERE singleton = 1"
+        ).fetchone()
+        if state_row != ("awaiting_human", _derive_version(connection, work_order)):
+            raise AcceptanceTransactionError(
+                "acceptance ledger changed under the target lock"
+            )
+        _insert_acceptance_rows(
+            connection,
+            work_order=work_order,
+            acceptance=parsed,
+            current_state=state_row[0],
+            current_version=state_row[1],
+        )
+        connection.execute("COMMIT")
+        return parsed
+    except (RuntimeContextError, AcceptanceTransactionError):
+        rollback_error = evidence._best_effort_rollback(connection)
+        if rollback_error is not None:
+            raise AcceptanceTransactionError(
+                "acceptance rollback failed"
+            ) from rollback_error
+        raise
+    finally:
+        close_error = evidence._best_effort_close(connection)
+        if close_error is not None:
+            raise AcceptanceCommitIndeterminateError(
+                "acceptance connection close failed"
+            ) from close_error
+        if owns_lock:
+            _, release_errors = evidence._release_target_lock(lock_descriptor)
+            if release_errors:
+                raise AcceptanceCommitIndeterminateError(
+                    "acceptance target lock release failed"
+                ) from release_errors[0]
+
+
+def _derive_version(connection, work_order) -> int:
+    _, receipts, _, _ = evidence._replay_receipt_publication_ledger(connection)
+    return evidence._derive_protocol_transaction_version(
+        action_receipts=receipts,
+        acceptance_receipts=(),
+    )
+
+
+def _expected_acceptance_payload(
+    work_order,
+    report: CompositionReport,
+    request: ApprovalRequestedReceipt,
+    snapshot: str,
+    expected_id: str,
+    accepted_at: datetime,
+    prefix: tuple[ActionReceiptEnvelope, ...],
+) -> dict:
+    return {
+        "protocol_version": "0.1",
+        "acceptance_id": expected_id,
+        "work_order_digest": work_order.digest,
+        "acceptance_request_receipt_id": request.receipt_id,
+        "acceptance_request_receipt_digest": request.digest,
+        "composition_report_digest": composition_report_digest(report),
+        "final_artifact": report.final_artifact.model_dump(mode="json"),
+        "artifact_digests": [
+            item.model_dump(mode="json") for item in report.artifact_digests
+        ],
+        "evidence_snapshot_digest": snapshot,
+        "receipt_digests": [item.digest for item in prefix],
+        "causal_graph_root": report.causal_graph_root,
+        "causal_complete": True,
+        "evidence_coverage": dict(report.evidence_coverage),
+        "independence_assessment": (
+            report.independence_assessment.model_dump(mode="json")
+        ),
+        "test_evidence_refs": [
+            item.model_dump(mode="json") for item in report.test_evidence_refs
+        ],
+        "decision": "accepted",
+        "unresolved_failures": [],
+        "warnings": [item.model_dump(mode="json") for item in report.warnings],
+        "global_postconditions": [
+            item.model_dump(mode="json")
+            for item in report.global_postconditions
+        ],
+        "global_postconditions_satisfied": True,
+        "verifier_conclusion": "proof_ready",
+        "accepted_at": accepted_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def _insert_acceptance_rows(
+    connection: sqlite3.Connection,
+    *,
+    work_order,
+    acceptance: AcceptanceReceipt,
+    current_state: str,
+    current_version: int,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO acceptance_receipts (
+            acceptance_id, work_order_digest, acceptance_json
+        )
+        VALUES (?, ?, ?)
+        """,
+        (
+            acceptance.acceptance_id,
+            work_order.digest,
+            evidence._canonical_json(acceptance.model_dump(mode="json")),
+        ),
+    )
+    state_update = connection.execute(
+        """
+        UPDATE work_order_state
+        SET current_state = ?, version = version + 1
+        WHERE singleton = 1
+          AND work_order_digest = ?
+          AND current_state = ?
+          AND version = ?
+        """,
+        (
+            "accepted",
+            work_order.digest,
+            current_state,
+            current_version,
+        ),
+    )
+    if state_update.rowcount != 1:
+        raise AcceptanceTransactionError(
+            "acceptance state could not be advanced"
+        )
