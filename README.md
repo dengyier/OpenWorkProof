@@ -97,9 +97,11 @@ WorkOrder            CapabilityGrant        ActionReceipt          AcceptanceRec
 - 原子 final-acceptance 请求、无密钥外部签名草稿与 Acceptor 签名验收提交
   （proof_ready → awaiting_human → accepted，本地合成 Acceptor 验证）
 - 独立 Verifier 结果与确定性 recomposition：证据不完整的首份报告保持
-  不可变，独立执行的结果占专属证据槽位，Manager 显式 recomposition
-  在五维证据链闭合后到达 `proof_ready`（双报告离线验签与篡改拒绝已覆盖）
-- **全量测试：2181 passed、0 failed、0 skip**（required-live Docker 模式，
+  不可变，独立执行的结果占专属证据槽位（含 TIMEOUT/OUTPUT_LIMIT/
+  DISK_LIMIT 失败收据的精确回放），Manager 显式 recomposition
+  在五维证据链闭合后到达 `proof_ready`（双报告离线验签、一一对应
+  绑定与报告/收据/关联因子/公钥/账本表篡改拒绝均已覆盖）
+- **全量测试：2197 passed、0 failed、0 skip**（required-live Docker 模式，
   含冻结计划规定的 candidate-inventory 供应链门，退出码 0）
 
 **尚未完成：** Acceptor 拒绝路径、CLI、MCP 传输服务器、Docker 生产执行器、
