@@ -793,3 +793,255 @@ def test_recomposition_readback_failure_is_indeterminate(
             sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
             clock=lambda: fixed_now,
         )
+
+
+def test_concurrent_independent_runs_have_one_winner(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    import threading  # noqa: PLC0415
+
+    case, first, incomplete = _independent_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    from test_mcp_server import (
+        _current_run_tests_context,
+        _execute_run_tests_case,
+    )
+
+    base_context = _current_run_tests_context(case, fixed_now)
+    outcomes = []
+    barrier = threading.Barrier(2)
+
+    def attempt(nonce_label, ctx_id, cid_id):
+        barrier.wait()
+        try:
+            request, arguments, facts = _independent_test_request(
+                case, ephemeral_role_keys, fixed_now,
+                nonce_label=nonce_label,
+                execution_context_id=ctx_id,
+                container_instance_id_digest=cid_id,
+            )
+            _execute_run_tests_case(
+                case,
+                case["ledger_path"].parent,
+                ephemeral_role_keys,
+                _FakeRunTestsExecutionDriver(),
+                context=base_context,
+                request=request,
+                request_arguments=arguments,
+                execution_facts=facts,
+                now=fixed_now,
+            )
+            outcomes.append("success")
+        except Exception as error:  # noqa: BLE001
+            outcomes.append(type(error).__name__)
+
+    threads = [
+        threading.Thread(
+            target=attempt,
+            args=("independent:race-a", "1a" * 32, "2a" * 32),
+        ),
+        threading.Thread(
+            target=attempt,
+            args=("independent:race-b", "1b" * 32, "2b" * 32),
+        ),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert len(outcomes) == 2
+    assert outcomes.count("success") == 1, outcomes
+    import sqlite3 as _sql
+
+    connection = _sql.connect(case["ledger_path"])
+    try:
+        independent_receipts = connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE receipt_json LIKE "
+            "'%verifier-independent-result%'"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert independent_receipts == 1
+
+
+def test_concurrent_recompositions_have_one_second_report(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    import threading  # noqa: PLC0415
+
+    case, first, refreshed, receipt, first_digest = (
+        _run_independent_and_recompose(
+            tmp_path,
+            signed_work_order,
+            ephemeral_role_keys,
+            sidecar_receipt_factory,
+            fixed_now,
+            monkeypatch,
+        )
+    )
+    outcomes = []
+    barrier = threading.Barrier(2)
+
+    def attempt(nonce_label):
+        barrier.wait()
+        try:
+            request = _recompose_request(
+                case, refreshed, ephemeral_role_keys, fixed_now,
+                previous_report_digest=first_digest,
+                nonce_label=nonce_label,
+            )
+            acceptance.compose_proof_transaction(
+                case["ledger_path"],
+                evidence_root=case["evidence_root"],
+                context=refreshed,
+                request=request,
+                sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+                clock=lambda: fixed_now,
+            )
+            outcomes.append("success")
+        except Exception as error:  # noqa: BLE001
+            outcomes.append(type(error).__name__)
+
+    threads = [
+        threading.Thread(target=attempt, args=("recompose:race-a",)),
+        threading.Thread(target=attempt, args=("recompose:race-b",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert len(outcomes) == 2
+    assert outcomes.count("success") == 1, outcomes
+    import sqlite3 as _sql
+
+    connection = _sql.connect(case["ledger_path"])
+    try:
+        reports = connection.execute(
+            "SELECT COUNT(*) FROM composition_reports"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert reports == 2
+
+
+def test_non_passing_independent_result_seals_the_episode(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, incomplete = _independent_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    from test_mcp_server import (
+        _current_run_tests_context,
+        _execute_run_tests_case,
+    )
+
+    # A non-passing closed independent result seals the episode.
+    fail_request, fail_arguments, fail_facts = _independent_test_request(
+        case, ephemeral_role_keys, fixed_now,
+        nonce_label="independent:seal-fail",
+        execution_context_id="ca" * 32,
+        container_instance_id_digest="db" * 32,
+    )
+    base_context = _current_run_tests_context(case, fixed_now)
+    _execute_run_tests_case(
+        case,
+        case["ledger_path"].parent,
+        ephemeral_role_keys,
+        _FakeRunTestsExecutionDriver(actual_exit_code=1),
+        context=base_context,
+        request=fail_request,
+        request_arguments=fail_arguments,
+        execution_facts=fail_facts,
+        now=fixed_now,
+    )
+    sealed_context = _current_run_tests_context(case, fixed_now)
+    # A further independent run is refused.
+    again_request, again_arguments, again_facts = _independent_test_request(
+        case, ephemeral_role_keys, fixed_now,
+        nonce_label="independent:seal-again",
+        execution_context_id="dd" * 32,
+        container_instance_id_digest="ee" * 32,
+    )
+    from openworkproof.policy import AuthorizationPolicyError
+
+    with pytest.raises(
+        (
+            mcp_server.HandlerCoordinationError,
+            mcp_server.ToolCallDenied,
+            AuthorizationPolicyError,
+        )
+    ):
+        _execute_run_tests_case(
+            case,
+            case["ledger_path"].parent,
+            ephemeral_role_keys,
+            _FakeRunTestsExecutionDriver(),
+            context=sealed_context,
+            request=again_request,
+            request_arguments=again_arguments,
+            execution_facts=again_facts,
+            now=fixed_now,
+        )
+    # A recomposition is refused too (no passing independent result).
+    import sqlite3 as _sql
+
+    connection = _sql.connect(case["ledger_path"])
+    try:
+        reports_before = connection.execute(
+            "SELECT COUNT(*) FROM composition_reports"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    from openworkproof.policy import AuthorizationPolicyError
+
+    with pytest.raises(
+        (acceptance.AcceptanceTransactionError, AuthorizationPolicyError)
+    ):
+        acceptance.compose_proof_transaction(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=sealed_context,
+            request=_recompose_request(
+                case, sealed_context, ephemeral_role_keys, fixed_now,
+                previous_report_digest=acceptance.composition_report_digest(
+                    first.report
+                ),
+                nonce_label="recompose:sealed",
+            ),
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            clock=lambda: fixed_now,
+        )
+    connection = _sql.connect(case["ledger_path"])
+    try:
+        reports_after = connection.execute(
+            "SELECT COUNT(*) FROM composition_reports"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert reports_after == reports_before

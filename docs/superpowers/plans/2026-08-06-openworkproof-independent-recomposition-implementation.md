@@ -872,7 +872,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 
 - Modify: `tests/test_independent_recomposition.py`
 
-- [ ] **Step 1: Write RED concurrency tests**
+- [x] **Step 1: Write RED concurrency tests**
 
   - two threads racing an independent run_tests call on the same ledger
     produce at most one execution winner, the second attempt returns a
@@ -886,13 +886,13 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
     recomposition call, and only separately implemented rejection,
     termination, or contract-expiry tails may follow.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
   Expected: the tests may already serialize correctly because both coordinators
   borrow or acquire the same per-target lock. Any failure must identify a
   missing sealed-state check, not justify a new locking primitive.
 
-- [ ] **Step 3: Implement concurrency seal**
+- [x] **Step 3: Implement concurrency seal**
 
   Add an explicit check in the recomposition transaction that the
   independent-result ToolCallReceipt is unique within the prefix and that
@@ -902,7 +902,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   Use the existing per-target lock for serialization. Keep the
   existing handler-side concurrency primitives untouched.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
   Run:
 
@@ -912,7 +912,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 
   Expected: PASS.
 
-- [ ] **Step 5: Commit concurrency and seal coverage**
+- [x] **Step 5: Commit concurrency and seal coverage**
 
   ```bash
   git add src/openworkproof/mcp_server.py src/openworkproof/acceptance.py \
