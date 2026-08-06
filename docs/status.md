@@ -240,7 +240,9 @@ Day 0 执行门仍为 FAIL；deny/rollback 生产事务、真实无网执行器
   （validate_resolution_manifest_bytes：preimage 解析 → 域分隔 digest
   比对 → 与 trusted 对象一致，接入谓词权威门）；完整 Task 9
   composition 和外部真实 Acceptor 独立环境复现仍为边界；
-- CLI、MCP Sidecar 和 AgentTeams 接线；
+- CLI 与 MCP 传输层已实现（owp 命令：status/run-tests/repo-read；
+  MCP stdio 服务器：owp_status/owp_run_tests/owp_repo_read 工具，
+  承载 JSON 协议消息转发到协调器）；AgentTeams 接线仍为边界；
 - Rich #4196 完整演示；
 - Acceptor 独立环境复现；
 - Day 0 人类签署和完整执行门；
