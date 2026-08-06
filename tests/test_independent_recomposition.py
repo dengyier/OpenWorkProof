@@ -687,3 +687,109 @@ def test_recomposition_rejects_null_stale_or_unknown_digest(
                 sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
                 clock=lambda: fixed_now,
             )
+
+
+def test_recomposition_commit_ack_loss_recovers_exact_truth(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from openworkproof import evidence
+    from test_acceptance import _AckLossConnection
+
+    case, first, refreshed, receipt, first_digest = (
+        _run_independent_and_recompose(
+            tmp_path,
+            signed_work_order,
+            ephemeral_role_keys,
+            sidecar_receipt_factory,
+            fixed_now,
+            monkeypatch,
+        )
+    )
+    good = _recompose_request(
+        case, refreshed, ephemeral_role_keys, fixed_now,
+        previous_report_digest=first_digest,
+        nonce_label="recompose:ack-loss",
+    )
+    real_connect = evidence.connect_ledger
+    monkeypatch.setattr(
+        evidence,
+        "connect_ledger",
+        lambda p: _AckLossConnection(real_connect(p)),
+    )
+    with pytest.raises(
+        acceptance.AcceptanceCommittedError,
+        match="acknowledgement was lost",
+    ) as captured:
+        acceptance.compose_proof_transaction(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=refreshed,
+            request=good,
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            clock=lambda: fixed_now,
+        )
+    monkeypatch.undo()
+    committed = captured.value.committed
+    assert committed.report.verifier_conclusion == "proof_ready"
+    import sqlite3 as _sql
+
+    connection = _sql.connect(case["ledger_path"])
+    try:
+        reports = connection.execute(
+            "SELECT COUNT(*) FROM composition_reports"
+        ).fetchone()[0]
+        state = connection.execute(
+            "SELECT current_state, version FROM work_order_state "
+            "WHERE singleton = 1"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert reports == 2
+    assert state == ("proof_ready", 8)
+
+
+def test_recomposition_readback_failure_is_indeterminate(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, refreshed, receipt, first_digest = (
+        _run_independent_and_recompose(
+            tmp_path,
+            signed_work_order,
+            ephemeral_role_keys,
+            sidecar_receipt_factory,
+            fixed_now,
+            monkeypatch,
+        )
+    )
+    good = _recompose_request(
+        case, refreshed, ephemeral_role_keys, fixed_now,
+        previous_report_digest=first_digest,
+        nonce_label="recompose:readback",
+    )
+    monkeypatch.setattr(
+        acceptance,
+        "_readback_compose_committed",
+        lambda *a, **k: False,
+    )
+    with pytest.raises(
+        acceptance.AcceptanceCommitIndeterminateError,
+        match="readback could not confirm",
+    ):
+        acceptance.compose_proof_transaction(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=refreshed,
+            request=good,
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            clock=lambda: fixed_now,
+        )

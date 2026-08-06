@@ -1042,6 +1042,8 @@ def compose_proof_transaction(
                 initiator=initiator,
                 trigger=trigger,
                 report=report,
+                expected_state=trigger.state_after,
+                expected_version=state_row[1] + 1,
             ):
                 committed_result = result
                 raise AcceptanceCommittedError(
@@ -1057,6 +1059,8 @@ def compose_proof_transaction(
             initiator=initiator,
             trigger=trigger,
             report=report,
+            expected_state=trigger.state_after,
+            expected_version=state_row[1] + 1,
         ):
             raise AcceptanceCommitIndeterminateError(
                 "composition readback could not confirm the exact commit"
@@ -2264,6 +2268,8 @@ def _readback_compose_committed(
     initiator: ToolCallReceipt,
     trigger: SystemEventReceipt,
     report: CompositionReport,
+    expected_state: str,
+    expected_version: int,
 ) -> bool:
     """Prove the exact composition committed by reopening the ledger."""
     try:
@@ -2276,6 +2282,10 @@ def _readback_compose_committed(
                 connection,
                 current_work_order,
             )
+            state_row = connection.execute(
+                "SELECT current_state, version FROM work_order_state "
+                "WHERE singleton = 1"
+            ).fetchone()
         finally:
             connection.close()
     except Exception:
@@ -2285,6 +2295,7 @@ def _readback_compose_committed(
         and len(receipts) >= 2
         and receipts[-2:] == (initiator, trigger)
         and any(candidate == report for candidate in reports)
+        and state_row == (expected_state, expected_version)
     )
 
 

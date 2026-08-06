@@ -786,7 +786,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 - Modify: `src/openworkproof/acceptance.py`
 - Modify: `tests/test_independent_recomposition.py`
 
-- [ ] **Step 1: Write RED atomic recomposition tests**
+- [x] **Step 1: Write RED atomic recomposition tests**
 
   Cover the recomposition path with the same atomicity guarantees already
   applied to the initial compose transaction:
@@ -801,7 +801,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   - a proven commit never becomes uncommitted because connection close,
     lock release, or cleanup failed.
 
-- [ ] **Step 2: Run the atomicity tests before adding new transaction code**
+- [x] **Step 2: Run the atomicity tests before adding new transaction code**
 
   Run the four named tests. Expected: the normal recomposition may already
   pass after Tasks 4-6 because `_insert_compose_rows` and
@@ -809,7 +809,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   reveal any real gap. Do not add a second transaction implementation merely
   because this is the second report.
 
-- [ ] **Step 3: Reuse and prove the existing atomic transaction**
+- [x] **Step 3: Reuse and prove the existing atomic transaction**
 
   The intended production path remains exactly:
 
@@ -849,7 +849,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   normal-COMMIT and lost-COMMIT-ACK calls with those two arguments. Do not
   create `_readback_recompose_committed`.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
   Run:
 
@@ -859,7 +859,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 
   Expected: PASS.
 
-- [ ] **Step 5: Commit recomposition transaction evidence**
+- [x] **Step 5: Commit recomposition transaction evidence**
 
   ```bash
   git add src/openworkproof/acceptance.py tests/test_independent_recomposition.py
