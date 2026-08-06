@@ -1352,6 +1352,7 @@ def _validate_authoritative_receipt_predicates(
     receipt: ToolCallReceipt,
     payloads: Mapping[str, bytes],
     trusted_resolution_manifest: ResolutionManifest | None,
+    resolution_manifest_bytes: bytes | None = None,
 ) -> None:
     replayed_work_order, receipts, grants, _ = (
         _replay_receipt_publication_ledger(connection)
