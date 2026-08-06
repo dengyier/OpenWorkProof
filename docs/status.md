@@ -109,17 +109,19 @@
 
 - Acceptance 事务专项：40 passed；
 - Acceptance、Contract、Signing、State、Composition、Policy、
-  Receipt-chain、MCP 与 Schema focused 门：1031 passed；
+  Receipt-chain、MCP 与 Schema focused 门：1037 passed；
 - candidate-inventory 供应链专项（required-live Docker）：144 passed
-  （image supply-chain 61 + candidate integration 83）；
-- 全量测试（required-live Docker，0 skip）：2197 passed、0 failed，
+  （image supply-chain 62 + candidate integration 83）；
+- 全量测试（required-live Docker，0 skip）：2204 passed、0 failed，
   退出码 0；固定 execution RepoDigest 与外部 artifact root 均按冻结计划提供；
 - 本轮精确验收修复提交：`cac4b51739d1bd1f18069fc957fe116bb8bb2d42`；
 - 独立结果与 recomposition 专项：test_independent_recomposition
-  29 passed（独立 episode 推导、前置闸门七项拒绝、独立基础设施失败
-  精确回放、recomposition 五维 proof_ready、COMMIT-ACK 回读、并发一个
-  赢家、非通过封印、双报告离线验签与一一对应绑定、报告/收据/关联因子/
-  公钥/四类账本表篡改拒绝、pre-COMMIT 原子性与 cleanup 故障保持提交）；
+  34 passed（独立 episode 推导、槽位一对一映射、前置闸门七项拒绝、
+  独立基础设施失败精确回放与新签名重试、失败零 EvidenceRef、
+  recomposition 五维 proof_ready、COMMIT-ACK 回读、并发一个赢家、
+  非通过封印、双报告离线验签与一一对应绑定、语义层重签篡改拒绝、
+  报告/收据/关联因子/公钥/四类账本表篡改拒绝、STARTED_UNCONFIRMED
+  恢复、pre-COMMIT/cleanup/锁释放故障保持提交）；
 - 独立规格复核：7B4_SPEC_PASS；
 - 独立质量复核：7B4_QUALITY_PASS；
 - pip check、compileall 和 git diff check：通过；
