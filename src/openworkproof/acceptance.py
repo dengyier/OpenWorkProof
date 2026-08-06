@@ -874,6 +874,7 @@ def compose_proof_transaction(
     lock_descriptor: int | None = None
     owns_lock = False
     connection: sqlite3.Connection | None = None
+    committed_result: CompositionTransactionResult | None = None
     try:
         lock_descriptor, owns_lock = evidence._borrow_or_acquire_target_lock(
             path, None
@@ -927,6 +928,11 @@ def compose_proof_transaction(
             sequence=prefix_len + 2,
             previous_digest=initiator.digest,
         )
+        result = CompositionTransactionResult(
+            initiator_receipt=initiator,
+            report=report,
+            trigger_receipt=trigger,
+        )
         connection = evidence.connect_ledger(path)
         connection.execute("BEGIN IMMEDIATE")
         work_order, receipts, _, _ = (
@@ -964,15 +970,12 @@ def compose_proof_transaction(
                 work_order=work_order,
                 initiator=initiator,
                 trigger=trigger,
-                report_digest=composition_report_digest(report),
+                report=report,
             ):
+                committed_result = result
                 raise AcceptanceCommittedError(
                     "composition committed but its acknowledgement was lost",
-                    CompositionTransactionResult(
-                        initiator_receipt=initiator,
-                        report=report,
-                        trigger_receipt=trigger,
-                    ),
+                    result,
                 ) from error
             raise AcceptanceCommitIndeterminateError(
                 "composition commit outcome is indeterminate"
@@ -982,16 +985,13 @@ def compose_proof_transaction(
             work_order=work_order,
             initiator=initiator,
             trigger=trigger,
-            report_digest=composition_report_digest(report),
+            report=report,
         ):
             raise AcceptanceCommitIndeterminateError(
                 "composition readback could not confirm the exact commit"
             )
-        return CompositionTransactionResult(
-            initiator_receipt=initiator,
-            report=report,
-            trigger_receipt=trigger,
-        )
+        committed_result = result
+        return result
     except (RuntimeContextError, AcceptanceTransactionError) as error:
         rollback_error = evidence._best_effort_rollback(connection)
         if rollback_error is not None:
@@ -1007,17 +1007,23 @@ def compose_proof_transaction(
             ) from rollback_error
         raise
     finally:
+        cleanup_errors: list[Exception] = []
         close_error = evidence._best_effort_close(connection)
         if close_error is not None:
-            raise AcceptanceCommitIndeterminateError(
-                "composition connection close failed"
-            ) from close_error
+            cleanup_errors.append(close_error)
         if owns_lock:
             _, release_errors = evidence._release_target_lock(lock_descriptor)
-            if release_errors:
+            cleanup_errors.extend(release_errors)
+        if cleanup_errors:
+            if committed_result is not None:
+                raise AcceptanceCommittedError(
+                    "composition committed but cleanup failed",
+                    committed_result,
+                ) from cleanup_errors[0]
+            else:
                 raise AcceptanceCommitIndeterminateError(
-                    "composition target lock release failed"
-                ) from release_errors[0]
+                    "composition cleanup failed"
+                ) from cleanup_errors[0]
 
 
 def _current_report(
@@ -1297,6 +1303,7 @@ def request_acceptance_transaction(
     lock_descriptor: int | None = None
     owns_lock = False
     connection: sqlite3.Connection | None = None
+    committed_result: ApprovalRequestedReceipt | None = None
     try:
         lock_descriptor, owns_lock = evidence._borrow_or_acquire_target_lock(
             path, None
@@ -1387,6 +1394,7 @@ def request_acceptance_transaction(
                 work_order=work_order,
                 request_receipt=request_receipt,
             ):
+                committed_result = request_receipt
                 raise AcceptanceCommittedError(
                     "acceptance request committed but its acknowledgement "
                     "was lost",
@@ -1403,6 +1411,7 @@ def request_acceptance_transaction(
             raise AcceptanceCommitIndeterminateError(
                 "acceptance request readback could not confirm the exact commit"
             )
+        committed_result = request_receipt
         return request_receipt
     except (RuntimeContextError, AcceptanceTransactionError):
         rollback_error = evidence._best_effort_rollback(connection)
@@ -1412,17 +1421,23 @@ def request_acceptance_transaction(
             ) from rollback_error
         raise
     finally:
+        cleanup_errors: list[Exception] = []
         close_error = evidence._best_effort_close(connection)
         if close_error is not None:
-            raise AcceptanceCommitIndeterminateError(
-                "acceptance request connection close failed"
-            ) from close_error
+            cleanup_errors.append(close_error)
         if owns_lock:
             _, release_errors = evidence._release_target_lock(lock_descriptor)
-            if release_errors:
+            cleanup_errors.extend(release_errors)
+        if cleanup_errors:
+            if committed_result is not None:
+                raise AcceptanceCommittedError(
+                    "acceptance request committed but cleanup failed",
+                    committed_result,
+                ) from cleanup_errors[0]
+            else:
                 raise AcceptanceCommitIndeterminateError(
-                    "acceptance request target lock release failed"
-                ) from release_errors[0]
+                    "acceptance request cleanup failed"
+                ) from cleanup_errors[0]
 
 
 def _insert_request_rows(
@@ -1660,6 +1675,7 @@ def commit_acceptance(
     lock_descriptor: int | None = None
     owns_lock = False
     connection: sqlite3.Connection | None = None
+    committed_result: AcceptanceReceipt | None = None
     try:
         lock_descriptor, owns_lock = evidence._borrow_or_acquire_target_lock(
             path, None
@@ -1669,13 +1685,26 @@ def commit_acceptance(
             raise AcceptanceTransactionError(
                 "authorization context time is stale"
             )
-        require_current_context(
-            path,
-            evidence_root,
-            context,
-            now,
-            lock_descriptor,
-        )
+        try:
+            require_current_context(
+                path,
+                evidence_root,
+                context,
+                now,
+                lock_descriptor,
+            )
+        except RuntimeContextError as error:
+            if _readback_acceptance_committed(
+                path,
+                work_order=context.work_order,
+                acceptance=acceptance,
+            ):
+                committed_result = acceptance
+                raise AcceptanceCommittedError(
+                    "the exact acceptance is already committed",
+                    acceptance,
+                ) from error
+            raise
         if context.current_state != "awaiting_human":
             raise AcceptanceTransactionError(
                 "acceptance requires awaiting_human"
@@ -1795,6 +1824,7 @@ def commit_acceptance(
                 work_order=work_order,
                 acceptance=parsed,
             ):
+                committed_result = parsed
                 raise AcceptanceCommittedError(
                     "acceptance committed but its acknowledgement was lost",
                     parsed,
@@ -1810,6 +1840,7 @@ def commit_acceptance(
             raise AcceptanceCommitIndeterminateError(
                 "acceptance readback could not confirm the exact commit"
             )
+        committed_result = parsed
         return parsed
     except (RuntimeContextError, AcceptanceTransactionError):
         rollback_error = evidence._best_effort_rollback(connection)
@@ -1819,17 +1850,23 @@ def commit_acceptance(
             ) from rollback_error
         raise
     finally:
+        cleanup_errors: list[Exception] = []
         close_error = evidence._best_effort_close(connection)
         if close_error is not None:
-            raise AcceptanceCommitIndeterminateError(
-                "acceptance connection close failed"
-            ) from close_error
+            cleanup_errors.append(close_error)
         if owns_lock:
             _, release_errors = evidence._release_target_lock(lock_descriptor)
-            if release_errors:
+            cleanup_errors.extend(release_errors)
+        if cleanup_errors:
+            if committed_result is not None:
+                raise AcceptanceCommittedError(
+                    "acceptance committed but cleanup failed",
+                    committed_result,
+                ) from cleanup_errors[0]
+            else:
                 raise AcceptanceCommitIndeterminateError(
-                    "acceptance target lock release failed"
-                ) from release_errors[0]
+                    "acceptance cleanup failed"
+                ) from cleanup_errors[0]
 
 
 def _derive_version(connection, work_order) -> int:
@@ -1884,6 +1921,210 @@ def _expected_acceptance_payload(
     }
 
 
+def validate_acceptance_bindings(
+    *,
+    work_order,
+    report: CompositionReport,
+    receipts: tuple[ActionReceiptEnvelope, ...],
+    acceptance_receipt: AcceptanceReceipt,
+) -> AcceptanceReceipt:
+    """Verify one AcceptanceReceipt against its exact signed history."""
+    if (
+        not isinstance(report, CompositionReport)
+        or type(receipts) is not tuple
+        or not receipts
+        or any(
+            not isinstance(receipt, ActionReceiptEnvelope)
+            for receipt in receipts
+        )
+        or not isinstance(acceptance_receipt, AcceptanceReceipt)
+    ):
+        raise AcceptanceTransactionError(
+            "acceptance binding inputs are unavailable"
+        )
+    request = receipts[-1]
+    if (
+        not isinstance(request, ApprovalRequestedReceipt)
+        or request.request_kind != "final_acceptance"
+        or request.required_role != "Acceptor"
+        or request.policy_decision != "allow"
+        or request.execution_status != "succeeded"
+        or request.state_after != "awaiting_human"
+    ):
+        raise AcceptanceTransactionError(
+            "acceptance has no current final-acceptance request"
+        )
+    report_digest = composition_report_digest(report)
+    expected_scope = {
+        "work_order_digest": work_order.digest,
+        "operation": "submit_final_acceptance",
+        "composition_report_digest": report_digest,
+    }
+    trigger = receipts[-2] if len(receipts) >= 2 else None
+    if (
+        report.work_order_digest != work_order.digest
+        or report.verifier_conclusion != "proof_ready"
+        or request.requested_scope != expected_scope
+        or request.target_action_digest
+        != hashlib.sha256(
+            rfc8785.dumps(
+                {
+                    "domain": "openworkproof/final-acceptance-action/v0.1",
+                    "requested_scope": expected_scope,
+                }
+            )
+        ).hexdigest()
+        or not isinstance(trigger, SystemEventReceipt)
+        or trigger.system_event_name != "proof_composed"
+        or getattr(trigger.cause, "composition_report_digest", None)
+        != report_digest
+    ):
+        raise AcceptanceTransactionError(
+            "acceptance report or request binding is invalid"
+        )
+    initiator_indexes = tuple(
+        index
+        for index, receipt in enumerate(receipts)
+        if receipt.receipt_id == report.initiator_receipt_id
+        and receipt.digest == report.initiator_receipt_digest
+    )
+    if len(initiator_indexes) != 1:
+        raise AcceptanceTransactionError(
+            "acceptance report initiator is not unique"
+        )
+    report_prefix = receipts[: initiator_indexes[0] + 1]
+    report_refs = _sorted_unique_evidence_refs(report_prefix)
+    if (
+        report.receipt_digests
+        != tuple(receipt.digest for receipt in report_prefix)
+        or report.causal_graph_root != causal_graph_root(report_prefix)
+        or report.evidence_snapshot_digest
+        != evidence_snapshot_digest(report_refs)
+    ):
+        raise AcceptanceTransactionError(
+            "composition report does not match its authoritative prefix"
+        )
+    full_refs = _sorted_unique_evidence_refs(receipts)
+    snapshot = evidence_snapshot_digest(full_refs)
+    expected_id = acceptance_id(
+        work_order_digest=work_order.digest,
+        request_receipt_id=request.receipt_id,
+        request_receipt_digest=request.digest,
+        report_digest=report_digest,
+        evidence_snapshot=snapshot,
+    )
+    accepted_at = acceptance_receipt.accepted_at
+    if (
+        accepted_at < request.occurred_at
+        or accepted_at > request.expires_at
+        or accepted_at > work_order.deadline
+        or acceptance_receipt.acceptance_id != expected_id
+    ):
+        raise AcceptanceTransactionError(
+            "acceptance time or identifier binding is invalid"
+        )
+    expected_payload = _expected_acceptance_payload(
+        work_order,
+        report,
+        request,
+        snapshot,
+        expected_id,
+        accepted_at,
+        receipts,
+    )
+    actual_payload = {
+        key: value
+        for key, value in acceptance_receipt.model_dump(mode="json").items()
+        if key not in {"digest", "signature_alg", "signer_key_id", "signature"}
+    }
+    if actual_payload != expected_payload:
+        raise AcceptanceTransactionError(
+            "acceptance payload does not match its authoritative prefix"
+        )
+    from openworkproof.signing import (  # noqa: PLC0415
+        decode_and_verify_key_binding,
+        verify_payload,
+    )
+
+    acceptance_receipt.validate_against_work_order(work_order)
+    acceptor = work_order.key_bindings[5]
+    if (
+        acceptance_receipt.signer_key_id != acceptor.key_id
+        or not verify_payload(
+            "acceptance-receipt",
+            acceptance_receipt.model_dump(mode="json"),
+            decode_and_verify_key_binding(acceptor),
+        )
+    ):
+        raise AcceptanceTransactionError(
+            "acceptance signature does not match the bound Acceptor"
+        )
+    return acceptance_receipt
+
+
+def verify_acceptance_bundle(
+    *,
+    work_order,
+    report: CompositionReport,
+    effective_grants: tuple,
+    grant_attempts: tuple,
+    receipts: tuple[ActionReceiptEnvelope, ...],
+    committed_evidence: tuple,
+    acceptance_receipt: AcceptanceReceipt,
+    public_keys: Mapping,
+) -> AcceptanceReceipt:
+    """Verify a copied acceptance bundle without a live ledger."""
+    from openworkproof.evidence import validate_grant_chain  # noqa: PLC0415
+    from openworkproof.policy import (  # noqa: PLC0415
+        AuthorizationLedgerPrefix,
+        CommittedEvidence,
+        _validate_committed_evidence,
+    )
+
+    if (
+        type(effective_grants) is not tuple
+        or type(grant_attempts) is not tuple
+        or type(committed_evidence) is not tuple
+        or any(
+            not isinstance(item, CommittedEvidence)
+            for item in committed_evidence
+        )
+    ):
+        raise AcceptanceTransactionError(
+            "offline acceptance bundle is malformed"
+        )
+    try:
+        validate_grant_chain(
+            work_order,
+            effective_grants,
+            grant_attempts,
+            receipts,
+            public_keys,
+        )
+        prefix = AuthorizationLedgerPrefix(
+            effective_grants=effective_grants,
+            grant_attempts=grant_attempts,
+            receipts=receipts,
+        )
+        _validate_committed_evidence(
+            work_order,
+            prefix,
+            committed_evidence,
+        )
+        return validate_acceptance_bindings(
+            work_order=work_order,
+            report=report,
+            receipts=receipts,
+            acceptance_receipt=acceptance_receipt,
+        )
+    except AcceptanceTransactionError:
+        raise
+    except Exception as error:
+        raise AcceptanceTransactionError(
+            "offline acceptance bundle failed verification"
+        ) from error
+
+
 def _insert_acceptance_rows(
     connection: sqlite3.Connection,
     *,
@@ -1933,7 +2174,7 @@ def _readback_compose_committed(
     work_order,
     initiator: ToolCallReceipt,
     trigger: SystemEventReceipt,
-    report_digest: str,
+    report: CompositionReport,
 ) -> bool:
     """Prove the exact composition committed by reopening the ledger."""
     try:
@@ -1942,27 +2183,19 @@ def _readback_compose_committed(
             current_work_order, receipts, _, _ = (
                 evidence._replay_receipt_publication_ledger(connection)
             )
-            row = connection.execute(
-                "SELECT report_digest FROM composition_reports "
-                "WHERE initiator_receipt_id = ?",
-                (initiator.receipt_id,),
-            ).fetchone()
-            state = connection.execute(
-                "SELECT current_state FROM work_order_state WHERE singleton = 1"
-            ).fetchone()
+            reports = evidence._validated_composition_reports(
+                connection,
+                current_work_order,
+            )
         finally:
             connection.close()
     except Exception:
         return False
     return (
-        current_work_order.digest == work_order.digest
+        current_work_order == work_order
         and len(receipts) >= 2
-        and receipts[-2].receipt_id == initiator.receipt_id
-        and receipts[-1].receipt_id == trigger.receipt_id
-        and row is not None
-        and row[0] == report_digest
-        and state is not None
-        and state[0] == trigger.state_after
+        and receipts[-2:] == (initiator, trigger)
+        and any(candidate == report for candidate in reports)
     )
 
 
@@ -1986,9 +2219,9 @@ def _readback_request_committed(
     except Exception:
         return False
     return (
-        current_work_order.digest == work_order.digest
+        current_work_order == work_order
         and bool(receipts)
-        and receipts[-1].receipt_id == request_receipt.receipt_id
+        and receipts[-1] == request_receipt
         and state is not None
         and state[0] == request_receipt.state_after
     )
@@ -2006,22 +2239,15 @@ def _readback_acceptance_committed(
             current_work_order, _, _, _ = (
                 evidence._replay_receipt_publication_ledger(connection)
             )
-            row = connection.execute(
-                "SELECT acceptance_id FROM acceptance_receipts "
-                "WHERE acceptance_id = ?",
-                (acceptance.acceptance_id,),
-            ).fetchone()
-            state = connection.execute(
-                "SELECT current_state FROM work_order_state WHERE singleton = 1"
-            ).fetchone()
+            acceptances = evidence._validated_acceptance_receipts(
+                connection,
+                current_work_order,
+            )
         finally:
             connection.close()
     except Exception:
         return False
     return (
-        current_work_order.digest == work_order.digest
-        and row is not None
-        and row[0] == acceptance.acceptance_id
-        and state is not None
-        and state[0] == "accepted"
+        current_work_order == work_order
+        and acceptances == (acceptance,)
     )

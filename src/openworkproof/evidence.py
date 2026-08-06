@@ -4968,6 +4968,53 @@ def _validated_composition_reports(
     connection: sqlite3.Connection,
     work_order: WorkOrder,
 ) -> tuple[CompositionReport, ...]:
+    receipts = _validated_receipt_prefix(
+        connection,
+        work_order,
+        _validate_acceptance_suffix=False,
+    )
+    reports = _validated_composition_reports_for_receipts(
+        connection,
+        work_order,
+        receipts,
+    )
+    acceptances = _validated_acceptance_receipts(connection, work_order)
+    if acceptances:
+        from openworkproof.acceptance import (  # noqa: PLC0415
+            AcceptanceTransactionError,
+            composition_report_digest,
+            validate_acceptance_bindings,
+        )
+
+        matching = tuple(
+            report
+            for report in reports
+            if composition_report_digest(report)
+            == acceptances[0].composition_report_digest
+        )
+        try:
+            if len(matching) != 1:
+                raise AcceptanceTransactionError(
+                    "acceptance has no unique composition report"
+                )
+            validate_acceptance_bindings(
+                work_order=work_order,
+                report=matching[0],
+                receipts=receipts,
+                acceptance_receipt=acceptances[0],
+            )
+        except AcceptanceTransactionError as error:
+            raise _child_issuance_error(
+                "acceptance suffix failed report binding"
+            ) from error
+    return reports
+
+
+def _validated_composition_reports_for_receipts(
+    connection: sqlite3.Connection,
+    work_order: WorkOrder,
+    receipts,
+) -> tuple[CompositionReport, ...]:
     rows = _bounded_rows(
         connection,
         count_sql="SELECT COUNT(*) FROM composition_reports",
@@ -4985,7 +5032,6 @@ def _validated_composition_reports(
         cap=MAX_RECEIPTS,
         label="Composition reports",
     )
-    receipts = _validated_receipt_prefix(connection, work_order)
     by_id = {receipt.receipt_id: receipt for receipt in receipts}
     reports = []
     for (
@@ -5027,6 +5073,8 @@ def _validated_composition_reports(
 def _validated_receipt_prefix(
     connection: sqlite3.Connection,
     work_order: WorkOrder,
+    *,
+    _validate_acceptance_suffix: bool = True,
 ):
     rows = _bounded_rows(
         connection,
@@ -5191,6 +5239,39 @@ def _validated_receipt_prefix(
             raise _child_issuance_error(
                 "acceptance ledger suffix is malformed"
             )
+        if _validate_acceptance_suffix:
+            from openworkproof.acceptance import (  # noqa: PLC0415
+                AcceptanceTransactionError,
+                composition_report_digest,
+                validate_acceptance_bindings,
+            )
+
+            reports = _validated_composition_reports_for_receipts(
+                connection,
+                work_order,
+                tuple(receipts),
+            )
+            matching = tuple(
+                report
+                for report in reports
+                if composition_report_digest(report)
+                == acceptance_receipts[0].composition_report_digest
+            )
+            try:
+                if len(matching) != 1:
+                    raise AcceptanceTransactionError(
+                        "acceptance has no unique composition report"
+                    )
+                validate_acceptance_bindings(
+                    work_order=work_order,
+                    report=matching[0],
+                    receipts=tuple(receipts),
+                    acceptance_receipt=acceptance_receipts[0],
+                )
+            except AcceptanceTransactionError as error:
+                raise _child_issuance_error(
+                    "acceptance suffix failed authoritative binding"
+                ) from error
         expected_state = ("accepted", expected_version)
     else:
         expected_state = (

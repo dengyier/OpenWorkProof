@@ -1686,11 +1686,20 @@ def test_acceptance_receipt_offline_verification(
     fixed_now,
     monkeypatch,
 ) -> None:
-    """The signing draft verifies offline against the bound Acceptor key."""
-    from openworkproof.signing import (
+    """A copied bundle verifies without reopening the live ledger."""
+    import json  # noqa: PLC0415
+
+    from openworkproof import evidence  # noqa: PLC0415
+    from openworkproof.models import (  # noqa: PLC0415
+        ACTION_RECEIPT_ADAPTER,
+        AcceptanceReceipt,
+        CapabilityGrant,
+        WorkOrder,
+    )
+    from openworkproof.policy import CommittedEvidence  # noqa: PLC0415
+    from openworkproof.signing import (  # noqa: PLC0415
         decode_and_verify_key_binding,
-        verify_payload,
-    )  # noqa: PLC0415
+    )
 
     case, context, composed, request_receipt = _awaiting_case(
         tmp_path,
@@ -1707,34 +1716,108 @@ def test_acceptance_receipt_offline_verification(
         clock=lambda: fixed_now,
     )
     signed = _sign_draft(draft, ephemeral_role_keys)
-    acceptor_binding = next(
-        binding
-        for binding in case["work_order"].key_bindings
-        if binding.role == "Acceptor"
+    bundle = tmp_path / "offline-acceptance-bundle"
+    bundle.mkdir()
+    (bundle / "work-order.json").write_bytes(
+        rfc8785.dumps(case["work_order"].model_dump(mode="json"))
     )
-    acceptor_key = decode_and_verify_key_binding(acceptor_binding)
-    assert verify_payload(
-        "acceptance-receipt",
-        signed.model_dump(mode="json"),
-        acceptor_key,
+    (bundle / "composition-report.json").write_bytes(
+        rfc8785.dumps(composed.report.model_dump(mode="json"))
     )
-    # A different role key must not verify the same payload.
-    from openworkproof.signing import decode_and_verify_key_binding as dvk  # noqa: PLC0415
+    (bundle / "acceptance-receipt.json").write_bytes(
+        rfc8785.dumps(signed.model_dump(mode="json"))
+    )
+    (bundle / "effective-grants.json").write_bytes(
+        rfc8785.dumps(
+            [
+                grant.model_dump(mode="json")
+                for grant in context.ledger_prefix.effective_grants
+            ]
+        )
+    )
+    (bundle / "grant-attempts.json").write_bytes(
+        rfc8785.dumps(
+            [
+                grant.model_dump(mode="json")
+                for grant in context.ledger_prefix.grant_attempts
+            ]
+        )
+    )
+    receipts_dir = bundle / "receipts"
+    receipts_dir.mkdir()
+    for receipt in context.ledger_prefix.receipts:
+        (receipts_dir / f"{receipt.sequence:03d}.json").write_bytes(
+            rfc8785.dumps(receipt.model_dump(mode="json"))
+        )
+    evidence_dir = bundle / "evidence"
+    evidence_dir.mkdir()
+    evidence_index = []
+    for index, item in enumerate(context.committed_evidence):
+        filename = f"{index:03d}.bin"
+        (evidence_dir / filename).write_bytes(item.payload)
+        evidence_index.append(
+            {
+                "filename": filename,
+                "reference": item.reference.model_dump(mode="json"),
+            }
+        )
+    (bundle / "evidence-index.json").write_bytes(
+        rfc8785.dumps(evidence_index)
+    )
 
-    manager_binding = next(
-        binding
-        for binding in case["work_order"].key_bindings
-        if binding.role == "Manager"
+    loaded_work_order = WorkOrder.model_validate_json(
+        (bundle / "work-order.json").read_bytes()
     )
-    manager_key = dvk(manager_binding)
-    assert not verify_payload(
-        "acceptance-receipt",
-        signed.model_dump(mode="json"),
-        manager_key,
+    loaded_report = CompositionReport.model_validate_json(
+        (bundle / "composition-report.json").read_bytes()
     )
+    loaded_acceptance = AcceptanceReceipt.model_validate_json(
+        (bundle / "acceptance-receipt.json").read_bytes()
+    )
+    loaded_grants = tuple(
+        CapabilityGrant.model_validate(item)
+        for item in json.loads((bundle / "effective-grants.json").read_bytes())
+    )
+    loaded_attempts = tuple(
+        CapabilityGrant.model_validate(item)
+        for item in json.loads((bundle / "grant-attempts.json").read_bytes())
+    )
+    loaded_receipts = tuple(
+        ACTION_RECEIPT_ADAPTER.validate_json(path.read_bytes())
+        for path in sorted(receipts_dir.iterdir())
+    )
+    loaded_evidence = tuple(
+        CommittedEvidence(
+            reference=EvidenceRef.model_validate(item["reference"]),
+            payload=(evidence_dir / item["filename"]).read_bytes(),
+        )
+        for item in json.loads((bundle / "evidence-index.json").read_bytes())
+    )
+    public_keys = {
+        binding.key_id: decode_and_verify_key_binding(binding)
+        for binding in loaded_work_order.key_bindings
+    }
+    monkeypatch.setattr(
+        evidence,
+        "connect_ledger",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("offline verification reopened the live ledger")
+        ),
+    )
+    verified = acceptance.verify_acceptance_bundle(
+        work_order=loaded_work_order,
+        report=loaded_report,
+        effective_grants=loaded_grants,
+        grant_attempts=loaded_attempts,
+        receipts=loaded_receipts,
+        committed_evidence=loaded_evidence,
+        acceptance_receipt=loaded_acceptance,
+        public_keys=public_keys,
+    )
+    assert verified == loaded_acceptance
 
 
-def test_acceptance_transactions_serialize_under_target_lock(
+def test_acceptance_commits_serialize_under_target_lock(
     tmp_path,
     signed_work_order,
     ephemeral_role_keys,
@@ -1742,10 +1825,10 @@ def test_acceptance_transactions_serialize_under_target_lock(
     fixed_now,
     monkeypatch,
 ) -> None:
-    """Concurrent commits of the same request never double-apply."""
+    """Concurrent identical acceptances expose one exact committed truth."""
     import threading  # noqa: PLC0415
 
-    case, context, request, composed, expires_at = _request_case(
+    case, context, composed, request_receipt = _awaiting_case(
         tmp_path,
         signed_work_order,
         ephemeral_role_keys,
@@ -1753,24 +1836,32 @@ def test_acceptance_transactions_serialize_under_target_lock(
         fixed_now,
         monkeypatch,
     )
+    draft = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    signed = _sign_draft(draft, ephemeral_role_keys)
     outcomes = []
     barrier = threading.Barrier(2)
 
     def attempt():
         barrier.wait()
         try:
-            acceptance.request_acceptance_transaction(
+            committed = acceptance.commit_acceptance(
                 case["ledger_path"],
                 evidence_root=case["evidence_root"],
                 context=context,
-                request=request,
-                sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
-                expires_at=expires_at,
+                acceptance=signed,
+                public_keys=None,
                 clock=lambda: fixed_now,
             )
-            outcomes.append("success")
+            outcomes.append(("success", committed))
+        except acceptance.AcceptanceCommittedError as error:
+            outcomes.append(("committed", error.committed))
         except Exception as error:  # noqa: BLE001
-            outcomes.append(type(error).__name__)
+            outcomes.append((type(error).__name__, None))
 
     threads = [
         threading.Thread(target=attempt),
@@ -1781,6 +1872,390 @@ def test_acceptance_transactions_serialize_under_target_lock(
     for thread in threads:
         thread.join(timeout=30)
     assert len(outcomes) == 2
-    assert outcomes.count("success") == 1, outcomes
+    assert [kind for kind, _ in outcomes].count("success") == 1, outcomes
+    assert [kind for kind, _ in outcomes].count("committed") == 1, outcomes
+    assert all(result == signed for _, result in outcomes)
     state = _request_table_snapshot(case["ledger_path"])
-    assert state["state"] == ("awaiting_human", 7)
+    assert state["state"] == ("accepted", 8)
+    assert state["acceptances"] == 1
+
+
+def test_acceptance_suffix_rejects_valid_signature_bound_to_other_request(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    import sqlite3  # noqa: PLC0415
+
+    from openworkproof import evidence  # noqa: PLC0415
+    from openworkproof.models import AcceptanceReceipt  # noqa: PLC0415
+    from openworkproof.signing import sign_payload  # noqa: PLC0415
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    draft = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    signed = _sign_draft(draft, ephemeral_role_keys)
+    acceptance.commit_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        acceptance=signed,
+        public_keys=None,
+        clock=lambda: fixed_now,
+    )
+    payload = dict(draft.payload)
+    payload["acceptance_request_receipt_id"] = "e" * 64
+    payload["acceptance_request_receipt_digest"] = "f" * 64
+    payload["acceptance_id"] = acceptance.acceptance_id(
+        work_order_digest=case["work_order"].digest,
+        request_receipt_id=payload["acceptance_request_receipt_id"],
+        request_receipt_digest=payload["acceptance_request_receipt_digest"],
+        report_digest=payload["composition_report_digest"],
+        evidence_snapshot=payload["evidence_snapshot_digest"],
+    )
+    alien = AcceptanceReceipt.model_validate(
+        sign_payload(
+            "acceptance-receipt",
+            payload,
+            ephemeral_role_keys["Acceptor"][0],
+        )
+    )
+    connection = sqlite3.connect(case["ledger_path"])
+    try:
+        connection.execute(
+            "UPDATE acceptance_receipts "
+            "SET acceptance_id = ?, acceptance_json = ?",
+            (
+                alien.acceptance_id,
+                evidence._canonical_json(alien.model_dump(mode="json")),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        with pytest.raises(evidence.ChildGrantIssuanceError):
+            evidence._replay_receipt_publication_ledger(connection)
+    finally:
+        connection.close()
+
+
+def test_acceptance_readback_rejects_same_id_with_different_canonical_receipt(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    import sqlite3  # noqa: PLC0415
+    from datetime import timedelta  # noqa: PLC0415
+
+    from openworkproof import evidence  # noqa: PLC0415
+    from openworkproof.models import AcceptanceReceipt  # noqa: PLC0415
+    from openworkproof.signing import sign_payload  # noqa: PLC0415
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    draft = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    signed = _sign_draft(draft, ephemeral_role_keys)
+    acceptance.commit_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        acceptance=signed,
+        public_keys=None,
+        clock=lambda: fixed_now,
+    )
+    alternate_payload = dict(draft.payload)
+    alternate_payload["accepted_at"] = (
+        fixed_now + timedelta(seconds=1)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    alternate = AcceptanceReceipt.model_validate(
+        sign_payload(
+            "acceptance-receipt",
+            alternate_payload,
+            ephemeral_role_keys["Acceptor"][0],
+        )
+    )
+    assert alternate.acceptance_id == signed.acceptance_id
+    assert alternate != signed
+    connection = sqlite3.connect(case["ledger_path"])
+    try:
+        connection.execute(
+            "UPDATE acceptance_receipts SET acceptance_json = ?",
+            (evidence._canonical_json(alternate.model_dump(mode="json")),),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    assert not acceptance._readback_acceptance_committed(
+        case["ledger_path"],
+        work_order=case["work_order"],
+        acceptance=signed,
+    )
+
+
+def test_acceptance_close_failure_preserves_proven_committed_truth(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from openworkproof import evidence  # noqa: PLC0415
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    draft = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    signed = _sign_draft(draft, ephemeral_role_keys)
+    real_close = evidence._best_effort_close
+    real_readback = acceptance._readback_acceptance_committed
+    armed = False
+
+    def confirm_then_arm(*args, **kwargs):
+        nonlocal armed
+        confirmed = real_readback(*args, **kwargs)
+        if confirmed:
+            armed = True
+        return confirmed
+
+    def close_then_fail(connection):
+        real_close(connection)
+        return RuntimeError("injected close failure") if armed else None
+
+    monkeypatch.setattr(
+        acceptance,
+        "_readback_acceptance_committed",
+        confirm_then_arm,
+    )
+    monkeypatch.setattr(evidence, "_best_effort_close", close_then_fail)
+    with pytest.raises(acceptance.AcceptanceCommittedError) as captured:
+        acceptance.commit_acceptance(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            acceptance=signed,
+            public_keys=None,
+            clock=lambda: fixed_now,
+        )
+    assert captured.value.committed == signed
+
+
+@pytest.mark.parametrize(
+    "fault_point",
+    ("before_insert", "after_insert", "after_state_update"),
+)
+def test_acceptance_precommit_faults_leave_exact_snapshot(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+    fault_point,
+) -> None:
+    from openworkproof import evidence  # noqa: PLC0415
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    draft = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    signed = _sign_draft(draft, ephemeral_role_keys)
+    before = _request_table_snapshot(case["ledger_path"])
+    real_insert = acceptance._insert_acceptance_rows
+
+    def inject(connection, *, work_order, acceptance, current_state, current_version):
+        if fault_point == "before_insert":
+            raise acceptance_module_error()
+        if fault_point == "after_insert":
+            connection.execute(
+                "INSERT INTO acceptance_receipts "
+                "(acceptance_id, work_order_digest, acceptance_json) "
+                "VALUES (?, ?, ?)",
+                (
+                    acceptance.acceptance_id,
+                    work_order.digest,
+                    evidence._canonical_json(
+                        acceptance.model_dump(mode="json")
+                    ),
+                ),
+            )
+            raise acceptance_module_error()
+        real_insert(
+            connection,
+            work_order=work_order,
+            acceptance=acceptance,
+            current_state=current_state,
+            current_version=current_version,
+        )
+        raise acceptance_module_error()
+
+    def acceptance_module_error():
+        return acceptance.AcceptanceTransactionError(
+            f"injected {fault_point} failure"
+        )
+
+    monkeypatch.setattr(acceptance, "_insert_acceptance_rows", inject)
+    with pytest.raises(acceptance.AcceptanceTransactionError):
+        acceptance.commit_acceptance(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            acceptance=signed,
+            public_keys=None,
+            clock=lambda: fixed_now,
+        )
+    assert _request_table_snapshot(case["ledger_path"]) == before
+
+
+def test_acceptance_commit_failure_before_effect_rolls_back_exactly(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    import sqlite3  # noqa: PLC0415
+
+    from openworkproof import evidence  # noqa: PLC0415
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    draft = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    signed = _sign_draft(draft, ephemeral_role_keys)
+    before = _request_table_snapshot(case["ledger_path"])
+    real_connect = evidence.connect_ledger
+
+    class CommitFailureConnection(_AckLossConnection):
+        def execute(self, *args, **kwargs):
+            statement = args[0] if args else ""
+            if (
+                isinstance(statement, str)
+                and statement.strip().upper() == "COMMIT"
+            ):
+                raise sqlite3.OperationalError(
+                    "injected commit failure before effect"
+                )
+            return self._real.execute(*args, **kwargs)
+
+    monkeypatch.setattr(
+        evidence,
+        "connect_ledger",
+        lambda path: CommitFailureConnection(real_connect(path)),
+    )
+    with pytest.raises(acceptance.AcceptanceCommitIndeterminateError):
+        acceptance.commit_acceptance(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            acceptance=signed,
+            public_keys=None,
+            clock=lambda: fixed_now,
+        )
+    monkeypatch.undo()
+    assert _request_table_snapshot(case["ledger_path"]) == before
+
+
+def test_acceptance_lock_release_failure_preserves_proven_committed_truth(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from openworkproof import evidence  # noqa: PLC0415
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    draft = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    signed = _sign_draft(draft, ephemeral_role_keys)
+    real_release = evidence._release_target_lock
+
+    def release_then_fail(descriptor):
+        released, errors = real_release(descriptor)
+        return released, (*errors, RuntimeError("injected release failure"))
+
+    monkeypatch.setattr(evidence, "_release_target_lock", release_then_fail)
+    with pytest.raises(acceptance.AcceptanceCommittedError) as captured:
+        acceptance.commit_acceptance(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            acceptance=signed,
+            public_keys=None,
+            clock=lambda: fixed_now,
+        )
+    assert captured.value.committed == signed
