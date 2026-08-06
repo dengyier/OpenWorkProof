@@ -2357,11 +2357,16 @@ def verify_acceptance_bundle(
     grant_attempts: tuple,
     receipts: tuple[ActionReceiptEnvelope, ...],
     committed_evidence: tuple,
-    acceptance_receipt: AcceptanceReceipt,
+    acceptance_receipt: AcceptanceReceipt | None = None,
     public_keys: Mapping,
     reports: tuple[CompositionReport, ...] | None = None,
-) -> AcceptanceReceipt:
-    """Verify a copied acceptance bundle without a live ledger."""
+    rejection: AcceptanceRejectionReceipt | None = None,
+) -> AcceptanceReceipt | AcceptanceRejectionReceipt:
+    """Verify a copied acceptance bundle without a live ledger.
+
+    Exactly one terminal decision (acceptance or rejection) must be bound
+    to the request tip.
+    """
     from openworkproof.policy import (  # noqa: PLC0415
         AuthorizationLedgerPrefix,
         CommittedEvidence,
@@ -2376,6 +2381,7 @@ def verify_acceptance_bundle(
             not isinstance(item, CommittedEvidence)
             for item in committed_evidence
         )
+        or (acceptance_receipt is None) == (rejection is None)
     ):
         raise AcceptanceTransactionError(
             "offline acceptance bundle is malformed"
@@ -2395,6 +2401,14 @@ def verify_acceptance_bundle(
             raise AcceptanceTransactionError(
                 "offline bundle final report does not match the acceptance report"
             )
+        if rejection is not None:
+            return validate_rejection_bindings(
+                work_order=work_order,
+                report=report,
+                receipts=receipts,
+                rejection=rejection,
+            )
+        assert acceptance_receipt is not None
         return validate_acceptance_bindings(
             work_order=work_order,
             report=report,

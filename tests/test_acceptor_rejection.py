@@ -844,3 +844,204 @@ def test_second_rejection_fails_closed(
             clock=lambda: fixed_now,
         )
     assert _rejection_table_snapshot(case) == before
+
+
+def _offline_bundle(case, work_order):
+    """Copy the authoritative inputs for offline verification."""
+    from openworkproof.policy import CommittedEvidence  # noqa: PLC0415
+    from test_mcp_server import _grant_replay_inputs  # noqa: PLC0415
+
+    receipts, grants, attempts = _grant_replay_inputs(
+        case["ledger_path"], work_order
+    )
+    committed = []
+    for receipt in receipts:
+        for reference in receipt.evidence_refs:
+            payload = (
+                case["evidence_root"]
+                / reference.path.removeprefix("evidence/")
+            ).read_bytes()
+            committed.append(
+                CommittedEvidence(reference=reference, payload=payload)
+            )
+    committed.sort(key=lambda item: item.reference.path.encode())
+    from openworkproof.signing import decode_and_verify_key_binding  # noqa: PLC0415
+
+    public_keys = {
+        binding.key_id: decode_and_verify_key_binding(binding)
+        for binding in work_order.key_bindings
+    }
+    return (
+        tuple(sorted(grants.values(), key=lambda item: item.grant_id)),
+        tuple(sorted(attempts.values(), key=lambda item: item.digest)),
+        receipts,
+        tuple(committed),
+        public_keys,
+    )
+
+
+def test_rejection_bundle_verifies_offline(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from test_acceptance import _awaiting_case  # noqa: PLC0415
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    rejection = _sign_rejection(
+        case, context, request_receipt, ephemeral_role_keys, fixed_now
+    )
+    committed = acceptance.reject_acceptance_transaction(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        rejection=rejection,
+        public_keys=None,
+        clock=lambda: fixed_now,
+    )
+    work_order = case["work_order"]
+    report = acceptance._current_report(case["ledger_path"], work_order)
+    effective_grants, grant_attempts, receipts, evidence_items, public_keys = (
+        _offline_bundle(case, work_order)
+    )
+    verified = acceptance.verify_acceptance_bundle(
+        work_order=work_order,
+        report=report,
+        effective_grants=effective_grants,
+        grant_attempts=grant_attempts,
+        receipts=receipts,
+        committed_evidence=evidence_items,
+        public_keys=public_keys,
+        rejection=committed,
+    )
+    assert verified == committed
+    assert verified.decision == "rejected"
+    assert verified.reason_code == "BUSINESS_DECISION"
+
+
+def test_rejection_bundle_requires_exactly_one_terminal_decision(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from test_acceptance import _awaiting_case  # noqa: PLC0415
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    rejection = _sign_rejection(
+        case, context, request_receipt, ephemeral_role_keys, fixed_now
+    )
+    work_order = case["work_order"]
+    report = acceptance._current_report(case["ledger_path"], work_order)
+    effective_grants, grant_attempts, receipts, evidence_items, public_keys = (
+        _offline_bundle(case, work_order)
+    )
+    with pytest.raises(
+        acceptance.AcceptanceTransactionError, match="malformed"
+    ):
+        acceptance.verify_acceptance_bundle(
+            work_order=work_order,
+            report=report,
+            effective_grants=effective_grants,
+            grant_attempts=grant_attempts,
+            receipts=receipts,
+            committed_evidence=evidence_items,
+            public_keys=public_keys,
+            rejection=rejection,
+            acceptance_receipt=rejection,  # type: ignore[arg-type]
+        )
+
+
+def test_rejection_bundle_tampering_fails_closed(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from test_acceptance import _awaiting_case  # noqa: PLC0415
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    rejection = _sign_rejection(
+        case, context, request_receipt, ephemeral_role_keys, fixed_now
+    )
+    committed = acceptance.reject_acceptance_transaction(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        rejection=rejection,
+        public_keys=None,
+        clock=lambda: fixed_now,
+    )
+    work_order = case["work_order"]
+    report = acceptance._current_report(case["ledger_path"], work_order)
+    effective_grants, grant_attempts, receipts, evidence_items, public_keys = (
+        _offline_bundle(case, work_order)
+    )
+
+    def verify_with(*, rejection_override=None, keys_override=None, ev_override=None):
+        return acceptance.verify_acceptance_bundle(
+            work_order=work_order,
+            report=report,
+            effective_grants=effective_grants,
+            grant_attempts=grant_attempts,
+            receipts=receipts,
+            committed_evidence=(
+                evidence_items if ev_override is None else ev_override
+            ),
+            public_keys=public_keys if keys_override is None else keys_override,
+            rejection=(
+                committed if rejection_override is None else rejection_override
+            ),
+        )
+
+    # 1) Full-rebuild tamper of the rejection payload (reason flipped).
+    raw = committed.model_dump(mode="json")
+    raw["reason_code"] = "EVIDENCE_INSUFFICIENT"
+    tampered = AcceptanceRejectionReceipt.model_validate(raw)
+    with pytest.raises(acceptance.AcceptanceTransactionError):
+        verify_with(rejection_override=tampered)
+
+    # 2) Evidence-byte tamper fails closed.
+    tampered_evidence = list(evidence_items)
+    item = tampered_evidence[-1]
+    tampered_evidence[-1] = type(item)(
+        reference=item.reference,
+        payload=item.payload + b"\ntampered",
+    )
+    with pytest.raises(acceptance.AcceptanceTransactionError):
+        verify_with(ev_override=tuple(tampered_evidence))
+
+    # 3) Public-key substitution fails closed.
+    key_ids = list(public_keys)
+    wrong = dict(public_keys)
+    wrong[key_ids[0]] = wrong[key_ids[1]]
+    with pytest.raises(acceptance.AcceptanceTransactionError):
+        verify_with(keys_override=wrong)
