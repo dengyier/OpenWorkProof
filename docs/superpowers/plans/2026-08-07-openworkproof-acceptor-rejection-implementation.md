@@ -46,7 +46,7 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
 
 **Files:** `src/openworkproof/models.py`, `specs/v0.1/*`, `src/openworkproof/schema_registry.py`
 
-- [ ] **Step 1: Write RED model tests**
+- [x] **Step 1: Write RED model tests**
   Add `tests/test_acceptor_rejection.py` with tests that construct an
   `AcceptanceRejectionReceipt` for a canonical awaiting_human case and
   assert:
@@ -56,16 +56,16 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
     `acceptance_request_receipt_digest` fail model validation;
   - the schema registry round-trips the new object.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
   Expected: FAIL because `AcceptanceRejectionReceipt` does not exist.
 
-- [ ] **Step 3: Implement the model**
+- [x] **Step 3: Implement the model**
   Add `AcceptanceRejectionReceipt(SignedProtocolModel)` per spec 4.1 with
   model validators: closed `reason_code`, bounded `reason_detail`,
   `decision == "rejected"`, request/report/evidence binding, and
   `rejected_at` ordering. Regenerate the v0.1 schema and registry.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
   Run:
 
   ```bash
@@ -78,7 +78,7 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
 
 **Files:** `src/openworkproof/evidence.py`, `src/openworkproof/state.py`
 
-- [ ] **Step 1: Write RED replay tests**
+- [x] **Step 1: Write RED replay tests**
   Add tests that:
   - initialize a ledger for an awaiting_human work order, insert a
     rejection row directly, and assert `_replay_receipt_publication_ledger`
@@ -89,11 +89,11 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
     rejection-type transition from `awaiting_human` to `rejected` and
     rejects it from any other state.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
   Expected: FAIL because the table, validator, and state authorization do
   not exist.
 
-- [ ] **Step 3: Implement storage and replay**
+- [x] **Step 3: Implement storage and replay**
   - Add the `acceptance_rejection_receipts` table (spec 4.2).
   - Add `_validated_acceptance_rejections(connection, work_order)` that
     reads bounded rows, validates canonical JSON, WorkOrder binding,
@@ -105,7 +105,7 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
     `awaiting_human -> rejected` same-state append under the human-gate
     tail.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
   Run:
 
   ```bash
@@ -118,7 +118,7 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
 
 **Files:** `src/openworkproof/acceptance.py`
 
-- [ ] **Step 1: Write RED transaction tests**
+- [x] **Step 1: Write RED transaction tests**
   Drive a canonical awaiting_human case and assert `reject_acceptance_transaction`:
   - commits the rejection row, the `rejected` state, the version bump, and
     the sequence update atomically;
@@ -131,10 +131,10 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
   - under readback failure, raises `AcceptanceCommitIndeterminateError`
     rather than fabricating a second rejection.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
   Expected: FAIL because the transaction does not exist.
 
-- [ ] **Step 3: Implement the transaction**
+- [x] **Step 3: Implement the transaction**
   Add `reject_acceptance_transaction` per spec 4.3, reusing the acceptance
   transaction skeleton: lock, frozen second, `require_current_context`,
   `awaiting_human` gate, request-tip binding, Acceptor signature check,
@@ -142,7 +142,7 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
   the accepted and rejected sides, one `BEGIN IMMEDIATE`, and the exact
   readback on COMMIT-ACK failure.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
   Run:
 
   ```bash
@@ -155,7 +155,7 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
 
 **Files:** `tests/test_acceptor_rejection.py`
 
-- [ ] **Step 1: Write RED mutual-exclusion tests**
+- [x] **Step 1: Write RED mutual-exclusion tests**
   - accept after reject: after a rejection commits, a later
     `commit_acceptance` for the same request fails and writes nothing;
   - reject after accept: after an acceptance commits, a later
@@ -163,16 +163,16 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
   - a second rejection for the same request fails (storage UNIQUE);
   - table-snapshot equality for every rejected attempt.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
   Expected: FAIL for the cross-side checks that the transaction does not
   yet enforce.
 
-- [ ] **Step 3: Implement the missing guard**
+- [x] **Step 3: Implement the missing guard**
   Ensure the transaction and `_readback` check both the accepted and
   rejected sides for the request before writing, and that the storage
   layer enforces one rejection per request.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
   Run:
 
   ```bash
@@ -185,21 +185,21 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
 
 **Files:** `src/openworkproof/acceptance.py`, `tests/test_acceptor_rejection.py`
 
-- [ ] **Step 1: Write RED offline tests**
+- [x] **Step 1: Write RED offline tests**
   - build a copied bundle with a rejection and verify it offline via
     `verify_acceptance_bundle(rejection=...)`; assert the rejection binds
     the same request tip and evidence snapshot;
   - tamper the rejection row, the evidence bytes, or a public key and
     assert the offline replay fails closed before any write.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
   Expected: FAIL because `verify_acceptance_bundle` has no rejection path.
 
-- [ ] **Step 3: Implement offline rejection verification**
+- [x] **Step 3: Implement offline rejection verification**
   Extend `verify_acceptance_bundle` with the optional `rejection` parameter
   per spec 4.5, binding it one-to-one onto the request tip.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
   Run:
 
   ```bash
