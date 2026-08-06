@@ -230,7 +230,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 
   Expected: PASS; this task builds only the precondition fixture.
 
-- [ ] **Step 4: Commit the fixture**
+- [x] **Step 4: Commit the fixture**
 
   ```bash
   git add tests/test_mcp_server.py tests/test_independent_recomposition.py
@@ -630,7 +630,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 
   Expected: PASS.
 
-- [ ] **Step 5: Commit recomposition causality**
+- [x] **Step 5: Commit recomposition causality**
 
   ```bash
   git add src/openworkproof/acceptance.py tests/test_independent_recomposition.py
@@ -772,7 +772,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 
   Expected: PASS.
 
-- [ ] **Step 5: Commit five-dimension report derivation**
+- [x] **Step 5: Commit five-dimension report derivation**
 
   ```bash
   git add src/openworkproof/acceptance.py tests/test_independent_recomposition.py
@@ -1045,7 +1045,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 
 **Files:** none
 
-- [ ] **Step 1: Prove the frozen candidate inventory still matches**
+- [x] **Step 1: Prove the frozen candidate inventory still matches**
 
   This feature changes `mcp_server.py` and `acceptance.py`, neither of which is
   in `supply-chain/images/trusted-helper/SOURCE_ALLOWLIST`; it does not change
@@ -1065,7 +1065,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   matches, stop and inspect the actual tracked-definition diff; do not rewrite
   a historical inventory or silently retag an image.
 
-- [ ] **Step 2: Run the focused protocol suites**
+- [x] **Step 2: Run the focused protocol suites**
 
   Run:
 
@@ -1085,7 +1085,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 
   Expected: zero failures. Record exact count and elapsed time.
 
-- [ ] **Step 3: Resolve the repository-qualified execution image**
+- [x] **Step 3: Resolve the repository-qualified execution image**
 
   The frozen required-live execution candidate for this branch is the
   existing repository-qualified RepoDigest below. Verify it directly; do
@@ -1099,7 +1099,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   Expected: exit 0. If inspect fails, stop rather than replacing the
   immutable reference.
 
-- [ ] **Step 4: Run full required-live verification**
+- [x] **Step 4: Run full required-live verification**
 
   Run with the exact existing artifact root:
 
@@ -1113,7 +1113,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   Expected: zero failures and zero required-live skips. Record exact
   count and elapsed time.
 
-- [ ] **Step 5: Run non-test verification**
+- [x] **Step 5: Run non-test verification**
 
   Run:
 
@@ -1126,7 +1126,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   Require zero owned OpenWorkProof containers and volumes after the
   suite.
 
-- [ ] **Step 6: Update only observed project facts**
+- [x] **Step 6: Update only observed project facts**
 
   In README and `docs/status.md`:
 
@@ -1140,7 +1140,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   - do not write "独立验收完成"; local recomposition success is not
     external human acceptance.
 
-- [ ] **Step 7: Commit only verified status claims**
+- [x] **Step 7: Commit only verified status claims**
 
   ```bash
   git add README.md docs/status.md \
