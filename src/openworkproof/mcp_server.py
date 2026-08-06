@@ -2065,6 +2065,53 @@ def execute_run_tests_production(
     )
 
 
+def make_repo_pipeline_read_handler(
+    *,
+    max_bytes: int = 1_048_576,
+) -> Callable[
+    [repo_tools.CandidateReadRequest], repo_tools.CandidateReadResult
+]:
+    """Build a production repo-read handler backed by the repo pipeline.
+
+    The handler reads ``CandidateReadRequest.path`` under the candidate
+    runtime root through the repo_pipeline reader (UTF-8 decode, size cap,
+    permission guards) and constructs the exact ``RepoReadOutput`` with its
+    content digest and the expected workspace-manifest binding.
+    """
+
+    def handler(
+        command: repo_tools.CandidateReadRequest,
+    ) -> repo_tools.CandidateReadResult:
+        from openworkproof.repo_pipeline.errors import RepoPipelineError
+        from openworkproof.repo_pipeline.reader import (
+            read_text_file,
+            sha256_bytes,
+        )
+
+        root = Path(command.runtime_root)
+        path = root / command.path
+        if not path.is_file():
+            raise HandlerCoordinationError("REPO_READ_PATH_MISSING")
+        try:
+            content = read_text_file(path, max_bytes=max_bytes)
+        except RepoPipelineError as error:
+            raise HandlerCoordinationError("REPO_READ_READ_FAILED") from error
+        raw = content.encode("utf-8")
+        return repo_tools.CandidateReadResult(
+            content=raw,
+            output=repo_tools.RepoReadOutput(
+                path=command.path,
+                content_sha256=sha256_bytes(raw),
+                size_bytes=len(raw),
+                workspace_manifest_digest=(
+                    command.expected_workspace_manifest_digest
+                ),
+            ),
+        )
+
+    return handler
+
+
 def _repo_read_command(
     context: AuthorizationContext,
     arguments: RepoReadArguments,
