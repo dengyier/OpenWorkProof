@@ -24,6 +24,7 @@ import openworkproof.evidence as evidence
 from openworkproof.composition import replay_authorization_causality
 from openworkproof.models import (
     AcceptanceReceipt,
+    AcceptanceRejectionReceipt,
     ActionReceiptEnvelope,
     AgentRequest,
     ApprovalRequestedReceipt,
@@ -2153,6 +2154,199 @@ def validate_acceptance_bindings(
             "acceptance signature does not match the bound Acceptor"
         )
     return acceptance_receipt
+
+
+def rejection_id(
+    *,
+    work_order_digest: str,
+    request_receipt_id: str,
+    request_receipt_digest: str,
+    report_digest: str,
+    evidence_snapshot: str,
+) -> str:
+    return hashlib.sha256(
+        rfc8785.dumps(
+            {
+                "domain": "openworkproof/rejection-id/0.1",
+                "work_order_digest": work_order_digest,
+                "request_receipt_id": request_receipt_id,
+                "request_receipt_digest": request_receipt_digest,
+                "composition_report_digest": report_digest,
+                "evidence_snapshot_digest": evidence_snapshot,
+            }
+        )
+    ).hexdigest()
+
+
+def _expected_rejection_payload(
+    work_order,
+    report: CompositionReport,
+    request: ApprovalRequestedReceipt,
+    snapshot: str,
+    expected_id: str,
+    rejected_at: datetime,
+    prefix: tuple[ActionReceiptEnvelope, ...],
+    reason_code: str,
+    reason_detail: str,
+) -> dict:
+    return {
+        "protocol_version": "0.1",
+        "rejection_id": expected_id,
+        "work_order_digest": work_order.digest,
+        "acceptance_request_receipt_id": request.receipt_id,
+        "acceptance_request_receipt_digest": request.digest,
+        "composition_report_digest": composition_report_digest(report),
+        "evidence_snapshot_digest": snapshot,
+        "receipt_digests": [item.digest for item in prefix],
+        "causal_graph_root": report.causal_graph_root,
+        "reason_code": reason_code,
+        "reason_detail": reason_detail,
+        "decision": "rejected",
+        "rejected_at": rejected_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def validate_rejection_bindings(
+    *,
+    work_order,
+    report: CompositionReport,
+    receipts: tuple[ActionReceiptEnvelope, ...],
+    rejection: AcceptanceRejectionReceipt,
+) -> AcceptanceRejectionReceipt:
+    """Verify one AcceptanceRejectionReceipt against its exact history."""
+    if (
+        not isinstance(report, CompositionReport)
+        or type(receipts) is not tuple
+        or not receipts
+        or any(
+            not isinstance(receipt, ActionReceiptEnvelope)
+            for receipt in receipts
+        )
+        or not isinstance(rejection, AcceptanceRejectionReceipt)
+    ):
+        raise AcceptanceTransactionError(
+            "rejection binding inputs are unavailable"
+        )
+    request = receipts[-1]
+    if (
+        not isinstance(request, ApprovalRequestedReceipt)
+        or request.request_kind != "final_acceptance"
+        or request.required_role != "Acceptor"
+        or request.policy_decision != "allow"
+        or request.execution_status != "succeeded"
+        or request.state_after != "awaiting_human"
+    ):
+        raise AcceptanceTransactionError(
+            "rejection has no current final-acceptance request"
+        )
+    report_digest = composition_report_digest(report)
+    expected_scope = {
+        "work_order_digest": work_order.digest,
+        "operation": "submit_final_acceptance",
+        "composition_report_digest": report_digest,
+    }
+    trigger = receipts[-2] if len(receipts) >= 2 else None
+    if (
+        report.work_order_digest != work_order.digest
+        or report.verifier_conclusion != "proof_ready"
+        or request.requested_scope != expected_scope
+        or request.target_action_digest
+        != hashlib.sha256(
+            rfc8785.dumps(
+                {
+                    "domain": "openworkproof/final-acceptance-action/v0.1",
+                    "requested_scope": expected_scope,
+                }
+            )
+        ).hexdigest()
+        or not isinstance(trigger, SystemEventReceipt)
+        or trigger.system_event_name != "proof_composed"
+        or getattr(trigger.cause, "composition_report_digest", None)
+        != report_digest
+    ):
+        raise AcceptanceTransactionError(
+            "rejection report or request binding is invalid"
+        )
+    initiator_indexes = tuple(
+        index
+        for index, receipt in enumerate(receipts)
+        if receipt.receipt_id == report.initiator_receipt_id
+        and receipt.digest == report.initiator_receipt_digest
+    )
+    if len(initiator_indexes) != 1:
+        raise AcceptanceTransactionError(
+            "rejection report initiator is not unique"
+        )
+    report_prefix = receipts[: initiator_indexes[0] + 1]
+    report_refs = _sorted_unique_evidence_refs(report_prefix)
+    if (
+        report.receipt_digests
+        != tuple(receipt.digest for receipt in report_prefix)
+        or report.causal_graph_root != causal_graph_root(report_prefix)
+        or report.evidence_snapshot_digest
+        != evidence_snapshot_digest(report_refs)
+    ):
+        raise AcceptanceTransactionError(
+            "composition report does not match its authoritative prefix"
+        )
+    full_refs = _sorted_unique_evidence_refs(receipts)
+    snapshot = evidence_snapshot_digest(full_refs)
+    expected_id = rejection_id(
+        work_order_digest=work_order.digest,
+        request_receipt_id=request.receipt_id,
+        request_receipt_digest=request.digest,
+        report_digest=report_digest,
+        evidence_snapshot=snapshot,
+    )
+    rejected_at = rejection.rejected_at
+    if (
+        rejected_at < request.occurred_at
+        or rejected_at > request.expires_at
+        or rejected_at > work_order.deadline
+        or rejection.rejection_id != expected_id
+    ):
+        raise AcceptanceTransactionError(
+            "rejection time or identifier binding is invalid"
+        )
+    expected_payload = _expected_rejection_payload(
+        work_order,
+        report,
+        request,
+        snapshot,
+        expected_id,
+        rejected_at,
+        receipts,
+        rejection.reason_code,
+        rejection.reason_detail,
+    )
+    actual_payload = {
+        key: value
+        for key, value in rejection.model_dump(mode="json").items()
+        if key not in {"digest", "signature_alg", "signer_key_id", "signature"}
+    }
+    if actual_payload != expected_payload:
+        raise AcceptanceTransactionError(
+            "rejection payload does not match its authoritative prefix"
+        )
+    from openworkproof.signing import (  # noqa: PLC0415
+        decode_and_verify_key_binding,
+        verify_payload,
+    )
+
+    rejection.validate_against_work_order(work_order)
+    acceptor = work_order.key_bindings[5]
+    if (
+        rejection.signer_key_id != acceptor.key_id
+        or not verify_payload(
+            "acceptance-rejection-receipt",
+            rejection.model_dump(mode="json"),
+            decode_and_verify_key_binding(acceptor),
+        )
+    ):
+        raise AcceptanceTransactionError(
+            "rejection signature does not match the bound Acceptor"
+        )
+    return rejection
 
 
 def verify_acceptance_bundle(

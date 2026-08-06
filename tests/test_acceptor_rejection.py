@@ -13,6 +13,7 @@ import pytest
 import rfc8785
 
 import openworkproof.acceptance as acceptance
+import openworkproof.evidence as evidence
 from openworkproof.models import (
     AcceptanceRejectionReceipt,
 )
@@ -101,7 +102,7 @@ def _rejection_raw(
         ),
         "evidence_snapshot_digest": snapshot,
         "receipt_digests": tuple(receipt.digest for receipt in prefix),
-        "causal_graph_root": causal_graph_root(prefix),
+        "causal_graph_root": selected_report.causal_graph_root,
         "reason_code": reason_code,
         "reason_detail": reason_detail,
         "decision": "rejected",
@@ -269,3 +270,160 @@ def test_rejection_model_rejects_duplicate_receipt_digests(
                 ephemeral_role_keys["Acceptor"][0],
             )
         )
+
+
+def _commit_rejection_row(
+    case, context, request_receipt, ephemeral_role_keys, fixed_now,
+    *, state_after="rejected", reason_code="BUSINESS_DECISION",
+):
+    """Manually insert a rejection row and advance the state (pre-transaction)."""
+    from test_acceptance import _awaiting_case  # noqa: PLC0415
+
+    rejection = _sign_rejection(
+        case, context, request_receipt, ephemeral_role_keys, fixed_now,
+        reason_code=reason_code,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    connection.execute("BEGIN IMMEDIATE")
+    connection.execute(
+        """
+        INSERT INTO acceptance_rejection_receipts (
+            rejection_id, work_order_digest,
+            acceptance_request_receipt_id, rejection_json
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            rejection.rejection_id,
+            case["work_order"].digest,
+            request_receipt.receipt_id,
+            evidence._canonical_json(rejection.model_dump(mode="json")),
+        ),
+    )
+    connection.execute(
+        """
+        UPDATE work_order_state
+        SET current_state = ?, version = version + 1
+        WHERE singleton = 1
+        """,
+        (state_after,),
+    )
+    connection.execute("COMMIT")
+    connection.close()
+    return rejection
+
+
+def test_rejection_row_replays_to_rejected_state(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from test_acceptance import _awaiting_case
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    rejection = _commit_rejection_row(
+        case, context, request_receipt, ephemeral_role_keys, fixed_now
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        work_order, receipts, _, _ = (
+            evidence._replay_receipt_publication_ledger(connection)
+        )
+        state = connection.execute(
+            "SELECT current_state, version FROM work_order_state "
+            "WHERE singleton = 1"
+        ).fetchone()
+        rejections = evidence._validated_acceptance_rejections(
+            connection, work_order
+        )
+    finally:
+        connection.close()
+    assert state == ("rejected", 8)
+    assert len(rejections) == 1
+    assert rejections[0].rejection_id == rejection.rejection_id
+    assert rejections[0].decision == "rejected"
+
+
+def test_tampered_rejection_row_fails_replay(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from test_acceptance import _awaiting_case
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    _commit_rejection_row(
+        case, context, request_receipt, ephemeral_role_keys, fixed_now
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        row = connection.execute(
+            "SELECT rejection_json FROM acceptance_rejection_receipts"
+        ).fetchone()
+        tampered = row[0] + "\ntampered"
+        connection.execute(
+            "UPDATE acceptance_rejection_receipts "
+            "SET rejection_json = ?",
+            (tampered,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        with pytest.raises(Exception):
+            evidence._replay_receipt_publication_ledger(connection)
+    finally:
+        connection.close()
+
+
+def test_rejection_suffix_requires_awaiting_human_tip(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from test_acceptance import _awaiting_case
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    # Advancing the state to accepted first makes a later rejection suffix
+    # malformed: the tip is no longer awaiting_human.
+    _commit_rejection_row(
+        case, context, request_receipt, ephemeral_role_keys, fixed_now,
+        state_after="accepted",
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        with pytest.raises(Exception, match="suffix|malformed|disagree"):
+            evidence._replay_receipt_publication_ledger(connection)
+    finally:
+        connection.close()

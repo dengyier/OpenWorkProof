@@ -29,6 +29,7 @@ from openworkproof.composition import (
 from openworkproof.models import (
     ACTION_RECEIPT_ADAPTER,
     AcceptanceReceipt,
+    AcceptanceRejectionReceipt,
     ActionReceiptEnvelope,
     AgentRequest,
     ApplyPatchArguments,
@@ -102,6 +103,7 @@ MAX_GRANT_RESERVATIONS = (
 MAX_GRANT_EVENTS = MAX_RECEIPTS
 MAX_RECEIPT_PARENT_EDGES = MAX_RECEIPTS * 16
 MAX_ACCEPTANCE_RECEIPTS = 1
+MAX_ACCEPTANCE_REJECTION_RECEIPTS = 1
 _MAX_PUBLICATIONS_PER_GROUP = 8
 
 
@@ -534,6 +536,16 @@ _SCHEMA = (
         work_order_digest TEXT NOT NULL UNIQUE
             REFERENCES work_orders(work_order_digest),
         acceptance_json TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE acceptance_rejection_receipts (
+        rejection_id TEXT PRIMARY KEY,
+        work_order_digest TEXT NOT NULL UNIQUE
+            REFERENCES work_orders(work_order_digest),
+        acceptance_request_receipt_id TEXT NOT NULL UNIQUE
+            REFERENCES receipts(receipt_id),
+        rejection_json TEXT NOT NULL
     )
     """,
     """
@@ -4817,12 +4829,15 @@ def _derive_protocol_transaction_version(
     *,
     action_receipts,
     acceptance_receipts,
+    acceptance_rejections=(),
 ) -> int:
     actions = tuple(action_receipts)
     acceptances = tuple(acceptance_receipts)
+    rejections = tuple(acceptance_rejections)
     if (
         len(actions) > MAX_RECEIPTS
         or len(acceptances) > MAX_ACCEPTANCE_RECEIPTS
+        or len(rejections) > MAX_ACCEPTANCE_REJECTION_RECEIPTS
         or any(
             not isinstance(receipt, ActionReceiptEnvelope)
             for receipt in actions
@@ -4830,6 +4845,10 @@ def _derive_protocol_transaction_version(
         or any(
             not isinstance(receipt, AcceptanceReceipt)
             for receipt in acceptances
+        )
+        or any(
+            not isinstance(receipt, AcceptanceRejectionReceipt)
+            for receipt in rejections
         )
     ):
         raise _child_issuance_error(
@@ -4903,7 +4922,7 @@ def _derive_protocol_transaction_version(
             )
         transactions += 1
         index += 2
-    return transactions + len(acceptances)
+    return transactions + len(acceptances) + len(rejections)
 
 
 def _validated_acceptance_receipts(
@@ -4963,6 +4982,78 @@ def _validated_acceptance_receipts(
             )
         receipts.append(receipt)
     return tuple(receipts)
+
+
+def _validated_acceptance_rejections(
+    connection: sqlite3.Connection,
+    work_order: WorkOrder,
+) -> tuple[AcceptanceRejectionReceipt, ...]:
+    rows = _bounded_rows(
+        connection,
+        count_sql="SELECT COUNT(*) FROM acceptance_rejection_receipts",
+        select_sql="""
+        SELECT
+            rejection_id,
+            work_order_digest,
+            acceptance_request_receipt_id,
+            rejection_json
+        FROM acceptance_rejection_receipts
+        ORDER BY rejection_id
+        """,
+        cap=MAX_ACCEPTANCE_REJECTION_RECEIPTS,
+        label="Acceptance rejection receipts",
+    )
+    acceptor = next(
+        (
+            binding
+            for binding in work_order.key_bindings
+            if binding.role == "Acceptor"
+        ),
+        None,
+    )
+    if acceptor is None:
+        raise _child_issuance_error(
+            "WorkOrder has no bound Acceptor"
+        )
+    acceptor_key = decode_and_verify_key_binding(acceptor)
+    rejections = []
+    for (
+        stored_id,
+        stored_work_order,
+        stored_request_id,
+        stored_json,
+    ) in rows:
+        try:
+            receipt = AcceptanceRejectionReceipt.model_validate_json(
+                stored_json
+            )
+            canonical = _canonical_json(
+                receipt.model_dump(mode="json")
+            )
+            receipt.validate_against_work_order(work_order)
+        except Exception as error:
+            raise _child_issuance_error(
+                "Acceptance rejection row is malformed"
+            ) from error
+        if (
+            stored_id != receipt.rejection_id
+            or stored_work_order != work_order.digest
+            or stored_request_id
+            != receipt.acceptance_request_receipt_id
+            or receipt.work_order_digest != work_order.digest
+            or stored_json != canonical
+            or receipt.signer_key_id != acceptor.key_id
+            or not verify_payload(
+                "acceptance-rejection-receipt",
+                receipt.model_dump(mode="json"),
+                acceptor_key,
+            )
+        ):
+            raise _child_issuance_error(
+                "Acceptance rejection row failed integrity verification"
+            )
+        rejections.append(receipt)
+    return tuple(rejections)
 
 
 def _validated_composition_reports(
@@ -5227,13 +5318,20 @@ def _validated_receipt_prefix(
         connection,
         work_order,
     )
+    rejections = _validated_acceptance_rejections(
+        connection,
+        work_order,
+    )
     expected_version = _derive_protocol_transaction_version(
         action_receipts=tuple(receipts),
         acceptance_receipts=acceptance_receipts,
+        acceptance_rejections=rejections,
     )
-    if acceptance_receipts:
+    if acceptance_receipts or rejections:
         if (
-            len(acceptance_receipts) != 1
+            len(acceptance_receipts) > 1
+            or len(rejections) > 1
+            or (acceptance_receipts and rejections)
             or not receipts
             or receipts[-1].state_after != "awaiting_human"
         ):
@@ -5245,6 +5343,7 @@ def _validated_receipt_prefix(
                 AcceptanceTransactionError,
                 composition_report_digest,
                 validate_acceptance_bindings,
+                validate_rejection_bindings,
             )
 
             reports = _validated_composition_reports_for_receipts(
@@ -5252,28 +5351,55 @@ def _validated_receipt_prefix(
                 work_order,
                 tuple(receipts),
             )
-            matching = tuple(
-                report
-                for report in reports
-                if composition_report_digest(report)
-                == acceptance_receipts[0].composition_report_digest
-            )
-            try:
-                if len(matching) != 1:
-                    raise AcceptanceTransactionError(
-                        "acceptance has no unique composition report"
-                    )
-                validate_acceptance_bindings(
-                    work_order=work_order,
-                    report=matching[0],
-                    receipts=tuple(receipts),
-                    acceptance_receipt=acceptance_receipts[0],
+            if acceptance_receipts:
+                matching = tuple(
+                    report
+                    for report in reports
+                    if composition_report_digest(report)
+                    == acceptance_receipts[0].composition_report_digest
                 )
-            except AcceptanceTransactionError as error:
-                raise _child_issuance_error(
-                    "acceptance suffix failed authoritative binding"
-                ) from error
-        expected_state = ("accepted", expected_version)
+                try:
+                    if len(matching) != 1:
+                        raise AcceptanceTransactionError(
+                            "acceptance has no unique composition report"
+                        )
+                    validate_acceptance_bindings(
+                        work_order=work_order,
+                        report=matching[0],
+                        receipts=tuple(receipts),
+                        acceptance_receipt=acceptance_receipts[0],
+                    )
+                except AcceptanceTransactionError as error:
+                    raise _child_issuance_error(
+                        "acceptance suffix failed authoritative binding"
+                    ) from error
+            else:
+                matching = tuple(
+                    report
+                    for report in reports
+                    if composition_report_digest(report)
+                    == rejections[0].composition_report_digest
+                )
+                try:
+                    if len(matching) != 1:
+                        raise AcceptanceTransactionError(
+                            "rejection has no unique composition report"
+                        )
+                    validate_rejection_bindings(
+                        work_order=work_order,
+                        report=matching[0],
+                        receipts=tuple(receipts),
+                        rejection=rejections[0],
+                    )
+                except AcceptanceTransactionError as error:
+                    raise _child_issuance_error(
+                        "rejection suffix failed authoritative binding"
+                    ) from error
+        expected_state = (
+            ("accepted", expected_version)
+            if acceptance_receipts
+            else ("rejected", expected_version)
+        )
     else:
         expected_state = (
             ("issued", 0)
