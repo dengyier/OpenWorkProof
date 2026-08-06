@@ -159,6 +159,7 @@ def test_canonical_domains_are_exact_and_key_order_is_irrelevant() -> None:
             "capability-grant",
             "action-receipt",
             "acceptance-receipt",
+            "acceptance-rejection-receipt",
             "agent-request",
             "human-decision",
             "sidecar-event",
