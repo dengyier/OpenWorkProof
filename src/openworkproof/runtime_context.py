@@ -131,6 +131,14 @@ def require_current_context(
             work_order,
             receipts,
         )
+        acceptances = evidence._validated_acceptance_receipts(
+            connection,
+            work_order,
+        )
+        rejections = evidence._validated_acceptance_rejections(
+            connection,
+            work_order,
+        )
         state_row = connection.execute(
             """
             SELECT current_state, version
@@ -158,7 +166,8 @@ def require_current_context(
             context.current_state,
             evidence._derive_protocol_transaction_version(
                 action_receipts=receipts,
-                acceptance_receipts=(),
+                acceptance_receipts=acceptances,
+                acceptance_rejections=rejections,
             ),
         )
         or any(state_value != "COMMITTED" for _, state_value in groups)

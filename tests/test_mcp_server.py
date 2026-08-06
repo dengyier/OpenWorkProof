@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime
+import dataclasses
 import hashlib
 import json
 import os
@@ -732,7 +733,7 @@ def _current_run_tests_context(case, now: datetime):
                 verified.append(ResultEvidence.model_validate_json(payload))
     committed.sort(key=lambda item: item.reference.path.encode())
     checkpoint = case["context"].replay_checkpoint
-    return derive_authorization_context(
+    context = derive_authorization_context(
         case["work_order"],
         AuthorizationLedgerPrefix(
             effective_grants=tuple(
@@ -753,6 +754,24 @@ def _current_run_tests_context(case, now: datetime):
         ),
         now,
     )
+    # Terminal states live in the authoritative state row, not in the
+    # action-receipt prefix (acceptance/rejection are separate tables).
+    import sqlite3 as _sql  # noqa: PLC0415
+
+    connection = _sql.connect(case["ledger_path"])
+    try:
+        state_row = connection.execute(
+            "SELECT current_state FROM work_order_state WHERE singleton = 1"
+        ).fetchone()
+    finally:
+        connection.close()
+    if state_row is not None and state_row[0] in {
+        "accepted",
+        "rejected",
+        "frozen",
+    }:
+        context = dataclasses.replace(context, current_state=state_row[0])
+    return context
 
 
 def _execute_run_tests_case(

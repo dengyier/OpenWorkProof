@@ -666,3 +666,181 @@ def test_reject_readback_failure_is_indeterminate(
             public_keys=None,
             clock=lambda: fixed_now,
         )
+
+
+def test_accept_after_reject_fails_closed(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from test_acceptance import _awaiting_case, _sign_draft  # noqa: PLC0415
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    from test_mcp_server import _current_run_tests_context  # noqa: PLC0415
+
+    draft = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    signed = _sign_draft(draft, ephemeral_role_keys)
+    rejection = _sign_rejection(
+        case, context, request_receipt, ephemeral_role_keys, fixed_now
+    )
+    acceptance.reject_acceptance_transaction(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        rejection=rejection,
+        public_keys=None,
+        clock=lambda: fixed_now,
+    )
+    rejected_context = _current_run_tests_context(case, fixed_now)
+    before = _rejection_table_snapshot(case)
+    from openworkproof.runtime_context import RuntimeContextError  # noqa: PLC0415
+
+    with pytest.raises(
+        (
+            acceptance.AcceptanceTransactionError,
+            acceptance.AcceptanceCommittedError,
+            RuntimeContextError,
+        ),
+        match="awaiting_human|already has|already committed|does not reproduce",
+    ):
+        acceptance.commit_acceptance(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=rejected_context,
+            acceptance=signed,
+            public_keys=None,
+            clock=lambda: fixed_now,
+        )
+    assert _rejection_table_snapshot(case) == before
+
+
+def test_reject_after_accept_fails_closed(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from test_acceptance import _awaiting_case, _sign_draft  # noqa: PLC0415
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    draft = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    signed = _sign_draft(draft, ephemeral_role_keys)
+    acceptance.commit_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        acceptance=signed,
+        public_keys=None,
+        clock=lambda: fixed_now,
+    )
+    from test_mcp_server import _current_run_tests_context  # noqa: PLC0415
+
+    accepted_context = _current_run_tests_context(case, fixed_now)
+    before = _rejection_table_snapshot(case)
+    rejection = _sign_rejection(
+        case, context, request_receipt, ephemeral_role_keys, fixed_now
+    )
+    from openworkproof.runtime_context import RuntimeContextError  # noqa: PLC0415
+
+    with pytest.raises(
+        (
+            acceptance.AcceptanceTransactionError,
+            acceptance.AcceptanceCommittedError,
+            RuntimeContextError,
+        ),
+        match="awaiting_human|already has|already committed|does not reproduce",
+    ):
+        acceptance.reject_acceptance_transaction(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=accepted_context,
+            rejection=rejection,
+            public_keys=None,
+            clock=lambda: fixed_now,
+        )
+    assert _rejection_table_snapshot(case) == before
+
+
+def test_second_rejection_fails_closed(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from test_acceptance import _awaiting_case  # noqa: PLC0415
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    rejection = _sign_rejection(
+        case, context, request_receipt, ephemeral_role_keys, fixed_now
+    )
+    acceptance.reject_acceptance_transaction(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        rejection=rejection,
+        public_keys=None,
+        clock=lambda: fixed_now,
+    )
+    from test_mcp_server import _current_run_tests_context  # noqa: PLC0415
+
+    rejected_context = _current_run_tests_context(case, fixed_now)
+    before = _rejection_table_snapshot(case)
+    second = _sign_rejection(
+        case, context, request_receipt, ephemeral_role_keys, fixed_now,
+        reason_code="EVIDENCE_INSUFFICIENT",
+        reason_detail="second opinion",
+    )
+    with pytest.raises(
+        (
+            acceptance.AcceptanceTransactionError,
+            acceptance.AcceptanceCommittedError,
+        ),
+        match="awaiting_human|already has|already committed",
+    ):
+        acceptance.reject_acceptance_transaction(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=rejected_context,
+            rejection=second,
+            public_keys=None,
+            clock=lambda: fixed_now,
+        )
+    assert _rejection_table_snapshot(case) == before
