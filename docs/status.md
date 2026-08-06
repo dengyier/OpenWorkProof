@@ -217,8 +217,10 @@ Day 0 执行门仍为 FAIL；deny/rollback 生产事务、真实无网执行器
 
 ## 尚未完成
 
-- `run_tests` 的真实无网执行器、稳定 execution ID、启动/结果
-  回执与 `STARTED_UNCONFIRMED` 自动恢复，以及 Developer mode 与 MCP 入口；
+- `run_tests` 真实无网执行器已接入生产路径：DockerRunTestsExecutor
+  驱动 execute_run_tests_production（稳定 execution ID、启动/结果回执、
+  STARTED_UNCONFIRMED 恢复，required-live 真实 Docker 执行已验证）；
+  剩余为 Developer mode 生产入口与 MCP 传输层；
 - 独立结果（independent-result）执行 episode 与五维证据 recomposition
   → proof_ready 链已实现并验证（本切片测试使用五维 WorkOrder 变体：
   独立结果占 verifier_independent_result 专属槽位，recomposition 在
