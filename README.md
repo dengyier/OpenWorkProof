@@ -96,7 +96,8 @@ WorkOrder            CapabilityGrant        ActionReceipt          AcceptanceRec
   （Manager 发起收据 + 报告 + proof_composed 收据一次提交）
 - 原子 final-acceptance 请求、无密钥外部签名草稿与 Acceptor 签名验收提交
   （proof_ready → awaiting_human → accepted，本地合成 Acceptor 验证）
-- **全量测试：2142 passed**（required-live Docker 模式，0 skip）
+- **全量测试：2146 passed、0 failed、0 skip**（required-live Docker 模式，
+  含冻结计划规定的 candidate-inventory 供应链门，退出码 0）
 
 **尚未完成：** Acceptor 拒绝路径、独立结果（independent-result）执行 episode、
 CLI、MCP 传输服务器、Docker 生产执行器、deny/rollback 生产事务、Day 0 执行门。
@@ -146,10 +147,13 @@ python3.12 -m venv .venv
 1. 接入真实无网执行器的稳定 execution ID 与启动/结果回执，
    闭合 `STARTED_UNCONFIRMED` 恢复后再接入 MCP 传输层；
 2. 完成人工决策、回滚和终止策略 API；
-3. 完成多尺度证据合成与 AcceptanceReceipt 成功路径；
+3. 完成独立结果（independent-result）执行 episode 与五维证据
+   recomposition → proof_ready 完整链（CompositionReport 与
+   AcceptanceReceipt 成功路径已实现）；
 4. 完成 CLI、MCP Sidecar 和 AgentTeams 集成；
-5. 完成 Rich #4196 自包含演示及独立验收；
-6. 完成 Day 0 人类签署和赛事交付材料（许可证已完成：Apache-2.0）。
+5. 完成 Rich #4196 自包含演示及外部独立验收；
+6. 完成 Acceptor 拒绝路径、真实外部 Acceptor 复现与 Day 0
+   人类签署和赛事交付材料（许可证已完成：Apache-2.0）。
 
 ---
 

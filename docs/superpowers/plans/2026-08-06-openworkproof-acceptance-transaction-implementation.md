@@ -1,6 +1,6 @@
 # OpenWorkProof Independent Acceptance Transaction Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Add a separately keyed Acceptor and close the atomic `proof_ready -> awaiting_human -> accepted` strong-success path from deterministic CompositionReport through externally signed AcceptanceReceipt.
 
@@ -65,7 +65,7 @@
 
 **Files:** none
 
-- [ ] **Step 1: Confirm branch and source authority**
+- [x] **Step 1: Confirm branch and source authority**
 
 Run:
 
@@ -78,7 +78,7 @@ git merge-base --is-ancestor 666ed6d44343c0ecc5dd226a9bf7c1fb1bde251c HEAD
 Expected: branch is `codex/acceptance-transaction`, worktree is clean, and the
 ancestor command exits 0.
 
-- [ ] **Step 2: Confirm the Python environment**
+- [x] **Step 2: Confirm the Python environment**
 
 Run:
 
@@ -89,7 +89,7 @@ Run:
 
 Expected: Python 3.12 and `No broken requirements found.`
 
-- [ ] **Step 3: Run the portable baseline**
+- [x] **Step 3: Run the portable baseline**
 
 Run:
 
@@ -113,7 +113,7 @@ do not reuse the historical 2117 count as current evidence.
 - Modify: `tests/test_state.py`
 - Modify: `tests/test_receipt_chain.py`
 
-- [ ] **Step 1: Write the RED six-role contract test**
+- [x] **Step 1: Write the RED six-role contract test**
 
 Add a focused test to `tests/test_contract.py` that appends a deterministic
 Acceptor binding, points `acceptor_key_ids` at it, and expects a valid
@@ -140,7 +140,7 @@ def test_work_order_binds_distinct_acceptor(
 Import `deterministic_key_binding` from `conftest` in the same style as the
 existing test helpers.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -151,7 +151,7 @@ Run:
 Expected: FAIL because `Acceptor` is not an allowed role or the fixed role
 order still requires five bindings.
 
-- [ ] **Step 3: Implement the minimum six-role model**
+- [x] **Step 3: Implement the minimum six-role model**
 
 In `src/openworkproof/models.py` make the closed role tuple and KeyBinding
 literal exact:
@@ -205,7 +205,7 @@ Update every exact-five key count in `signing.py`, `state.py`, and
 `evidence.py` to exact six. Do not replace the exact-count checks with open
 ended membership checks.
 
-- [ ] **Step 4: Move AcceptanceReceipt signer authority to Acceptor**
+- [x] **Step 4: Move AcceptanceReceipt signer authority to Acceptor**
 
 In `AcceptanceReceipt.validate_against_work_order` and
 `state._validate_acceptance`, select `work_order.key_bindings[5]`. Preserve
@@ -228,7 +228,7 @@ Add the deterministic Acceptor binding to `key_bindings`, point every fixture
 WorkOrder's `acceptor_key_ids` at it, and sign `signed_acceptance_receipt` with
 `ephemeral_role_keys["Acceptor"][0]`.
 
-- [ ] **Step 5: Add negative signer and alias tests**
+- [x] **Step 5: Add negative signer and alias tests**
 
 Add parameterized tests proving that all five non-Acceptor keys fail
 AcceptanceReceipt verification and that duplicate Acceptor/Maintainer subject
@@ -246,7 +246,7 @@ Run:
 
 Expected: PASS outside the intentionally stale schema-anchor tests.
 
-- [ ] **Step 6: Close the final-request role matrix**
+- [x] **Step 6: Close the final-request role matrix**
 
 Change `ApprovalRequestedReceipt.required_role` to
 `Literal["Maintainer", "Acceptor"]` and extend `_validate_request`:
@@ -265,7 +265,7 @@ Update `state._validate_final_request` to require `Acceptor`. Add focused tests
 showing high-risk Maintainer and final-acceptance Acceptor are valid while the
 crossed combinations fail.
 
-- [ ] **Step 7: Run the role-focused GREEN suite**
+- [x] **Step 7: Run the role-focused GREEN suite**
 
 Run:
 
@@ -288,7 +288,7 @@ Expected: PASS.
 - Replace generated: `src/openworkproof/schemas/v0.1/*.json`
 - Replace generated: `specs/v0.1/*.json`
 
-- [ ] **Step 1: Observe RED schema drift**
+- [x] **Step 1: Observe RED schema drift**
 
 Run:
 
@@ -300,7 +300,7 @@ Run:
 Expected: FAIL because reviewed v0.1 development anchors still describe five
 roles and Maintainer acceptance.
 
-- [ ] **Step 2: Compute reviewed schema bytes and hashes without writing**
+- [x] **Step 2: Compute reviewed schema bytes and hashes without writing**
 
 Run this exact read-only command:
 
@@ -352,14 +352,14 @@ PY
 
 Expected: five lowercase SHA-256 lines. Capture them verbatim in the task log.
 
-- [ ] **Step 3: Update both reviewed anchor maps**
+- [x] **Step 3: Update both reviewed anchor maps**
 
 Use `apply_patch` to replace exactly the five digest values in
 `src/openworkproof/schema_registry.py` and `tests/test_schema_registry.py` with
 the command output. Do not change filenames, object types, or protocol
 version.
 
-- [ ] **Step 4: Generate package and mirror schemas transactionally**
+- [x] **Step 4: Generate package and mirror schemas transactionally**
 
 Run:
 
@@ -371,7 +371,7 @@ Run:
 
 Expected: exit 0; package and mirror contain the same five canonical files.
 
-- [ ] **Step 5: Run schema GREEN**
+- [x] **Step 5: Run schema GREEN**
 
 Run:
 
@@ -381,7 +381,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit Acceptor authority**
+- [x] **Step 6: Commit Acceptor authority**
 
 Run:
 
@@ -415,14 +415,14 @@ schema-authority changes.
 - Modify: `src/openworkproof/mcp_server.py`
 - Modify: `tests/test_mcp_server.py`
 
-- [ ] **Step 1: Verify the existing characterization test**
+- [x] **Step 1: Verify the existing characterization test**
 
 The extraction is already covered by
 `test_execute_run_tests_rejects_stale_context_before_second_handler`, which
 changes the authoritative context before a second call and proves the handler
 does not execute from a stale snapshot.
 
-- [ ] **Step 2: Run the characterization test**
+- [x] **Step 2: Run the characterization test**
 
 Run:
 
@@ -434,7 +434,7 @@ Run:
 Expected before extraction: PASS. This freezes behavior rather than
 introducing new behavior.
 
-- [ ] **Step 3: Move, do not rewrite, the current-snapshot functions**
+- [x] **Step 3: Move, do not rewrite, the current-snapshot functions**
 
 Create `runtime_context.py` with this error boundary:
 
@@ -455,7 +455,7 @@ exact `derive_authorization_context` equality. Translate internal errors to
 In `mcp_server.py`, call `require_current_context` and translate
 `RuntimeContextError` to `HandlerCoordinationError` at the existing boundary.
 
-- [ ] **Step 4: Run extraction GREEN**
+- [x] **Step 4: Run extraction GREEN**
 
 Run:
 
@@ -473,7 +473,7 @@ Expected: PASS with no behavior changes.
 - Create: `src/openworkproof/acceptance.py`
 - Create: `tests/test_acceptance.py`
 
-- [ ] **Step 1: Write RED aggregate-digest tests**
+- [x] **Step 1: Write RED aggregate-digest tests**
 
 Create `tests/test_acceptance.py` and add tests for exact formulas:
 
@@ -503,7 +503,7 @@ def test_causal_graph_root_is_sequence_ordered(receipts) -> None:
 
 Add an equivalent evidence-snapshot test using path-byte-sorted EvidenceRefs.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -514,7 +514,7 @@ Run:
 
 Expected: FAIL because `openworkproof.acceptance` does not exist.
 
-- [ ] **Step 3: Implement pure aggregate helpers**
+- [x] **Step 3: Implement pure aggregate helpers**
 
 Create `acceptance.py` with exact closed helpers:
 
@@ -563,7 +563,7 @@ Implement `evidence_snapshot_digest` with a canonical path-byte-sorted unique
 EvidenceRef vector and `composition_report_digest` as SHA-256 of exact report
 JCS bytes.
 
-- [ ] **Step 4: Add CompositionReport to models**
+- [x] **Step 4: Add CompositionReport to models**
 
 Add a closed `CompositionReport(ProtocolModel)` immediately before
 AcceptanceReceipt with the fields from design section 7.2. Reuse
@@ -587,7 +587,7 @@ else:
 Also enforce sorted/unique artifacts, tests, warnings, failures, and exact
 postcondition order.
 
-- [ ] **Step 5: Add report-construction tests**
+- [x] **Step 5: Add report-construction tests**
 
 Cover:
 
@@ -617,7 +617,7 @@ Expected: PASS for pure report tests.
 - Modify: `tests/test_acceptance.py`
 - Modify: `tests/test_receipt_chain.py`
 
-- [ ] **Step 1: Write RED ledger-schema and tamper tests**
+- [x] **Step 1: Write RED ledger-schema and tamper tests**
 
 Add tests that initialize a fresh ledger and assert the exact table:
 
@@ -637,7 +637,7 @@ CREATE TABLE composition_reports (
 Add a loader test that changes `report_json` without updating its digest and
 expects closed validation.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -649,7 +649,7 @@ Run:
 
 Expected: both FAIL because the table and loader do not exist.
 
-- [ ] **Step 3: Add schema and bounded loader**
+- [x] **Step 3: Add schema and bounded loader**
 
 Add the SQL statement to the authoritative schema tuple and include
 `composition_reports` in every exact table-set check. Implement
@@ -661,7 +661,7 @@ canonical JSON equality, report-model validation, raw-byte digest recompute,
 WorkOrder binding, initiator ID/digest lookup, and one-to-one report/trigger
 closure.
 
-- [ ] **Step 4: Write RED compose transaction success test**
+- [x] **Step 4: Write RED compose transaction success test**
 
 Build a current `AuthorizationContext` ending in `locally_verified`, a signed
 Manager `owp.compose_proof` AgentRequest, and a Sidecar key. Assert one call to:
@@ -681,11 +681,11 @@ returns `CompositionTransactionResult` containing a Manager ToolCallReceipt,
 CompositionReport, and Sidecar SystemEventReceipt; a fresh read must show the
 two new sequences, one report row, one quota event, and `proof_ready`.
 
-- [ ] **Step 5: Run RED**
+- [x] **Step 5: Run RED**
 
 Expected: FAIL because `compose_proof_transaction` is undefined.
 
-- [ ] **Step 6: Implement compose construction and one transaction**
+- [x] **Step 6: Implement compose construction and one transaction**
 
 Define this result object:
 
@@ -718,7 +718,7 @@ Inside the target lock:
 Do not call `complete_receipt_publication`: CompositionReport is ledger-backed
 and the compose operation publishes no new WorkOrder evidence artifact.
 
-- [ ] **Step 7: Add failure injection and incomplete tests**
+- [x] **Step 7: Add failure injection and incomplete tests**
 
 Inject failures after initiator insert, report insert, trigger insert, quota
 insert, state update, before COMMIT, and at COMMIT acknowledgement. Before
@@ -729,7 +729,7 @@ From `locally_verified`, missing independent evidence must commit a report and
 transition to `evidence_incomplete`. Recomposition that remains incomplete
 must perform no same-state write.
 
-- [ ] **Step 8: Run composition GREEN**
+- [x] **Step 8: Run composition GREEN**
 
 Run:
 
@@ -742,7 +742,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit deterministic proof composition**
+- [x] **Step 9: Commit deterministic proof composition**
 
 Run:
 
@@ -767,7 +767,7 @@ git commit -m "feat: commit deterministic proof composition"
 - Modify: `src/openworkproof/acceptance.py`
 - Modify: `tests/test_acceptance.py`
 
-- [ ] **Step 1: Write RED request transaction test**
+- [x] **Step 1: Write RED request transaction test**
 
 From a freshly committed `proof_ready` result, construct a Manager AgentRequest
 for `owp.request_acceptance` whose exact arguments are:
@@ -790,11 +790,11 @@ Call `request_acceptance_transaction` and assert an
 ApprovalRequestedReceipt, one quota decrement, one new sequence, and atomic
 `proof_ready -> awaiting_human`.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Expected: FAIL because the function does not exist.
 
-- [ ] **Step 3: Implement the request transaction**
+- [x] **Step 3: Implement the request transaction**
 
 Implement `request_acceptance_transaction(ledger_path: Path, *, evidence_root:
 Path, context: AuthorizationContext, request: AgentRequest,
@@ -806,20 +806,20 @@ Grant, nonce, quota, request digest, target-action digest, expiry <= now + 3600
 seconds, and expiry <= WorkOrder deadline. Build the Sidecar-signed receipt and
 atomically insert receipt, parents, quota event, sequence, state, and version.
 
-- [ ] **Step 4: Add zero-write negative tests**
+- [x] **Step 4: Add zero-write negative tests**
 
 Cover evidence-incomplete, old report digest, wrong role, wrong Manager key,
 missing capability, exhausted quota, duplicate nonce, past expiry, >1-hour
 expiry, and deadline overflow. Snapshot all authoritative tables before each
 call and require exact equality after failure.
 
-- [ ] **Step 5: Add request COMMIT-truth tests**
+- [x] **Step 5: Add request COMMIT-truth tests**
 
 Inject pre-COMMIT and COMMIT-ACK failures. Exact committed readback may return
 the existing receipt; mismatched or ambiguous readback returns
 `RECOVERY_REQUIRED` and never retries with a new receipt ID.
 
-- [ ] **Step 6: Run request GREEN**
+- [x] **Step 6: Run request GREEN**
 
 Run:
 
@@ -836,17 +836,17 @@ Expected: PASS.
 - Modify: `src/openworkproof/acceptance.py`
 - Modify: `tests/test_acceptance.py`
 
-- [ ] **Step 1: Write RED deterministic draft test**
+- [x] **Step 1: Write RED deterministic draft test**
 
 Call `prepare_acceptance` twice against the same awaiting-human snapshot and
 same trusted UTC second. Assert byte-identical canonical payload, the exact
 domain, and deterministic acceptance ID.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Expected: FAIL because `prepare_acceptance` is undefined.
 
-- [ ] **Step 3: Implement the keyless draft**
+- [x] **Step 3: Implement the keyless draft**
 
 Define:
 
@@ -870,13 +870,13 @@ and warnings. Build the payload by copying authoritative report fields and
 extending receipt digests through the request. Compute acceptance ID from the
 exact design projection and serialize with RFC 8785 JCS.
 
-- [ ] **Step 4: Add draft boundary tests**
+- [x] **Step 4: Add draft boundary tests**
 
 Use `inspect.signature` to prove no private-key parameter exists. Cover expired
 request, stale report row, changed evidence byte, changed replay checkpoint,
 wrong state, and an existing acceptance row. Each must fail without writing.
 
-- [ ] **Step 5: Run draft GREEN**
+- [x] **Step 5: Run draft GREEN**
 
 Run:
 
@@ -896,7 +896,7 @@ Expected: PASS.
 - Modify: `tests/test_state.py`
 - Modify: `tests/test_receipt_chain.py`
 
-- [ ] **Step 1: Write RED success test**
+- [x] **Step 1: Write RED success test**
 
 Sign `draft.payload` outside the Sidecar boundary:
 
@@ -922,12 +922,12 @@ assert committed == signed
 Fresh readback must show one AcceptanceReceipt and `accepted`; receipt
 sequence remains unchanged and protocol transaction version increases by one.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Expected: FAIL because `commit_acceptance` is undefined and acceptance-suffix
 validation currently rejects every stored acceptance.
 
-- [ ] **Step 3: Implement bounded acceptance-suffix validation**
+- [x] **Step 3: Implement bounded acceptance-suffix validation**
 
 Replace the current `Acceptance ledger suffix validation is unavailable`
 branch with exact validation of one AcceptanceReceipt against:
@@ -941,7 +941,7 @@ branch with exact validation of one AcceptanceReceipt against:
 
 Keep `MAX_ACCEPTANCE_RECEIPTS = 1` and the WorkOrder unique constraint.
 
-- [ ] **Step 4: Implement commit_acceptance**
+- [x] **Step 4: Implement commit_acceptance**
 
 Implement `commit_acceptance(ledger_path: Path, *, evidence_root: Path,
 context: AuthorizationContext, acceptance: AcceptanceReceipt, public_keys:
@@ -955,7 +955,7 @@ bound Acceptor key, require `request.occurred_at <= accepted_at <= now`,
 WorkOrder deadline. In one `BEGIN IMMEDIATE`, insert the receipt and update
 state/version. Do not advance `sequence_counter`.
 
-- [ ] **Step 5: Add signer, stale, duplicate, and concurrency tests**
+- [x] **Step 5: Add signer, stale, duplicate, and concurrency tests**
 
 Cover all five non-Acceptor keys, a valid but unbound key, modified report
 field, modified receipt vector, accepted_at before request, future accepted_at,
@@ -964,21 +964,21 @@ checkpoint, duplicate acceptance, and two concurrent identical submissions.
 Exactly one concurrent call may perform the insert; the other may return the
 same committed receipt only after exact readback.
 
-- [ ] **Step 6: Add COMMIT fault tests**
+- [x] **Step 6: Add COMMIT fault tests**
 
 Inject failure before insert, after insert, after state update, at COMMIT, and
 after COMMIT acknowledgement. Pre-COMMIT snapshots remain exact. Unknown
 acknowledgement reads back accepted state, version, and exact receipt before
 classifying committed truth.
 
-- [ ] **Step 7: Add offline verification test**
+- [x] **Step 7: Add offline verification test**
 
 Copy WorkOrder, canonical report bytes, ActionReceipts, committed evidence
 bytes, AcceptanceReceipt, and six bound public keys into an isolated temporary
 directory. Without the live ledger connection, reparse, rehash, replay, and
 verify the Acceptor signature and every AcceptanceReceipt/report binding.
 
-- [ ] **Step 8: Run acceptance GREEN**
+- [x] **Step 8: Run acceptance GREEN**
 
 Run:
 
@@ -992,7 +992,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit independent acceptance**
+- [x] **Step 9: Commit independent acceptance**
 
 Run:
 
@@ -1014,7 +1014,7 @@ git commit -m "feat: commit independent acceptance"
 - Modify: `README.md`
 - Modify: `docs/status.md`
 
-- [ ] **Step 1: Run focused protocol suites**
+- [x] **Step 1: Run focused protocol suites**
 
 Run:
 
@@ -1033,7 +1033,7 @@ Run:
 
 Expected: zero failures. Record exact count and elapsed time.
 
-- [ ] **Step 2: Resolve the repository-qualified execution image**
+- [x] **Step 2: Resolve the repository-qualified execution image**
 
 The frozen required-live execution candidate for this branch is the existing
 repository-qualified RepoDigest below. Verify it directly; do not invent or
@@ -1047,7 +1047,7 @@ docker image inspect "$OPENWORKPROOF_DOCKER_TEST_IMAGE" >/dev/null
 Expected: exit 0. If inspect fails, stop rather than replacing the immutable
 reference.
 
-- [ ] **Step 3: Run full required-live verification**
+- [x] **Step 3: Run full required-live verification**
 
 Run with the exact existing artifact root:
 
@@ -1061,7 +1061,7 @@ OPENWORKPROOF_DOCKER_TEST_IMAGE="$OPENWORKPROOF_DOCKER_TEST_IMAGE" \
 Expected: zero failures and zero required-live skips. Record exact count and
 elapsed time.
 
-- [ ] **Step 4: Run non-test verification**
+- [x] **Step 4: Run non-test verification**
 
 Run:
 
@@ -1073,7 +1073,7 @@ git diff --check
 
 Require zero owned OpenWorkProof containers and volumes after the suite.
 
-- [ ] **Step 5: Update only observed project facts**
+- [x] **Step 5: Update only observed project facts**
 
 In README and `docs/status.md`:
 
@@ -1087,7 +1087,7 @@ In README and `docs/status.md`:
 Do not write “独立验收完成”; local synthetic Acceptor tests are not external
 human acceptance.
 
-- [ ] **Step 6: Verify documentation truth and commit**
+- [x] **Step 6: Verify documentation truth and commit**
 
 Run:
 
@@ -1105,7 +1105,7 @@ Expected: no real-person Acceptor name and one documentation-only commit.
 
 **Files:** none
 
-- [ ] **Step 1: Record exact evidence**
+- [x] **Step 1: Record exact evidence**
 
 Record:
 
@@ -1117,7 +1117,7 @@ Record:
 - pip, compileall, diff, and Docker cleanup results;
 - clean worktree status.
 
-- [ ] **Step 2: Keep external states separate**
+- [x] **Step 2: Keep external states separate**
 
 Explicitly retain as unproven:
 
@@ -1128,7 +1128,7 @@ Explicitly retain as unproven:
 - final trusted helper, D8, Day 0, Rich demo, contest submission, award, and
   commercial validation.
 
-- [ ] **Step 3: Finish the branch**
+- [x] **Step 3: Finish the branch**
 
 Invoke `finishing-a-development-branch`, rerun the required final verification
 it specifies, and present the standard integration choices. Do not merge or
