@@ -33,6 +33,7 @@ from openworkproof.models import (
     EvidenceRef,
     GrantIssuedReceipt,
     PolicyDecision,
+    RepoReadArguments,
     RollbackReceipt,
     RunTestsArguments,
     SystemEventReceipt,
@@ -2062,3 +2063,266 @@ def execute_run_tests_production(
         execution_driver=driver,
         clock=clock,
     )
+
+
+def _repo_read_command(
+    context: AuthorizationContext,
+    arguments: RepoReadArguments,
+    candidate_runtime_root: Path,
+) -> repo_tools.CandidateReadRequest:
+    return repo_tools.CandidateReadRequest(
+        runtime_root=Path(candidate_runtime_root),
+        workspace_id="c" * 64,
+        source_artifact_sha256=(
+            context.work_order.replay_profile.source_artifact_sha256
+        ),
+        expected_head_commit=context.replay_checkpoint.head_commit,
+        expected_workspace_manifest_digest=(
+            context.replay_checkpoint.workspace_manifest_digest
+        ),
+        path=arguments.path,
+    )
+
+
+def _build_repo_read_receipt(
+    context: AuthorizationContext,
+    request: AgentRequest,
+    arguments: RepoReadArguments,
+    result: repo_tools.CandidateReadResult,
+    sidecar_private_key: Ed25519PrivateKey,
+) -> ToolCallReceipt:
+    remaining_before = _remaining_tool_calls(context, request.grant_id)
+    sidecar_key_id = key_id(sidecar_private_key.public_key())
+    output_digest = _digest(result.output.model_dump(mode="json"))
+    raw = {
+        "protocol_version": "0.1",
+        "receipt_id": _digest(
+            {
+                "domain": "openworkproof/receipt-id/v0.1",
+                "request_digest": request.digest,
+                "entropy": secrets.token_hex(32),
+            }
+        ),
+        "work_order_digest": context.work_order.digest,
+        "actor_type": "agent",
+        "actor_id": request.actor_id,
+        "actor_key_id": request.actor_key_id,
+        "nested_claim_type": "agent-request",
+        "nested_claim_digest": request.digest,
+        "nested_claim": request.model_dump(mode="json"),
+        "gateway_signer_key_id": sidecar_key_id,
+        "event_type": "tool_call",
+        "policy_decision": "allow",
+        "policy_error_code": None,
+        "execution_status": "succeeded",
+        "execution_error_code": None,
+        "quota_charge": {
+            "grant_id": request.grant_id,
+            "metric": "tool_calls",
+            "amount": 1,
+            "remaining_after": remaining_before - 1,
+        },
+        "state_before": context.current_state,
+        "state_after": context.current_state,
+        "parent_receipt_ids": list(_causal_parents(context, request)),
+        "correlation_factors": None,
+        "evidence_refs": [],
+        "occurred_at": context.transaction_time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "sequence": len(context.ledger_prefix.receipts) + 1,
+        "nonce": request.nonce,
+        "previous_receipt_digest": (
+            context.ledger_prefix.receipts[-1].digest
+        ),
+        "grant_id": request.grant_id,
+        "tool_name": "owp.repo_read",
+        "tool_version": "0.1",
+        "request_arguments": arguments.model_dump(mode="json"),
+        "arguments_digest": request.arguments_digest,
+        "output_digest": output_digest,
+        "predicate_results": [
+            result.model_dump(mode="json")
+            for result in _predicate_results(
+                context,
+                request,
+                arguments,
+                execution_status="succeeded",
+                actual_exit_code=0,
+                evidence_digest=output_digest,
+            )
+        ],
+    }
+    return ACTION_RECEIPT_ADAPTER.validate_python(
+        sign_payload("action-receipt", raw, sidecar_private_key)
+    )
+
+
+def _preflight_repo_read_receipts(
+    context: AuthorizationContext,
+    request: AgentRequest,
+    arguments: RepoReadArguments,
+    sidecar_private_key: Ed25519PrivateKey,
+) -> None:
+    import base64  # noqa: PLC0415
+
+    entries = context.replay_checkpoint.workspace_manifest.entries
+    decoded_paths = {
+        base64.urlsafe_b64decode(entry.path_bytes_b64url + b"==").decode(
+            "utf-8"
+        )
+        for entry in entries
+    }
+    if arguments.path not in decoded_paths:
+        raise HandlerCoordinationError("REPO_READ_PATH_DENIED")
+    representative = repo_tools.CandidateReadResult(
+        content=b"x" * 65_536,
+        output=repo_tools.RepoReadOutput(
+            path=arguments.path,
+            content_sha256="0" * 64,
+            size_bytes=65_536,
+            workspace_manifest_digest=(
+                context.replay_checkpoint.workspace_manifest_digest
+            ),
+        ),
+    )
+    if (
+        len(
+            rfc8785.dumps(
+                _build_repo_read_receipt(
+                    context,
+                    request,
+                    arguments,
+                    representative,
+                    sidecar_private_key,
+                ).model_dump(mode="json")
+            )
+        )
+        > _MAX_RECEIPT_BYTES
+    ):
+        raise HandlerCoordinationError("BUNDLE_CAPACITY_EXCEEDED")
+
+
+def _readback_repo_read_committed(
+    ledger_path: Path,
+    *,
+    work_order,
+    receipt: ToolCallReceipt,
+) -> bool:
+    try:
+        connection = evidence.connect_ledger(ledger_path)
+        try:
+            current_work_order, receipts, _, _ = (
+                evidence._replay_receipt_publication_ledger(connection)
+            )
+        finally:
+            connection.close()
+    except Exception:
+        return False
+    return (
+        current_work_order == work_order
+        and bool(receipts)
+        and receipts[-1].receipt_id == receipt.receipt_id
+        and receipts[-1] == receipt
+    )
+
+
+def execute_repo_read(
+    ledger_path: Path,
+    *,
+    evidence_root: Path,
+    context: AuthorizationContext,
+    request: AgentRequest,
+    request_arguments: RepoReadArguments,
+    execution_facts: ProspectiveExecutionFacts,
+    sidecar_private_key: Ed25519PrivateKey,
+    candidate_runtime_root: Path,
+    handler: Callable[[repo_tools.CandidateReadRequest], repo_tools.CandidateReadResult],
+    clock: Callable[[], datetime],
+) -> ToolCallReceipt:
+    """Authorize, execute, sign, and commit one repo-read attempt."""
+    if (
+        not callable(handler)
+        or not isinstance(candidate_runtime_root, Path)
+        or not isinstance(request_arguments, RepoReadArguments)
+    ):
+        raise HandlerCoordinationError("HANDLER_UNAVAILABLE")
+    arguments = request_arguments
+    path = Path(ledger_path)
+    root = Path(evidence_root)
+    evidence.recover_evidence_publications(path, evidence_root=root)
+    lock_descriptor = evidence._acquire_target_lock(path)
+    primary_error: Exception | None = None
+    receipt: ToolCallReceipt | None = None
+    try:
+        _ensure_handler_execution_schema(path, lock_descriptor)
+        _recover_handler_executions(path, lock_descriptor)
+        now = evidence._freeze_trusted_utc_second(clock())
+        _require_current_context(
+            path,
+            root,
+            context,
+            now,
+            lock_descriptor,
+        )
+        decision = authorize_tool_call(
+            context,
+            request,
+            arguments,
+            None,
+        )
+        if not decision.allowed:
+            raise ToolCallDenied(decision)
+        _preflight_repo_read_receipts(
+            context,
+            request,
+            arguments,
+            sidecar_private_key,
+        )
+        command = _repo_read_command(context, arguments, candidate_runtime_root)
+        execution_id = _reserve_handler_execution(
+            path,
+            lock_descriptor,
+            context,
+            request,
+            execution_facts,
+            None,
+        )
+        _mark_handler_started(path, lock_descriptor, execution_id)
+        try:
+            result = handler(command)
+        except Exception as error:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+        if type(result) is not repo_tools.CandidateReadResult:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        receipt = _build_repo_read_receipt(
+            context,
+            request,
+            arguments,
+            result,
+            sidecar_private_key,
+        )
+        evidence.complete_receipt_publication(
+            path,
+            evidence_root=root,
+            receipt=receipt,
+            payloads={},
+            clock=lambda: now,
+            _borrowed_lock_descriptor=lock_descriptor,
+        )
+        _finalize_handler_execution(path, lock_descriptor)
+    except Exception as error:
+        primary_error = error
+    _, release_errors = evidence._release_target_lock(lock_descriptor)
+    if primary_error is not None:
+        if release_errors:
+            raise HandlerCoordinationError(
+                "handler coordination and lock release both failed"
+            ) from primary_error
+        raise primary_error
+    if release_errors:
+        raise HandlerCoordinationError(
+            "handler coordination lock release failed"
+        ) from release_errors[0]
+    assert receipt is not None
+    return receipt

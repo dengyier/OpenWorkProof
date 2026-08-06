@@ -230,6 +230,7 @@ def _run_tests_case(
     sidecar_receipt_factory,
     now: datetime,
     verifier_tool_calls: int = 1,
+    developer_tools: tuple[str, ...] | None = None,
 ):
     work_order = _work_order_with_pr_chain_predicates(
         signed_work_order,
@@ -268,7 +269,11 @@ def _run_tests_case(
         role_keys,
         label="handler-loop:developer",
         updates={
-            "allowed_tools": ["owp.apply_patch", "owp.rollback_patch"],
+            "allowed_tools": list(
+                developer_tools
+                if developer_tools is not None
+                else ("owp.apply_patch", "owp.rollback_patch")
+            ),
             "quota": {"tool_calls": 2, "repair_rounds": 0},
         },
     )
