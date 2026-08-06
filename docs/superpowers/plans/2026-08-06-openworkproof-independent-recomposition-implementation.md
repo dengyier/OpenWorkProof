@@ -1153,7 +1153,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 
 **Files:** none
 
-- [ ] **Step 1: Record exact evidence**
+- [x] **Step 1: Record exact evidence**
 
   Record:
 
@@ -1166,7 +1166,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   - pip, compileall, diff, and Docker cleanup results;
   - clean worktree status.
 
-- [ ] **Step 2: Keep external states separate**
+- [x] **Step 2: Keep external states separate**
 
   Explicitly retain as unproven:
 
