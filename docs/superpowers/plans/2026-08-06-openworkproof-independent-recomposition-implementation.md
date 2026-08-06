@@ -52,7 +52,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 
 **Files:** none
 
-- [ ] **Step 1: Confirm the implementation branch and clean tree**
+- [x] **Step 1: Confirm the implementation branch and clean tree**
 
   Run:
 
@@ -66,7 +66,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   Expected: both `test` commands exit 0; record the two SHAs. Stop if the
   worktree is dirty instead of discarding unrelated changes.
 
-- [ ] **Step 2: Run the exact pre-change protocol baseline**
+- [x] **Step 2: Run the exact pre-change protocol baseline**
 
   Run:
 
@@ -88,7 +88,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 - Modify: `tests/test_mcp_server.py:222-290`
 - Create: `tests/test_independent_recomposition.py`
 
-- [ ] **Step 1: Make only the Verifier test quota configurable**
+- [x] **Step 1: Make only the Verifier test quota configurable**
 
   Change the existing helper signature and its Verifier child grant. Keep the
   default at one so every pre-existing test is byte-for-byte equivalent:
@@ -119,7 +119,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
       )
   ```
 
-- [ ] **Step 2: Add the five-dimension scenario builder**
+- [x] **Step 2: Add the five-dimension scenario builder**
 
   In `tests/test_independent_recomposition.py`, define one helper that passes
   the unmodified `signed_work_order`, uses `verifier_tool_calls=2`, executes
@@ -214,7 +214,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
       )
   ```
 
-- [ ] **Step 3: Prove the fixture without changing product behaviour**
+- [x] **Step 3: Prove the fixture without changing product behaviour**
 
   Add `test_five_dimension_case_stops_at_evidence_incomplete` and assert the
   first report covers four dimensions, marks `independent_result` false,

@@ -226,6 +226,7 @@ def _run_tests_case(
     role_keys,
     sidecar_receipt_factory,
     now: datetime,
+    verifier_tool_calls: int = 1,
 ):
     work_order = _work_order_with_pr_chain_predicates(
         signed_work_order,
@@ -242,7 +243,7 @@ def _run_tests_case(
         role_keys,
         label="handler-loop:verifier",
         subject_role="Verifier",
-        updates={"quota": {"tool_calls": 1, "repair_rounds": 0}},
+        updates={"quota": {"tool_calls": verifier_tool_calls, "repair_rounds": 0}},
     )
     verifier_issuance = _issue_child(
         ledger_path,
