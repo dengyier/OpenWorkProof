@@ -561,10 +561,15 @@ def _compose_arguments_allowed(
 ) -> bool:
     if tool_name != "owp.compose_proof":
         return True
-    if not isinstance(arguments, ComposeProofArguments) or (
-        arguments.expected_state_version
-        != len(context.ledger_prefix.receipts)
-    ):
+    if not isinstance(arguments, ComposeProofArguments):
+        return False
+    from openworkproof import evidence as _evidence
+
+    expected_version = _evidence._derive_protocol_transaction_version(
+        action_receipts=context.ledger_prefix.receipts,
+        acceptance_receipts=(),
+    )
+    if arguments.expected_state_version != expected_version:
         return False
     if context.current_state == "locally_verified":
         return arguments.previous_report_digest is None

@@ -13,6 +13,7 @@ import pytest
 import dataclasses
 
 import openworkproof.acceptance as acceptance
+import openworkproof.evidence as evidence
 import openworkproof.mcp_server as mcp_server
 from openworkproof.models import (
     AgentRequest,
@@ -42,7 +43,10 @@ def _signed_compose_request(
 ) -> AgentRequest:
     manager = role_keys["Manager"][1]
     arguments = ComposeProofArguments(
-        expected_state_version=len(context.ledger_prefix.receipts),
+        expected_state_version=evidence._derive_protocol_transaction_version(
+                action_receipts=context.ledger_prefix.receipts,
+                acceptance_receipts=(),
+            ),
         previous_report_digest=previous_report_digest,
     )
     return AgentRequest.model_validate(
@@ -531,3 +535,155 @@ def test_independent_pre_start_gate_leaves_snapshot_unchanged(
         )
     assert _snapshot_ledger(case) == before
     assert all(call[0] not in {"prepare", "start_and_wait"} for call in driver.calls)
+
+
+def _recompose_request(
+    case,
+    context,
+    role_keys,
+    now,
+    *,
+    previous_report_digest,
+    nonce_label: str,
+) -> AgentRequest:
+    return _signed_compose_request(
+        case,
+        context,
+        role_keys,
+        now,
+        previous_report_digest=previous_report_digest,
+        nonce_label=nonce_label,
+    )
+
+
+def _run_independent_and_recompose(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+):
+    """Run an independent result then recompose against the first report."""
+    case, first, incomplete = _independent_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    # Commit the independent result first; recomposition is only meaningful
+    # after the independent episode has produced a receipt.
+    from test_mcp_server import _current_run_tests_context
+
+    receipt = _execute_independent_run(
+        case,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        execution_context_id="a1" * 32,
+        container_instance_id_digest="b1" * 32,
+        nonce_label="independent:recompose",
+    )
+    refreshed = _current_run_tests_context(case, fixed_now)
+    first_digest = acceptance.composition_report_digest(first.report)
+    assert first.trigger_receipt.cause.composition_report_digest == first_digest
+    return case, first, refreshed, receipt, first_digest
+
+
+def test_recomposition_requires_current_report_digest(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, refreshed, receipt, first_digest = (
+        _run_independent_and_recompose(
+            tmp_path,
+            signed_work_order,
+            ephemeral_role_keys,
+            sidecar_receipt_factory,
+            fixed_now,
+            monkeypatch,
+        )
+    )
+    good = _recompose_request(
+        case, refreshed, ephemeral_role_keys, fixed_now,
+        previous_report_digest=first_digest,
+        nonce_label="recompose:good",
+    )
+    result = acceptance.compose_proof_transaction(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=refreshed,
+        request=good,
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        clock=lambda: fixed_now,
+    )
+    # The five-dimension chain is closed now: recomposition reaches
+    # proof_ready with both Verifier evidence refs in the report.
+    assert result.report.verifier_conclusion == "proof_ready"
+    coverage = dict(result.report.evidence_coverage)
+    assert coverage["independent_result"] is True
+    test_paths = [item.path for item in result.report.test_evidence_refs]
+    assert any("verifier-independent-result" in path for path in test_paths)
+    assert any("verifier-result" in path for path in test_paths)
+    import sqlite3 as _sql
+
+    connection = _sql.connect(case["ledger_path"])
+    try:
+        reports = connection.execute(
+            "SELECT COUNT(*) FROM composition_reports"
+        ).fetchone()[0]
+        state = connection.execute(
+            "SELECT current_state FROM work_order_state WHERE singleton = 1"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert reports == 2
+    assert state == "proof_ready"
+
+
+def test_recomposition_rejects_null_stale_or_unknown_digest(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, incomplete = _independent_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    first_digest = acceptance.composition_report_digest(first.report)
+    bad_digests = [
+        None,
+        "0" * 64,
+        first_digest[::-1],
+    ]
+    for bad in bad_digests:
+        bad_request = _recompose_request(
+            case, incomplete, ephemeral_role_keys, fixed_now,
+            previous_report_digest=bad,
+            nonce_label=f"recompose:bad:{bad!s}"[:64],
+        )
+        with pytest.raises(
+            acceptance.AcceptanceTransactionError,
+            match="previous_report_digest|arguments|context",
+        ):
+            acceptance.compose_proof_transaction(
+                case["ledger_path"],
+                evidence_root=case["evidence_root"],
+                context=incomplete,
+                request=bad_request,
+                sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+                clock=lambda: fixed_now,
+            )

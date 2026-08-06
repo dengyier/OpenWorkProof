@@ -451,7 +451,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 - Modify: `src/openworkproof/acceptance.py`
 - Modify: `tests/test_independent_recomposition.py`
 
-- [ ] **Step 1: Write RED recomposition request tests**
+- [x] **Step 1: Write RED recomposition request tests**
 
   Add tests that drive a Manager `owp.compose_proof` request from
   `evidence_incomplete` with the correct `previous_report_digest` and
@@ -468,14 +468,14 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   - recomposition continues to produce `evidence_incomplete` when the
     five-dimension chain is still incomplete.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
   Expected: FAIL because the current
   `_derive_compose_expected_arguments` always returns
   `previous_report_digest = None` and the request digest check therefore
   rejects a Manager request that correctly supplies the trigger digest.
 
-- [ ] **Step 3: Implement recomposition argument derivation**
+- [x] **Step 3: Implement recomposition argument derivation**
 
   Replace the hard-coded `previous_report_digest = None` with a
   state-driven value:
@@ -534,7 +534,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   )
   ```
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
   Run:
 
@@ -544,7 +544,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 
   Expected: PASS with both slices green.
 
-- [ ] **Step 5: Commit current-report binding**
+- [x] **Step 5: Commit current-report binding**
 
   ```bash
   git add src/openworkproof/acceptance.py tests/test_independent_recomposition.py
@@ -558,7 +558,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 - Modify: `src/openworkproof/acceptance.py`
 - Modify: `tests/test_independent_recomposition.py`
 
-- [ ] **Step 1: Write RED recomposition receipt tests**
+- [x] **Step 1: Write RED recomposition receipt tests**
 
   Drive a recomposition that succeeds and assert the recomposition Manager
   ToolCallReceipt has:
@@ -572,13 +572,13 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
     latest trigger's report digest and the recomposition digest refers to
     the second report.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
   Expected: FAIL because the recomposition receipt currently parents only
   the Manager Grant issuance receipt and active patch, omitting the trigger
   and the independent result.
 
-- [ ] **Step 3: Implement recomposition causal parents**
+- [x] **Step 3: Implement recomposition causal parents**
 
   Extend `_compose_causal_parents` so the recomposition branch returns
   the recomposition Manager Grant, the latest `proof_composed` trigger,
@@ -620,7 +620,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   receipt. The exact parent vector is Grant issuance, current composition
   trigger, independent result, in ledger sequence order.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
   Run:
 
@@ -644,7 +644,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 - Modify: `src/openworkproof/acceptance.py`
 - Modify: `tests/test_independent_recomposition.py`
 
-- [ ] **Step 1: Write RED second-report tests**
+- [x] **Step 1: Write RED second-report tests**
 
   Drive a successful recomposition and assert the second CompositionReport:
 
@@ -662,13 +662,13 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   - persists as an immutable row in `composition_reports`; the first
     row remains unchanged.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
   Expected: FAIL because the report currently selects the primary Verifier
   receipt as `verifier_reference` and `test_evidence_refs` does not look
   up the `verifier_independent_result` slot.
 
-- [ ] **Step 3: Implement five-dimension report derivation**
+- [x] **Step 3: Implement five-dimension report derivation**
 
   Replace the current Verifier receipt lookup with a purpose-based selector
   that walks the recomposition prefix and returns:
@@ -762,7 +762,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   `verifier_independent_result`, reject duplicate paths with differing
   digests, and return the path-sorted tuple.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
   Run:
 

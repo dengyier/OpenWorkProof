@@ -16,6 +16,7 @@ from openworkproof.models import (
 from conftest import SHA256_A, SHA256_B, SHA256_C, SHA256_D
 
 from openworkproof import acceptance
+from openworkproof import evidence
 
 
 @pytest.fixture(autouse=True)
@@ -406,7 +407,10 @@ def _compose_case(
     assert context.current_state == "locally_verified"
     manager = ephemeral_role_keys["Manager"][1]
     arguments = ComposeProofArguments(
-        expected_state_version=len(context.ledger_prefix.receipts),
+        expected_state_version=evidence._derive_protocol_transaction_version(
+                action_receipts=context.ledger_prefix.receipts,
+                acceptance_receipts=(),
+            ),
         previous_report_digest=None,
     )
     request = AgentRequest.model_validate(

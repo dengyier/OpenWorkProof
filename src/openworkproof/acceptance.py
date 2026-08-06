@@ -191,10 +191,7 @@ def _derive_composition_report(
         for dimension in work_order.required_evidence_dimensions
         if not coverage[dimension]
     ]
-    complete = (
-        not missing_dimensions
-        and context.current_state in {"locally_verified", "proof_ready"}
-    )
+    complete = not missing_dimensions
     unresolved_failures = (
         ()
         if complete
@@ -208,6 +205,7 @@ def _derive_composition_report(
     developer_ref: CorrelationReference | None = None
     verifier_ref: CorrelationReference | None = None
     test_refs: list[EvidenceRef] = []
+    verifier_receipts: list[ToolCallReceipt] = []
     for receipt in prefix:
         if not isinstance(receipt, ToolCallReceipt) or receipt.correlation_factors is None:
             continue
@@ -217,12 +215,40 @@ def _derive_composition_report(
                 receipt_digest=receipt.digest,
                 factors=receipt.correlation_factors.model_dump(mode="json"),
             )
-        elif role == "Verifier" and verifier_ref is None:
-            verifier_ref = CorrelationReference(
-                receipt_digest=receipt.digest,
-                factors=receipt.correlation_factors.model_dump(mode="json"),
-            )
+        elif role == "Verifier":
+            verifier_receipts.append(receipt)
             test_refs.extend(receipt.evidence_refs)
+    # The verifier reference is the independent result receipt when the
+    # five-dimension recomposition chain is present; otherwise the first
+    # primary Verifier execution remains authoritative.
+    if verifier_receipts:
+        independent = next(
+            (
+                receipt
+                for receipt in reversed(verifier_receipts)
+                if any(
+                    reference.path
+                    in {
+                        f"evidence/{artifact.path}"
+                        for artifact in work_order.evidence_policy.artifacts
+                        if artifact.purpose == "verifier_independent_result"
+                    }
+                    for reference in receipt.evidence_refs
+                )
+            ),
+            None,
+        )
+        selected_verifier = independent or verifier_receipts[0]
+        verifier_ref = CorrelationReference(
+            receipt_digest=selected_verifier.digest,
+            factors=selected_verifier.correlation_factors.model_dump(mode="json"),
+        )
+    test_refs = tuple(
+        sorted(
+            set(test_refs),
+            key=lambda item: item.path.encode(),
+        )
+    )
     if developer_ref is None:
         raise AcceptanceTransactionError(
             "composition requires a developer execution reference"
@@ -286,8 +312,7 @@ def _derive_composition_report(
         evidence_coverage=FrozenDict(coverage),
         independence_assessment=independence.model_dump(mode="json"),
         test_evidence_refs=tuple(
-            item.model_dump(mode="json")
-            for item in _sorted_unique_evidence_refs_for_test(prefix)
+            item.model_dump(mode="json") for item in test_refs
         ),
         unresolved_failures=unresolved,
         warnings=warnings,
@@ -523,20 +548,39 @@ def _compose_causal_parents(
             "compose grant issuance is unavailable"
         )
     parents[issuance.receipt_id] = issuance
-    active_patch_id = context.active_patch_receipt_id
-    if active_patch_id is not None and active_patch_id in by_id:
-        parents[active_patch_id] = by_id[active_patch_id]
-    passing = [
-        receipt
-        for receipt in prefix
-        if isinstance(receipt, ToolCallReceipt)
-        and receipt.tool_name == "owp.run_tests"
-        and receipt.policy_decision == "allow"
-        and receipt.execution_status == "succeeded"
-    ]
-    if passing:
-        latest = passing[-1]
-        parents[latest.receipt_id] = latest
+    if context.current_state == "evidence_incomplete":
+        trigger = by_id.get(
+            context.causal_state.latest_composition_trigger_id
+        )
+        independent = by_id.get(
+            context.causal_state.independent_result_receipt_id
+        )
+        if (
+            trigger is None
+            or independent is None
+            or not isinstance(trigger, SystemEventReceipt)
+            or trigger.system_event_name != "proof_composed"
+        ):
+            raise AcceptanceTransactionError(
+                "recomposition causal inputs are unavailable"
+            )
+        parents[trigger.receipt_id] = trigger
+        parents[independent.receipt_id] = independent
+    else:
+        active_patch_id = context.active_patch_receipt_id
+        if active_patch_id is not None and active_patch_id in by_id:
+            parents[active_patch_id] = by_id[active_patch_id]
+        passing = [
+            receipt
+            for receipt in prefix
+            if isinstance(receipt, ToolCallReceipt)
+            and receipt.tool_name == "owp.run_tests"
+            and receipt.policy_decision == "allow"
+            and receipt.execution_status == "succeeded"
+        ]
+        if passing:
+            latest = passing[-1]
+            parents[latest.receipt_id] = latest
     return tuple(
         receipt.receipt_id
         for receipt in sorted(
@@ -893,11 +937,31 @@ def compose_proof_transaction(
         )
         if request.tool_name != "owp.compose_proof":
             raise AcceptanceTransactionError("compose request tool is invalid")
+        if context.current_state == "locally_verified":
+            expected_previous_report_digest = None
+        elif context.current_state == "evidence_incomplete":
+            current_report = _current_report(path, context.work_order)
+            trigger = _latest_proof_composed_trigger(context)
+            expected_previous_report_digest = composition_report_digest(
+                current_report
+            )
+            if (
+                getattr(trigger.cause, "composition_report_digest", None)
+                != expected_previous_report_digest
+            ):
+                raise AcceptanceTransactionError(
+                    "current report does not match its proof-composed trigger"
+                )
+        else:
+            raise AcceptanceTransactionError(
+                "composition state is invalid"
+            )
         expected = ComposeProofArguments(
-            expected_state_version=len(context.ledger_prefix.receipts),
-            previous_report_digest=(
-                None if context.current_state == "locally_verified" else None
+            expected_state_version=evidence._derive_protocol_transaction_version(
+                action_receipts=context.ledger_prefix.receipts,
+                acceptance_receipts=(),
             ),
+            previous_report_digest=expected_previous_report_digest,
         )
         if request.arguments_digest != request_arguments_digest(
             "owp.compose_proof", expected
@@ -920,6 +984,13 @@ def compose_proof_transaction(
         )
         prefix = tuple(context.ledger_prefix.receipts) + (initiator,)
         report = _derive_composition_report(context, initiator, prefix, now)
+        if (
+            context.current_state == "evidence_incomplete"
+            and report.verifier_conclusion != "proof_ready"
+        ):
+            raise AcceptanceTransactionError(
+                "recomposition remains evidence-incomplete"
+            )
         trigger = _build_proof_composed_receipt(
             context,
             initiator,
@@ -1284,6 +1355,24 @@ def _authorize_acceptance_request(
         raise AcceptanceTransactionError(
             "acceptance request nonce is already used"
         )
+
+
+def _latest_proof_composed_trigger(
+    context: AuthorizationContext,
+) -> SystemEventReceipt:
+    trigger_id = context.causal_state.latest_composition_trigger_id
+    matches = tuple(
+        receipt
+        for receipt in context.ledger_prefix.receipts
+        if isinstance(receipt, SystemEventReceipt)
+        and receipt.receipt_id == trigger_id
+        and receipt.system_event_name == "proof_composed"
+    )
+    if len(matches) != 1:
+        raise AcceptanceTransactionError(
+            "current composition trigger is unavailable"
+        )
+    return matches[0]
 
 
 def request_acceptance_transaction(

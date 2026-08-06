@@ -856,7 +856,7 @@ def test_rollback_same_state_fails_closed_without_rework_episode_history(
     assert decision.error_code == "TRANSITION_CONTEXT_UNAVAILABLE"
 
 
-def test_independent_verifier_same_state_result_requires_history_context(
+def test_independent_verifier_same_state_result_is_authorized(
     signed_work_order: WorkOrder,
     sidecar_receipt_factory,
     public_keys: dict,
@@ -879,8 +879,10 @@ def test_independent_verifier_same_state_result_requires_history_context(
         now=fixed_now,
     )
 
-    assert decision.allowed is False
-    assert decision.error_code == "TRANSITION_CONTEXT_UNAVAILABLE"
+    # Task 2 of the independent-recomposition slice authorizes the
+    # same-state independent Verifier rerun at the receipt level; the
+    # coordinator enforces the pre-start gate before execution.
+    assert decision.allowed is True
 
 
 @pytest.mark.parametrize(
