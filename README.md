@@ -165,7 +165,7 @@ python3.12 -m venv .venv
 ## 项目主体
 
 - 技术 Owner：dengyier
-- 独立 Acceptor：龙胜海
+- 独立 Acceptor：待定（当前不绑定真实个人）
 - 版权主体：成都星火领航科技有限公司
 
 ---

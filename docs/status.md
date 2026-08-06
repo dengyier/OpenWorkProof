@@ -195,7 +195,7 @@ execution ID 和可验证启动/结果回执。deny Receipt、rollback 和 Accep
 ## 项目主体说明
 
 技术 Owner：dengyier
-独立 Acceptor：龙胜海
+独立 Acceptor：待定（当前不绑定真实个人）
 版权主体：成都星火领航科技有限公司
 
 以上角色已经作为项目责任角色记录，但不能据此推断 Day 0 人类签署、
