@@ -85,16 +85,21 @@ WorkOrder            CapabilityGrant        ActionReceipt          AcceptanceRec
 
 **已实现并验证（公开快照）：**
 
-- 四类协议对象模型、RFC 8785 JCS + Ed25519 签名、五角色身份绑定
+- 四类协议对象模型、RFC 8785 JCS + Ed25519 签名、六角色身份绑定
+  （Maintainer/Manager/Developer/Verifier/Sidecar/Acceptor，Acceptor 独立密钥）
 - SQLite 权威账本、Root/child Grant 原子签发与撤销、配额回放
 - 纯事前授权：工具调用 / 人工决策 / 回滚三类 PolicyDecision
 - 因果回放层 + 策略回放层 + 五输入离线验证器
 - group-aware 证据 staging、原子提交、no-replace 发布、崩溃恢复
 - 首个 Verifier `run_tests` 可信协调切片（含真实子进程崩溃注入验证）
-- **全量测试：1247 passed**
+- 确定性 CompositionReport 与 `owp.compose_proof` 原子合成事务
+  （Manager 发起收据 + 报告 + proof_composed 收据一次提交）
+- 原子 final-acceptance 请求、无密钥外部签名草稿与 Acceptor 签名验收提交
+  （proof_ready → awaiting_human → accepted，本地合成 Acceptor 验证）
+- **全量测试：2142 passed**（required-live Docker 模式，0 skip）
 
-**尚未完成：** CLI、MCP 传输服务器、Docker 生产执行器、deny/rollback/
-acceptance 生产事务、Day 0 执行门。
+**尚未完成：** Acceptor 拒绝路径、独立结果（independent-result）执行 episode、
+CLI、MCP 传输服务器、Docker 生产执行器、deny/rollback 生产事务、Day 0 执行门。
 
 > 我们把「尚未完成什么」写得和「已经完成什么」一样清楚。
 > 这不是谦虚，这是协议项目应有的证据标准。

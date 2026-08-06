@@ -88,16 +88,35 @@
   可信 handler；正常结果进入
   stage→commit→publish→mark committed，handler 异常则提交
   已扣费、无证据附件的 `allow/failed + HANDLER_ERROR` Receipt。
+- Task 14 独立 Acceptor 权威：WorkOrder 扩为六角色身份绑定
+  （Acceptor 密钥独立于 Maintainer），AcceptanceReceipt 仅接受
+  WorkOrder 绑定的 Acceptor 签名，final-acceptance 请求必须声明
+  `required_role = Acceptor`，v0.1 schema 与注册表锚点已随模型
+  权威重生成。
+- Task 15 确定性 proof composition：`CompositionReport` 作为
+  可重哈希的权威账本工件，`owp.compose_proof` 在单目标锁与一个
+  `BEGIN IMMEDIATE` 内原子提交 Manager 发起收据、报告行、
+  proof_composed 收据、配额事件、状态与版本；局部缺失证据的
+  首次合成收敛为 `evidence_incomplete`。
+- Task 16 final-acceptance 事务链：`request_acceptance_transaction`
+  从 proof_ready 原子进入 awaiting_human（1 小时 + WorkOrder 期限
+  约束），`prepare_acceptance` 在无私钥输入下返回唯一可外部签名的
+  规范草稿，`commit_acceptance` 仅接受 WorkOrder 绑定 Acceptor 的
+  签名并原子提交 `accepted` 状态；compose 收据引发的状态转换与
+  Acceptor 验收转换已在状态机中由收据级校验授权。
 
 ## 当前验证快照
 
 - Policy 专项：101 passed；
 - Policy、Composition 与 Receipt-chain 专项：540 passed；
 - Receipt-chain 专项：407 passed；
-- 全量测试：1247 passed；
+- 全量测试（required-live Docker，0 skip）：2142 passed，
+  另有 3 个 candidate-inventory 绑定测试因当前分支 revision 尚无
+  对应候选库存而失败（外部状态，不改写历史候选库存）；
 - 独立规格复核：7B4_SPEC_PASS；
 - 独立质量复核：7B4_QUALITY_PASS；
-- pip check、compileall 和 git diff check：通过。
+- pip check、compileall 和 git diff check：通过；
+- OpenWorkProof Docker 容器与卷残留：0。
 
 ## 重要边界
 
@@ -125,9 +144,10 @@ Developer mode 生产入口。当前目标锁与内部 journal 能区分：
 从旧开发快照打开的 ledger 会在目标锁内仅新增这张内部表，
 不改变 Receipt、sequence、配额、协议状态或状态版本。
 要自动收敛该不确定分支，仍需真实无网执行器提供稳定
-execution ID 和可验证启动/结果回执。deny Receipt、rollback 和 Acceptance
-生产事务也尚未完成。Task 7 与完整 Task 9 仍未完成，Day 0
-执行门仍为 FAIL。
+execution ID 和可验证启动/结果回执。deny Receipt 与 rollback
+生产事务尚未完成；acceptance 生产事务（compose/request/prepare/
+commit）已实现并验证。独立结果执行 episode 与完整 Task 9
+composition 仍未完成，Day 0 执行门仍为 FAIL。
 
 ## 已完成（按任务切片）
 
@@ -171,16 +191,25 @@ execution ID 和可验证启动/结果回执。deny Receipt、rollback 和 Accep
   handler；内部执行 journal 已用真实子进程崩溃注入验证
   RESERVED 安全重试、未确认启动阻断与已提交 Receipt 自动收敛；
   旧 ledger 可受锁迁移内部 journal schema，不伪造协议版本步。
+- Task 14 六角色信任模型：Acceptor 独立密钥绑定、AcceptanceReceipt
+  签名权威迁移、final-acceptance 角色矩阵与 v0.1 schema 重生成。
+- Task 15 确定性 CompositionReport 与 `owp.compose_proof` 原子合成。
+- Task 16 独立验收事务链：原子 final-acceptance 请求、无密钥
+  prepare 草稿与 Acceptor 签名 commit（awaiting_human → accepted）。
 
 ## 尚未完成
 
 - `run_tests` 的真实无网执行器、稳定 execution ID、启动/结果
   回执与 `STARTED_UNCONFIRMED` 自动恢复，以及 Developer mode 与 MCP 入口；
+- 独立结果（independent-result）执行 episode 与基于五维证据的
+  完整 recomposition → proof_ready 链（本切片测试用四维
+  authority/scope/execution/result WorkOrder 变体验证事务本身）；
 - deny/rollback 生产事务和剩余入口的全局 nonce 处理；
+- Acceptor 拒绝（rejection）收据与拒绝终态事务；
 - 其他 ToolCall handler 与 evidence publication 的调用闭包，
-  rollback handler 及其结果/Receipt 闭包，以及 acceptance 事务闭包；
+  rollback handler 及其结果/Receipt 闭包；
 - ResolutionManifest 原始字节的独立读取与重哈希、完整 Task 9
-  composition 和 Acceptance；
+  composition 和外部真实 Acceptor 独立环境复现；
 - CLI、MCP Sidecar 和 AgentTeams 接线；
 - Rich #4196 完整演示；
 - Acceptor 独立环境复现；
