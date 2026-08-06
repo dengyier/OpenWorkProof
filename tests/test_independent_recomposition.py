@@ -242,6 +242,7 @@ def _execute_independent_run(
     container_instance_id_digest: str = "b" * 64,
     nonce_label: str = "independent:run-1",
     actual_exit_code: int | None = 0,
+    failure_code: str | None = None,
 ):
     from test_mcp_server import (
         _current_run_tests_context,
@@ -261,8 +262,46 @@ def _execute_independent_run(
         case,
         case["ledger_path"].parent,
         ephemeral_role_keys,
-        _FakeRunTestsExecutionDriver(actual_exit_code=actual_exit_code),
+        _FakeRunTestsExecutionDriver(
+            actual_exit_code=(
+                actual_exit_code if failure_code is None else None
+            ),
+            failure_code=failure_code,
+        ),
         context=evidence_incomplete_context,
+        request=request,
+        request_arguments=arguments,
+        execution_facts=facts,
+        now=fixed_now,
+    )
+
+
+def _execute_independent_run_with_context(
+    case,
+    ephemeral_role_keys,
+    fixed_now,
+    *,
+    context,
+    execution_context_id: str,
+    container_instance_id_digest: str,
+    nonce_label: str,
+):
+    from test_mcp_server import _execute_run_tests_case
+
+    request, arguments, facts = _independent_test_request(
+        case,
+        ephemeral_role_keys,
+        fixed_now,
+        nonce_label=nonce_label,
+        execution_context_id=execution_context_id,
+        container_instance_id_digest=container_instance_id_digest,
+    )
+    return _execute_run_tests_case(
+        case,
+        case["ledger_path"].parent,
+        ephemeral_role_keys,
+        _FakeRunTestsExecutionDriver(),
+        context=context,
         request=request,
         request_arguments=arguments,
         execution_facts=facts,
@@ -1213,3 +1252,607 @@ def test_two_report_bundle_tampering_fails_closed(
             reports=wrong_reports,
             public_keys=public_keys,
         )
+
+
+def _latest_proof_composed_trigger_id(ledger_path) -> str:
+    """Find the latest proof_composed trigger receipt id."""
+    from openworkproof.models import SystemEventReceipt  # noqa: PLC0415
+
+    import sqlite3 as _sql
+
+    connection = _sql.connect(ledger_path)
+    try:
+        _, receipts, _, _ = evidence._replay_receipt_publication_ledger(
+            connection
+        )
+    finally:
+        connection.close()
+    triggers = [
+        receipt
+        for receipt in receipts
+        if isinstance(receipt, SystemEventReceipt)
+        and receipt.system_event_name == "proof_composed"
+    ]
+    return max(triggers, key=lambda item: item.sequence).receipt_id
+
+
+@pytest.mark.parametrize(
+    "failure_code", ["TIMEOUT", "OUTPUT_LIMIT", "DISK_LIMIT"]
+)
+def test_independent_infrastructure_failure_replays_exactly(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+    failure_code,
+) -> None:
+    case, first, incomplete = _independent_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    receipt = _execute_independent_run(
+        case,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        execution_context_id="a7" * 32,
+        container_instance_id_digest="b8" * 32,
+        nonce_label=f"independent:infra-{failure_code}",
+        failure_code=failure_code,
+    )
+    assert receipt.execution_status == "failed"
+    assert receipt.execution_error_code == failure_code
+    assert receipt.state_before == "evidence_incomplete"
+    assert receipt.state_after == "evidence_incomplete"
+    assert receipt.policy_decision == "allow"
+    # The closed failure still carries the proof_composed parent and exact
+    # replay accepts it against the immutable first report.
+    trigger_id = _latest_proof_composed_trigger_id(case["ledger_path"])
+    assert trigger_id in receipt.parent_receipt_ids
+    work_order = case["work_order"]
+    effective_grants, grant_attempts, receipts, committed, public_keys = (
+        _offline_bundle(case, work_order, first, None)
+    )
+    verified = acceptance.verify_composition_bundle(
+        work_order=work_order,
+        effective_grants=effective_grants,
+        grant_attempts=grant_attempts,
+        receipts=receipts,
+        committed_evidence=committed,
+        reports=(first.report,),
+        public_keys=public_keys,
+    )
+    assert verified == first.report
+
+
+def test_offline_bundle_rejects_duplicate_or_reordered_reports(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, refreshed, receipt, first_digest = (
+        _run_independent_and_recompose(
+            tmp_path,
+            signed_work_order,
+            ephemeral_role_keys,
+            sidecar_receipt_factory,
+            fixed_now,
+            monkeypatch,
+        )
+    )
+    second = acceptance.compose_proof_transaction(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=refreshed,
+        request=_recompose_request(
+            case, refreshed, ephemeral_role_keys, fixed_now,
+            previous_report_digest=first_digest,
+            nonce_label="recompose:dup-reject",
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        clock=lambda: fixed_now,
+    )
+    work_order = case["work_order"]
+    effective_grants, grant_attempts, receipts, committed, public_keys = (
+        _offline_bundle(case, work_order, first, second)
+    )
+    for reports in (
+        (second.report, second.report),
+        (first.report, first.report),
+        (second.report, first.report),
+    ):
+        with pytest.raises(
+            acceptance.AcceptanceTransactionError,
+            match="duplicated|out of order",
+        ):
+            acceptance.verify_composition_bundle(
+                work_order=work_order,
+                effective_grants=effective_grants,
+                grant_attempts=grant_attempts,
+                receipts=receipts,
+                committed_evidence=committed,
+                reports=reports,
+                public_keys=public_keys,
+            )
+
+
+def test_offline_bundle_rejects_receipt_correlation_and_key_tampering(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, refreshed, receipt, first_digest = (
+        _run_independent_and_recompose(
+            tmp_path,
+            signed_work_order,
+            ephemeral_role_keys,
+            sidecar_receipt_factory,
+            fixed_now,
+            monkeypatch,
+        )
+    )
+    second = acceptance.compose_proof_transaction(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=refreshed,
+        request=_recompose_request(
+            case, refreshed, ephemeral_role_keys, fixed_now,
+            previous_report_digest=first_digest,
+            nonce_label="recompose:tamper-matrix",
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        clock=lambda: fixed_now,
+    )
+    work_order = case["work_order"]
+    effective_grants, grant_attempts, receipts, committed, public_keys = (
+        _offline_bundle(case, work_order, first, second)
+    )
+
+    def verify_with(*, receipts_override=None, keys_override=None):
+        return acceptance.verify_composition_bundle(
+            work_order=work_order,
+            effective_grants=effective_grants,
+            grant_attempts=grant_attempts,
+            receipts=(
+                receipts if receipts_override is None else receipts_override
+            ),
+            committed_evidence=committed,
+            reports=(first.report, second.report),
+            public_keys=(
+                public_keys if keys_override is None else keys_override
+            ),
+        )
+
+    # 1) Receipt mutation flips the independent receipt state_after.
+    tampered = tuple(
+        r.model_copy(update={"state_after": "locally_verified"})
+        if r.receipt_id == receipt.receipt_id
+        else r
+        for r in receipts
+    )
+    with pytest.raises(acceptance.AcceptanceTransactionError):
+        verify_with(receipts_override=tampered)
+
+    # 2) Correlation-factor mutation breaks the fresh-context replay check.
+    factored = tuple(
+        r.model_copy(
+            update={
+                "correlation_factors": r.correlation_factors.model_copy(
+                    update={"execution_context_id": None}
+                )
+            }
+        )
+        if r.receipt_id == receipt.receipt_id
+        and r.correlation_factors is not None
+        else r
+        for r in receipts
+    )
+    with pytest.raises(acceptance.AcceptanceTransactionError):
+        verify_with(receipts_override=factored)
+
+    # 3) Public-key substitution breaks the grant chain signature checks.
+    key_ids = list(public_keys)
+    wrong = dict(public_keys)
+    wrong[key_ids[0]] = wrong[key_ids[1]]
+    with pytest.raises(acceptance.AcceptanceTransactionError):
+        verify_with(keys_override=wrong)
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "receipts",
+        "receipt_parents",
+        "composition_reports",
+        "evidence_publications",
+    ],
+)
+def test_live_ledger_table_tamper_fails_replay(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+    table,
+) -> None:
+    case, first, refreshed, receipt, first_digest = (
+        _run_independent_and_recompose(
+            tmp_path,
+            signed_work_order,
+            ephemeral_role_keys,
+            sidecar_receipt_factory,
+            fixed_now,
+            monkeypatch,
+        )
+    )
+    second = acceptance.compose_proof_transaction(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=refreshed,
+        request=_recompose_request(
+            case, refreshed, ephemeral_role_keys, fixed_now,
+            previous_report_digest=first_digest,
+            nonce_label="recompose:table-tamper",
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        clock=lambda: fixed_now,
+    )
+    import sqlite3 as _sql
+
+    connection = _sql.connect(case["ledger_path"])
+    try:
+        if table == "receipts":
+            connection.execute(
+                "UPDATE receipts SET receipt_json = '{}' "
+                "WHERE rowid = (SELECT MAX(rowid) FROM receipts)"
+            )
+        elif table == "receipt_parents":
+            connection.execute(
+                "DELETE FROM receipt_parents "
+                "WHERE rowid = (SELECT MAX(rowid) FROM receipt_parents)"
+            )
+        elif table == "composition_reports":
+            connection.execute(
+                "UPDATE composition_reports SET report_json = '{}' "
+                "WHERE rowid = 1"
+            )
+        elif table == "evidence_publications":
+            connection.execute(
+                "UPDATE evidence_publications SET digest = ?, state = 'COMMITTING' "
+                "WHERE rowid = 1",
+                ("0" * 64,),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(Exception):
+        connection = evidence.connect_ledger(case["ledger_path"])
+        try:
+            work_order, _, _, _ = (
+                evidence._replay_receipt_publication_ledger(connection)
+            )
+            if table == "composition_reports":
+                evidence._validated_composition_reports(
+                    connection, work_order
+                )
+        finally:
+            connection.close()
+
+
+def test_recomposition_precommit_failure_is_atomic(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, refreshed, receipt, first_digest = (
+        _run_independent_and_recompose(
+            tmp_path,
+            signed_work_order,
+            ephemeral_role_keys,
+            sidecar_receipt_factory,
+            fixed_now,
+            monkeypatch,
+        )
+    )
+    before = _snapshot_ledger(case)
+    good = _recompose_request(
+        case, refreshed, ephemeral_role_keys, fixed_now,
+        previous_report_digest=first_digest,
+        nonce_label="recompose:precommit",
+    )
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("injected pre-commit failure")
+
+    monkeypatch.setattr(acceptance, "_insert_compose_rows", boom)
+    with pytest.raises(RuntimeError, match="pre-commit"):
+        acceptance.compose_proof_transaction(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=refreshed,
+            request=good,
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            clock=lambda: fixed_now,
+        )
+    monkeypatch.undo()
+    # Every authoritative table and counter is unchanged.
+    assert _snapshot_ledger(case) == before
+
+
+def test_independent_cleanup_failure_keeps_committed_receipt(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, incomplete = _independent_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    from test_mcp_server import (
+        _current_run_tests_context,
+        _execute_run_tests_case,
+    )
+
+    request, arguments, facts = _independent_test_request(
+        case, ephemeral_role_keys, fixed_now,
+        nonce_label="independent:cleanup-fail",
+        execution_context_id="c9" * 32,
+        container_instance_id_digest="d9" * 32,
+    )
+    context = _current_run_tests_context(case, fixed_now)
+    driver = _FakeRunTestsExecutionDriver(
+        cleanup_error=RuntimeError("cleanup exploded")
+    )
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError, match="RECOVERY_REQUIRED"
+    ):
+        _execute_run_tests_case(
+            case,
+            case["ledger_path"].parent,
+            ephemeral_role_keys,
+            driver,
+            context=context,
+            request=request,
+            request_arguments=arguments,
+            execution_facts=facts,
+            now=fixed_now,
+        )
+    # The publication committed before cleanup; reopening proves the exact
+    # receipt is present and the episode is not double-executed.
+    import sqlite3 as _sql
+
+    connection = _sql.connect(case["ledger_path"])
+    try:
+        independent_receipts = connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE receipt_json LIKE "
+            "'%verifier-independent-result%'"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert independent_receipts == 1
+    # The stored execution record still exists for an explicit recovery pass;
+    # the committed receipt is never double-applied by a fresh attempt, so a
+    # re-entrant call with the same episode is refused or deferred, never a
+    # second success.
+    from test_mcp_server import _current_run_tests_context as _refresh
+
+    reentrant_context = _refresh(case, fixed_now)
+    request2, arguments2, facts2 = _independent_test_request(
+        case, ephemeral_role_keys, fixed_now,
+        nonce_label="independent:cleanup-reenter",
+        execution_context_id="e9" * 32,
+        container_instance_id_digest="f9" * 32,
+    )
+    with pytest.raises(
+        (
+            mcp_server.HandlerCoordinationError,
+            mcp_server.ToolCallDenied,
+        )
+    ):
+        _execute_run_tests_case(
+            case,
+            case["ledger_path"].parent,
+            ephemeral_role_keys,
+            _FakeRunTestsExecutionDriver(),
+            context=reentrant_context,
+            request=request2,
+            request_arguments=arguments2,
+            execution_facts=facts2,
+            now=fixed_now,
+        )
+    connection = _sql.connect(case["ledger_path"])
+    try:
+        independent_receipts = connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE receipt_json LIKE "
+            "'%verifier-independent-result%'"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert independent_receipts == 1
+
+
+def test_independent_prestart_rejects_non_incomplete_state(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from openworkproof.policy import AuthorizationPolicyError
+    from test_mcp_server import (
+        _current_run_tests_context,
+        _execute_run_tests_case,
+        _run_tests_case,
+    )
+
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    _execute_run_tests_case(
+        case,
+        tmp_path,
+        ephemeral_role_keys,
+        _FakeRunTestsExecutionDriver(),
+    )
+    locally_verified = _current_run_tests_context(case, fixed_now)
+    assert locally_verified.current_state == "locally_verified"
+    before = _snapshot_ledger(case)
+    request, arguments, facts = _independent_test_request(
+        case, ephemeral_role_keys, fixed_now,
+        nonce_label="independent:wrong-state",
+        execution_context_id="f7" * 32,
+        container_instance_id_digest="a8" * 32,
+    )
+    with pytest.raises(
+        (
+            mcp_server.HandlerCoordinationError,
+            mcp_server.ToolCallDenied,
+            AuthorizationPolicyError,
+        )
+    ):
+        _execute_run_tests_case(
+            case,
+            tmp_path,
+            ephemeral_role_keys,
+            _FakeRunTestsExecutionDriver(),
+            context=locally_verified,
+            request=request,
+            request_arguments=arguments,
+            execution_facts=facts,
+            now=fixed_now,
+        )
+    assert _snapshot_ledger(case) == before
+
+
+def test_independent_payload_over_slot_limit_is_rejected(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, incomplete = _independent_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    slot = next(
+        artifact
+        for artifact in case["work_order"].evidence_policy.artifacts
+        if artifact.purpose == "verifier_independent_result"
+    )
+    oversized = b"x" * (slot.max_size_bytes + 1)
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError, match="EVIDENCE_SLOT_UNAVAILABLE"
+    ):
+        mcp_server._next_test_reference(
+            incomplete,
+            case["arguments"],
+            oversized,
+            purpose="verifier_independent_result",
+        )
+
+
+def test_independent_reuses_primary_execution_ids_rejected(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, incomplete = _independent_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    # "1" * 64 / "2" * 64 are the primary verifier execution identifiers;
+    # reusing them in the independent episode must fail closed.
+    with pytest.raises(
+        mcp_server.ToolCallDenied, match="PREDICATE_DENIED"
+    ):
+        _execute_independent_run(
+            case,
+            ephemeral_role_keys,
+            sidecar_receipt_factory,
+            fixed_now,
+            execution_context_id="1" * 64,
+            container_instance_id_digest="2" * 64,
+            nonce_label="independent:reuse-id",
+        )
+
+
+def test_independent_active_patch_mismatch_rejected(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, incomplete = _independent_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    stale = dataclasses.replace(
+        incomplete,
+        causal_state=dataclasses.replace(
+            incomplete.causal_state,
+            active_patch_receipt_id="deadbeef" * 8,
+        ),
+    )
+    before = _snapshot_ledger(case)
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError,
+        match="does not reproduce exactly|not the current ledger snapshot",
+    ):
+        _execute_independent_run_with_context(
+            case,
+            ephemeral_role_keys,
+            fixed_now,
+            context=stale,
+            execution_context_id="f9" * 32,
+            container_instance_id_digest="a0" * 32,
+            nonce_label="independent:stale-patch",
+        )
+    assert _snapshot_ledger(case) == before

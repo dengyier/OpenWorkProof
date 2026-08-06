@@ -2588,17 +2588,19 @@ class ToolCallReceipt(AgentReceiptEnvelope):
                 if args.test_mode == "verifier"
                 else "developer_test_result"
             )
-            # An independent_verifier episode reuses the verifier test
-            # profile but stores its payload in the dedicated independent
-            # evidence slot. Allow either purpose for the verifier mode
-            # when the prior state is evidence_incomplete (the independent
-            # episode signature), and require the verifier_result slot for
-            # the primary episode.
+            # The verifier_independent_result slot is only reachable from an
+            # evidence_incomplete prior state (the independent episode
+            # signature). Primary-episode Verifier receipts must use the
+            # verifier_result slot even though they share the verifier test
+            # profile.
             if args.test_mode == "verifier":
-                allowed = {
-                    "verifier_result",
-                    "verifier_independent_result",
-                }
+                if self.state_before == "evidence_incomplete":
+                    allowed = {
+                        "verifier_result",
+                        "verifier_independent_result",
+                    }
+                else:
+                    allowed = {"verifier_result"}
                 if referenced_slots[result_ref.path].purpose not in allowed:
                     raise ValueError(
                         "test result evidence has the wrong slot purpose"

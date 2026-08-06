@@ -1309,6 +1309,7 @@ def _validate_new_receipt_publication(
                 receipt=receipt,
                 public_keys=public_keys,
                 now=now,
+                allow_independent_verifier_rerun=True,
             )
             if state_before is state_after
             else apply_state_transition(

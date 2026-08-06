@@ -393,11 +393,15 @@ def replay_authorization_causality(
                 if active_patch is not None:
                     add_parent(active_patch)
             elif receipt.tool_name == "owp.run_tests":
+                # An independent episode is identified by its state pair and
+                # role alone: both succeeded and closed infrastructure-failed
+                # (TIMEOUT / OUTPUT_LIMIT / DISK_LIMIT) receipts carry the
+                # same proof_composed parent and the same fresh execution
+                # context requirements, so causal replay must accept either.
                 is_independent_attempt = (
                     receipt.state_before == "evidence_incomplete"
                     and receipt.state_after == "evidence_incomplete"
                     and receipt.policy_decision == "allow"
-                    and receipt.execution_status == "succeeded"
                     and roles_by_key.get(receipt.actor_key_id)
                     == "Verifier"
                 )

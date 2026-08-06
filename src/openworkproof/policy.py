@@ -1591,6 +1591,7 @@ def _validate_state_history(
                 receipt=receipt,
                 public_keys=public_keys,
                 now=receipt.occurred_at,
+                allow_independent_verifier_rerun=True,
             )
             if state_before is state_after
             else apply_state_transition(

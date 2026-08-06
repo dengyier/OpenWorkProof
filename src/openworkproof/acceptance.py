@@ -2459,6 +2459,38 @@ def verify_composition_bundle(
             raise AcceptanceTransactionError(
                 "composition report count does not match the trigger count"
             )
+        # Reports must map one-to-one, in order, onto the proof_composed
+        # triggers: duplicates and reordering are rejected so that a tuple
+        # containing the final report twice cannot skip validating an earlier
+        # report.
+        initiator_indexes = tuple(
+            tuple(
+                index
+                for index, receipt in enumerate(receipts)
+                if receipt.receipt_id == report.initiator_receipt_id
+                and receipt.digest == report.initiator_receipt_digest
+            )
+            for report in reports
+        )
+        if any(len(indexes) != 1 for indexes in initiator_indexes):
+            raise AcceptanceTransactionError(
+                "composition report initiator is not unique"
+            )
+        flattened = tuple(indexes[0] for indexes in initiator_indexes)
+        if any(
+            left >= right
+            for left, right in zip(flattened, flattened[1:])
+        ):
+            raise AcceptanceTransactionError(
+                "composition reports are duplicated or out of order"
+            )
+        bound_triggers = {
+            receipts[index + 1].receipt_id for index in flattened
+        }
+        if bound_triggers != {trigger.receipt_id for trigger in triggers}:
+            raise AcceptanceTransactionError(
+                "composition reports do not map one-to-one onto triggers"
+            )
         for report in reports:
             _validate_composition_report_binding(
                 work_order=work_order,

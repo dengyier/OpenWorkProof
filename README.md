@@ -102,8 +102,10 @@ WorkOrder            CapabilityGrant        ActionReceipt          AcceptanceRec
 - **全量测试：2181 passed、0 failed、0 skip**（required-live Docker 模式，
   含冻结计划规定的 candidate-inventory 供应链门，退出码 0）
 
-**尚未完成：** Acceptor 拒绝路径、独立结果（independent-result）执行 episode、
-CLI、MCP 传输服务器、Docker 生产执行器、deny/rollback 生产事务、Day 0 执行门。
+**尚未完成：** Acceptor 拒绝路径、CLI、MCP 传输服务器、Docker 生产执行器、
+deny/rollback 生产事务、Day 0 执行门。独立结果（independent-result）执行
+episode 与五维 recomposition 链已实现并通过全量测试（见上方能力清单与
+docs/status.md 的验证记录）。
 
 > 我们把「尚未完成什么」写得和「已经完成什么」一样清楚。
 > 这不是谦虚，这是协议项目应有的证据标准。
@@ -150,9 +152,10 @@ python3.12 -m venv .venv
 1. 接入真实无网执行器的稳定 execution ID 与启动/结果回执，
    闭合 `STARTED_UNCONFIRMED` 恢复后再接入 MCP 传输层；
 2. 完成人工决策、回滚和终止策略 API；
-3. 完成独立结果（independent-result）执行 episode 与五维证据
-   recomposition → proof_ready 完整链（CompositionReport 与
-   AcceptanceReceipt 成功路径已实现）；
+3. 独立结果（independent-result）执行 episode 与五维证据
+   recomposition → proof_ready 完整链已实现并验证（双报告离线验签、
+   篡改拒绝、并发一个赢家与非通过封印已覆盖）；待办为真实外部
+   Acceptor 复核与赛事交付；
 4. 完成 CLI、MCP Sidecar 和 AgentTeams 集成；
 5. 完成 Rich #4196 自包含演示及外部独立验收；
 6. 完成 Acceptor 拒绝路径、真实外部 Acceptor 复现与 Day 0

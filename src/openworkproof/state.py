@@ -600,6 +600,7 @@ def append_receipt(
     receipt: ActionReceipt,
     public_keys: Mapping[str, Ed25519PublicKey],
     now: datetime,
+    allow_independent_verifier_rerun: bool = False,
 ) -> TransitionDecision:
     if not _work_order_is_trusted(work_order, public_keys):
         return _denied("INVALID_EVIDENCE", "WorkOrder trust failed")
@@ -648,8 +649,16 @@ def append_receipt(
             and parsed.tool_name == "owp.run_tests"
             and role == "Verifier"
         ):
-            return _allowed(
-                "independent Verifier rerun appended in evidence-incomplete"
+            # The single-receipt API fails closed because it has no canonical
+            # episode history. Full-history replay paths pass the explicit
+            # allowance flag after their own causal/policy verification.
+            if allow_independent_verifier_rerun:
+                return _allowed(
+                    "independent Verifier rerun in evidence-incomplete"
+                )
+            return _denied(
+                "TRANSITION_CONTEXT_UNAVAILABLE",
+                "same-state evidence requires unavailable episode history",
             )
         return _denied(
             "STATE_DENIED",

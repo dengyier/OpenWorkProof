@@ -211,9 +211,11 @@ composition 仍未完成，Day 0 执行门仍为 FAIL。
 
 - `run_tests` 的真实无网执行器、稳定 execution ID、启动/结果
   回执与 `STARTED_UNCONFIRMED` 自动恢复，以及 Developer mode 与 MCP 入口；
-- 独立结果（independent-result）执行 episode 与基于五维证据的
-  完整 recomposition → proof_ready 链（本切片测试用四维
-  authority/scope/execution/result WorkOrder 变体验证事务本身）；
+- 独立结果（independent-result）执行 episode 与五维证据 recomposition
+  → proof_ready 链已实现并验证（本切片测试使用五维 WorkOrder 变体：
+  独立结果占 verifier_independent_result 专属槽位，recomposition 在
+  五维闭合后到达 proof_ready，双报告离线验签证明两段 signed
+  report-to-trigger 绑定）；剩余为真实外部 Acceptor 复核与赛事交付；
 - deny/rollback 生产事务和剩余入口的全局 nonce 处理；
 - Acceptor 拒绝（rejection）收据与拒绝终态事务；
 - 其他 ToolCall handler 与 evidence publication 的调用闭包，
