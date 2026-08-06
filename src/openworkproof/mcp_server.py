@@ -2521,3 +2521,212 @@ def execute_repo_read(
         ) from release_errors[0]
     assert receipt is not None
     return receipt
+
+
+def _committed_evidence_from_ledger(
+    ledger_path: Path,
+    evidence_root: Path,
+    work_order: WorkOrder,
+    receipts,
+) -> tuple[CommittedEvidence, ...]:
+    """Rebuild the committed evidence tuple from the evidence root."""
+    from openworkproof.policy import CommittedEvidence  # noqa: PLC0415
+
+    connection = evidence.connect_ledger(ledger_path)
+    try:
+        groups = evidence._journal_publication_groups(connection)
+    finally:
+        connection.close()
+    committed: list[CommittedEvidence] = []
+    for group in groups:
+        for publication in group.publications:
+            if publication.state != "COMMITTED":
+                continue
+            artifact_path = Path(evidence_root) / publication.final_path
+            try:
+                payload = artifact_path.read_bytes()
+            except OSError:
+                continue
+            committed.append(
+                CommittedEvidence(
+                    reference=publication.reference,
+                    payload=payload,
+                )
+            )
+    committed.sort(key=lambda item: item.reference.path.encode())
+    return tuple(committed)
+
+
+def _context_from_payload(
+    ledger_path: Path,
+    evidence_root: Path,
+    payload: Mapping[str, object],
+    now: datetime,
+) -> AuthorizationContext:
+    """Reconstruct an AuthorizationContext from a transport payload."""
+    from openworkproof.policy import (
+        AuthorizationLedgerPrefix,
+        derive_authorization_context,
+    )
+    from openworkproof.repo_tools import (
+        ReplayCheckpoint,
+        WorkspaceManifest,
+    )
+
+    checkpoint_data = payload["checkpoint"]
+    if type(checkpoint_data) is not dict:
+        raise KeyError("checkpoint")
+    manifest_data = checkpoint_data.get("workspace_manifest")
+    from openworkproof.repo_tools import WorkspaceManifestEntry  # noqa: PLC0415
+
+    manifest = WorkspaceManifest(
+        schema_version=manifest_data["schema_version"],
+        head_commit=manifest_data["head_commit"],
+        entries=tuple(
+            WorkspaceManifestEntry(
+                path_bytes_b64url=entry["path_bytes_b64url"],
+                type=entry["type"],
+                posix_mode=entry["posix_mode"],
+                size_bytes=entry["size_bytes"],
+                sha256=entry["sha256"],
+                symlink_target_b64url=entry["symlink_target_b64url"],
+            )
+            for entry in manifest_data["entries"]
+        ),
+    )
+    checkpoint = ReplayCheckpoint(
+        files=(),
+        head_commit=checkpoint_data["head_commit"],
+        workspace_manifest=manifest,
+        workspace_manifest_digest=checkpoint_data[
+            "workspace_manifest_digest"
+        ],
+        verified_test_results=(),
+    )
+    connection = evidence.connect_ledger(ledger_path)
+    try:
+        work_order, receipts, grants, _ = (
+            evidence._replay_receipt_publication_ledger(connection)
+        )
+        attempts = evidence._validated_grant_attempts(
+            connection, work_order, receipts
+        )
+    finally:
+        connection.close()
+    prefix = AuthorizationLedgerPrefix(
+        effective_grants=tuple(
+            sorted(grants.values(), key=lambda item: item.grant_id)
+        ),
+        grant_attempts=tuple(
+            sorted(attempts.values(), key=lambda item: item.digest)
+        ),
+        receipts=receipts,
+    )
+    committed = _committed_evidence_from_ledger(
+        ledger_path, evidence_root, work_order, receipts
+    )
+    return derive_authorization_context(
+        work_order,
+        prefix,
+        committed,
+        checkpoint,
+        now,
+    )
+
+
+def _load_sidecar_key(key_hex: str) -> Ed25519PrivateKey:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PrivateKey,
+    )
+
+    raw = bytes.fromhex(key_hex)
+    if len(raw) != 32:
+        raise HandlerCoordinationError("SIDECAR_KEY_INVALID")
+    return Ed25519PrivateKey.from_private_bytes(raw)
+
+
+def _run_tests_from_payload(
+    ledger_path: str | Path,
+    payload: Mapping[str, object],
+) -> ToolCallReceipt:
+    """Forward one run-tests execution from a transport payload."""
+    from openworkproof.models import (
+        AgentRequest,
+        RunTestsArguments,
+    )
+    from openworkproof.policy import ProspectiveExecutionFacts
+
+    path = Path(ledger_path)
+    now = evidence._freeze_trusted_utc_second(
+        datetime.fromisoformat(str(payload["now"]))
+    )
+    context = _context_from_payload(
+        path,
+        Path(str(payload["evidence_root"])),
+        payload,
+        now,
+    )
+    request = AgentRequest.model_validate(payload["request"])
+    arguments = RunTestsArguments.model_validate(payload["arguments"])
+    facts = ProspectiveExecutionFacts(
+        execution_context_id=payload["facts"]["execution_context_id"],
+        container_instance_id_digest=payload["facts"][
+            "container_instance_id_digest"
+        ],
+        controller_id=payload["facts"]["controller_id"],
+    )
+    sidecar_key = _load_sidecar_key(str(payload["sidecar_key_hex"]))
+    return execute_run_tests_production(
+        path,
+        evidence_root=Path(str(payload["evidence_root"])),
+        context=context,
+        request=request,
+        request_arguments=arguments,
+        execution_facts=facts,
+        sidecar_private_key=sidecar_key,
+        docker_binary=Path(str(payload["docker_binary"])),
+        image_reference=str(payload["image_reference"]),
+        candidate_runtime_root=Path(str(payload["candidate_runtime_root"])),
+        clock=lambda: now,
+    )
+
+
+def _repo_read_from_payload(
+    ledger_path: str | Path,
+    payload: Mapping[str, object],
+) -> ToolCallReceipt:
+    """Forward one repo-read execution from a transport payload."""
+    from openworkproof.models import AgentRequest, RepoReadArguments
+
+    path = Path(ledger_path)
+    now = evidence._freeze_trusted_utc_second(
+        datetime.fromisoformat(str(payload["now"]))
+    )
+    context = _context_from_payload(
+        path,
+        Path(str(payload["evidence_root"])),
+        payload,
+        now,
+    )
+    request = AgentRequest.model_validate(payload["request"])
+    arguments = RepoReadArguments.model_validate(payload["arguments"])
+    facts = ProspectiveExecutionFacts(
+        execution_context_id=payload["facts"]["execution_context_id"],
+        container_instance_id_digest=payload["facts"][
+            "container_instance_id_digest"
+        ],
+        controller_id=payload["facts"]["controller_id"],
+    )
+    sidecar_key = _load_sidecar_key(str(payload["sidecar_key_hex"]))
+    return execute_repo_read(
+        path,
+        evidence_root=Path(str(payload["evidence_root"])),
+        context=context,
+        request=request,
+        request_arguments=arguments,
+        execution_facts=facts,
+        sidecar_private_key=sidecar_key,
+        candidate_runtime_root=Path(str(payload["candidate_runtime_root"])),
+        handler=make_repo_pipeline_read_handler(),
+        clock=lambda: now,
+    )
