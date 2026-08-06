@@ -246,6 +246,10 @@ Day 0 执行门仍为 FAIL；deny/rollback 生产事务、真实无网执行器
 - AgentTeams 执行接入层已实现（execution_adapter：TeamTask/TeamTaskResult、
   AgentTeamClient 协议 + LocalTeamClient 参考实现、TeamExecutionAdapter
   数据转换/协议适配/状态同步/错误隔离/分级日志，团队→开发者闭环 6 测试）；
+- 真实团队网络客户端已实现（team_network_client：TCP 会话 + token 鉴权 +
+  指数退避重试 + 环境配置 + 结构化日志；参考 TeamNetworkService 服务端；
+  网络版适配器端到端闭环 6 测试；阿里云 AgentTeams SDK 为治理面 API 且无
+  Python 版——执行面网络层按文档化 TCP 协议实现，SDK 接入点保留在适配器）；
 - Rich #4196 完整演示；
 - Acceptor 独立环境复现；
 - Day 0 人类签署和完整执行门；
