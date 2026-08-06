@@ -2588,17 +2588,14 @@ class ToolCallReceipt(AgentReceiptEnvelope):
                 if args.test_mode == "verifier"
                 else "developer_test_result"
             )
-            # The verifier_independent_result slot is only reachable from an
-            # evidence_incomplete prior state (the independent episode
-            # signature). Primary-episode Verifier receipts must use the
-            # verifier_result slot even though they share the verifier test
-            # profile.
+            # The slot-to-episode mapping is strictly one-to-one: an
+            # evidence_incomplete prior state is the independent episode
+            # signature and must use the verifier_independent_result slot
+            # exclusively; every primary-episode Verifier receipt must use
+            # the verifier_result slot.
             if args.test_mode == "verifier":
                 if self.state_before == "evidence_incomplete":
-                    allowed = {
-                        "verifier_result",
-                        "verifier_independent_result",
-                    }
+                    allowed = {"verifier_independent_result"}
                 else:
                     allowed = {"verifier_result"}
                 if referenced_slots[result_ref.path].purpose not in allowed:

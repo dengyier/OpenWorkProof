@@ -109,8 +109,9 @@
 
 - Acceptance 事务专项：40 passed；
 - Acceptance、Contract、Signing、State、Composition、Policy、
-  Receipt-chain、MCP 与 Schema focused 门：1002 passed；
-- candidate-inventory 供应链专项（required-live Docker）：142 passed；
+  Receipt-chain、MCP 与 Schema focused 门：1031 passed；
+- candidate-inventory 供应链专项（required-live Docker）：144 passed
+  （image supply-chain 61 + candidate integration 83）；
 - 全量测试（required-live Docker，0 skip）：2197 passed、0 failed，
   退出码 0；固定 execution RepoDigest 与外部 artifact root 均按冻结计划提供；
 - 本轮精确验收修复提交：`cac4b51739d1bd1f18069fc957fe116bb8bb2d42`；
@@ -127,8 +128,8 @@
 同一验证窗口的前两轮全量测试分别暴露一个未修改测试夹具的进程竞态：
 schema registry 交叉进程写入用例，以及 detached-survivor pidfile 就绪用例。
 两项均在不改代码的情况下独立重复 5 次并全部通过；最终完整 required-live
-门取得上述 2166/2166 结果。该记录保留失败历史，不把一次最终绿灯改写成
-“从未出现过不稳定性”。
+门取得上述 2197/2197 结果（第四轮审核修复后复验，0 failed、0 skip）。
+该记录保留失败历史，不把一次最终绿灯改写成“从未出现过不稳定性”。
 
 ## 重要边界
 
@@ -148,8 +149,9 @@ Phase 1→4 和最终权威读取门的 `complete_receipt_publication`。
 ResolutionManifest 解析断言，但五输入 API 没有独立读取并重哈希
 ResolutionManifest 原始字节。
 当前只接入了 `owp.run_tests(test_mode=verifier)` 的首个可调用
-handler 协调切片，还没有 MCP 传输服务器、Docker 测试执行器或
-Developer mode 生产入口。当前目标锁与内部 journal 能区分：
+handler 协调切片；真实无网 Docker 测试执行器生产 driver 与
+MCP 传输服务器、Developer mode 生产入口尚未接入（当前以确定性
+fake driver 完成全部协调与恢复切片验证）。当前目标锁与内部 journal 能区分：
 只有 `RESERVED` 的崩溃可清理并安全重试；Receipt 已提交但 journal
 未清理时可按已提交事实收敛；`STARTED_UNCONFIRMED` 且无 Receipt
 时只返回 `RECOVERY_REQUIRED`，不重跑、不补造 Receipt 或扣费事实。
@@ -158,8 +160,10 @@ Developer mode 生产入口。当前目标锁与内部 journal 能区分：
 要自动收敛该不确定分支，仍需真实无网执行器提供稳定
 execution ID 和可验证启动/结果回执。deny Receipt 与 rollback
 生产事务尚未完成；acceptance 生产事务（compose/request/prepare/
-commit）已实现并验证。独立结果执行 episode 与完整 Task 9
-composition 仍未完成，Day 0 执行门仍为 FAIL。
+commit）已实现并验证。独立结果执行 episode 与五维 recomposition
+链已实现并验证（含独立失败收据精确回放与失败后新签名重试），
+Day 0 执行门仍为 FAIL；deny/rollback 生产事务、真实无网执行器
+生产 driver、MCP 传输服务器与 Acceptor 拒绝路径仍为边界。
 
 ## 已完成（按任务切片）
 

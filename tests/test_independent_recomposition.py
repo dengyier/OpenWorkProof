@@ -16,6 +16,7 @@ import openworkproof.acceptance as acceptance
 import openworkproof.evidence as evidence
 import openworkproof.mcp_server as mcp_server
 from openworkproof.models import (
+    ACTION_RECEIPT_ADAPTER,
     AgentRequest,
     ComposeProofArguments,
     request_arguments_digest,
@@ -23,12 +24,17 @@ from openworkproof.models import (
 from openworkproof.policy import CommittedEvidence
 from openworkproof.policy import ProspectiveExecutionFacts
 
-from openworkproof.signing import sign_payload
+from openworkproof.signing import (
+    decode_and_verify_key_binding,
+    sign_payload,
+    verify_payload,
+)
 from test_mcp_server import (
     _FakeRunTestsExecutionDriver,
     _current_run_tests_context,
     _execute_run_tests_case,
     _grant_id,
+    _grant_replay_inputs,
     _run_tests_case,
 )
 
@@ -83,6 +89,8 @@ def _independent_case(
     sidecar_receipt_factory,
     fixed_now,
     monkeypatch,
+    *,
+    verifier_tool_calls: int = 2,
 ):
     case = _run_tests_case(
         tmp_path=tmp_path,
@@ -90,7 +98,7 @@ def _independent_case(
         role_keys=ephemeral_role_keys,
         sidecar_receipt_factory=sidecar_receipt_factory,
         now=fixed_now,
-        verifier_tool_calls=2,
+        verifier_tool_calls=verifier_tool_calls,
     )
     _execute_run_tests_case(
         case,
@@ -306,6 +314,77 @@ def _execute_independent_run_with_context(
         request_arguments=arguments,
         execution_facts=facts,
         now=fixed_now,
+    )
+
+
+def test_independent_slot_mapping_is_strictly_one_to_one(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    import hashlib  # noqa: PLC0415
+
+    case, first, incomplete = _independent_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    receipt = _execute_independent_run(
+        case,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        execution_context_id="c3" * 32,
+        container_instance_id_digest="d4" * 32,
+        nonce_label="independent:slot-map",
+    )
+    assert receipt.state_before == "evidence_incomplete"
+    independent_path = receipt.evidence_refs[0].path
+    payload = (
+        case["evidence_root"]
+        / independent_path.removeprefix("evidence/")
+    ).read_bytes()
+    work_order = case["work_order"]
+
+    # A) Primary-episode state with the independent slot is rejected.
+    wrong_state = receipt.model_copy(update={"state_before": "running"})
+    with pytest.raises(ValueError, match="wrong slot purpose"):
+        wrong_state.validate_evidence_payloads(
+            {independent_path: payload}, work_order
+        )
+
+    # B) evidence_incomplete with the primary verifier slot is rejected.
+    verifier_slot = next(
+        artifact
+        for artifact in work_order.evidence_policy.artifacts
+        if artifact.purpose == "verifier_result"
+    )
+    verifier_path = f"evidence/{verifier_slot.path}"
+    swapped_ref = receipt.evidence_refs[0].model_copy(
+        update={
+            "path": verifier_path,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "media_type": verifier_slot.media_type,
+            "size_bytes": len(payload),
+        }
+    )
+    wrong_slot = receipt.model_copy(
+        update={"evidence_refs": (swapped_ref,)}
+    )
+    with pytest.raises(ValueError, match="wrong slot purpose"):
+        wrong_slot.validate_evidence_payloads(
+            {verifier_path: payload}, work_order
+        )
+
+    # C) The canonical mapping still validates.
+    receipt.validate_evidence_payloads(
+        {independent_path: payload}, work_order
     )
 
 
@@ -1311,6 +1390,8 @@ def test_independent_infrastructure_failure_replays_exactly(
     assert receipt.state_before == "evidence_incomplete"
     assert receipt.state_after == "evidence_incomplete"
     assert receipt.policy_decision == "allow"
+    # Infrastructure failures never produce an EvidenceRef.
+    assert receipt.evidence_refs == ()
     # The closed failure still carries the proof_composed parent and exact
     # replay accepts it against the immutable first report.
     trigger_id = _latest_proof_composed_trigger_id(case["ledger_path"])
@@ -1435,9 +1516,16 @@ def test_offline_bundle_rejects_receipt_correlation_and_key_tampering(
             ),
         )
 
-    # 1) Receipt mutation flips the independent receipt state_after.
+    def rebuild(receipt, updates):
+        """model_dump -> modify -> model_validate: full Pydantic rebuild."""
+        raw = receipt.model_dump(mode="json")
+        raw.update(updates)
+        return ACTION_RECEIPT_ADAPTER.validate_python(raw)
+
+    # 1) Receipt mutation: full rebuild; the stale signature no longer
+    #    matches the rebuilt payload, so the bundle fails closed.
     tampered = tuple(
-        r.model_copy(update={"state_after": "locally_verified"})
+        rebuild(r, {"state_after": "locally_verified"})
         if r.receipt_id == receipt.receipt_id
         else r
         for r in receipts
@@ -1445,14 +1533,17 @@ def test_offline_bundle_rejects_receipt_correlation_and_key_tampering(
     with pytest.raises(acceptance.AcceptanceTransactionError):
         verify_with(receipts_override=tampered)
 
-    # 2) Correlation-factor mutation breaks the fresh-context replay check.
+    # 2) Correlation-factor mutation: full rebuild with a well-formed but
+    #    already-used execution context; the bundle still fails closed.
     factored = tuple(
-        r.model_copy(
-            update={
-                "correlation_factors": r.correlation_factors.model_copy(
-                    update={"execution_context_id": None}
-                )
-            }
+        rebuild(
+            r,
+            {
+                "correlation_factors": {
+                    **r.correlation_factors.model_dump(mode="json"),
+                    "execution_context_id": "1" * 64,
+                }
+            },
         )
         if r.receipt_id == receipt.receipt_id
         and r.correlation_factors is not None
@@ -1856,3 +1947,259 @@ def test_independent_active_patch_mismatch_rejected(
             nonce_label="independent:stale-patch",
         )
     assert _snapshot_ledger(case) == before
+
+
+def _resign_receipt(receipt, private_key, updates=None):
+    """model_dump -> modify -> re-sign with a valid Sidecar key."""
+    raw = receipt.model_dump(mode="json")
+    for key in ("digest", "signature_alg", "signer_key_id", "signature"):
+        raw.pop(key, None)
+    if updates:
+        raw.update(updates)
+    signed = sign_payload("action-receipt", raw, private_key)
+    return ACTION_RECEIPT_ADAPTER.validate_python(signed)
+
+
+def test_semantic_replay_rejects_correlation_tampering_with_valid_signature(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, incomplete = _independent_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    receipt = _execute_independent_run(
+        case,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        execution_context_id="5a" * 32,
+        container_instance_id_digest="6b" * 32,
+        nonce_label="independent:sema",
+    )
+    # Rebuild and re-sign with the primary verifier's execution context id.
+    # The signature is valid; the prefix replay must reject at the semantic
+    # fresh-context check, not at a broken-signature layer.
+    rebuilt = _resign_receipt(
+        receipt,
+        ephemeral_role_keys["Sidecar"][0],
+        updates={
+            "correlation_factors": {
+                **receipt.correlation_factors.model_dump(mode="json"),
+                "execution_context_id": "1" * 64,
+            }
+        },
+    )
+    sidecar_binding = next(
+        binding
+        for binding in case["work_order"].key_bindings
+        if binding.role == "Sidecar"
+    )
+    assert verify_payload(
+        "action-receipt",
+        rebuilt.model_dump(mode="json"),
+        decode_and_verify_key_binding(sidecar_binding),
+    )
+    receipts, grants, attempts = _grant_replay_inputs(
+        case["ledger_path"], case["work_order"]
+    )
+    prefix = tuple(
+        rebuilt if r.receipt_id == receipt.receipt_id else r
+        for r in receipts
+    )
+    from openworkproof.composition import replay_authorization_causality  # noqa: PLC0415
+
+    with pytest.raises(Exception, match="fresh execution context"):
+        replay_authorization_causality(case["work_order"], prefix)
+
+
+def test_infrastructure_failure_retry_succeeds_with_fresh_signature(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, incomplete = _independent_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+        verifier_tool_calls=3,
+    )
+    failed = _execute_independent_run(
+        case,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        execution_context_id="9e" * 32,
+        container_instance_id_digest="0f" * 32,
+        nonce_label="independent:retry-fail",
+        failure_code="TIMEOUT",
+    )
+    assert failed.execution_status == "failed"
+    assert failed.execution_error_code == "TIMEOUT"
+    # Quota remains: a fresh signature with fresh execution identifiers
+    # retries the episode and succeeds.
+    succeeded = _execute_independent_run(
+        case,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        execution_context_id="a1b2" * 16,
+        container_instance_id_digest="c3d4" * 16,
+        nonce_label="independent:retry-ok",
+    )
+    assert succeeded.execution_status == "succeeded"
+    assert succeeded.state_before == "evidence_incomplete"
+    assert succeeded.state_after == "evidence_incomplete"
+
+
+def test_independent_started_unconfirmed_recovery(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, incomplete = _independent_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    from openworkproof import repo_tools  # noqa: PLC0415
+    from test_mcp_server import _closed_run_tests_outcome
+
+    request, arguments, facts = _independent_test_request(
+        case, ephemeral_role_keys, fixed_now,
+        nonce_label="independent:recover",
+        execution_context_id="7c" * 32,
+        container_instance_id_digest="8d" * 32,
+    )
+    refreshed = _current_run_tests_context(case, fixed_now)
+    contract = repo_tools.RunTestsExecutionContract(
+        execution_id=mcp_server._handler_execution_id(request, facts),
+        request_digest=request.digest,
+        arguments_digest=request.arguments_digest,
+        candidate_workspace_id="c" * 64,
+        source_artifact_sha256=(
+            case["work_order"].replay_profile.source_artifact_sha256
+        ),
+        source_commit=arguments.source_commit,
+        candidate_commit=arguments.candidate_commit,
+        workspace_manifest_digest=arguments.workspace_manifest_digest,
+        container_image_digest=arguments.container_image_digest,
+        command_digest=arguments.command_digest,
+        fixed_test_source_digest=arguments.fixed_test_source_digest,
+    )
+    lock_descriptor = evidence._acquire_target_lock(case["ledger_path"])
+    try:
+        mcp_server._reserve_handler_execution(
+            case["ledger_path"],
+            lock_descriptor,
+            refreshed,
+            request,
+            facts,
+            contract,
+        )
+        mcp_server._mark_handler_started(
+            case["ledger_path"], lock_descriptor, contract.execution_id
+        )
+    finally:
+        evidence._release_target_lock(lock_descriptor)
+    driver = _FakeRunTestsExecutionDriver(
+        reconciliation_outcomes=(_closed_run_tests_outcome(contract),)
+    )
+    receipt = _execute_run_tests_case(
+        case,
+        case["ledger_path"].parent,
+        ephemeral_role_keys,
+        driver,
+        context=refreshed,
+        request=request,
+        request_arguments=arguments,
+        execution_facts=facts,
+        now=fixed_now,
+    )
+    assert receipt.state_before == "evidence_incomplete"
+    assert receipt.state_after == "evidence_incomplete"
+    assert receipt.policy_decision == "allow"
+    assert [call[0] for call in driver.calls] == ["reconcile", "cleanup"]
+
+
+def test_lock_release_failure_keeps_committed(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, incomplete = _independent_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    request, arguments, facts = _independent_test_request(
+        case, ephemeral_role_keys, fixed_now,
+        nonce_label="independent:lock-release",
+        execution_context_id="b5" * 32,
+        container_instance_id_digest="c6" * 32,
+    )
+    refreshed = _current_run_tests_context(case, fixed_now)
+    real_release = evidence._release_target_lock
+    release_calls = []
+
+    def broken_release(descriptor):
+        release_calls.append(descriptor)
+        if len(release_calls) == 2:
+            # The first call belongs to evidence recovery; the second is the
+            # main transaction's final release.
+            return False, (RuntimeError("lock release exploded"),)
+        return real_release(descriptor)
+
+    monkeypatch.setattr(evidence, "_release_target_lock", broken_release)
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError, match="lock release failed"
+    ):
+        _execute_run_tests_case(
+            case,
+            case["ledger_path"].parent,
+            ephemeral_role_keys,
+            _FakeRunTestsExecutionDriver(),
+            context=refreshed,
+            request=request,
+            request_arguments=arguments,
+            execution_facts=facts,
+            now=fixed_now,
+        )
+    monkeypatch.undo()
+    import sqlite3 as _sql
+
+    connection = _sql.connect(case["ledger_path"])
+    try:
+        independent_receipts = connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE receipt_json LIKE "
+            "'%verifier-independent-result%'"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert independent_receipts == 1

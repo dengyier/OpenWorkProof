@@ -248,6 +248,7 @@ def replay_authorization_causality(
     latest_composition_trigger: SystemEventReceipt | None = None
     independent_result: ToolCallReceipt | None = None
     independent_failure_terminal = False
+    last_independent_attempt: ToolCallReceipt | None = None
     sealed_tail_appended = False
     started_execution_context_ids: set[str] = set()
     started_container_instance_digests: set[str] = set()
@@ -415,6 +416,10 @@ def replay_authorization_causality(
                             "independent result episode is unavailable"
                         )
                     add_parent(latest_composition_trigger)
+                    # A retry after an infrastructure failure links to the
+                    # previous closed failure receipt of the same episode.
+                    if last_independent_attempt is not None:
+                        add_parent(last_independent_attempt)
                     factors = receipt.correlation_factors
                     if (
                         factors.execution_context_id is None
@@ -692,6 +697,14 @@ def replay_authorization_causality(
                 independent_failure_terminal = True
             elif receipt.state_after == "locally_verified":
                 latest_passing_result = receipt
+        if (
+            isinstance(receipt, ToolCallReceipt)
+            and receipt.tool_name == "owp.run_tests"
+            and receipt.state_before == "evidence_incomplete"
+            and receipt.state_after == "evidence_incomplete"
+            and roles_by_key.get(receipt.actor_key_id) == "Verifier"
+        ):
+            last_independent_attempt = receipt
         if (
             isinstance(receipt, ToolCallReceipt)
             and receipt.quota_charge is not None

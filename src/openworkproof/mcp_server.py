@@ -28,6 +28,7 @@ import openworkproof.repo_tools as repo_tools
 import openworkproof.runtime_context as runtime_context
 from openworkproof.models import (
     ACTION_RECEIPT_ADAPTER,
+    ActionReceiptEnvelope,
     AgentRequest,
     EvidenceRef,
     GrantIssuedReceipt,
@@ -1113,8 +1114,24 @@ def _build_run_tests_receipt(
     episode = _run_tests_episode(context, request, arguments)
     if episode == "independent_verifier":
         trigger = _latest_proof_composed_trigger(context.ledger_prefix.receipts)
-        extra_parents: tuple[ActionReceiptEnvelope, ...] = (
-            (trigger,) if trigger is not None else ()
+        # A retry after an infrastructure failure causally links to the
+        # previous closed failure receipt of the same episode, so the exact
+        # publication-tip parent requirement is satisfied on retry.
+        prior_independent = next(
+            (
+                receipt
+                for receipt in reversed(context.ledger_prefix.receipts)
+                if isinstance(receipt, ToolCallReceipt)
+                and receipt.tool_name == "owp.run_tests"
+                and receipt.state_before == "evidence_incomplete"
+                and receipt.state_after == "evidence_incomplete"
+            ),
+            None,
+        )
+        extra_parents: tuple[ActionReceiptEnvelope, ...] = tuple(
+            parent
+            for parent in (trigger, prior_independent)
+            if parent is not None
         )
         purpose: Literal[
             "verifier_result",

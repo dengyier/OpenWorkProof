@@ -3349,3 +3349,23 @@ def test_execute_rollback_recovers_committed_receipt_after_cleanup_failure(
         ).fetchone() == committed
     finally:
         connection.close()
+
+
+def test_mcp_server_type_hints_resolve() -> None:
+    """Every annotated function in mcp_server resolves without NameError."""
+    import inspect  # noqa: PLC0415
+    import typing  # noqa: PLC0415
+
+    from openworkproof import mcp_server as mod  # noqa: PLC0415
+
+    unresolved = []
+    for name, member in vars(mod).items():
+        if (
+            inspect.isfunction(member)
+            and getattr(member, "__annotations__", None)
+        ):
+            try:
+                typing.get_type_hints(member)
+            except Exception as error:  # noqa: BLE001
+                unresolved.append((name, repr(error)))
+    assert not unresolved, unresolved
