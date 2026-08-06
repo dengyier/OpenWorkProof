@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
 import secrets
@@ -956,7 +956,37 @@ def compose_proof_transaction(
             current_state=context.current_state,
             current_version=state_row[1],
         )
-        connection.execute("COMMIT")
+        try:
+            connection.execute("COMMIT")
+        except Exception as error:
+            if _readback_compose_committed(
+                path,
+                work_order=work_order,
+                initiator=initiator,
+                trigger=trigger,
+                report_digest=composition_report_digest(report),
+            ):
+                raise AcceptanceCommittedError(
+                    "composition committed but its acknowledgement was lost",
+                    CompositionTransactionResult(
+                        initiator_receipt=initiator,
+                        report=report,
+                        trigger_receipt=trigger,
+                    ),
+                ) from error
+            raise AcceptanceCommitIndeterminateError(
+                "composition commit outcome is indeterminate"
+            ) from error
+        if not _readback_compose_committed(
+            path,
+            work_order=work_order,
+            initiator=initiator,
+            trigger=trigger,
+            report_digest=composition_report_digest(report),
+        ):
+            raise AcceptanceCommitIndeterminateError(
+                "composition readback could not confirm the exact commit"
+            )
         return CompositionTransactionResult(
             initiator_receipt=initiator,
             report=report,
@@ -1148,6 +1178,108 @@ def _request_parents(
     )
 
 
+def _authorize_acceptance_request(
+    context: AuthorizationContext,
+    request: AgentRequest,
+) -> None:
+    """Prospective authorization for the final-acceptance request.
+
+    Mirrors the tool-call gate: verified signature, freshness, Manager
+    role, Grant subject binding, capability, revocation, validity and
+    quota must all hold before any allow receipt is constructed.
+    """
+    from openworkproof.signing import (
+        decode_and_verify_key_binding,
+        verify_payload,
+    )  # noqa: PLC0415
+
+    work_order = context.work_order
+    if (
+        request.work_order_digest != work_order.digest
+        or request.tool_name != "owp.request_acceptance"
+    ):
+        raise AcceptanceTransactionError(
+            "acceptance request work_order binding is invalid"
+        )
+    grants = {
+        grant.grant_id: grant
+        for grant in context.ledger_prefix.effective_grants
+    }
+    grant = grants.get(request.grant_id)
+    bindings = {
+        binding.key_id: binding
+        for binding in work_order.key_bindings
+    }
+    binding = bindings.get(request.actor_key_id)
+    if (
+        grant is None
+        or binding is None
+        or request.actor_id != binding.subject_id
+        or grant.subject_key_id != binding.key_id
+        or grant.subject_agent_id != binding.subject_id
+    ):
+        raise AcceptanceTransactionError(
+            "acceptance request Grant or actor binding is invalid"
+        )
+    if binding.role != "Manager":
+        raise AcceptanceTransactionError(
+            "final acceptance must be requested by the Manager"
+        )
+    try:
+        public_key = decode_and_verify_key_binding(binding)
+    except Exception as error:
+        raise AcceptanceTransactionError(
+            "acceptance request key binding is invalid"
+        ) from error
+    if not verify_payload(
+        "agent-request",
+        request.model_dump(mode="json"),
+        public_key,
+    ):
+        raise AcceptanceTransactionError(
+            "acceptance request signature is invalid"
+        )
+    request_age = context.transaction_time - request.requested_at
+    if request_age < timedelta(0) or request_age > timedelta(seconds=300):
+        raise AcceptanceTransactionError(
+            "acceptance request is outside the freshness window"
+        )
+    if context.transaction_time > work_order.deadline:
+        raise AcceptanceTransactionError(
+            "contract expired before the acceptance request"
+        )
+    if request.grant_id in context.replay_state.revoked_grant_ids:
+        raise AcceptanceTransactionError(
+            "acceptance request Grant is revoked"
+        )
+    if (
+        request.tool_name not in work_order.allowed_tools
+        or request.tool_name not in grant.allowed_tools
+    ):
+        raise AcceptanceTransactionError(
+            "acceptance request capability is denied"
+        )
+    if not (
+        grant.valid_from
+        <= context.transaction_time
+        <= min(grant.expires_at, work_order.deadline)
+    ):
+        raise AcceptanceTransactionError(
+            "acceptance request Grant is outside its validity"
+        )
+    if _remaining_tool_calls(context, request.grant_id) <= 0:
+        raise AcceptanceTransactionError(
+            "acceptance request Grant quota is exhausted"
+        )
+    if any(
+        receipt.nonce == request.nonce
+        for receipt in context.ledger_prefix.receipts
+    ):
+        raise AcceptanceTransactionError(
+            "acceptance request nonce is already used"
+        )
+
+
 def request_acceptance_transaction(
     ledger_path: Path,
     *,
@@ -1189,6 +1321,7 @@ def request_acceptance_transaction(
             raise AcceptanceTransactionError(
                 "acceptance request tool is invalid"
             )
+        _authorize_acceptance_request(context, request)
         if expires_at.tzinfo is None or expires_at.utcoffset() is None:
             raise AcceptanceTransactionError("request expiry must be UTC")
         expiry = expires_at.astimezone(timezone.utc)
@@ -1246,7 +1379,30 @@ def request_acceptance_transaction(
             current_state=context.current_state,
             current_version=state_row[1],
         )
-        connection.execute("COMMIT")
+        try:
+            connection.execute("COMMIT")
+        except Exception as error:
+            if _readback_request_committed(
+                path,
+                work_order=work_order,
+                request_receipt=request_receipt,
+            ):
+                raise AcceptanceCommittedError(
+                    "acceptance request committed but its acknowledgement "
+                    "was lost",
+                    request_receipt,
+                ) from error
+            raise AcceptanceCommitIndeterminateError(
+                "acceptance request commit outcome is indeterminate"
+            ) from error
+        if not _readback_request_committed(
+            path,
+            work_order=work_order,
+            request_receipt=request_receipt,
+        ):
+            raise AcceptanceCommitIndeterminateError(
+                "acceptance request readback could not confirm the exact commit"
+            )
         return request_receipt
     except (RuntimeContextError, AcceptanceTransactionError):
         rollback_error = evidence._best_effort_rollback(connection)
@@ -1631,7 +1787,29 @@ def commit_acceptance(
             current_state=state_row[0],
             current_version=state_row[1],
         )
-        connection.execute("COMMIT")
+        try:
+            connection.execute("COMMIT")
+        except Exception as error:
+            if _readback_acceptance_committed(
+                path,
+                work_order=work_order,
+                acceptance=parsed,
+            ):
+                raise AcceptanceCommittedError(
+                    "acceptance committed but its acknowledgement was lost",
+                    parsed,
+                ) from error
+            raise AcceptanceCommitIndeterminateError(
+                "acceptance commit outcome is indeterminate"
+            ) from error
+        if not _readback_acceptance_committed(
+            path,
+            work_order=work_order,
+            acceptance=parsed,
+        ):
+            raise AcceptanceCommitIndeterminateError(
+                "acceptance readback could not confirm the exact commit"
+            )
         return parsed
     except (RuntimeContextError, AcceptanceTransactionError):
         rollback_error = evidence._best_effort_rollback(connection)
@@ -1747,3 +1925,103 @@ def _insert_acceptance_rows(
         raise AcceptanceTransactionError(
             "acceptance state could not be advanced"
         )
+
+
+def _readback_compose_committed(
+    ledger_path: Path,
+    *,
+    work_order,
+    initiator: ToolCallReceipt,
+    trigger: SystemEventReceipt,
+    report_digest: str,
+) -> bool:
+    """Prove the exact composition committed by reopening the ledger."""
+    try:
+        connection = evidence.connect_ledger(ledger_path)
+        try:
+            current_work_order, receipts, _, _ = (
+                evidence._replay_receipt_publication_ledger(connection)
+            )
+            row = connection.execute(
+                "SELECT report_digest FROM composition_reports "
+                "WHERE initiator_receipt_id = ?",
+                (initiator.receipt_id,),
+            ).fetchone()
+            state = connection.execute(
+                "SELECT current_state FROM work_order_state WHERE singleton = 1"
+            ).fetchone()
+        finally:
+            connection.close()
+    except Exception:
+        return False
+    return (
+        current_work_order.digest == work_order.digest
+        and len(receipts) >= 2
+        and receipts[-2].receipt_id == initiator.receipt_id
+        and receipts[-1].receipt_id == trigger.receipt_id
+        and row is not None
+        and row[0] == report_digest
+        and state is not None
+        and state[0] == trigger.state_after
+    )
+
+
+def _readback_request_committed(
+    ledger_path: Path,
+    *,
+    work_order,
+    request_receipt: ApprovalRequestedReceipt,
+) -> bool:
+    try:
+        connection = evidence.connect_ledger(ledger_path)
+        try:
+            current_work_order, receipts, _, _ = (
+                evidence._replay_receipt_publication_ledger(connection)
+            )
+            state = connection.execute(
+                "SELECT current_state FROM work_order_state WHERE singleton = 1"
+            ).fetchone()
+        finally:
+            connection.close()
+    except Exception:
+        return False
+    return (
+        current_work_order.digest == work_order.digest
+        and bool(receipts)
+        and receipts[-1].receipt_id == request_receipt.receipt_id
+        and state is not None
+        and state[0] == request_receipt.state_after
+    )
+
+
+def _readback_acceptance_committed(
+    ledger_path: Path,
+    *,
+    work_order,
+    acceptance: AcceptanceReceipt,
+) -> bool:
+    try:
+        connection = evidence.connect_ledger(ledger_path)
+        try:
+            current_work_order, _, _, _ = (
+                evidence._replay_receipt_publication_ledger(connection)
+            )
+            row = connection.execute(
+                "SELECT acceptance_id FROM acceptance_receipts "
+                "WHERE acceptance_id = ?",
+                (acceptance.acceptance_id,),
+            ).fetchone()
+            state = connection.execute(
+                "SELECT current_state FROM work_order_state WHERE singleton = 1"
+            ).fetchone()
+        finally:
+            connection.close()
+    except Exception:
+        return False
+    return (
+        current_work_order.digest == work_order.digest
+        and row is not None
+        and row[0] == acceptance.acceptance_id
+        and state is not None
+        and state[0] == "accepted"
+    )

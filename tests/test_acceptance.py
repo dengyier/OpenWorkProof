@@ -1123,3 +1123,664 @@ def test_commit_acceptance_rejects_duplicate(
             public_keys=None,
             clock=lambda: fixed_now,
         )
+
+
+def _acceptance_request_variant(
+    case,
+    context,
+    request,
+    ephemeral_role_keys,
+    fixed_now,
+    *,
+    signer_role="Manager",
+    binding_role=None,
+    nonce=None,
+    requested_at=None,
+    grant_id=None,
+):
+    """Rebuild the acceptance AgentRequest with one altered attribute.
+
+    ``signer_role`` is the key that signs; ``binding_role`` is the actor
+    identity the request declares (defaults to the signer role).
+    """
+    from openworkproof.signing import sign_payload  # noqa: PLC0415
+
+    declared_role = binding_role or signer_role
+    binding = ephemeral_role_keys[declared_role][1]
+    raw = {
+        "claim_type": "agent-request",
+        "work_order_digest": case["work_order"].digest,
+        "grant_id": grant_id or case["root"].grant_id,
+        "actor_id": binding["subject_id"],
+        "actor_key_id": binding["key_id"],
+        "tool_name": "owp.request_acceptance",
+        "arguments_digest": request.arguments_digest,
+        "nonce": nonce or request.nonce,
+        "requested_at": (
+            requested_at or fixed_now
+        ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "authentication_method": "agent_signature",
+        "model_id": "model",
+        "model_version": "1",
+        "prompt_template_digest": "a" * 64,
+        "context_source_digest": "b" * 64,
+    }
+    return AgentRequest.model_validate(
+        sign_payload("agent-request", raw, ephemeral_role_keys[signer_role][0])
+    )
+
+
+def test_request_acceptance_rejects_wrong_role_signer(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, context, request, composed, expires_at = _request_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    for role in ("Maintainer", "Developer", "Verifier", "Sidecar"):
+        variant = _acceptance_request_variant(
+            case, context, request, ephemeral_role_keys, fixed_now,
+            signer_role=role,
+        )
+        with pytest.raises(
+            acceptance.AcceptanceTransactionError, match="binding|Manager"
+        ):
+            acceptance.request_acceptance_transaction(
+                case["ledger_path"],
+                evidence_root=case["evidence_root"],
+                context=context,
+                request=variant,
+                sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+                expires_at=expires_at,
+                clock=lambda: fixed_now,
+            )
+
+
+def test_request_acceptance_rejects_invalid_signature(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, context, request, composed, expires_at = _request_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    from openworkproof.signing import sign_payload  # noqa: PLC0415
+
+    binding = ephemeral_role_keys["Manager"][1]
+    raw = {
+        "claim_type": "agent-request",
+        "work_order_digest": case["work_order"].digest,
+        "grant_id": case["root"].grant_id,
+        "actor_id": binding["subject_id"],
+        "actor_key_id": binding["key_id"],
+        "tool_name": "owp.request_acceptance",
+        "arguments_digest": request.arguments_digest,
+        "nonce": "1" * 64,
+        "requested_at": fixed_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "authentication_method": "agent_signature",
+        "model_id": "model",
+        "model_version": "1",
+        "prompt_template_digest": "a" * 64,
+        "context_source_digest": "b" * 64,
+    }
+    signed = sign_payload("agent-request", raw, ephemeral_role_keys["Manager"][0])
+    import base64  # noqa: PLC0415
+
+    forged = base64.urlsafe_b64encode(b"\x01" * 64).decode().rstrip("=")
+    signed["signature"] = forged
+    variant = AgentRequest.model_validate(signed)
+    with pytest.raises(
+        acceptance.AcceptanceTransactionError, match="signature"
+    ):
+        acceptance._authorize_acceptance_request(context, variant)
+
+
+def test_acceptance_request_authorization_rejects_stale_and_reused_nonce(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, context, request, composed, expires_at = _request_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    stale = _acceptance_request_variant(
+        case, context, request, ephemeral_role_keys, fixed_now,
+        requested_at=datetime(2025, 12, 31, 23, 0, 0, tzinfo=timezone.utc),
+    )
+    with pytest.raises(
+        acceptance.AcceptanceTransactionError, match="freshness"
+    ):
+        acceptance._authorize_acceptance_request(context, stale)
+    # nonce reuse is enforced against the signed prefix: a receipt already
+    # carrying the request nonce must fail the authorization gate.
+    from openworkproof.policy import AuthorizationLedgerPrefix  # noqa: PLC0415
+
+    reused_last = context.ledger_prefix.receipts[-1].model_copy(
+        update={"nonce": request.nonce}
+    )
+    reused_prefix = AuthorizationLedgerPrefix(
+        effective_grants=context.ledger_prefix.effective_grants,
+        grant_attempts=context.ledger_prefix.grant_attempts,
+        receipts=context.ledger_prefix.receipts[:-1] + (reused_last,),
+    )
+    reused_context = dataclasses.replace(
+        context,
+        ledger_prefix=reused_prefix,
+    )
+    with pytest.raises(
+        acceptance.AcceptanceTransactionError, match="nonce"
+    ):
+        acceptance._authorize_acceptance_request(reused_context, request)
+
+
+def test_request_acceptance_rejects_revoked_and_exhausted_grant(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, context, request, composed, expires_at = _request_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    from openworkproof.policy import AuthorizationReplayState  # noqa: PLC0415
+
+    revoked = dataclasses.replace(
+        context,
+        replay_state=AuthorizationReplayState(
+            active_patch_receipt_id=context.replay_state.active_patch_receipt_id,
+            balances=context.replay_state.balances,
+            revoked_grant_ids=(request.grant_id,),
+            used_single_use_grant_ids=(
+                context.replay_state.used_single_use_grant_ids
+            ),
+            approval_decision_by_request=(
+                context.replay_state.approval_decision_by_request
+            ),
+        ),
+    )
+    with pytest.raises(
+        acceptance.AcceptanceTransactionError, match="revoked"
+    ):
+        acceptance._authorize_acceptance_request(revoked, request)
+    exhausted_balances = tuple(
+        (grant_id, metric, 0)
+        for grant_id, metric, _ in context.replay_state.balances
+    )
+    exhausted = dataclasses.replace(
+        context,
+        replay_state=AuthorizationReplayState(
+            active_patch_receipt_id=context.replay_state.active_patch_receipt_id,
+            balances=exhausted_balances,
+            revoked_grant_ids=context.replay_state.revoked_grant_ids,
+            used_single_use_grant_ids=(
+                context.replay_state.used_single_use_grant_ids
+            ),
+            approval_decision_by_request=(
+                context.replay_state.approval_decision_by_request
+            ),
+        ),
+    )
+    with pytest.raises(
+        acceptance.AcceptanceTransactionError, match="quota"
+    ):
+        acceptance._authorize_acceptance_request(exhausted, request)
+
+
+class _AckLossConnection:
+    """Wraps a ledger connection and drops COMMIT acknowledgements."""
+
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def execute(self, *args, **kwargs):
+        statement = args[0] if args else ""
+        if isinstance(statement, str) and statement.strip().upper() == "COMMIT":
+            # The commit physically succeeds; only the acknowledgement is lost.
+            result = self._real.execute(*args, **kwargs)
+            raise sqlite3.OperationalError("injected acknowledgement loss")
+        return self._real.execute(*args, **kwargs)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return self._real.__exit__(*args)
+
+
+def test_compose_commit_ack_loss_recovers_exact_truth(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    import sqlite3  # noqa: PLC0415
+
+    from openworkproof import evidence  # noqa: PLC0415
+
+    case, context, request = _compose_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    real_connect = evidence.connect_ledger
+    monkeypatch.setattr(
+        evidence,
+        "connect_ledger",
+        lambda p: _AckLossConnection(real_connect(p)),
+    )
+    with pytest.raises(
+        acceptance.AcceptanceCommittedError,
+        match="acknowledgement was lost",
+    ) as captured:
+        acceptance.compose_proof_transaction(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            request=request,
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            clock=lambda: fixed_now,
+        )
+    monkeypatch.undo()
+    committed = captured.value.committed
+    assert committed.report.verifier_conclusion == "evidence_incomplete"
+    # The exact write is provably present after recovery.
+    connection = sqlite3.connect(case["ledger_path"])
+    try:
+        reports = connection.execute(
+            "SELECT COUNT(*) FROM composition_reports"
+        ).fetchone()[0]
+        state = connection.execute(
+            "SELECT current_state FROM work_order_state WHERE singleton = 1"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert reports == 1
+    assert state == "evidence_incomplete"
+
+
+def test_request_commit_ack_loss_recovers_exact_truth(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from openworkproof import evidence  # noqa: PLC0415
+
+    case, context, request, composed, expires_at = _request_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    real_connect = evidence.connect_ledger
+    monkeypatch.setattr(
+        evidence,
+        "connect_ledger",
+        lambda p: _AckLossConnection(real_connect(p)),
+    )
+    with pytest.raises(
+        acceptance.AcceptanceCommittedError,
+        match="acknowledgement was lost",
+    ) as captured:
+        acceptance.request_acceptance_transaction(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            request=request,
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            expires_at=expires_at,
+            clock=lambda: fixed_now,
+        )
+    monkeypatch.undo()
+    committed = captured.value.committed
+    assert committed.request_kind == "final_acceptance"
+
+
+def test_commit_ack_loss_recovers_exact_truth(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from openworkproof import evidence  # noqa: PLC0415
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    draft = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    signed = _sign_draft(draft, ephemeral_role_keys)
+    real_connect = evidence.connect_ledger
+    monkeypatch.setattr(
+        evidence,
+        "connect_ledger",
+        lambda p: _AckLossConnection(real_connect(p)),
+    )
+    with pytest.raises(
+        acceptance.AcceptanceCommittedError,
+        match="acknowledgement was lost",
+    ) as captured:
+        acceptance.commit_acceptance(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            acceptance=signed,
+            public_keys=None,
+            clock=lambda: fixed_now,
+        )
+    monkeypatch.undo()
+    committed = captured.value.committed
+    assert committed == signed
+
+
+def test_commit_readback_failure_is_indeterminate_not_silent(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, context, request, composed, expires_at = _request_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    monkeypatch.setattr(
+        acceptance,
+        "_readback_request_committed",
+        lambda *a, **k: False,
+    )
+    with pytest.raises(
+        acceptance.AcceptanceCommitIndeterminateError,
+        match="readback could not confirm",
+    ):
+        acceptance.request_acceptance_transaction(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            request=request,
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            expires_at=expires_at,
+            clock=lambda: fixed_now,
+        )
+
+
+def _request_table_snapshot(ledger_path) -> dict:
+    import sqlite3  # noqa: PLC0415
+
+    connection = sqlite3.connect(ledger_path)
+    try:
+        return {
+            "receipts": connection.execute("SELECT COUNT(*) FROM receipts").fetchone()[0],
+            "parents": connection.execute("SELECT COUNT(*) FROM receipt_parents").fetchone()[0],
+            "events": connection.execute("SELECT COUNT(*) FROM grant_events").fetchone()[0],
+            "reports": connection.execute("SELECT COUNT(*) FROM composition_reports").fetchone()[0],
+            "acceptances": connection.execute("SELECT COUNT(*) FROM acceptance_receipts").fetchone()[0],
+            "state": connection.execute(
+                "SELECT current_state, version FROM work_order_state WHERE singleton = 1"
+            ).fetchone(),
+        }
+    finally:
+        connection.close()
+
+
+def test_request_acceptance_rejects_expiry_violations(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from datetime import datetime, timedelta, timezone  # noqa: PLC0415
+
+    case, context, request, composed, expires_at = _request_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    past = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    too_long = datetime(2026, 1, 1, 1, 30, 0, tzinfo=timezone.utc)
+    # The WorkOrder deadline is 2026-01-02, so a >1-hour expiry is rejected
+    # by the one-hour window before the deadline check can fire.
+    for bad_expiry, message in (
+        (past, "within one hour"),
+        (too_long, "within one hour"),
+    ):
+        before = _request_table_snapshot(case["ledger_path"])
+        with pytest.raises(
+            acceptance.AcceptanceTransactionError, match=message
+        ):
+            acceptance.request_acceptance_transaction(
+                case["ledger_path"],
+                evidence_root=case["evidence_root"],
+                context=context,
+                request=request,
+                sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+                expires_at=bad_expiry,
+                clock=lambda: fixed_now,
+            )
+        assert _request_table_snapshot(case["ledger_path"]) == before
+
+
+def test_request_acceptance_rejects_evidence_drift(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from openworkproof import evidence  # noqa: PLC0415
+
+    case, context, request, composed, expires_at = _request_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    # Tamper a committed evidence artifact under the evidence root; the
+    # current-context gate must fail closed before any write.
+    import sqlite3  # noqa: PLC0415
+
+    connection = sqlite3.connect(case["ledger_path"])
+    try:
+        path = connection.execute(
+            "SELECT final_path FROM evidence_publications LIMIT 1"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    from pathlib import Path  # noqa: PLC0415
+
+    artifact = (
+        case["evidence_root"] / path.removeprefix("evidence/")
+    )
+    original = artifact.read_bytes()
+    artifact.write_bytes(original + b"\ntampered")
+    before = _request_table_snapshot(case["ledger_path"])
+    with pytest.raises(Exception):
+        acceptance.request_acceptance_transaction(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            request=request,
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            expires_at=expires_at,
+            clock=lambda: fixed_now,
+        )
+    artifact.write_bytes(original)
+    assert _request_table_snapshot(case["ledger_path"]) == before
+
+
+def test_acceptance_receipt_offline_verification(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    """The signing draft verifies offline against the bound Acceptor key."""
+    from openworkproof.signing import (
+        decode_and_verify_key_binding,
+        verify_payload,
+    )  # noqa: PLC0415
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    draft = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    signed = _sign_draft(draft, ephemeral_role_keys)
+    acceptor_binding = next(
+        binding
+        for binding in case["work_order"].key_bindings
+        if binding.role == "Acceptor"
+    )
+    acceptor_key = decode_and_verify_key_binding(acceptor_binding)
+    assert verify_payload(
+        "acceptance-receipt",
+        signed.model_dump(mode="json"),
+        acceptor_key,
+    )
+    # A different role key must not verify the same payload.
+    from openworkproof.signing import decode_and_verify_key_binding as dvk  # noqa: PLC0415
+
+    manager_binding = next(
+        binding
+        for binding in case["work_order"].key_bindings
+        if binding.role == "Manager"
+    )
+    manager_key = dvk(manager_binding)
+    assert not verify_payload(
+        "acceptance-receipt",
+        signed.model_dump(mode="json"),
+        manager_key,
+    )
+
+
+def test_acceptance_transactions_serialize_under_target_lock(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    """Concurrent commits of the same request never double-apply."""
+    import threading  # noqa: PLC0415
+
+    case, context, request, composed, expires_at = _request_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    outcomes = []
+    barrier = threading.Barrier(2)
+
+    def attempt():
+        barrier.wait()
+        try:
+            acceptance.request_acceptance_transaction(
+                case["ledger_path"],
+                evidence_root=case["evidence_root"],
+                context=context,
+                request=request,
+                sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+                expires_at=expires_at,
+                clock=lambda: fixed_now,
+            )
+            outcomes.append("success")
+        except Exception as error:  # noqa: BLE001
+            outcomes.append(type(error).__name__)
+
+    threads = [
+        threading.Thread(target=attempt),
+        threading.Thread(target=attempt),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert len(outcomes) == 2
+    assert outcomes.count("success") == 1, outcomes
+    state = _request_table_snapshot(case["ledger_path"])
+    assert state["state"] == ("awaiting_human", 7)

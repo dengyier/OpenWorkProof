@@ -4920,8 +4920,19 @@ def _validated_acceptance_receipts(
         cap=MAX_ACCEPTANCE_RECEIPTS,
         label="Acceptance receipts",
     )
-    maintainer = work_order.key_bindings[0]
-    maintainer_key = decode_and_verify_key_binding(maintainer)
+    acceptor = next(
+        (
+            binding
+            for binding in work_order.key_bindings
+            if binding.role == "Acceptor"
+        ),
+        None,
+    )
+    if acceptor is None:
+        raise _child_issuance_error(
+            "WorkOrder has no bound Acceptor"
+        )
+    acceptor_key = decode_and_verify_key_binding(acceptor)
     receipts = []
     for stored_id, stored_work_order, stored_json in rows:
         try:
@@ -4939,10 +4950,11 @@ def _validated_acceptance_receipts(
             or stored_work_order != work_order.digest
             or receipt.work_order_digest != work_order.digest
             or stored_json != canonical
+            or receipt.signer_key_id != acceptor.key_id
             or not verify_payload(
                 "acceptance-receipt",
                 receipt.model_dump(mode="json"),
-                maintainer_key,
+                acceptor_key,
             )
         ):
             raise _child_issuance_error(
@@ -5171,14 +5183,21 @@ def _validated_receipt_prefix(
         acceptance_receipts=acceptance_receipts,
     )
     if acceptance_receipts:
-        raise _child_issuance_error(
-            "Acceptance ledger suffix validation is unavailable"
+        if (
+            len(acceptance_receipts) != 1
+            or not receipts
+            or receipts[-1].state_after != "awaiting_human"
+        ):
+            raise _child_issuance_error(
+                "acceptance ledger suffix is malformed"
+            )
+        expected_state = ("accepted", expected_version)
+    else:
+        expected_state = (
+            ("issued", 0)
+            if not receipts
+            else (receipts[-1].state_after, expected_version)
         )
-    expected_state = (
-        ("issued", 0)
-        if not receipts
-        else (receipts[-1].state_after, expected_version)
-    )
     if (
         counter != (len(receipts) + 1,)
         or state_row != expected_state

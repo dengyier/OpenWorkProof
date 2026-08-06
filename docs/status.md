@@ -110,7 +110,7 @@
 - Policy 专项：101 passed；
 - Policy、Composition 与 Receipt-chain 专项：540 passed；
 - Receipt-chain 专项：407 passed；
-- 全量测试（required-live Docker，0 skip）：2146 passed、0 failed，
+- 全量测试（required-live Docker，0 skip）：2158 passed、0 failed，
   退出码 0；含 candidate-inventory 供应链门（candidate 集成专项
   83 passed，绑定本分支 revision 的新不可变库存）；
 - 独立规格复核：7B4_SPEC_PASS；
