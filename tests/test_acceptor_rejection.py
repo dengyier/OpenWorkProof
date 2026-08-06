@@ -427,3 +427,242 @@ def test_rejection_suffix_requires_awaiting_human_tip(
             evidence._replay_receipt_publication_ledger(connection)
     finally:
         connection.close()
+
+
+def _rejection_table_snapshot(case) -> dict:
+    import sqlite3 as _sql  # noqa: PLC0415
+
+    connection = _sql.connect(case["ledger_path"])
+    try:
+        return {
+            "rejections": connection.execute(
+                "SELECT COUNT(*) FROM acceptance_rejection_receipts"
+            ).fetchone()[0],
+            "acceptances": connection.execute(
+                "SELECT COUNT(*) FROM acceptance_receipts"
+            ).fetchone()[0],
+            "state": connection.execute(
+                "SELECT current_state, version FROM work_order_state "
+                "WHERE singleton = 1"
+            ).fetchone(),
+        }
+    finally:
+        connection.close()
+
+
+def test_reject_acceptance_transaction_commits_rejected(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from test_acceptance import _awaiting_case
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    rejection = _sign_rejection(
+        case, context, request_receipt, ephemeral_role_keys, fixed_now
+    )
+    committed = acceptance.reject_acceptance_transaction(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        rejection=rejection,
+        public_keys=None,
+        clock=lambda: fixed_now,
+    )
+    assert committed == rejection
+    assert _rejection_table_snapshot(case) == {
+        "rejections": 1,
+        "acceptances": 0,
+        "state": ("rejected", 8),
+    }
+
+
+def test_reject_acceptance_transaction_rejects_wrong_role_signer(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from test_acceptance import _awaiting_case
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    raw = _rejection_raw(
+        case, context, request_receipt, ephemeral_role_keys, fixed_now,
+        reason_code="BUSINESS_DECISION",
+    )
+    signed = sign_payload(
+        "acceptance-rejection-receipt",
+        raw,
+        ephemeral_role_keys["Maintainer"][0],
+    )
+    wrong = AcceptanceRejectionReceipt.model_validate(signed)
+    before = _rejection_table_snapshot(case)
+    with pytest.raises(
+        acceptance.AcceptanceTransactionError, match="bound Acceptor"
+    ):
+        acceptance.reject_acceptance_transaction(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            rejection=wrong,
+            public_keys=None,
+            clock=lambda: fixed_now,
+        )
+    assert _rejection_table_snapshot(case) == before
+
+
+@pytest.mark.parametrize(
+    "rejected_at_delta, message",
+    [
+        # The 300s freshness window is shadowed by the request-occurred_at
+        # bound at the same frozen second, so only the future branch is
+        # reachable end-to-end here.
+        (1, "future"),
+    ],
+)
+def test_reject_acceptance_transaction_rejects_bad_time(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+    rejected_at_delta,
+    message,
+) -> None:
+    from datetime import timedelta  # noqa: PLC0415
+    from test_acceptance import _awaiting_case
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    rejection = _sign_rejection(
+        case, context, request_receipt, ephemeral_role_keys, fixed_now,
+        rejected_at=fixed_now + timedelta(seconds=rejected_at_delta),
+    )
+    before = _rejection_table_snapshot(case)
+    with pytest.raises(
+        acceptance.AcceptanceTransactionError, match=message
+    ):
+        acceptance.reject_acceptance_transaction(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            rejection=rejection,
+            public_keys=None,
+            clock=lambda: fixed_now,
+        )
+    assert _rejection_table_snapshot(case) == before
+
+
+def test_reject_commit_ack_loss_recovers_exact_truth(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from test_acceptance import _AckLossConnection, _awaiting_case  # noqa: PLC0415
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    rejection = _sign_rejection(
+        case, context, request_receipt, ephemeral_role_keys, fixed_now
+    )
+    real_connect = evidence.connect_ledger
+    monkeypatch.setattr(
+        evidence,
+        "connect_ledger",
+        lambda p: _AckLossConnection(real_connect(p)),
+    )
+    with pytest.raises(
+        acceptance.AcceptanceCommittedError,
+        match="acknowledgement was lost",
+    ) as captured:
+        acceptance.reject_acceptance_transaction(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            rejection=rejection,
+            public_keys=None,
+            clock=lambda: fixed_now,
+        )
+    monkeypatch.undo()
+    committed = captured.value.committed
+    assert committed == rejection
+    assert _rejection_table_snapshot(case) == {
+        "rejections": 1,
+        "acceptances": 0,
+        "state": ("rejected", 8),
+    }
+
+
+def test_reject_readback_failure_is_indeterminate(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from test_acceptance import _awaiting_case  # noqa: PLC0415
+
+    case, context, composed, request_receipt = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    rejection = _sign_rejection(
+        case, context, request_receipt, ephemeral_role_keys, fixed_now
+    )
+    monkeypatch.setattr(
+        acceptance,
+        "_readback_rejection_committed",
+        lambda *a, **k: False,
+    )
+    with pytest.raises(
+        acceptance.AcceptanceCommitIndeterminateError,
+        match="readback could not confirm",
+    ):
+        acceptance.reject_acceptance_transaction(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            rejection=rejection,
+            public_keys=None,
+            clock=lambda: fixed_now,
+        )

@@ -2698,3 +2698,295 @@ def verify_composition_bundle(
         raise AcceptanceTransactionError(
             "offline composition bundle failed verification"
         ) from error
+
+
+def _insert_rejection_rows(
+    connection: sqlite3.Connection,
+    *,
+    work_order,
+    rejection: AcceptanceRejectionReceipt,
+    current_state: str,
+    current_version: int,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO acceptance_rejection_receipts (
+            rejection_id, work_order_digest,
+            acceptance_request_receipt_id, rejection_json
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            rejection.rejection_id,
+            work_order.digest,
+            rejection.acceptance_request_receipt_id,
+            evidence._canonical_json(rejection.model_dump(mode="json")),
+        ),
+    )
+    state_update = connection.execute(
+        """
+        UPDATE work_order_state
+        SET current_state = ?, version = version + 1
+        WHERE singleton = 1
+          AND work_order_digest = ?
+          AND current_state = ?
+          AND version = ?
+        """,
+        (
+            "rejected",
+            work_order.digest,
+            current_state,
+            current_version,
+        ),
+    )
+    if state_update.rowcount != 1:
+        raise AcceptanceTransactionError(
+            "rejection state could not be advanced"
+        )
+
+
+def _readback_rejection_committed(
+    ledger_path: Path,
+    *,
+    work_order,
+    rejection: AcceptanceRejectionReceipt,
+) -> bool:
+    """Prove the exact rejection committed by reopening the ledger."""
+    try:
+        connection = evidence.connect_ledger(ledger_path)
+        try:
+            current_work_order, _, _, _ = (
+                evidence._replay_receipt_publication_ledger(connection)
+            )
+            rejections = evidence._validated_acceptance_rejections(
+                connection,
+                current_work_order,
+            )
+            state = connection.execute(
+                "SELECT current_state FROM work_order_state "
+                "WHERE singleton = 1"
+            ).fetchone()
+        finally:
+            connection.close()
+    except Exception:
+        return False
+    return (
+        current_work_order == work_order
+        and len(rejections) == 1
+        and rejections[0].rejection_id == rejection.rejection_id
+        and state is not None
+        and state[0] == "rejected"
+    )
+
+
+def reject_acceptance_transaction(
+    ledger_path: Path,
+    *,
+    evidence_root: Path,
+    context: AuthorizationContext,
+    rejection: AcceptanceRejectionReceipt,
+    public_keys=None,
+    clock: Callable[[], datetime],
+) -> AcceptanceRejectionReceipt:
+    """Atomically commit the Acceptor-signed AcceptanceRejectionReceipt."""
+    from openworkproof.signing import (  # noqa: PLC0415
+        decode_and_verify_key_binding,
+        verify_payload,
+    )
+
+    path = Path(ledger_path)
+    if not path.is_file():
+        raise AcceptanceTransactionError("acceptance ledger is unavailable")
+    lock_descriptor: int | None = None
+    owns_lock = False
+    connection: sqlite3.Connection | None = None
+    committed_result: AcceptanceRejectionReceipt | None = None
+    try:
+        lock_descriptor, owns_lock = evidence._borrow_or_acquire_target_lock(
+            path, None
+        )
+        now = _freeze_second(clock())
+        if context.transaction_time != now:
+            raise AcceptanceTransactionError(
+                "authorization context time is stale"
+            )
+        try:
+            require_current_context(
+                path,
+                evidence_root,
+                context,
+                now,
+                lock_descriptor,
+            )
+        except RuntimeContextError as error:
+            if _readback_rejection_committed(
+                path,
+                work_order=context.work_order,
+                rejection=rejection,
+            ):
+                committed_result = rejection
+                raise AcceptanceCommittedError(
+                    "the exact rejection is already committed",
+                    rejection,
+                ) from error
+            raise
+        if context.current_state != "awaiting_human":
+            raise AcceptanceTransactionError(
+                "rejection requires awaiting_human"
+            )
+        work_order, receipts, _, _ = evidence._replay_receipt_publication_ledger(
+            evidence.connect_ledger(path)
+        )
+        report = _current_report(path, work_order)
+        request = _current_acceptance_request(path, work_order)
+        if request.expires_at < now:
+            raise AcceptanceTransactionError(
+                "acceptance request has expired"
+            )
+        if context.ledger_prefix.receipts[-1].digest != request.digest:
+            raise AcceptanceTransactionError(
+                "acceptance request is not the current ledger tip"
+            )
+        acceptor = work_order.key_bindings[5]
+        if rejection.signer_key_id != acceptor.key_id:
+            raise AcceptanceTransactionError(
+                "rejection must be signed by the bound Acceptor"
+            )
+        parsed = AcceptanceRejectionReceipt.model_validate(
+            rejection.model_dump(mode="json")
+        )
+        parsed.validate_against_work_order(work_order)
+        rejected_at = parsed.rejected_at
+        if rejected_at < request.occurred_at:
+            raise AcceptanceTransactionError(
+                "rejected_at precedes the acceptance request"
+            )
+        if rejected_at > now:
+            raise AcceptanceTransactionError(
+                "rejected_at is in the future"
+            )
+        if (now - rejected_at).total_seconds() > 300:
+            raise AcceptanceTransactionError(
+                "rejection signature is stale"
+            )
+        if rejected_at > request.expires_at:
+            raise AcceptanceTransactionError(
+                "rejection signature exceeds request expiry"
+            )
+        if rejected_at > work_order.deadline:
+            raise AcceptanceTransactionError(
+                "rejection signature exceeds the WorkOrder deadline"
+            )
+        prefix = context.ledger_prefix.receipts
+        refs = _sorted_unique_evidence_refs(prefix)
+        snapshot = evidence_snapshot_digest(refs)
+        expected_id = rejection_id(
+            work_order_digest=work_order.digest,
+            request_receipt_id=request.receipt_id,
+            request_receipt_digest=request.digest,
+            report_digest=composition_report_digest(report),
+            evidence_snapshot=snapshot,
+        )
+        if parsed.rejection_id != expected_id:
+            raise AcceptanceTransactionError(
+                "rejection ID does not match the authoritative snapshot"
+            )
+        expected_payload = _expected_rejection_payload(
+            work_order,
+            report,
+            request,
+            snapshot,
+            expected_id,
+            rejected_at,
+            prefix,
+            parsed.reason_code,
+            parsed.reason_detail,
+        )
+        actual_payload = {
+            key: value
+            for key, value in parsed.model_dump(mode="json").items()
+            if key not in {"digest", "signature_alg", "signer_key_id", "signature"}
+        }
+        if actual_payload != expected_payload:
+            raise AcceptanceTransactionError(
+                "rejection payload does not match the authoritative snapshot"
+            )
+        acceptor_key = decode_and_verify_key_binding(acceptor)
+        if not verify_payload(
+            "acceptance-rejection-receipt",
+            parsed.model_dump(mode="json"),
+            acceptor_key,
+        ):
+            raise AcceptanceTransactionError(
+                "rejection signature verification failed"
+            )
+        connection = evidence.connect_ledger(path)
+        connection.execute("BEGIN IMMEDIATE")
+        existing_acceptance = connection.execute(
+            "SELECT COUNT(*) FROM acceptance_receipts"
+        ).fetchone()
+        if existing_acceptance is not None and existing_acceptance[0] != 0:
+            raise AcceptanceTransactionError(
+                "WorkOrder already has an acceptance"
+            )
+        existing_rejection = connection.execute(
+            "SELECT COUNT(*) FROM acceptance_rejection_receipts"
+        ).fetchone()
+        if existing_rejection is not None and existing_rejection[0] != 0:
+            raise AcceptanceTransactionError(
+                "WorkOrder already has a rejection"
+            )
+        state_row = connection.execute(
+            "SELECT current_state, version FROM work_order_state WHERE singleton = 1"
+        ).fetchone()
+        if state_row != ("awaiting_human", _derive_version(connection, work_order)):
+            raise AcceptanceTransactionError(
+                "rejection ledger changed under the target lock"
+            )
+        _insert_rejection_rows(
+            connection,
+            work_order=work_order,
+            rejection=parsed,
+            current_state=state_row[0],
+            current_version=state_row[1],
+        )
+        try:
+            connection.execute("COMMIT")
+        except Exception as error:
+            if _readback_rejection_committed(
+                path,
+                work_order=work_order,
+                rejection=parsed,
+            ):
+                committed_result = parsed
+                raise AcceptanceCommittedError(
+                    "rejection committed but its acknowledgement was lost",
+                    parsed,
+                ) from error
+            raise AcceptanceCommitIndeterminateError(
+                "rejection commit outcome is indeterminate"
+            ) from error
+        if not _readback_rejection_committed(
+            path,
+            work_order=work_order,
+            rejection=parsed,
+        ):
+            raise AcceptanceCommitIndeterminateError(
+                "rejection readback could not confirm the exact commit"
+            )
+        committed_result = parsed
+        return parsed
+    except Exception as error:
+        if committed_result is not None and isinstance(
+            error, AcceptanceCommittedError
+        ):
+            raise
+        raise
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+        if owns_lock and lock_descriptor is not None:
+            evidence._release_target_lock(lock_descriptor)
