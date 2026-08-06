@@ -242,7 +242,10 @@ Day 0 执行门仍为 FAIL；deny/rollback 生产事务、真实无网执行器
   composition 和外部真实 Acceptor 独立环境复现仍为边界；
 - CLI 与 MCP 传输层已实现（owp 命令：status/run-tests/repo-read；
   MCP stdio 服务器：owp_status/owp_run_tests/owp_repo_read 工具，
-  承载 JSON 协议消息转发到协调器）；AgentTeams 接线仍为边界；
+  承载 JSON 协议消息转发到协调器）；
+- AgentTeams 执行接入层已实现（execution_adapter：TeamTask/TeamTaskResult、
+  AgentTeamClient 协议 + LocalTeamClient 参考实现、TeamExecutionAdapter
+  数据转换/协议适配/状态同步/错误隔离/分级日志，团队→开发者闭环 6 测试）；
 - Rich #4196 完整演示；
 - Acceptor 独立环境复现；
 - Day 0 人类签署和完整执行门；
