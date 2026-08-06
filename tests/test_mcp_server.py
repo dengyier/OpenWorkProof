@@ -9,7 +9,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
+import subprocess
 
 import pytest
 import rfc8785
@@ -3388,3 +3390,79 @@ def test_mcp_server_type_hints_resolve() -> None:
             except Exception as error:  # noqa: BLE001
                 unresolved.append((name, repr(error)))
     assert not unresolved, unresolved
+
+
+def test_build_docker_run_tests_driver_fails_closed_on_invalid_config() -> None:
+    from openworkproof import repo_tools  # noqa: PLC0415
+
+    with pytest.raises(mcp_server.HandlerCoordinationError):
+        mcp_server.build_docker_run_tests_driver(
+            docker_binary=Path("relative-docker"),
+            image_reference="not-immutable",
+            candidate_runtime_root=Path("/tmp"),
+        )
+    with pytest.raises(mcp_server.HandlerCoordinationError):
+        mcp_server.build_docker_run_tests_driver(
+            docker_binary=Path("/usr/local/bin/docker"),
+            image_reference="not-immutable",
+            candidate_runtime_root=Path("/tmp"),
+        )
+    driver = mcp_server.build_docker_run_tests_driver(
+        docker_binary=Path("/usr/local/bin/docker"),
+        image_reference="docker.io/library/python@sha256:" + "0" * 64,
+        candidate_runtime_root=Path("/tmp"),
+    )
+    assert isinstance(driver, repo_tools.DockerRunTestsExecutor)
+
+
+def test_execute_run_tests_production_delegates_with_docker_driver(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+    monkeypatch,
+) -> None:
+    from openworkproof import repo_tools  # noqa: PLC0415
+
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    captured = {}
+
+    def fake_execute(ledger_path, **kwargs):
+        captured["ledger_path"] = ledger_path
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr(mcp_server, "execute_run_tests", fake_execute)
+    mcp_server.execute_run_tests_production(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=case["context"],
+        request=case["request"],
+        request_arguments=case["arguments"],
+        execution_facts=case["facts"],
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        docker_binary=Path("/usr/local/bin/docker"),
+        image_reference="docker.io/library/python@sha256:" + "0" * 64,
+        candidate_runtime_root=tmp_path,
+        clock=lambda: fixed_now,
+    )
+    assert isinstance(
+        captured["execution_driver"], repo_tools.DockerRunTestsExecutor
+    )
+    snapshot_request = captured["candidate_snapshot_request"]
+    assert snapshot_request.expected_head_commit == (
+        case["arguments"].candidate_commit
+    )
+    assert snapshot_request.expected_workspace_manifest_digest == (
+        case["arguments"].workspace_manifest_digest
+    )
+    assert snapshot_request.source_artifact_sha256 == (
+        case["work_order"].replay_profile.source_artifact_sha256
+    )

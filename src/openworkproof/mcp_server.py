@@ -1986,3 +1986,79 @@ __all__ = [
     "execute_run_tests",
     "make_candidate_rollback_handler",
 ]
+
+
+def build_docker_run_tests_driver(
+    *,
+    docker_binary: Path,
+    image_reference: str,
+    candidate_runtime_root: Path,
+) -> repo_tools.DockerRunTestsExecutor:
+    """Construct the production Docker run-tests executor (fail closed)."""
+    if (
+        not isinstance(docker_binary, Path)
+        or not docker_binary.is_absolute()
+        or not isinstance(candidate_runtime_root, Path)
+        or not candidate_runtime_root.is_absolute()
+        or type(image_reference) is not str
+    ):
+        raise HandlerCoordinationError("HANDLER_UNAVAILABLE")
+    try:
+        return repo_tools.DockerRunTestsExecutor(
+            docker_binary=docker_binary,
+            candidate_runtime_root=candidate_runtime_root,
+            image_reference=image_reference,
+        )
+    except ValueError as error:
+        raise HandlerCoordinationError("HANDLER_UNAVAILABLE") from error
+
+
+def execute_run_tests_production(
+    ledger_path: Path,
+    *,
+    evidence_root: Path,
+    context: AuthorizationContext,
+    request: AgentRequest,
+    request_arguments: RunTestsArguments,
+    execution_facts: ProspectiveExecutionFacts,
+    sidecar_private_key: Ed25519PrivateKey,
+    docker_binary: Path,
+    image_reference: str,
+    candidate_runtime_root: Path,
+    clock: Callable[[], datetime],
+) -> ToolCallReceipt:
+    """Run one production test call with the real Docker executor."""
+    if (
+        not isinstance(docker_binary, Path)
+        or not isinstance(candidate_runtime_root, Path)
+        or type(image_reference) is not str
+    ):
+        raise HandlerCoordinationError("HANDLER_UNAVAILABLE")
+    snapshot_request = repo_tools.CandidateExecutionSnapshotRequest(
+        runtime_root=Path(candidate_runtime_root),
+        workspace_id="c" * 64,
+        source_artifact_sha256=(
+            context.work_order.replay_profile.source_artifact_sha256
+        ),
+        expected_head_commit=request_arguments.candidate_commit,
+        expected_workspace_manifest_digest=(
+            request_arguments.workspace_manifest_digest
+        ),
+    )
+    driver = build_docker_run_tests_driver(
+        docker_binary=docker_binary,
+        image_reference=image_reference,
+        candidate_runtime_root=Path(candidate_runtime_root),
+    )
+    return execute_run_tests(
+        ledger_path,
+        evidence_root=evidence_root,
+        context=context,
+        request=request,
+        request_arguments=request_arguments,
+        execution_facts=execution_facts,
+        candidate_snapshot_request=snapshot_request,
+        sidecar_private_key=sidecar_private_key,
+        execution_driver=driver,
+        clock=clock,
+    )
