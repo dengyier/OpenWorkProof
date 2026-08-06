@@ -2529,7 +2529,7 @@ def _committed_evidence_from_ledger(
     evidence_root: Path,
     work_order: WorkOrder,
     receipts,
-) -> tuple[CommittedEvidence, ...]:
+) -> tuple:
     """Rebuild the committed evidence tuple from the evidence root."""
     from openworkproof.policy import CommittedEvidence  # noqa: PLC0415
 
