@@ -1,0 +1,132 @@
+{
+ "schema_version": "openworkproof-image-candidate-inventory/0.2",
+ "source_revision": "425e7ad52640d3840eded8c811840046deb44e74",
+ "base_image": {
+  "reference": "docker.io/library/python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de",
+  "platform": "linux/arm64",
+  "python_version": "3.12.13"
+ },
+ "build_inputs": {
+  "global": {
+   "project_requirements_lock_sha256": "be6f8e10d7a82b978913eb2b6a73ee11efc5a9af623e5a783163e3cb78179f8c",
+   "full_wheelhouse_sha256sums_sha256": "e8d3ccaaa1cf735113e7bd533637cef028d710725981fbe20968179c70ea3a72"
+  },
+  "execution": {
+   "dockerfile_sha256": "ed415c1e0f6dd54e94aca73a860af3259fab44fafc542e507a2508dfda07d0eb",
+   "requirements_lock_sha256": "f60a9bd1cc239a5c2eab11e92665d1af10f457ee06381398350d9ddf0b8d4c70",
+   "wheel_sha256sums_sha256": "d34350069473b90a356fc24f41362bd457c87112ac82ad5f3468ebc97b5df5b2",
+   "runner_sha256": "a9eb1afc84ced1b573473d64d0e2fb9d7f05dfb9ead057b978720721bbb828d4",
+   "fixed_test_source_sha256": "79b8f001ae89c394901d5ba618e79821dd6d78dd6194de3023a28fcac6f130a6"
+  },
+  "trusted_helper": {
+   "dockerfile_sha256": "e30ddb6023c1f19ca05c3e62b213e42a07743f7560d8aa3f36e805e61d4f6b75",
+   "requirements_lock_sha256": "a6fc946cbfb709962f85a38d5c3c5d605dc0885a363bf25045a9e5c4dd783435",
+   "debian_packages_lock_sha256": "d19818e666e1e62644a264d5ef28a8779e04b549e402351f9b1c1cbd90a470b1",
+   "source_allowlist_sha256": "3d81af1d76cc9f94f1b3c8a2276399dd6dbfe6b31d0e2c022ad6eebc1c4e2952",
+   "wheel_sha256sums_sha256": "1e75f54377e6fe7e303b60c6ad3c07bbaa886986a938b2b4f00ff5cf76e45dcf",
+   "deb_sha256sums_sha256": "79095383da9e8413666d9d8e78c04b57197adcd616358fdea87e5d0a98c8460e",
+   "helper_src_sha256sums_sha256": "4a422df7b47cc75c83a3cb9268186f5564b1385845b637c07ea61928f96a543e"
+  }
+ },
+ "images": {
+  "execution": {
+   "candidate_name": "openworkproof/execution-test:425e7ad52640d3840eded8c811840046deb44e74",
+   "local_image_id": "sha256:5defe1d269811b7b519989002dfa007ae953019cc06b97c36967e756d3ffb99c",
+   "local_repo_digests": [
+    "openworkproof/execution-test@sha256:5defe1d269811b7b519989002dfa007ae953019cc06b97c36967e756d3ffb99c"
+   ],
+   "platform": "linux/arm64",
+   "user": "65532:65532",
+   "entrypoint": [
+    "/opt/venv/bin/python",
+    "-I",
+    "/opt/openworkproof/run_tests_runner.py"
+   ],
+   "cmd": [
+    "execute"
+   ],
+   "labels": {
+    "org.opencontainers.image.description": "Offline Python 3.12 pytest runtime for the fixed Rich 15 source test",
+    "org.opencontainers.image.revision": "425e7ad52640d3840eded8c811840046deb44e74",
+    "org.opencontainers.image.source": "https://github.com/dengyier/OpenWorkProof",
+    "org.opencontainers.image.title": "OpenWorkProof Rich execution/test candidate",
+    "org.openworkproof.base.digest": "sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de",
+    "org.openworkproof.image.role": "execution-test"
+   },
+   "oci_manifest_digest": "sha256:9830d1184b77e4d1ebcffbc57d6aa4c501560fc8a0ee5e67098c4240e7c5ecb9",
+   "archives": {
+    "docker": {
+     "format": "docker-archive",
+     "filename": "openworkproof-execution-test-candidate.docker-archive.tar",
+     "sha256": "97e7fc1df33109437dbe07f0682c562e88fa2b4641b81fd1f3b478a3bd33538b"
+    },
+    "oci": {
+     "format": "oci-image-layout-archive",
+     "filename": "openworkproof-execution-test-candidate.oci-archive.tar",
+     "sha256": "b68a8603bc49f9f3ec03df86438cb1ae7b062f6a95410508c661fffedeff0a5f"
+    }
+   }
+  },
+  "trusted_helper": {
+   "candidate_name": "openworkproof/trusted-helper-candidate:425e7ad52640d3840eded8c811840046deb44e74",
+   "local_image_id": "sha256:387293eb6ff146eec972110138af7fa39ff713935c846115f605f62a6174aa86",
+   "local_repo_digests": [
+    "openworkproof/trusted-helper-candidate@sha256:387293eb6ff146eec972110138af7fa39ff713935c846115f605f62a6174aa86"
+   ],
+   "platform": "linux/arm64",
+   "user": "65532:65532",
+   "entrypoint": [
+    "/opt/venv/bin/python",
+    "-I",
+    "-m",
+    "openworkproof.trusted_helper"
+   ],
+   "cmd": null,
+   "labels": {
+    "org.opencontainers.image.description": "Offline candidate containing Git and the frozen OpenWorkProof helper subset",
+    "org.opencontainers.image.revision": "425e7ad52640d3840eded8c811840046deb44e74",
+    "org.opencontainers.image.source": "https://github.com/dengyier/OpenWorkProof",
+    "org.opencontainers.image.title": "OpenWorkProof trusted-helper candidate",
+    "org.openworkproof.base.digest": "sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de",
+    "org.openworkproof.image.role": "trusted-helper-candidate"
+   },
+   "oci_manifest_digest": "sha256:67cf49cb72686886d1b500e481a25a32ea9c79669b7c3b0d6eb110cf943c74f7",
+   "archives": {
+    "docker": {
+     "format": "docker-archive",
+     "filename": "openworkproof-trusted-helper-candidate.docker-archive.tar",
+     "sha256": "bce294553982b654a5fbc55da323d1eb9475b83191ae011e11d1392fc3086c5a"
+    },
+    "oci": {
+     "format": "oci-image-layout-archive",
+     "filename": "openworkproof-trusted-helper-candidate.oci-archive.tar",
+     "sha256": "8b143e96fe6681d345229e7e6f69595d5321b39165ad78129b120fc564e36b08"
+    }
+   }
+  }
+ },
+ "external_layout": {
+  "local_root": "/Users/molin/Project/openWorkProof-day0",
+  "path_rule": "join-local-root-with-relative-path-no-parent-traversal",
+  "relative_paths": {
+   "wheelhouse": "wheelhouse/linux-arm64-cp312-full",
+   "git_deb_closure": "debs/linux-arm64-trixie-git",
+   "execution_build_context": "build-contexts/425e7ad52640d3840eded8c811840046deb44e74/execution",
+   "trusted_helper_build_context": "build-contexts/425e7ad52640d3840eded8c811840046deb44e74/trusted-helper",
+   "archives": "oci/425e7ad52640d3840eded8c811840046deb44e74"
+  }
+ },
+ "license": {
+  "status": "PENDING",
+  "spdx": "NOASSERTION",
+  "oci_label_present": false
+ },
+ "claims": {
+  "registry_pushed": false,
+  "acceptor_access": false,
+  "clean_cache_reacquisition": false,
+  "final_trusted_helper": false,
+  "day0_pass": false,
+  "acceptor_acquisition_path": null
+ }
+}
