@@ -221,6 +221,9 @@ Day 0 执行门仍为 FAIL；deny/rollback 生产事务、真实无网执行器
   驱动 execute_run_tests_production（稳定 execution ID、启动/结果回执、
   STARTED_UNCONFIRMED 恢复，required-live 真实 Docker 执行已验证）；
   剩余为 Developer mode 生产入口与 MCP 传输层；
+- repo_pipeline 生产级仓库读取-分析管道（本地路径 / GitHub URL 输入、
+  递归遍历 + 目录过滤 + 语言识别、统一数据模型、可扩展分析层、
+  canonical JSON 输出、分级日志与类型化错误；13 测试）；
 - 独立结果（independent-result）执行 episode 与五维证据 recomposition
   → proof_ready 链已实现并验证（本切片测试使用五维 WorkOrder 变体：
   独立结果占 verifier_independent_result 专属槽位，recomposition 在
