@@ -233,8 +233,10 @@ Day 0 执行门仍为 FAIL；deny/rollback 生产事务、真实无网执行器
   篡改拒绝）；真实外部 Acceptor 签署与复核仍为边界；
 - 其他 ToolCall handler 与 evidence publication 的调用闭包，
   rollback handler 及其结果/Receipt 闭包；
-- ResolutionManifest 原始字节的独立读取与重哈希、完整 Task 9
-  composition 和外部真实 Acceptor 独立环境复现；
+- ResolutionManifest 原始字节独立读取与重哈希已实现并验证
+  （validate_resolution_manifest_bytes：preimage 解析 → 域分隔 digest
+  比对 → 与 trusted 对象一致，接入谓词权威门）；完整 Task 9
+  composition 和外部真实 Acceptor 独立环境复现仍为边界；
 - CLI、MCP Sidecar 和 AgentTeams 接线；
 - Rich #4196 完整演示；
 - Acceptor 独立环境复现；
