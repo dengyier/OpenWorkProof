@@ -1468,6 +1468,20 @@ def _validate_authoritative_receipt_predicates(
                     "predicate requested path is outside active authority"
                 )
             manifest = trusted_resolution_manifest
+            if resolution_manifest_bytes is not None:
+                from openworkproof.repo_tools import (  # noqa: PLC0415
+                    validate_resolution_manifest_bytes,
+                )
+
+                try:
+                    validate_resolution_manifest_bytes(
+                        manifest,
+                        resolution_manifest_bytes,
+                    )
+                except Exception as error:
+                    raise ValueError(
+                        "resolution manifest bytes failed independent rehash"
+                    ) from error
             resolved_entries = manifest.resolved_entries
             if (
                 manifest.requested_paths != tuple(requested_paths)

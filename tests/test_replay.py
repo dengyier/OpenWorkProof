@@ -3088,3 +3088,41 @@ def test_burned_patch_result_hole_cannot_be_filled_by_later_receipt(
             policy,
             (failed, illegal_refill),
         )
+
+
+def test_resolution_manifest_bytes_independent_rehash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import rfc8785  # noqa: PLC0415
+
+    from openworkproof.repo_tools import (
+        ResolutionError,
+        _resolution_manifest_json,
+        validate_resolution_manifest_bytes,
+    )
+
+    workspace = _resolution_workspace()
+    requested = ("src/app.py",)
+    probes = (
+        ResolutionProbe(
+            requested_path="src/app.py",
+            resolved_relative_path="src/app.py",
+            openat2_flags=OPENAT2_RESOLVE_FLAGS,
+        ),
+    )
+    manifest = build_resolution_manifest(workspace, requested, probes)
+    preimage = rfc8785.dumps(
+        _resolution_manifest_json(manifest)
+    )
+
+    parsed = validate_resolution_manifest_bytes(manifest, preimage)
+    assert parsed == manifest
+
+    tampered = preimage.replace(b"src/app.py", b"src/evil.py")
+    with pytest.raises(ResolutionError, match="do not match"):
+        validate_resolution_manifest_bytes(manifest, tampered)
+
+    with pytest.raises(ResolutionError, match="bytes"):
+        validate_resolution_manifest_bytes(manifest, b"")
+    with pytest.raises(ResolutionError, match="cannot be parsed"):
+        validate_resolution_manifest_bytes(manifest, b"not json")

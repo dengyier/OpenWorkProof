@@ -7628,6 +7628,60 @@ def build_resolution_manifest(
     return manifest
 
 
+def validate_resolution_manifest_bytes(
+    manifest: ResolutionManifest,
+    manifest_bytes: bytes,
+) -> ResolutionManifest:
+    """Independently read and rehash the ResolutionManifest preimage bytes.
+
+    The trusted manifest object alone is not proof: the caller must also
+    provide the raw preimage bytes, which are parsed and rehashed here and
+    must agree with the trusted object and its domain-separated digest.
+    """
+    if type(manifest_bytes) is not bytes or not manifest_bytes:
+        raise ResolutionError("resolution manifest bytes are invalid")
+    try:
+        raw = json.loads(manifest_bytes)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ResolutionError(
+            "resolution manifest bytes cannot be parsed"
+        ) from error
+    if (
+        type(raw) is not dict
+        or type(raw.get("schema_version")) is not str
+        or type(raw.get("workspace_manifest_digest")) is not str
+        or type(raw.get("requested_paths")) is not list
+        or type(raw.get("resolved_entries")) is not list
+    ):
+        raise ResolutionError("resolution manifest bytes are malformed")
+    try:
+        candidate = ResolutionManifest(
+            schema_version=raw["schema_version"],
+            workspace_manifest_digest=raw["workspace_manifest_digest"],
+            requested_paths=tuple(raw["requested_paths"]),
+            resolved_entries=tuple(
+                ResolutionManifestEntry(
+                    requested_path=entry["requested_path"],
+                    resolved_relative_path=entry.get("resolved_relative_path"),
+                )
+                for entry in raw["resolved_entries"]
+            ),
+        )
+    except (TypeError, ValueError, KeyError) as error:
+        raise ResolutionError(
+            "resolution manifest bytes cannot be reconstructed"
+        ) from error
+    if (
+        candidate != manifest
+        or resolution_manifest_digest(candidate)
+        != resolution_manifest_digest(manifest)
+    ):
+        raise ResolutionError(
+            "resolution manifest bytes do not match the trusted digest"
+        )
+    return candidate
+
+
 def resolution_manifest_digest(manifest: ResolutionManifest) -> str:
     """Return the domain-separated digest of a closed ResolutionManifest."""
 
