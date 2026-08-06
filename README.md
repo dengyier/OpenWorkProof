@@ -96,6 +96,9 @@ WorkOrder            CapabilityGrant        ActionReceipt          AcceptanceRec
   （Manager 发起收据 + 报告 + proof_composed 收据一次提交）
 - 原子 final-acceptance 请求、无密钥外部签名草稿与 Acceptor 签名验收提交
   （proof_ready → awaiting_human → accepted，本地合成 Acceptor 验证）
+- Acceptor 拒绝路径：同权威 Acceptor 签名的 AcceptanceRejectionReceipt
+  原子提交 awaiting_human → rejected（四种闭式拒绝理由、与 accepted
+  互斥终态、COMMIT-ACK 回读、离线双路径验签与篡改拒绝）
 - 独立 Verifier 结果与确定性 recomposition：证据不完整的首份报告保持
   不可变，独立执行的结果占专属证据槽位（槽位与状态一对一映射；
   TIMEOUT/OUTPUT_LIMIT/DISK_LIMIT 失败收据精确回放且可新签名重试，
@@ -103,11 +106,12 @@ WorkOrder            CapabilityGrant        ActionReceipt          AcceptanceRec
   在五维证据链闭合后到达 `proof_ready`（双报告离线验签、一一对应
   绑定与报告/收据/关联因子/公钥/账本表篡改拒绝、STARTED_UNCONFIRMED
   恢复与锁释放故障保持提交均已覆盖）
-- **全量测试：2204 passed、0 failed、0 skip**（required-live Docker 模式，
+- **全量测试：2226 passed、0 failed、0 skip**（required-live Docker 模式，
   含冻结计划规定的 candidate-inventory 供应链门，退出码 0）
 
-**尚未完成：** Acceptor 拒绝路径、CLI、MCP 传输服务器、Docker 生产执行器、
-deny/rollback 生产事务、Day 0 执行门。独立结果（independent-result）执行
+**尚未完成：** CLI、MCP 传输服务器、Docker 生产执行器、
+deny/rollback 生产事务、Day 0 执行门。Acceptor 拒绝路径已实现并验证
+（见上方能力清单与 docs/status.md 的验证记录）。独立结果（independent-result）执行
 episode 与五维 recomposition 链已实现并通过全量测试（见上方能力清单与
 docs/status.md 的验证记录）。
 

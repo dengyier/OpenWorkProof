@@ -109,10 +109,10 @@
 
 - Acceptance 事务专项：40 passed；
 - Acceptance、Contract、Signing、State、Composition、Policy、
-  Receipt-chain、MCP 与 Schema focused 门：1037 passed；
+  Receipt-chain、MCP 与 Schema focused 门：1058 passed；
 - candidate-inventory 供应链专项（required-live Docker）：144 passed
   （image supply-chain 62 + candidate integration 83）；
-- 全量测试（required-live Docker，0 skip）：2204 passed、0 failed，
+- 全量测试（required-live Docker，0 skip）：2226 passed、0 failed，
   退出码 0；固定 execution RepoDigest 与外部 artifact root 均按冻结计划提供；
 - 本轮精确验收修复提交：`cac4b51739d1bd1f18069fc957fe116bb8bb2d42`；
 - 独立结果与 recomposition 专项：test_independent_recomposition
@@ -225,7 +225,10 @@ Day 0 执行门仍为 FAIL；deny/rollback 生产事务、真实无网执行器
   五维闭合后到达 proof_ready，双报告离线验签证明两段 signed
   report-to-trigger 绑定）；剩余为真实外部 Acceptor 复核与赛事交付；
 - deny/rollback 生产事务和剩余入口的全局 nonce 处理；
-- Acceptor 拒绝（rejection）收据与拒绝终态事务；
+- Acceptor 拒绝（rejection）收据与拒绝终态事务已实现并验证
+  （AcceptanceRejectionReceipt 独立签名对象、awaiting_human → rejected
+  原子事务、与 accepted 互斥、COMMIT-ACK 回读、离线 bundle 验签与
+  篡改拒绝）；真实外部 Acceptor 签署与复核仍为边界；
 - 其他 ToolCall handler 与 evidence publication 的调用闭包，
   rollback handler 及其结果/Receipt 闭包；
 - ResolutionManifest 原始字节的独立读取与重哈希、完整 Task 9

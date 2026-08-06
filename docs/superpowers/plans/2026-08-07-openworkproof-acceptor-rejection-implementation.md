@@ -212,7 +212,7 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
 
 **Files:** `README.md`, `docs/status.md`, this plan
 
-- [ ] **Step 1: Run the focused protocol suites**
+- [x] **Step 1: Run the focused protocol suites**
   Run:
 
   ```bash
@@ -232,7 +232,7 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
 
   Expected: zero failures. Record exact count and elapsed time.
 
-- [ ] **Step 2: Resolve the repository-qualified execution image**
+- [x] **Step 2: Resolve the repository-qualified execution image**
   Verify the frozen image directly; do not invent or retag an image:
 
   ```bash
@@ -243,7 +243,7 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
   Expected: exit 0. If inspect fails, stop rather than replacing the
   immutable reference.
 
-- [ ] **Step 3: Run full required-live verification**
+- [x] **Step 3: Run full required-live verification**
   Run:
 
   ```bash
@@ -256,7 +256,7 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
   Expected: zero failures and zero required-live skips. Record exact count
   and elapsed time.
 
-- [ ] **Step 4: Run non-test verification**
+- [x] **Step 4: Run non-test verification**
   Run:
 
   ```bash
@@ -267,14 +267,14 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
 
   Require zero owned OpenWorkProof containers and volumes after the suite.
 
-- [ ] **Step 5: Update only observed project facts**
+- [x] **Step 5: Update only observed project facts**
   In README and `docs/status.md`: state that the Acceptor rejection path is
   implemented and tested; replace stale counts with the exact fresh counts;
   keep explicit boundaries for real external Acceptor signing, termination
   and `FROZEN -> rejected` paths, `prepare_acceptance_rejection` drafts,
   CLI/MCP transmission, Day 0, and contest delivery.
 
-- [ ] **Step 6: Record exact evidence and finish the branch**
+- [x] **Step 6: Record exact evidence and finish the branch**
   Record branch and implementation commit SHAs, focused/full counts,
   schema hashes, the rejection object chain from `awaiting_human` to
   `rejected`, mutual-exclusion and COMMIT-ACK results, and clean worktree
