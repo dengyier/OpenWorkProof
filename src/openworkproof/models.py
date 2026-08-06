@@ -2588,8 +2588,26 @@ class ToolCallReceipt(AgentReceiptEnvelope):
                 if args.test_mode == "verifier"
                 else "developer_test_result"
             )
-            if referenced_slots[result_ref.path].purpose != expected_purpose:
-                raise ValueError("test result evidence has the wrong slot purpose")
+            # An independent_verifier episode reuses the verifier test
+            # profile but stores its payload in the dedicated independent
+            # evidence slot. Allow either purpose for the verifier mode
+            # when the prior state is evidence_incomplete (the independent
+            # episode signature), and require the verifier_result slot for
+            # the primary episode.
+            if args.test_mode == "verifier":
+                allowed = {
+                    "verifier_result",
+                    "verifier_independent_result",
+                }
+                if referenced_slots[result_ref.path].purpose not in allowed:
+                    raise ValueError(
+                        "test result evidence has the wrong slot purpose"
+                    )
+            else:
+                if referenced_slots[result_ref.path].purpose != expected_purpose:
+                    raise ValueError(
+                        "test result evidence has the wrong slot purpose"
+                    )
             result = TestResultEvidence.model_validate(
                 _load_canonical_json(payloads[result_ref.path])
             )

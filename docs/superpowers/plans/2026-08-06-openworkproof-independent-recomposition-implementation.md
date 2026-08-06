@@ -245,7 +245,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 - Modify: `tests/test_independent_recomposition.py`
 - Modify: `tests/test_mcp_server.py`
 
-- [ ] **Step 1: Write RED state-aware slot tests**
+- [x] **Step 1: Write RED state-aware slot tests**
 
   Add tests in `tests/test_independent_recomposition.py` that drive a
   `run_tests` verifier call from `evidence_incomplete` with a fresh
@@ -261,13 +261,13 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
     result commits returns `RECOVERY_REQUIRED` (or a clear sealed-episode
     refusal) rather than overwriting the first slot.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
   Expected: FAIL because the slot is still always selected by the test
   mode string and the state transition still moves the receipt to
   `locally_verified`.
 
-- [ ] **Step 3: Implement state-based episode derivation**
+- [x] **Step 3: Implement state-based episode derivation**
 
   Inside `_build_run_tests_receipt`, derive the closed episode from the
   current authoritative state before any other branching:
@@ -344,7 +344,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
       verified.append(ResultEvidence.model_validate_json(payload))
   ```
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
   Run:
 
@@ -355,7 +355,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   Expected: PASS. The pre-existing primary verifier and developer tests
   remain green.
 
-- [ ] **Step 5: Commit the state-derived episode**
+- [x] **Step 5: Commit the state-derived episode**
 
   ```bash
   git add src/openworkproof/mcp_server.py \

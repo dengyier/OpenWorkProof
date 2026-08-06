@@ -34,6 +34,7 @@ from openworkproof.models import (
     PolicyDecision,
     RollbackReceipt,
     RunTestsArguments,
+    SystemEventReceipt,
     TestResultEvidence,
     ToolCallReceipt,
     request_arguments_digest,
@@ -898,16 +899,52 @@ def _run_tests_arguments_from_contract(
     )
 
 
+def _run_tests_episode(
+    context: AuthorizationContext,
+    request: AgentRequest,
+    arguments: RunTestsArguments,
+) -> Literal["primary_verifier", "independent_verifier"]:
+    """Derive the closed run-tests episode from current authority.
+
+    The episode is derived from the signed context and the agent request;
+    callers do not supply it. A second Verifier run after the first composition
+    is the independent_verifier episode; all other Verifier runs are the
+    primary_verifier episode. Developer mode and any non-Verifier caller are
+    not handled by this helper.
+    """
+    binding = next(
+        (
+            item
+            for item in context.work_order.key_bindings
+            if item.subject_id == request.actor_id
+            and item.key_id == request.actor_key_id
+        ),
+        None,
+    )
+    if binding is None or binding.role != "Verifier":
+        raise HandlerCoordinationError("run-tests actor is not the Verifier")
+    if arguments.test_mode != "verifier":
+        raise HandlerCoordinationError("run-tests mode is not verifier")
+    if context.current_state in {"running", "retrying"}:
+        return "primary_verifier"
+    if context.current_state == "evidence_incomplete":
+        return "independent_verifier"
+    raise HandlerCoordinationError("run-tests state is not executable")
+
+
 def _next_test_reference(
     context: AuthorizationContext,
     arguments: RunTestsArguments,
     payload: bytes,
+    *,
+    purpose: Literal["verifier_result", "verifier_independent_result", "developer_test_result"] | None = None,
 ) -> EvidenceRef:
-    purpose = (
-        "verifier_result"
-        if arguments.test_mode == "verifier"
-        else "developer_test_result"
-    )
+    if purpose is None:
+        purpose = (
+            "verifier_result"
+            if arguments.test_mode == "verifier"
+            else "developer_test_result"
+        )
     used_paths = {
         reference.path
         for receipt in context.ledger_prefix.receipts
@@ -1006,6 +1043,8 @@ def _predicate_results(
 def _causal_parents(
     context: AuthorizationContext,
     request: AgentRequest,
+    *,
+    extra_parents: tuple[ActionReceiptEnvelope, ...] = (),
 ):
     receipts = context.ledger_prefix.receipts
     issuance = next(
@@ -1030,13 +1069,31 @@ def _causal_parents(
         raise HandlerCoordinationError(
             "run-tests causal parents are unavailable"
         )
+    parents: dict[str, ActionReceiptEnvelope] = {
+        issuance.receipt_id: issuance,
+        active_patch.receipt_id: active_patch,
+    }
+    for parent in extra_parents:
+        parents[parent.receipt_id] = parent
     return tuple(
         receipt.receipt_id
         for receipt in sorted(
-            {issuance.receipt_id: issuance, active_patch.receipt_id: active_patch}.values(),
+            parents.values(),
             key=lambda item: item.sequence,
         )
     )
+
+
+def _latest_proof_composed_trigger(
+    receipts: tuple[ActionReceiptEnvelope, ...],
+) -> SystemEventReceipt | None:
+    for receipt in reversed(receipts):
+        if (
+            isinstance(receipt, SystemEventReceipt)
+            and receipt.system_event_name == "proof_composed"
+        ):
+            return receipt
+    return None
 
 
 def _build_run_tests_receipt(
@@ -1053,26 +1110,49 @@ def _build_run_tests_receipt(
     actual_exit_code: int | None,
     payload: bytes | None,
 ) -> ToolCallReceipt:
+    episode = _run_tests_episode(context, request, arguments)
+    if episode == "independent_verifier":
+        trigger = _latest_proof_composed_trigger(context.ledger_prefix.receipts)
+        extra_parents: tuple[ActionReceiptEnvelope, ...] = (
+            (trigger,) if trigger is not None else ()
+        )
+        purpose: Literal[
+            "verifier_result",
+            "verifier_independent_result",
+            "developer_test_result",
+        ] = "verifier_independent_result"
+    else:
+        extra_parents = ()
+        purpose = (
+            "verifier_result"
+            if arguments.test_mode == "verifier"
+            else "developer_test_result"
+        )
     if execution_status == "succeeded":
         if execution_error_code is not None:
             raise HandlerCoordinationError("run-tests outcome is malformed")
         assert payload is not None and actual_exit_code is not None
-        reference = _next_test_reference(context, arguments, payload)
+        reference = _next_test_reference(
+            context, arguments, payload, purpose=purpose
+        )
         evidence_refs = (reference,)
         output_digest = reference.sha256
-        state_after = (
-            "locally_verified"
-            if arguments.test_mode == "verifier"
-            and actual_exit_code
-            == next(
-                profile.expected_exit_code
-                for profile in context.work_order.test_profiles
-                if profile.test_mode == arguments.test_mode
+        if episode == "independent_verifier":
+            state_after = "evidence_incomplete"
+        else:
+            state_after = (
+                "locally_verified"
+                if arguments.test_mode == "verifier"
+                and actual_exit_code
+                == next(
+                    profile.expected_exit_code
+                    for profile in context.work_order.test_profiles
+                    if profile.test_mode == arguments.test_mode
+                )
+                else "needs_rework"
+                if arguments.test_mode == "verifier"
+                else context.current_state
             )
-            else "needs_rework"
-            if arguments.test_mode == "verifier"
-            else context.current_state
-        )
     else:
         if execution_error_code not in {
             "OUTPUT_LIMIT",
@@ -1086,7 +1166,11 @@ def _build_run_tests_receipt(
         output_digest = _digest(
             {"status": "failed", "error_code": execution_error_code}
         )
-        state_after = context.current_state
+        state_after = (
+            "evidence_incomplete"
+            if episode == "independent_verifier"
+            else context.current_state
+        )
     results = _predicate_results(
         context,
         request,
@@ -1139,7 +1223,9 @@ def _build_run_tests_receipt(
         },
         "state_before": context.current_state,
         "state_after": state_after,
-        "parent_receipt_ids": _causal_parents(context, request),
+        "parent_receipt_ids": _causal_parents(
+            context, request, extra_parents=extra_parents
+        ),
         "correlation_factors": {
             "model_id": request.model_id,
             "model_version": request.model_version,

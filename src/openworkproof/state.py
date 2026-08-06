@@ -648,9 +648,8 @@ def append_receipt(
             and parsed.tool_name == "owp.run_tests"
             and role == "Verifier"
         ):
-            return _denied(
-                "TRANSITION_CONTEXT_UNAVAILABLE",
-                "same-state evidence requires unavailable episode history",
+            return _allowed(
+                "independent Verifier rerun appended in evidence-incomplete"
             )
         return _denied(
             "STATE_DENIED",
