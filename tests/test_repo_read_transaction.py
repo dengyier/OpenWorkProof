@@ -312,3 +312,120 @@ def test_execute_repo_read_rejects_path_outside_manifest_with_pipeline_handler(
             clock=lambda: fixed_now,
         )
     assert _snapshot_ledger(case) == before
+
+
+def _repo_read_success_case(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+):
+    """Build a repo-read-only case with a non-empty workspace manifest."""
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+        developer_tools=(
+            "owp.apply_patch",
+            "owp.repo_read",
+            "owp.rollback_patch",
+        ),
+        repo_read_path="src/app.py",
+    )
+    context = _current_run_tests_context(case, fixed_now)
+    return case, context
+
+
+def test_repo_read_commits_receipt_success_path(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    import hashlib as _h
+
+    from openworkproof import repo_tools
+    from openworkproof.repo_tools import RepoReadOutput
+
+    case, context = _repo_read_success_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    # The candidate file exists under the runtime root.
+    candidate_root = tmp_path / "candidate-repo"
+    (candidate_root / "src").mkdir(parents=True)
+    (candidate_root / "src" / "app.py").write_text("import os\n")
+    manifest_digest = context.replay_checkpoint.workspace_manifest_digest
+
+    def read_handler(command):
+        content = (candidate_root / command.path).read_text()
+        raw = content.encode("utf-8")
+        return repo_tools.CandidateReadResult(
+            content=raw,
+            output=RepoReadOutput(
+                path=command.path,
+                content_sha256=_h.sha256(raw).hexdigest(),
+                size_bytes=len(raw),
+                workspace_manifest_digest=manifest_digest,
+            ),
+        )
+
+    request, arguments = _repo_read_request(
+        case, context, ephemeral_role_keys, fixed_now,
+        path="src/app.py",
+    )
+    receipt = mcp_server.execute_repo_read(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        request=request,
+        request_arguments=arguments,
+        execution_facts=case["facts"],
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        candidate_runtime_root=candidate_root,
+        handler=read_handler,
+        clock=lambda: fixed_now,
+    )
+    assert receipt.tool_name == "owp.repo_read"
+    assert receipt.policy_decision == "allow"
+    assert receipt.execution_status == "succeeded"
+    assert receipt.state_after == context.current_state
+    expected_digest = _h.sha256(
+        rfc8785.dumps(
+            {
+                "path": "src/app.py",
+                "content_sha256": _h.sha256(b"import os\n").hexdigest(),
+                "size_bytes": 10,
+                "workspace_manifest_digest": manifest_digest,
+            }
+        )
+    ).hexdigest()
+    assert receipt.output_digest == expected_digest
+    # The receipt is committed and replays exactly.
+    import sqlite3 as _sql
+
+    connection = _sql.connect(case["ledger_path"])
+    try:
+        rows = connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE receipt_json LIKE "
+            "'%owp.repo_read%'"
+        ).fetchone()[0]
+        state = connection.execute(
+            "SELECT current_state, version FROM work_order_state "
+            "WHERE singleton = 1"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert rows == 1
+    # repo-read-only case: root + two grant issuances + the read = version 4
+    assert state == (context.current_state, 4)

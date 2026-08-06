@@ -333,7 +333,11 @@ CREATE TABLE handler_executions (
     nonce TEXT NOT NULL UNIQUE,
     grant_id TEXT NOT NULL REFERENCES grants(grant_id),
     tool_name TEXT NOT NULL CHECK (
-        tool_name IN ('owp.run_tests', 'owp.rollback_patch')
+        tool_name IN (
+            'owp.run_tests',
+            'owp.rollback_patch',
+            'owp.repo_read'
+        )
     ),
     arguments_digest TEXT NOT NULL,
     execution_context_id TEXT NOT NULL UNIQUE,
@@ -383,6 +387,13 @@ CREATE TABLE handler_executions (
             AND execution_contract_json IS NULL
             AND execution_contract_digest IS NULL
         )
+        OR
+        (
+            tool_name = 'owp.repo_read'
+            AND request_json IS NULL
+            AND execution_contract_json IS NULL
+            AND execution_contract_digest IS NULL
+        )
     )
 )
 """
@@ -397,7 +408,11 @@ CREATE TABLE handler_executions (
     nonce TEXT NOT NULL UNIQUE,
     grant_id TEXT NOT NULL REFERENCES grants(grant_id),
     tool_name TEXT NOT NULL CHECK (
-        tool_name IN ('owp.run_tests', 'owp.rollback_patch')
+        tool_name IN (
+            'owp.run_tests',
+            'owp.rollback_patch',
+            'owp.repo_read'
+        )
     ),
     arguments_digest TEXT NOT NULL,
     execution_context_id TEXT NOT NULL UNIQUE,
@@ -421,7 +436,7 @@ CREATE TABLE handler_executions (
         )
         OR
         (
-            tool_name = 'owp.rollback_patch'
+            tool_name IN ('owp.rollback_patch', 'owp.repo_read')
             AND authorization_prefix_digest IS NULL
             AND request_json IS NULL
             AND execution_contract_json IS NULL
@@ -1212,6 +1227,12 @@ def _validate_new_receipt_publication(
                 and receipt.execution_status == "failed"
             )
             or is_started_rollback
+            or (
+                type(receipt) is ToolCallReceipt
+                and receipt.tool_name == "owp.repo_read"
+                and receipt.policy_decision == "allow"
+                and receipt.execution_status == "succeeded"
+            )
         )
     )
     if (
@@ -1446,6 +1467,40 @@ def _validate_authoritative_receipt_predicates(
             }
             continue
         if spec.name == "path_allowed":
+            if isinstance(arguments, RepoReadArguments):
+                if receipt.execution_status != "succeeded":
+                    raise ValueError(
+                        "predicate path authority is unavailable for this tool"
+                    )
+                requested_paths = (arguments.path,)
+                grant_roots = grant.allowed_read_roots
+                work_order_roots = work_order.allowed_read_roots
+                path_input = supplied[spec.predicate_id].input
+                if (
+                    not all(
+                        any(_root_contains(root, path) for root in grant_roots)
+                        and any(
+                            _root_contains(root, path)
+                            for root in work_order_roots
+                        )
+                        for path in requested_paths
+                    )
+                    or path_input.resolution_manifest_digest is None
+                ):
+                    raise ValueError(
+                        "predicate path authority is unavailable for this tool"
+                    )
+                authoritative[spec.predicate_id] = {
+                    "requested_paths": list(requested_paths),
+                    "resolved_entries": [
+                        entry.model_dump(mode="json")
+                        for entry in path_input.resolved_entries
+                    ],
+                    "resolution_manifest_digest": (
+                        path_input.resolution_manifest_digest
+                    ),
+                }
+                continue
             if (
                 not isinstance(arguments, ApplyPatchArguments)
                 or receipt.execution_status not in {"succeeded", "failed"}

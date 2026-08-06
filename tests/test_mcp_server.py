@@ -231,6 +231,7 @@ def _run_tests_case(
     now: datetime,
     verifier_tool_calls: int = 1,
     developer_tools: tuple[str, ...] | None = None,
+    repo_read_path: str | None = None,
 ):
     work_order = _work_order_with_pr_chain_predicates(
         signed_work_order,
@@ -291,16 +292,48 @@ def _run_tests_case(
         role_keys,
         now,
     )
-    patch, checkpoint, committed = _append_active_patch(
-        ledger_path=ledger_path,
-        evidence_root=evidence_root,
-        work_order=work_order,
-        developer=developer,
-        developer_issuance=developer_issuance,
-        role_keys=role_keys,
-        sidecar_receipt_factory=sidecar_receipt_factory,
-        now=now,
-    )
+    import stat  # noqa: PLC0415
+
+    if repo_read_path is not None:
+        # Repo-read-only case: no active patch, a non-empty workspace manifest
+        # that declares the readable path, and a fresh candidate commit.
+        patch = None
+        candidate_commit = work_order.source_commit
+        manifest = build_workspace_manifest(
+            candidate_commit,
+            (
+                repo_tools.WorkspaceScanRecord(
+                    path_bytes=repo_read_path.encode("ascii"),
+                    entry_type="regular",
+                    posix_mode=stat.S_IFREG | 0o644,
+                    size_bytes=4,
+                    content=b"test",
+                    symlink_target=None,
+                    link_count=1,
+                    read_token_before="stable",
+                    read_token_after="stable",
+                ),
+            ),
+        )
+        checkpoint = ReplayCheckpoint(
+            files=(),
+            head_commit=candidate_commit,
+            workspace_manifest=manifest,
+            workspace_manifest_digest=workspace_manifest_digest(manifest),
+            verified_test_results=(),
+        )
+        committed: tuple[CommittedEvidence, ...] = ()
+    else:
+        patch, checkpoint, committed = _append_active_patch(
+            ledger_path=ledger_path,
+            evidence_root=evidence_root,
+            work_order=work_order,
+            developer=developer,
+            developer_issuance=developer_issuance,
+            role_keys=role_keys,
+            sidecar_receipt_factory=sidecar_receipt_factory,
+            now=now,
+        )
     receipts, grants, attempts = _grant_replay_inputs(
         ledger_path, work_order
     )

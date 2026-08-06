@@ -565,7 +565,7 @@ def _reserve_handler_execution(
             )
         except (TypeError, ValueError) as error:
             raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
-    elif request.tool_name == "owp.rollback_patch":
+    elif request.tool_name in {"owp.rollback_patch", "owp.repo_read"}:
         if execution_contract is not None:
             raise HandlerCoordinationError("RECOVERY_REQUIRED")
     else:
@@ -2112,6 +2112,134 @@ def make_repo_pipeline_read_handler(
     return handler
 
 
+def _repo_read_predicate_results(
+    context: AuthorizationContext,
+    request: AgentRequest,
+    arguments: RepoReadArguments,
+    output_digest: str,
+) -> tuple:
+    """Construct the exact predicate results for a repo-read receipt."""
+    from openworkproof.predicates import (  # noqa: PLC0415
+        EvaluationContext,
+        evaluate_required_predicates,
+    )
+    from openworkproof.repo_tools import (  # noqa: PLC0415
+        ResolutionManifest,
+        ResolutionManifestEntry,
+        resolution_manifest_digest,
+    )
+
+    selected = tuple(
+        spec
+        for spec in (
+            context.work_order.preconditions
+            + context.work_order.invariants
+        )
+        if "owp.repo_read" in spec.applies_to_tools
+    )
+    inputs: dict[str, object] = {}
+    for spec in selected:
+        if spec.name == "tool_allowed":
+            inputs[spec.predicate_id] = {
+                "actual_tool_name": "owp.repo_read"
+            }
+        elif spec.name == "quota_remaining":
+            inputs[spec.predicate_id] = {
+                "grant_id": request.grant_id,
+                "metric": "tool_calls",
+                "amount": 1,
+                "grant_remaining_before": _remaining_tool_calls(
+                    context, request.grant_id
+                ),
+                "ledger_prefix_digest": (
+                    context.ledger_prefix.receipts[-1].digest
+                ),
+            }
+        elif spec.name == "path_allowed":
+            manifest = ResolutionManifest(
+                schema_version="openworkproof-resolution-manifest/0.1",
+                workspace_manifest_digest=(
+                    context.replay_checkpoint.workspace_manifest_digest
+                ),
+                requested_paths=(arguments.path,),
+                resolved_entries=(
+                    ResolutionManifestEntry(
+                        requested_path=arguments.path,
+                        resolved_relative_path=arguments.path,
+                    ),
+                ),
+            )
+            inputs[spec.predicate_id] = {
+                "requested_paths": [arguments.path],
+                "resolved_entries": [
+                    {
+                        "requested_path": arguments.path,
+                        "resolved_relative_path": arguments.path,
+                    }
+                ],
+                "resolution_manifest_digest": resolution_manifest_digest(
+                    manifest
+                ),
+            }
+        else:
+            raise HandlerCoordinationError(
+                "repo-read predicate has no offline authority rule"
+            )
+    results = evaluate_required_predicates(
+        selected,
+        EvaluationContext(
+            inputs=inputs,
+            authoritative_inputs=inputs,
+            authoritative_ledger_prefix_digests={
+                request.grant_id: context.ledger_prefix.receipts[-1].digest,
+            },
+        ),
+    )
+    return tuple(
+        result.model_dump(mode="json") for result in results
+    )
+
+
+def _repo_read_parents(
+    context: AuthorizationContext,
+    request: AgentRequest,
+) -> tuple[str, ...]:
+    """Causal parents for a repo-read receipt: grant issuance plus the active
+    patch when one exists (mirrors the frozen causal replay rule)."""
+    receipts = context.ledger_prefix.receipts
+    issuance = next(
+        (
+            receipt
+            for receipt in receipts
+            if isinstance(receipt, GrantIssuedReceipt)
+            and receipt.policy_decision == "allow"
+            and receipt.issued_grant_id == request.grant_id
+        ),
+        None,
+    )
+    if issuance is None:
+        raise HandlerCoordinationError("repo-read causal parents are unavailable")
+    parents: dict[str, ActionReceiptEnvelope] = {
+        issuance.receipt_id: issuance
+    }
+    active_patch = next(
+        (
+            receipt
+            for receipt in receipts
+            if receipt.receipt_id == context.active_patch_receipt_id
+        ),
+        None,
+    )
+    if active_patch is not None:
+        parents[active_patch.receipt_id] = active_patch
+    return tuple(
+        receipt.receipt_id
+        for receipt in sorted(
+            parents.values(), key=lambda item: item.sequence
+        )
+    )
+
+
 def _repo_read_command(
     context: AuthorizationContext,
     arguments: RepoReadArguments,
@@ -2137,6 +2265,7 @@ def _build_repo_read_receipt(
     arguments: RepoReadArguments,
     result: repo_tools.CandidateReadResult,
     sidecar_private_key: Ed25519PrivateKey,
+    execution_facts: ProspectiveExecutionFacts,
 ) -> ToolCallReceipt:
     remaining_before = _remaining_tool_calls(context, request.grant_id)
     sidecar_key_id = key_id(sidecar_private_key.public_key())
@@ -2171,8 +2300,26 @@ def _build_repo_read_receipt(
         },
         "state_before": context.current_state,
         "state_after": context.current_state,
-        "parent_receipt_ids": list(_causal_parents(context, request)),
-        "correlation_factors": None,
+        "parent_receipt_ids": list(_repo_read_parents(context, request)),
+        "correlation_factors": {
+            "model_id": request.model_id,
+            "model_version": request.model_version,
+            "prompt_template_digest": request.prompt_template_digest,
+            "context_source_digest": request.context_source_digest,
+            "toolchain_id": _digest(
+                {
+                    "domain": "openworkproof/toolchain/v0.1",
+                    "tool_name": "owp.repo_read",
+                    "tool_version": "0.1",
+                }
+            ),
+            "execution_context_id": execution_facts.execution_context_id,
+            "container_instance_id_digest": (
+                execution_facts.container_instance_id_digest
+            ),
+            "controller_id": execution_facts.controller_id,
+            "fixed_test_source_digest": None,
+        },
         "evidence_refs": [],
         "occurred_at": context.transaction_time.strftime(
             "%Y-%m-%dT%H:%M:%SZ"
@@ -2188,17 +2335,14 @@ def _build_repo_read_receipt(
         "request_arguments": arguments.model_dump(mode="json"),
         "arguments_digest": request.arguments_digest,
         "output_digest": output_digest,
-        "predicate_results": [
-            result.model_dump(mode="json")
-            for result in _predicate_results(
+        "predicate_results": list(
+            _repo_read_predicate_results(
                 context,
                 request,
                 arguments,
-                execution_status="succeeded",
-                actual_exit_code=0,
-                evidence_digest=output_digest,
+                output_digest,
             )
-        ],
+        ),
     }
     return ACTION_RECEIPT_ADAPTER.validate_python(
         sign_payload("action-receipt", raw, sidecar_private_key)
@@ -2210,14 +2354,15 @@ def _preflight_repo_read_receipts(
     request: AgentRequest,
     arguments: RepoReadArguments,
     sidecar_private_key: Ed25519PrivateKey,
+    execution_facts: ProspectiveExecutionFacts,
 ) -> None:
     import base64  # noqa: PLC0415
 
     entries = context.replay_checkpoint.workspace_manifest.entries
     decoded_paths = {
-        base64.urlsafe_b64decode(entry.path_bytes_b64url + b"==").decode(
-            "utf-8"
-        )
+        base64.urlsafe_b64decode(
+            (entry.path_bytes_b64url + "==").encode("ascii")
+        ).decode("utf-8")
         for entry in entries
     }
     if arguments.path not in decoded_paths:
@@ -2242,6 +2387,7 @@ def _preflight_repo_read_receipts(
                     arguments,
                     representative,
                     sidecar_private_key,
+                    execution_facts,
                 ).model_dump(mode="json")
             )
         )
@@ -2325,6 +2471,7 @@ def execute_repo_read(
             request,
             arguments,
             sidecar_private_key,
+            execution_facts,
         )
         command = _repo_read_command(context, arguments, candidate_runtime_root)
         execution_id = _reserve_handler_execution(
@@ -2348,6 +2495,7 @@ def execute_repo_read(
             arguments,
             result,
             sidecar_private_key,
+            execution_facts,
         )
         evidence.complete_receipt_publication(
             path,
