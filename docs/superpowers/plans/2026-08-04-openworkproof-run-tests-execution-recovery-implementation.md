@@ -63,7 +63,7 @@
 - Modify: `src/openworkproof/repo_tools.py`
 - Modify: `tests/test_sandbox.py`
 
-- [ ] **Step 1: Write RED tests for the exact contract, marker, and result**
+- [x] **Step 1: Write RED tests for the exact contract, marker, and result**
 
 Add imports and tests that construct these exact typed values:
 
@@ -125,7 +125,7 @@ Parametrize decoder rejection for empty bytes, 8193 bytes, duplicate keys,
 unknown keys, trailing newline, BOM, non-canonical key order, wrong scalar
 types, developer mode, wrong tool name, and result exit codes outside `0..255`.
 
-- [ ] **Step 2: Run the contract tests and observe RED**
+- [x] **Step 2: Run the contract tests and observe RED**
 
 Run:
 
@@ -136,7 +136,7 @@ Run:
 Expected: collection or attribute failure because the three types and codecs
 do not exist.
 
-- [ ] **Step 3: Add the minimal exact types and strict codecs**
+- [x] **Step 3: Add the minimal exact types and strict codecs**
 
 Add these package types near the existing Docker dataclasses:
 
@@ -211,7 +211,7 @@ def frozen_verifier_command_digest() -> str:
     ).hexdigest()
 ```
 
-- [ ] **Step 4: Run GREEN and existing sandbox regression**
+- [x] **Step 4: Run GREEN and existing sandbox regression**
 
 Run:
 
@@ -222,7 +222,7 @@ Run:
 Expected: all sandbox tests pass; Docker tests may perform only their existing
 precise environment skip when required-live is not enabled.
 
-- [ ] **Step 5: Commit Task 1**
+- [x] **Step 5: Commit Task 1**
 
 ```bash
 git add src/openworkproof/repo_tools.py tests/test_sandbox.py
@@ -238,7 +238,7 @@ git commit -m "feat: freeze run tests execution contracts"
 - Modify: `tests/test_trusted_helper.py`
 - Modify: `tests/test_sandbox.py`
 
-- [ ] **Step 1: Write a successful snapshot RED test**
+- [x] **Step 1: Write a successful snapshot RED test**
 
 Reuse the trusted-helper candidate fixture and add:
 
@@ -263,7 +263,7 @@ def test_prepare_candidate_execution_snapshot_returns_exact_files(
     )
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_trusted_helper.py::test_prepare_candidate_execution_snapshot_returns_exact_files -q
@@ -271,7 +271,7 @@ def test_prepare_candidate_execution_snapshot_returns_exact_files(
 
 Expected: FAIL because the request, result, and function do not exist.
 
-- [ ] **Step 3: Implement the package-private snapshot boundary**
+- [x] **Step 3: Implement the package-private snapshot boundary**
 
 Add:
 
@@ -301,14 +301,14 @@ after all bytes are read. Feed the exact `SourceFile` tuple into
 `derive_execution_snapshot_plan`. Reject any symlink, hardlink, special file,
 extra file, manifest mismatch, or identity drift as `RECOVERY_REQUIRED`.
 
-- [ ] **Step 4: Add adversarial snapshot tests one at a time**
+- [x] **Step 4: Add adversarial snapshot tests one at a time**
 
 Cover sibling in-place change, globally woven ABA, 513th entry before open,
 symlink, hardlink, FIFO, oversize file, wrong source digest, wrong HEAD, wrong
 manifest digest, control replacement, index drift, and fd cleanup after every
 failure. Reuse the existing checkpoint hooks rather than sleeping.
 
-- [ ] **Step 5: Run GREEN**
+- [x] **Step 5: Run GREEN**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_trusted_helper.py tests/test_sandbox.py -q
@@ -316,7 +316,7 @@ failure. Reuse the existing checkpoint hooks rather than sleeping.
 
 Expected: all focused tests pass without new skips.
 
-- [ ] **Step 6: Commit Task 2**
+- [x] **Step 6: Commit Task 2**
 
 ```bash
 git add src/openworkproof/repo_tools.py tests/test_trusted_helper.py tests/test_sandbox.py
@@ -332,7 +332,7 @@ git commit -m "feat: close candidate execution snapshots"
 - Modify: `src/openworkproof/mcp_server.py`
 - Modify: `tests/test_mcp_server.py`
 
-- [ ] **Step 1: Write journal schema RED tests**
+- [x] **Step 1: Write journal schema RED tests**
 
 Add a test that opens a newly initialized ledger and asserts:
 
@@ -350,7 +350,7 @@ assert {row[1] for row in columns} >= {
 Add inserts proving that `owp.run_tests` rejects null recovery fields while
 `owp.rollback_patch` rejects non-null recovery fields.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_mcp_server.py -k 'journal_schema or recovery_fields' -q
@@ -358,7 +358,7 @@ Add inserts proving that `owp.run_tests` rejects null recovery fields while
 
 Expected: FAIL because the columns are absent.
 
-- [ ] **Step 3: Define the versioned schema exactly**
+- [x] **Step 3: Define the versioned schema exactly**
 
 Rename the current two-tool schema to
 `_HANDLER_EXECUTION_SCHEMA_V1`. Define the new current schema with the three
@@ -387,7 +387,7 @@ Retain the original run-tests-only legacy schema constant. Update
 an empty table inside the existing transaction, and reject a non-empty old
 table with `RECOVERY_REQUIRED`.
 
-- [ ] **Step 4: Persist and reload exact request/contract bytes**
+- [x] **Step 4: Persist and reload exact request/contract bytes**
 
 Change `_reserve_handler_execution` to accept
 `RunTestsExecutionContract | None`. For run-tests rows, serialize the signed
@@ -411,14 +411,14 @@ The loader must parse and re-verify canonical request bytes, request digest,
 contract digest, duplicated journal fields, Verifier tool/mode, and trusted UTC
 second. It must not accept the next caller's request as a substitute.
 
-- [ ] **Step 5: Add migration and tamper tests**
+- [x] **Step 5: Add migration and tamper tests**
 
 Cover empty V1 migration, empty legacy migration, non-empty V1 rejection,
 non-empty legacy rejection, duplicate-key request JSON, non-canonical request,
 contract digest mismatch, journal-column mismatch, developer contract, and
 rollback insertion/regression.
 
-- [ ] **Step 6: Run GREEN**
+- [x] **Step 6: Run GREEN**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_mcp_server.py -q
@@ -427,7 +427,7 @@ rollback insertion/regression.
 
 Expected: all MCP and receipt-chain tests pass.
 
-- [ ] **Step 7: Commit Task 3**
+- [x] **Step 7: Commit Task 3**
 
 ```bash
 git add src/openworkproof/evidence.py src/openworkproof/mcp_server.py tests/test_mcp_server.py
@@ -442,7 +442,7 @@ git commit -m "feat: persist run tests recovery inputs"
 - Modify: `src/openworkproof/repo_tools.py`
 - Modify: `tests/test_sandbox.py`
 
-- [ ] **Step 1: Write deterministic binding RED tests**
+- [x] **Step 1: Write deterministic binding RED tests**
 
 Add:
 
@@ -463,7 +463,7 @@ These fixed prefixes plus the first 32 execution-ID characters are the naming
 contract. Every resulting Docker identifier is below 64 ASCII bytes; full
 identity still comes only from the ownership label and contract digest.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_sandbox.py -k 'run_tests_docker_binding or reconcile_run_tests' -q
@@ -471,7 +471,7 @@ identity still comes only from the ownership label and contract digest.
 
 Expected: FAIL because the binding and reconciliation types do not exist.
 
-- [ ] **Step 3: Add the pure binding and observation types**
+- [x] **Step 3: Add the pure binding and observation types**
 
 Add:
 
@@ -513,7 +513,7 @@ container, matching immutable image/config/mount observations, matching start
 marker, and matching closed result. Wrong ownership or contradictory facts are
 always `UNRESOLVED`.
 
-- [ ] **Step 4: Add the full state table tests**
+- [x] **Step 4: Add the full state table tests**
 
 Cover absent, partial pre-start, created-never-started, running, paused,
 restarting, dead, exited-with-result, exited-without-result, malformed result,
@@ -521,7 +521,7 @@ wrong contract, committed Receipt, unowned replacement, and multiple resource
 identity mismatches. Assert reconciliation does not produce Docker commands;
 it returns only a typed action.
 
-- [ ] **Step 5: Run GREEN**
+- [x] **Step 5: Run GREEN**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_sandbox.py -k 'run_tests_docker_binding or reconcile_run_tests' -q
@@ -529,7 +529,7 @@ it returns only a typed action.
 
 Expected: all new pure tests pass.
 
-- [ ] **Step 6: Commit Task 4**
+- [x] **Step 6: Commit Task 4**
 
 ```bash
 git add src/openworkproof/repo_tools.py tests/test_sandbox.py
@@ -549,7 +549,7 @@ git commit -m "feat: derive run tests recovery actions"
 - Modify: `tests/test_image_supply_chain.py`
 - Modify: `supply-chain/images/README.md`
 
-- [ ] **Step 1: Write runner RED tests**
+- [x] **Step 1: Write runner RED tests**
 
 Load the standalone file with `importlib.util.spec_from_file_location` and add:
 
@@ -581,7 +581,7 @@ Add exact failure tests for argv, duplicate keys, non-canonical contract,
 wrong command digest, candidate file drift, symlink, pre-existing marker,
 output limit, timeout, disk limit, and atomic-write failure.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_run_tests_runner.py -q
@@ -589,7 +589,7 @@ output limit, timeout, disk limit, and atomic-write failure.
 
 Expected: FAIL because the standalone runner file does not exist.
 
-- [ ] **Step 3: Implement the standalone runner**
+- [x] **Step 3: Implement the standalone runner**
 
 The file may import only Python standard-library modules. Define:
 
@@ -651,7 +651,7 @@ process-group TERM/KILL behavior consistent with the existing bounded-process
 tests. Failure before a closed result exits nonzero without inventing result
 bytes.
 
-- [ ] **Step 4: Freeze the image entrypoint and context assembler**
+- [x] **Step 4: Freeze the image entrypoint and context assembler**
 
 Change the execution Dockerfile to include:
 
@@ -666,14 +666,14 @@ blob bytes into the execution context, and include the runner in generated
 tracked-input drift checks. Update fixture repositories and tests so untracked
 worktree drift is ignored but revision-blob drift changes the generated runner.
 
-- [ ] **Step 5: Add static image and README tests**
+- [x] **Step 5: Add static image and README tests**
 
 Require the exact entrypoint/CMD, regular non-symlink runner bytes, no shell
 entrypoint, no OpenWorkProof package install, and no Sidecar key or Docker
 socket. Document that this remains an execution-test candidate and does not
 establish final helper, registry, Acceptor, D8, or Day 0.
 
-- [ ] **Step 6: Run GREEN**
+- [x] **Step 6: Run GREEN**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_run_tests_runner.py tests/test_prepare_image_context.py tests/test_image_supply_chain.py -q
@@ -681,7 +681,7 @@ establish final helper, registry, Acceptor, D8, or Day 0.
 
 Expected: all static and portable runner/image tests pass.
 
-- [ ] **Step 7: Commit Task 5**
+- [x] **Step 7: Commit Task 5**
 
 ```bash
 git add supply-chain/images/execution/run_tests_runner.py \
@@ -702,7 +702,7 @@ git commit -m "build: freeze verifier execution runner"
 - Modify: `src/openworkproof/repo_tools.py`
 - Modify: `tests/test_sandbox.py`
 
-- [ ] **Step 1: Write a fake-CLI lifecycle RED test**
+- [x] **Step 1: Write a fake-CLI lifecycle RED test**
 
 Add a scripted Docker runner that records exact argv and returns controlled
 JSON inspections. Assert one normal call performs:
@@ -732,7 +732,7 @@ assert observed_commands == (
 The exact tuples must come from the plan object, not be assembled in the test
 with loose substring matching.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_sandbox.py -k 'docker_run_tests_driver' -q
@@ -740,7 +740,7 @@ with loose substring matching.
 
 Expected: FAIL because the driver does not exist.
 
-- [ ] **Step 3: Add one concrete driver with a narrow test seam**
+- [x] **Step 3: Add one concrete driver with a narrow test seam**
 
 Define:
 
@@ -857,7 +857,7 @@ and manifest digest in the stored contract; it re-runs the Task-2 checkpoint
 before trusting any resource. Missing root, snapshot mismatch, or identity
 drift returns `UNRESOLVED` and retains the journal/resources.
 
-- [ ] **Step 4: Add cleanup and uncertainty tests**
+- [x] **Step 4: Add cleanup and uncertainty tests**
 
 Cover every partial create position, Docker CLI timeout, daemon error, create
 success with lost ACK, wrong owner label, staging mismatch, execution running,
@@ -865,7 +865,7 @@ result missing, result mismatch, committed Receipt cleanup, retained unowned
 resource, and fd/process cleanup. Require reverse-order removal and no broad
 name/glob deletion.
 
-- [ ] **Step 5: Add required-live focused tests**
+- [x] **Step 5: Add required-live focused tests**
 
 Under `OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1`, assemble a revision-bound temporary
 execution context from the current clean Task-5 commit, build an ephemeral
@@ -878,7 +878,7 @@ context and tag after the test. Mark the test with `pytest.mark.docker` and
 retain the existing precise portable skip when the required-live flag is
 absent.
 
-- [ ] **Step 6: Run GREEN**
+- [x] **Step 6: Run GREEN**
 
 ```bash
 OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 \
@@ -887,7 +887,7 @@ OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 \
 
 Expected: all driver tests pass with zero required-live skip.
 
-- [ ] **Step 7: Commit Task 6**
+- [x] **Step 7: Commit Task 6**
 
 ```bash
 git add src/openworkproof/repo_tools.py tests/test_sandbox.py
@@ -903,7 +903,7 @@ git commit -m "feat: execute verifier tests in Docker"
 - Modify: `tests/test_mcp_server.py`
 - Modify: `tests/test_receipt_chain.py`
 
-- [ ] **Step 1: Replace the callable-handler success test with a typed executor RED test**
+- [x] **Step 1: Replace the callable-handler success test with a typed executor RED test**
 
 Create a focused fake implementing the four protocol executor methods and
 recording calls. Change the successful test to pass `execution_driver=` and
@@ -919,7 +919,7 @@ Run:
 Expected: FAIL because `execute_run_tests` still accepts `handler=` and has no
 driver recovery path.
 
-- [ ] **Step 2: Integrate stored contract construction and normal outcome handling**
+- [x] **Step 2: Integrate stored contract construction and normal outcome handling**
 
 Change the public internal signature to:
 
@@ -964,7 +964,7 @@ once, publishes no TestResultEvidence, and keeps state unchanged.
 `WAIT_RUNNING` and `UNRESOLVED` raise
 `HandlerCoordinationError("RECOVERY_REQUIRED")` without a Receipt.
 
-- [ ] **Step 3: Add old-execution recovery before new authorization**
+- [x] **Step 3: Add old-execution recovery before new authorization**
 
 When a stored run-tests row exists, load its signed request and contract, prove
 the supplied current context has the same WorkOrder and exact pre-execution
@@ -982,7 +982,7 @@ ledger prefix, prove the Sidecar key matches the stored controller, and call
 Do not authorize the old request a second time and do not use the new request's
 nonce, model, arguments, or correlation fields.
 
-- [ ] **Step 4: Add crash-injection tests in exact order**
+- [x] **Step 4: Add crash-injection tests in exact order**
 
 Cover interruption after reservation, workspace volume, staging create,
 staging removal, output volume, execution container, journal started mark,
@@ -1003,7 +1003,7 @@ assert state_version_delta <= 1
 Tests for a closed result must require equality to one. Unresolved tests must
 require zero Receipt/quota/state writes and retained exact journal identity.
 
-- [ ] **Step 5: Add rollback and denial regressions**
+- [x] **Step 5: Add rollback and denial regressions**
 
 Run the existing rollback coordinator tests unchanged except fixture updates
 needed for the new schema. Prove a rollback row stores null recovery fields,
@@ -1011,7 +1011,7 @@ does not invoke the Docker driver, and retains its existing
 `STARTED_UNCONFIRMED` behavior. Prove policy denial, stale context, evidence
 capacity failure, and wrong command digest never create Docker resources.
 
-- [ ] **Step 6: Run focused and full portable GREEN**
+- [x] **Step 6: Run focused and full portable GREEN**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_mcp_server.py tests/test_receipt_chain.py tests/test_policy.py -q
@@ -1021,7 +1021,7 @@ capacity failure, and wrong command digest never create Docker resources.
 Expected: all portable tests pass; only the established environment-gated
 Docker tests may skip without the required-live flag.
 
-- [ ] **Step 7: Commit Task 7**
+- [x] **Step 7: Commit Task 7**
 
 ```bash
 git add src/openworkproof/mcp_server.py \
@@ -1041,7 +1041,7 @@ git commit -m "feat: recover verifier test executions"
 - Modify: `supply-chain/images/README.md`
 - Create: `supply-chain/images/candidates/$OWP_SOURCE_REVISION.json`
 
-- [ ] **Step 1: Add versioned inventory and selector RED tests**
+- [x] **Step 1: Add versioned inventory and selector RED tests**
 
 Support historical `openworkproof-image-candidate-inventory/0.1` records without
 editing them. Require the new current record to use
@@ -1067,7 +1067,7 @@ Expected: the historical fixture remains GREEN and both v0.2/current-definition
 tests are RED because the strict loader and current inventory do not yet bind
 the runner.
 
-- [ ] **Step 2: Implement version-aware validation, then commit the definition**
+- [x] **Step 2: Implement version-aware validation, then commit the definition**
 
 Change the strict loader so v0.1 accepts its historical exact execution keys
 and v0.2 requires the same keys plus exactly `runner_sha256`. Reject every
@@ -1097,7 +1097,7 @@ selection test remains intentionally RED until the evidence commit is created.
 This commit contains every final source, image-definition, test, and README
 change; no such file may change after the next step.
 
-- [ ] **Step 3: Freeze the final source revision**
+- [x] **Step 3: Freeze the final source revision**
 
 After all code and test changes are committed and the worktree is clean:
 
@@ -1113,7 +1113,7 @@ test ! -e "$OWP_ARTIFACT_ROOT/oci/$OWP_SOURCE_REVISION"
 
 Do not amend this source revision after building candidate artifacts.
 
-- [ ] **Step 4: Assemble and verify revision-specific contexts**
+- [x] **Step 4: Assemble and verify revision-specific contexts**
 
 ```bash
 ./.venv/bin/python supply-chain/images/prepare_context.py \
@@ -1127,7 +1127,7 @@ Do not amend this source revision after building candidate artifacts.
 Verify all generated `SHA256SUMS` and require the execution context to contain
 exactly Dockerfile, requirements lock, runner, selected wheels, and their sums.
 
-- [ ] **Step 5: Build, smoke, and export both images offline**
+- [x] **Step 5: Build, smoke, and export both images offline**
 
 ```bash
 docker buildx build --load --platform linux/arm64 --network none --pull=false \
@@ -1171,7 +1171,7 @@ Docker archives and true OCI archives under
 `$OWP_ARTIFACT_ROOT/oci/$OWP_SOURCE_REVISION`, then create and verify
 `SHA256SUMS`.
 
-- [ ] **Step 6: Record the measured v0.2 inventory**
+- [x] **Step 6: Record the measured v0.2 inventory**
 
 Create the revision-named JSON from actual Git blobs, context hashes,
 `docker image inspect`, OCI descriptors, archive hashes, sizes, and runner
@@ -1194,7 +1194,7 @@ an OCI license label, and keep the Acceptor path null.
 Copy the inventory to the external archive directory and create its digest
 sidecar without overwriting prior revisions.
 
-- [ ] **Step 7: Run required-live focused and full gates**
+- [x] **Step 7: Run required-live focused and full gates**
 
 ```bash
 export OPENWORKPROOF_DOCKER_TEST_IMAGE="$(
@@ -1279,7 +1279,7 @@ OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 \
 
 Expected: both commands exit 0 with zero required-live skip.
 
-- [ ] **Step 8: Run non-test verification**
+- [x] **Step 8: Run non-test verification**
 
 ```bash
 ./.venv/bin/python -m pip check
@@ -1291,7 +1291,7 @@ Recompute every wheel, Debian package, runner, helper source, Docker archive,
 OCI archive, inventory, and sidecar hash. Require zero owned OpenWorkProof
 container and volume residue.
 
-- [ ] **Step 9: Commit the evidence stage**
+- [x] **Step 9: Commit the evidence stage**
 
 Stage only the new inventory; every source, image-definition, test, and README
 change was frozen in Step 2:
