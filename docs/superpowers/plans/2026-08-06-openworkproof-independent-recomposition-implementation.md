@@ -370,7 +370,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 - Modify: `src/openworkproof/mcp_server.py`
 - Modify: `tests/test_independent_recomposition.py`
 
-- [ ] **Step 1: Write RED pre-start rejection tests**
+- [x] **Step 1: Write RED pre-start rejection tests**
 
   Cover the spec §7 list with explicit failing tests. Each test must
   snapshot the journal, quota events, sequence counter, state row, version,
@@ -388,14 +388,14 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   - the active patch receipt id does not match the current
     `ReplayCheckpoint`.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
   Expected: the slot-purpose and trigger assertions FAIL. The freshness,
   reused execution identity, active patch, and prior-independent-result cases
   may already pass through `authorize_tool_call`; retain those tests as proof
   of gate ordering instead of duplicating policy logic.
 
-- [ ] **Step 3: Implement only the missing coordinator checks**
+- [x] **Step 3: Implement only the missing coordinator checks**
 
   Preserve the existing order in `execute_run_tests`: recovery, target lock,
   current-context check, `authorize_tool_call`, execution binding, receipt
@@ -427,7 +427,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   every rejection test that `execution_driver.prepare` and
   `execution_driver.start_and_wait` were never called.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
   Run:
 
@@ -437,7 +437,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
 
   Expected: PASS with no behavioural change to the primary path.
 
-- [ ] **Step 5: Commit the pre-start gate**
+- [x] **Step 5: Commit the pre-start gate**
 
   ```bash
   git add src/openworkproof/mcp_server.py tests/test_independent_recomposition.py

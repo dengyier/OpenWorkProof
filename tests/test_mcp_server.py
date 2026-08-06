@@ -710,6 +710,14 @@ def _current_run_tests_context(case, now: datetime):
     )
     committed = []
     verified = []
+    verifier_paths = {
+        f"evidence/{artifact.path}"
+        for artifact in case["work_order"].evidence_policy.artifacts
+        if artifact.purpose in {
+            "verifier_result",
+            "verifier_independent_result",
+        }
+    }
     for receipt in receipts:
         for reference in receipt.evidence_refs:
             path = (
@@ -720,8 +728,9 @@ def _current_run_tests_context(case, now: datetime):
             committed.append(
                 CommittedEvidence(reference=reference, payload=payload)
             )
-            if reference.path.startswith("evidence/verifier-result/"):
+            if reference.path in verifier_paths:
                 verified.append(ResultEvidence.model_validate_json(payload))
+    committed.sort(key=lambda item: item.reference.path.encode())
     checkpoint = case["context"].replay_checkpoint
     return derive_authorization_context(
         case["work_order"],

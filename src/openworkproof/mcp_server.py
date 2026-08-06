@@ -1272,6 +1272,19 @@ def _preflight_run_tests_receipts(
     execution_facts: ProspectiveExecutionFacts,
     sidecar_private_key: Ed25519PrivateKey,
 ) -> None:
+    episode = _run_tests_episode(context, request, arguments)
+    if episode == "independent_verifier":
+        if context.causal_state.latest_composition_trigger_id is None:
+            raise HandlerCoordinationError(
+                "independent verifier trigger is unavailable"
+            )
+        if (
+            context.independent_failure_terminal
+            or context.causal_state.independent_result_receipt_id is not None
+        ):
+            raise HandlerCoordinationError(
+                "independent verifier episode is sealed"
+            )
     representative_receipts = []
     expected_exit_code = next(
         profile.expected_exit_code

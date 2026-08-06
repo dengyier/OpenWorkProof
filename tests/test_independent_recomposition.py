@@ -361,3 +361,173 @@ def test_independent_state_remains_incomplete_on_non_passing_closed_result(
     finally:
         connection.close()
     assert state == "evidence_incomplete"
+
+
+def _tracking_driver(*args, **kwargs):
+    """A driver that records prepare/start calls for gate-ordering proof."""
+    from test_mcp_server import _FakeRunTestsExecutionDriver
+
+    driver = _FakeRunTestsExecutionDriver(*args, **kwargs)
+    return driver
+
+
+def _snapshot_ledger(case) -> dict:
+    import sqlite3 as _sql
+
+    connection = _sql.connect(case["ledger_path"])
+    try:
+        return {
+            "journal": connection.execute(
+                "SELECT COUNT(*) FROM handler_executions"
+            ).fetchone()[0],
+            "events": connection.execute(
+                "SELECT COUNT(*) FROM grant_events"
+            ).fetchone()[0],
+            "sequence": connection.execute(
+                "SELECT next_sequence FROM sequence_counter WHERE singleton = 1"
+            ).fetchone()[0],
+            "state": connection.execute(
+                "SELECT current_state, version FROM work_order_state "
+                "WHERE singleton = 1"
+            ).fetchone(),
+            "receipts": connection.execute(
+                "SELECT COUNT(*) FROM receipts"
+            ).fetchone()[0],
+            "reports": connection.execute(
+                "SELECT COUNT(*) FROM composition_reports"
+            ).fetchone()[0],
+        }
+    finally:
+        connection.close()
+
+
+def test_independent_episode_is_sealed_after_first_result(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, incomplete = _independent_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    from test_mcp_server import _execute_run_tests_case
+
+    # First independent run commits a passing result.
+    request, arguments, facts = _independent_test_request(
+        case, ephemeral_role_keys, fixed_now,
+        nonce_label="independent:gate-run",
+        execution_context_id="e" * 64,
+        container_instance_id_digest="f" * 64,
+    )
+    from test_mcp_server import _current_run_tests_context
+
+    context_after_first = _current_run_tests_context(case, fixed_now)
+    _execute_run_tests_case(
+        case,
+        case["ledger_path"].parent,
+        ephemeral_role_keys,
+        _FakeRunTestsExecutionDriver(),
+        context=context_after_first,
+        request=request,
+        request_arguments=arguments,
+        execution_facts=facts,
+        now=fixed_now,
+    )
+    # A second independent run on the same episode must be sealed closed.
+    sealed_context = _current_run_tests_context(case, fixed_now)
+    driver = _tracking_driver()
+    second_request, second_arguments, second_facts = _independent_test_request(
+        case, ephemeral_role_keys, fixed_now,
+        nonce_label="independent:gate-sealed",
+        execution_context_id="a1" * 32,
+        container_instance_id_digest="b1" * 32,
+    )
+    with pytest.raises(
+        (mcp_server.HandlerCoordinationError, mcp_server.ToolCallDenied),
+        match="sealed|denied|unavailable|PREDICATE_DENIED",
+    ):
+        _execute_run_tests_case(
+            case,
+            case["ledger_path"].parent,
+            ephemeral_role_keys,
+            driver,
+            context=sealed_context,
+            request=second_request,
+            request_arguments=second_arguments,
+            execution_facts=second_facts,
+            now=fixed_now,
+        )
+    # The execution driver must never have started a second run.
+    assert all(call[0] not in {"prepare", "start_and_wait"} for call in driver.calls)
+
+
+def test_independent_pre_start_gate_leaves_snapshot_unchanged(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, first, incomplete = _independent_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    from test_mcp_server import _current_run_tests_context, _execute_run_tests_case
+
+    # First independent run commits; then a sealed second run must be a
+    # no-op for every authoritative table.
+    request, arguments, facts = _independent_test_request(
+        case, ephemeral_role_keys, fixed_now,
+        nonce_label="independent:snap-1",
+        execution_context_id="c1" * 32,
+        container_instance_id_digest="d1" * 32,
+    )
+    context_before = _current_run_tests_context(case, fixed_now)
+    _execute_run_tests_case(
+        case,
+        case["ledger_path"].parent,
+        ephemeral_role_keys,
+        _FakeRunTestsExecutionDriver(),
+        context=context_before,
+        request=request,
+        request_arguments=arguments,
+        execution_facts=facts,
+        now=fixed_now,
+    )
+    before = _snapshot_ledger(case)
+    sealed_context = _current_run_tests_context(case, fixed_now)
+    second_request, second_arguments, second_facts = _independent_test_request(
+        case, ephemeral_role_keys, fixed_now,
+        nonce_label="independent:snap-2",
+        execution_context_id="11" * 32,
+        container_instance_id_digest="22" * 32,
+    )
+    driver = _tracking_driver()
+    with pytest.raises(
+        (mcp_server.HandlerCoordinationError, mcp_server.ToolCallDenied)
+    ):
+        _execute_run_tests_case(
+            case,
+            case["ledger_path"].parent,
+            ephemeral_role_keys,
+            driver,
+            context=sealed_context,
+            request=second_request,
+            request_arguments=second_arguments,
+            execution_facts=second_facts,
+            now=fixed_now,
+        )
+    assert _snapshot_ledger(case) == before
+    assert all(call[0] not in {"prepare", "start_and_wait"} for call in driver.calls)
