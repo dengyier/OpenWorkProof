@@ -458,13 +458,12 @@ OpenWorkProof/
 - MCP stdio 传输层
 - AgentTeams TCP 网络客户端 + 执行适配层
 - Docker 生产执行器（STARTED_UNCONFIRMED 恢复）
-- Rich #4196 完整五角色端到端演示（外部 Acceptor TCP 签名 + 离线验签）
+- Rich #4196 完整五角色端到端演示（Acceptor TCP 签名 + 离线验签）
 - Dify #33013 完整五角色端到端演示（AI 应用平台类，跨项目类型通用性验证）
 - **全量测试：2283 passed、0 failed、7 skipped**
 
 **尚未完成：** 其他 ToolCall handler 与 evidence publication 的调用闭包、
-真实外部 Acceptor 的人类签署（本地子进程/TCP 验证已完成，外部个人复核
-属线下事件）、正式赛事提交。
+正式赛事提交。
 
 > 我们把「尚未完成什么」写得和「已经完成什么」一样清楚。
 > 这不是谦虚，这是协议项目应有的证据标准。
@@ -484,7 +483,7 @@ OpenWorkProof/
 Manager 签发最小权限 → Developer 在受限工作区修改代码（repo_read + apply_patch）→
 越权路径在执行前被拒绝 → Verifier 运行固定测试并形成独立证据 → 局部测试通过
 为何不自动等于最终接受 → 独立 Verifier 结果与 recomposition → Acceptor 基于
-完整证据链作出人工验收（真实外部 Acceptor 子进程 TCP 签名）→ 离线 bundle 验签。
+完整证据链作出人工验收（Acceptor 子进程 TCP 签名模拟）→ 离线 bundle 验签。
 
 Rich 及其源码仍归属于原权利人；OpenWorkProof 只拥有自有协议和任务封装。
 
@@ -511,8 +510,7 @@ Dify 是面向终端用户的 AI 工作流平台，与 Rich 的开发者工具�
 6. ~~完成 Acceptor 拒绝路径、真实外部 Acceptor 复现~~（已完成）
 7. ~~完成 deny 收据生产入口~~（已完成）
 8. ~~完成 Dify #33013 自包含演示及跨项目类型通用性验证~~（已完成）
-9. 剩余：其他 ToolCall handler 与 evidence publication 的调用闭包、
-   真实外部 Acceptor 人类签署（线下事件）、正式赛事提交。
+9. 剩余：其他 ToolCall handler 与 evidence publication 的调用闭包、正式赛事提交。
 
 ---
 
@@ -532,8 +530,7 @@ Dify 是面向终端用户的 AI 工作流平台，与 Rich 的开发者工具�
 
 ## 项目主体
 
-- 技术 Owner：dengyier
-- 独立 Acceptor：待定（当前不绑定真实个人）
+- 技术 Owner：dengyier（当前兼任 Maintainer、Manager、Acceptor）
 - 版权主体：成都星火领航科技有限公司
 
 ---
