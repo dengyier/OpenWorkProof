@@ -393,6 +393,23 @@ def replay_authorization_causality(
             if receipt.tool_name == "owp.repo_read":
                 if active_patch is not None:
                     add_parent(active_patch)
+            elif receipt.tool_name == "owp.apply_patch":
+                # A patch that follows a repo-read causally depends on the
+                # read: the exact historical replay must mirror the
+                # publication tip-parent rule (the latest repo-read on the
+                # same grant is a causal parent of the patch).
+                prior_read = next(
+                    (
+                        item
+                        for item in reversed(prior)
+                        if isinstance(item, ToolCallReceipt)
+                        and item.tool_name == "owp.repo_read"
+                        and item.grant_id == receipt.grant_id
+                    ),
+                    None,
+                )
+                if prior_read is not None:
+                    add_parent(prior_read)
             elif receipt.tool_name == "owp.run_tests":
                 # An independent episode is identified by its state pair and
                 # role alone: both succeeded and closed infrastructure-failed

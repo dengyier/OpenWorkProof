@@ -114,6 +114,10 @@
   （image supply-chain 62 + candidate integration 83）；
 - 全量测试（required-live Docker，0 skip）：2226 passed、0 failed，
   退出码 0；固定 execution RepoDigest 与外部 artifact root 均按冻结计划提供；
+- M2 Rich #4196 演示专项：test_delivery_m2 5 passed（repo_read 管道
+  output_digest 精确重算、apply_patch active patch、verifier 本地验证、
+  compose→独立→recompose proof_ready、外部 Acceptor 子进程签名 + 离线
+  bundle 验签）；M1 外部 Acceptor 专项：test_delivery_m1 8 passed；
 - 本轮精确验收修复提交：`cac4b51739d1bd1f18069fc957fe116bb8bb2d42`；
 - 独立结果与 recomposition 专项：test_independent_recomposition
   34 passed（独立 episode 推导、槽位一对一映射、前置闸门七项拒绝、
@@ -250,7 +254,11 @@ Day 0 执行门仍为 FAIL；deny/rollback 生产事务、真实无网执行器
   指数退避重试 + 环境配置 + 结构化日志；参考 TeamNetworkService 服务端；
   网络版适配器端到端闭环 6 测试；阿里云 AgentTeams SDK 为治理面 API 且无
   Python 版——执行面网络层按文档化 TCP 协议实现，SDK 接入点保留在适配器）；
-- Rich #4196 完整演示；
+- Rich #4196 演示（M2 交付验证层环节 2）已完成：完整五角色 9 步工作流
+  （init → repo_read → apply_patch → run_tests → compose → 独立 Verifier →
+  recompose → 外部 Acceptor 签名 → 离线验签）端到端可复现，5 测试；
+  本轮同时修复真实因果缺口：repo_read 之后 apply_patch 的语义父规则
+  （composition.py），既有链行为不变；
 - Acceptor 独立环境复现；
 - Day 0 人类签署和完整执行门；
 - 正式赛事提交、入围或获奖。
