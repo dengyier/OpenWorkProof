@@ -110,13 +110,13 @@
 - Acceptance 事务专项：40 passed；
 - Acceptance、Contract、Signing、State、Composition、Policy、
   Receipt-chain、MCP 与 Schema focused 门：1058 passed；
-- candidate-inventory 供应链专项（required-live Docker）：144 passed
-  （image supply-chain 62 + candidate integration 83）；
-- 全量测试（required-live Docker，0 skip）：2226 passed、0 failed，
+- candidate-inventory 供应链专项（required-live Docker）：157 passed
+  （image supply-chain 63 + candidate integration 83 + prepare 11，0 skip）；
+- 全量测试（required-live Docker，0 skip）：2281 passed、0 failed，
   退出码 0；固定 execution RepoDigest 与外部 artifact root 均按冻结计划提供；
-- 当前 HEAD 本地全量（非 required-live）：2271 passed、7 skipped、
-  2 既有失败（candidate-inventory 与当前 HEAD 定义不匹配，stash 对比
-  确认与最近改动无关；required-live 计数需候选库存对齐 HEAD 后重跑）；
+- 当前 HEAD 本地全量（非 required-live）：2271 passed、7 skipped、0 failed；
+  候选库存已为当前 HEAD 重新生成（supply-chain/images/candidates/
+  21af516b…json），历史 2 个既有失败已消除；
 - M2 Rich #4196 演示专项：test_delivery_m2 5 passed（repo_read 管道
   output_digest 精确重算、apply_patch active patch、verifier 本地验证、
   compose→独立→recompose proof_ready、外部 Acceptor 子进程签名 + 离线
@@ -248,12 +248,19 @@ commit）已实现并验证。独立结果执行 episode 与五维 recomposition
   （composition.py），既有链行为不变。
 - Task 24 交付验证层 M3：交付验证签署（冻结 HEAD 14fd7d6、SHA256SUMS
   112 项、Owner/见证人 Ed25519 明文签署、git tag delivery-signoff-2026-08-07）。
+- Task 25 交付验证层 M4：赛事材料（8 类材料核对清单 + 质量检查 +
+  离线验签说明，docs/delivery-materials-checklist.md）。
+- Task 26 rollback 生产事务：execute_rollback（授权 → 执行 → 签名 →
+  单锁原子提交 RollbackReceipt，handler journal RESERVED/STARTED
+  恢复，6 测试：成功/验证失败/异常 RECOVERY_REQUIRED/拒绝不启动/
+  旧 journal 迁移/cleanup 失败收敛）；deny 内建于各收据
+  （policy_decision=deny + 同态拒绝收据，见状态机与 policy 回放）。
 
 ## 尚未完成
 
-- deny/rollback 生产事务和剩余入口的全局 nonce 处理；
+- 剩余入口的全局 nonce 处理（deny 收据生产入口的统一 nonce 语义）；
 - 其他 ToolCall handler 与 evidence publication 的调用闭包，
-  rollback handler 及其结果/Receipt 闭包；
+  rollback handler 结果/Receipt 闭包的扩展边界；
 - 真实外部 Acceptor 的人类签署与独立环境复现（本地子进程/TCP 验证
   已完成；外部个人复核属线下事件，不由本仓库保证）；
 - required-live 最终门复跑（候选库存对齐当前 HEAD 后重跑，确认最终

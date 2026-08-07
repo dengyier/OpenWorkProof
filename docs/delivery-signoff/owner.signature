@@ -1,6 +1,6 @@
 role: owner
 manifest: docs/delivery-signoff/SHA256SUMS
-signed_at: 2026-08-07T05:05:30Z
+signed_at: 2026-08-07T05:59:35Z
 key_id: ed25519:1d153afca0cde7d3eed2d5736afefd520e8a7cf7525119be352854ba865b39f9
 signature_alg: Ed25519
-signature: uqrJhE1BMYMSMUWhYEaoyV0vb2ki0zo_U3rBnttlEsxV-nwjrnwhqIcSGGplAZaI5zc1tOVpdniFTh4OBCX0DQ
+signature: K7ETFhiQOugcGnQmB2BC8lYfaCOEWZG9m77d8gelWBCefzABlcfOi6atfOJTEe7kFM7IlSjYUClebA43m1DhCw

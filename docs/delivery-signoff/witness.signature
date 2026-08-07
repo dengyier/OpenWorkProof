@@ -1,6 +1,6 @@
 role: witness
 manifest: docs/delivery-signoff/SHA256SUMS
-signed_at: 2026-08-07T05:05:30Z
+signed_at: 2026-08-07T05:59:35Z
 key_id: ed25519:3ef752211ae092fb48c4f9a473b0bc4479178f9e01b74422cfb28dd1e970ff54
 signature_alg: Ed25519
-signature: wq_Ms56k0NDOt3_7KXtchwUonb4w9Cy-llXTbuJLV-aqJg1g9PcxJUgwQz9i0JlUgl3iPlY2cvjBDJO3ANc2Cg
+signature: NCiImefCo96uF2J1ZyZkZsilZQEfX8sqI6Ef0HQnrnVevRNeNKH0ihGKsFJ-Foo2ALqGWDwfzUHSXcYzNWRCBw

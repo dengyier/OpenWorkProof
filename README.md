@@ -106,15 +106,14 @@ WorkOrder            CapabilityGrant        ActionReceipt          AcceptanceRec
   在五维证据链闭合后到达 `proof_ready`（双报告离线验签、一一对应
   绑定与报告/收据/关联因子/公钥/账本表篡改拒绝、STARTED_UNCONFIRMED
   恢复与锁释放故障保持提交均已覆盖）
-- **全量测试：2271 passed、7 skipped、2 既有失败**（非 required-live 本地模式；
-  required-live Docker 模式含 candidate-inventory 供应链门，历史计数
-  2226 passed、0 failed、0 skip，需候选库存对齐 HEAD 后重跑确认最终数）
+- **全量测试：2281 passed、0 failed、0 skip**（required-live Docker 模式，
+  含冻结计划规定的 candidate-inventory 供应链门，退出码 0）
 
-**尚未完成：** deny/rollback 生产事务、真实外部 Acceptor 的人类签署
+**尚未完成：** 剩余入口的全局 nonce 处理、真实外部 Acceptor 的人类签署
 （本地子进程/TCP 验证已完成，外部个人复核属线下事件）、正式赛事提交。
-CLI、MCP 传输层、Docker 生产执行器、Acceptor 拒绝路径、独立结果
-（independent-result）episode 与五维 recomposition 链均已实现并验证
-（见上方能力清单与 docs/status.md 的验证记录）。
+CLI、MCP 传输层、Docker 生产执行器、Acceptor 拒绝路径、rollback 生产
+事务、独立结果（independent-result）episode 与五维 recomposition 链均
+已实现并验证（见上方能力清单与 docs/status.md 的验证记录）。
 
 > 我们把「尚未完成什么」写得和「已经完成什么」一样清楚。
 > 这不是谦虚，这是协议项目应有的证据标准。

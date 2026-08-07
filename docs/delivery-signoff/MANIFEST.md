@@ -1,12 +1,15 @@
 # 交付验证签署冻结清单(FREEZE MANIFEST)
 
-- 冻结日期(UTC):2026-08-07T05:05:30Z(第二轮:材料审校后重签)
+- 冻结日期(UTC):2026-08-07T05:59:35Z(第三轮:候选库存对齐 HEAD 后重签)
   - 首轮冻结 2026-08-07T04:58:49Z(HEAD `14fd7d6`),因 M4 材料审校
     更新 README/status/交付验证计划,SHA256SUMS 重生成并按
-    「签署后变更走新冻结周期」规则重签;
-- 冻结 HEAD:`14fd7d6c4047a4a6d5782e23499180eab9ed7b07`
-  (`refactor: rename Day 0 to delivery signoff (交付验证签署)`)+ M4 材料
-  审校变更(README、status、交付验证计划、新增离线验签说明与材料清单)
+    「签署后变更走新冻结周期」规则重签(第二轮 05:05:30Z);
+  - 第三轮:为当前 HEAD 重新生成候选库存(新增
+    `supply-chain/images/candidates/21af516b….json`),required-live
+    全量 2281 passed、0 failed、0 skip 首次全绿,SHA256SUMS 重生成并重签;
+- 冻结 HEAD:`14fd7d6c4047a4a6d5782e23499180eab9ed7b07` + M4 材料审校
+  + 候选库存对齐(README/status/交付验证计划/离线验签说明/材料清单/
+  新候选库存)
 - 冻结范围:HEAD 全部 git 跟踪文件(见 `SHA256SUMS`,排除本目录避免自引用)
 - 不可变锚点:`SHA256SUMS`(逐文件 SHA-256,复核脚本 `verify_sha256sums.py` 重算比对)
 
@@ -21,24 +24,21 @@
 | 验证证据 | `tests/**`(28 文件) | 全量测试可复现 |
 | 环节 1 记录 | `docs/superpowers/2026-08-07-acceptor-rejection-execution-log.md` | 外部 Acceptor 端到端验证 |
 | 环节 2 记录 | `docs/superpowers/2026-08-07-rich-4196-demo-log.md` | 五角色 9 步演示证据链 |
-| 候选库存 | `supply-chain/images/candidates/*.json`(10)+ `supply-chain/images/README.md` | 镜像候选清单(digest 绑定) |
+| 候选库存 | `supply-chain/images/candidates/*.json`(11)+ `supply-chain/images/README.md` | 镜像候选清单(digest 绑定,含当前 HEAD) |
 | 补充 | `docs/superpowers/2026-08-07-execution-adapter-guide.md`、`team-network-client-guide.md` | 执行接入层与网络客户端指南 |
 
 ## 2. 全量测试计数(冻结时点)
 
-- 本地全量(`pytest tests/ -q`,非 required-live):**2271 passed、2 failed、7 skipped**
-- 2 个失败为既有环境问题:候选库存与当前 HEAD 定义不匹配
-  (`test_current_candidate_inventory_binds_execution_runner` /
-  `test_current_candidate_inventory_binds_fixed_test_source`),stash 对比确认与本次无关;
-- required-live Docker 全量历史计数见 README(`2226 passed、0 failed、0 skip`),
-  需在候选库存与当前 HEAD 对齐后重跑。
+- required-live Docker 全量:**2281 passed、0 failed、0 skip**,退出码 0
+  (候选库存已为当前 HEAD 重新生成,历史 2 个既有失败消除,首次全绿);
+- 非 required-live 本地全量:2271 passed、7 skipped、0 failed。
 
 ## 3. 签署记录
 
 | 角色 | key_id | 签署时间(UTC) | 签名文件 |
 |---|---|---|---|
-| 技术 Owner(dengyier) | `ed25519:1d153afca0cde7d3eed2d5736afefd520e8a7cf7525119be352854ba865b39f9` | 2026-08-07T05:05:30Z(重签) | `owner.signature` |
-| 独立见证人 | `ed25519:3ef752211ae092fb48c4f9a473b0bc4479178f9e01b74422cfb28dd1e970ff54` | 2026-08-07T05:05:30Z(重签) | `witness.signature` |
+| 技术 Owner(dengyier) | `ed25519:1d153afca0cde7d3eed2d5736afefd520e8a7cf7525119be352854ba865b39f9` | 2026-08-07T05:59:35Z(第三轮重签) | `owner.signature` |
+| 独立见证人 | `ed25519:3ef752211ae092fb48c4f9a473b0bc4479178f9e01b74422cfb28dd1e970ff54` | 2026-08-07T05:59:35Z(第三轮重签) | `witness.signature` |
 
 签署对象:`SHA256SUMS` 精确字节(Ed25519 明文签名,base64url)。
 复核:`verify_signature.py --role <role> --public-key-hex <32-byte-hex>`。

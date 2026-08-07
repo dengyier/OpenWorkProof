@@ -9,8 +9,8 @@
 |---|---|---|---|---|
 | 1 | 项目说明 | README / 30 秒理解 / 市场定位 | `README.md`(30 秒理解 §、为什么是现在 §、愿景 §) | ✅ 已审校更新 |
 | 2 | 协议文档 | specs 设计(6)+ 实施计划(8)+ schema(6)+ 离线验签说明 | `docs/superpowers/specs/`、`docs/superpowers/plans/`、`specs/v0.1/`、`docs/offline-verification.md` | ✅ 齐备(离线验签说明本轮补齐) |
-| 3 | 代码 | 源码(27)+ requirements-lock + 候选库存(10) | `src/openworkproof/`、`requirements-lock.txt`、`supply-chain/images/candidates/` | ✅ 齐备 |
-| 4 | 验证 | 全量测试报告 + focused/candidate/full 计数 | `docs/status.md` §当前验证快照 | ⚠️ 本地计数已更新;required-live 最终数待候选库存对齐 HEAD 后复跑 |
+| 3 | 代码 | 源码(27)+ requirements-lock + 候选库存(11) | `src/openworkproof/`、`requirements-lock.txt`、`supply-chain/images/candidates/` | ✅ 齐备(含当前 HEAD 候选) |
+| 4 | 验证 | 全量测试报告 + focused/candidate/full 计数 | `docs/status.md` §当前验证快照 | ✅ required-live 全量 2281 passed、0 failed、0 skip |
 | 5 | 演示 | 环节 2 证据链 + 记录 | `tests/test_delivery_m2.py`、`docs/superpowers/2026-08-07-rich-4196-demo-log.md` | ✅ 已完成(M2) |
 | 6 | 签署 | 环节 3 签名单 + 哈希 | `docs/delivery-signoff/`(MANIFEST/SHA256SUMS/owner+witness.signature) | ✅ 已完成(M3) |
 | 7 | 法律 | Apache-2.0 LICENSE + 版权主体声明 | `LICENSE`、`README.md` §项目主体、`docs/status.md` §项目主体说明 | ✅ 齐备 |
@@ -26,8 +26,8 @@
   个人真实姓名;独立见证人仅以 key_id 记录,不出现姓名;
 - [x] **可复现性**:`git clone` + `pip install -r requirements-lock.txt` +
   `pytest -q`(required-live)可复跑;M2 演示 `test_delivery_m2.py` 本地闭环;
-- [x] **一致性**:README/status 计数已与当前本地全量一致
-  (2271 passed、7 skipped、2 既有失败),required-live 最终数标注待复跑;
+- [x] **一致性**:README/status 计数与 required-live 全量一致
+  (2281 passed、0 failed、0 skip),候选库存已为当前 HEAD 生成;
 - [x] **边界诚实**:全材料不宣称"独立外部人类验收完成"——明确标注
   外部 Acceptor 人类签署属线下事件、交付验证签署与赛事结果不由本仓库保证。
 
@@ -44,8 +44,8 @@
 
 ## 4. 剩余边界(如实声明)
 
-- **required-live 最终门**:候选库存与当前 HEAD 定义不匹配(既有失败
-  `matched 0`),需对齐后重跑 required-live Docker 全量并更新最终计数;
 - **真实外部人类签署**:M3 已用协议工具完成 Owner/见证人 Ed25519 签署
   并离线验签通过,但外部真实个人复核属线下事件,不由本仓库保证;
 - **赛事提交**:材料齐备不代表入围或获奖,正式提交由 Owner 执行。
+- **required-live 最终门**:已通过(2281 passed、0 failed、0 skip),
+  本次为候选库存对齐当前 HEAD 后的首次全绿确认。
