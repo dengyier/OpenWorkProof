@@ -263,9 +263,10 @@ commit）已实现并验证。独立结果执行 episode 与五维 recomposition
   rollback handler 结果/Receipt 闭包的扩展边界；
 - 真实外部 Acceptor 的人类签署与独立环境复现（本地子进程/TCP 验证
   已完成；外部个人复核属线下事件，不由本仓库保证）；
-- required-live 最终门复跑（候选库存对齐当前 HEAD 后重跑，确认最终
-  full 计数并更新 README/status）；
 - 正式赛事提交、入围或获奖。
+
+> required-live 最终门已通过（2281 passed、0 failed、0 skip，
+> 候选库存已为当前 HEAD 生成），不再列入未完成。
 
 ## 许可证状态
 

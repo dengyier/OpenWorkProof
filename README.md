@@ -171,8 +171,9 @@ python3.12 -m venv .venv
    证据链，外部 Acceptor 子进程签名 + 离线验签）；
 6. ~~完成 Acceptor 拒绝路径、真实外部 Acceptor 复现~~（已完成：拒绝终态
    事务 + M1 外部 Acceptor 端到端）；
-7. 剩余：deny/rollback 生产事务、真实外部 Acceptor 人类签署（线下事件）、
-   正式赛事提交。
+7. 剩余：剩余入口的全局 nonce 处理（deny 收据生产入口）、其他
+   ToolCall handler 与 evidence publication 的调用闭包、真实外部
+   Acceptor 人类签署（线下事件）、正式赛事提交。
 
 ---
 
