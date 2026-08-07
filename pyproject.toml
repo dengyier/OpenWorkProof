@@ -6,6 +6,17 @@ build-backend = "setuptools.build_meta"
 name = "openworkproof"
 version = "1.0.0"
 description = "Agent work contracts and verifiable execution protocol"
+readme = "README.md"
+license = {text = "MIT"}
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Security :: Cryptography",
+]
+keywords = ["agent", "verifiable", "ai", "work-contract", "mcp", "audit", "sign"]
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "cryptography==49.0.0",
@@ -15,6 +26,11 @@ dependencies = [
   "rich==15.0.0",
   "typer==0.27.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/dengyier/OpenWorkProof"
+Repository = "https://github.com/dengyier/OpenWorkProof"
+Issues = "https://github.com/dengyier/OpenWorkProof/issues"
 
 [project.optional-dependencies]
 dev = [
