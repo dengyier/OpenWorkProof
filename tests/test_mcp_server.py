@@ -26,6 +26,7 @@ from openworkproof.mcp_server import (
     HandlerCoordinationError,
     ToolCallDenied,
     execute_run_tests,
+    produce_deny_receipt,
 )
 from openworkproof.models import (
     AgentRequest,
@@ -2050,6 +2051,142 @@ def test_execute_run_tests_denial_never_starts_handler_or_writes(
         ).fetchone() == before
     finally:
         connection.close()
+
+
+def test_produce_deny_receipt_records_same_state_denial(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    request, arguments = _compose_deny_request(case, ephemeral_role_keys)
+    decision = _deny_decision("ROLE_DENIED")
+
+    receipt = produce_deny_receipt(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=case["context"],
+        request=request,
+        arguments=arguments,
+        execution_facts=case["facts"],
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        decision=decision,
+        clock=lambda: fixed_now,
+    )
+
+    assert receipt.policy_decision == "deny"
+    assert receipt.execution_status == "denied"
+    assert receipt.policy_error_code == "ROLE_DENIED"
+    assert receipt.state_before == receipt.state_after
+    assert receipt.quota_charge is None
+    assert receipt.evidence_refs == ()
+    assert receipt.nonce == request.nonce
+    assert receipt.receipt_id != request.digest
+
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        row = connection.execute(
+            "SELECT receipt_json FROM receipts WHERE receipt_id = ?",
+            (receipt.receipt_id,),
+        ).fetchone()
+        assert row is not None
+        stored = json.loads(row[0])
+        assert stored["policy_decision"] == "deny"
+        assert stored["execution_status"] == "denied"
+        assert stored["nonce"] == receipt.nonce
+    finally:
+        connection.close()
+
+
+def test_produce_deny_receipt_requires_non_allowed_decision(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    request, arguments = _compose_deny_request(case, ephemeral_role_keys)
+    allowed = _deny_decision("ROLE_DENIED").model_copy(
+        update={"allowed": True, "error_code": None, "decision": "allow"}
+    )
+
+    with pytest.raises(ValueError, match="non-allowed PolicyDecision"):
+        produce_deny_receipt(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=request,
+            arguments=arguments,
+            execution_facts=case["facts"],
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            decision=allowed,
+            clock=lambda: fixed_now,
+        )
+
+
+def _compose_deny_request(case, role_keys):
+    from openworkproof.models import ComposeProofArguments
+    from openworkproof.signing import sign_payload
+
+    manager = role_keys["Manager"][1]
+    arguments = ComposeProofArguments(
+        expected_state_version=0,
+        previous_report_digest=None,
+    )
+    request = AgentRequest.model_validate(
+        sign_payload(
+            "agent-request",
+            {
+                "claim_type": "agent-request",
+                "work_order_digest": case["work_order"].digest,
+                "grant_id": case["root"].grant_id,
+                "actor_id": manager["subject_id"],
+                "actor_key_id": manager["key_id"],
+                "tool_name": "owp.compose_proof",
+                "arguments_digest": request_arguments_digest(
+                    "owp.compose_proof", arguments
+                ),
+                "nonce": _grant_id("deny:compose-request"),
+                "requested_at": "2026-08-07T00:00:00Z",
+                "authentication_method": "agent_signature",
+                "model_id": "model",
+                "model_version": "1",
+                "prompt_template_digest": "a" * 64,
+                "context_source_digest": "b" * 64,
+            },
+            role_keys["Manager"][0],
+        )
+    )
+    return request, arguments
+
+
+def _deny_decision(error_code: str):
+    from openworkproof.models import PolicyDecision
+
+    return PolicyDecision(
+        allowed=False,
+        decision="deny",
+        error_code=error_code,
+        reason="deny test",
+    )
+
+
+
 
 
 def test_execute_run_tests_wrong_frozen_command_never_calls_driver(

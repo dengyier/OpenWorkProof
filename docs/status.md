@@ -255,10 +255,13 @@ commit）已实现并验证。独立结果执行 episode 与五维 recomposition
   恢复，6 测试：成功/验证失败/异常 RECOVERY_REQUIRED/拒绝不启动/
   旧 journal 迁移/cleanup 失败收敛）；deny 内建于各收据
   （policy_decision=deny + 同态拒绝收据，见状态机与 policy 回放）。
+- Task 27 deny 收据生产入口：produce_deny_receipt（策略拒绝时可选记录
+  不可变同态 deny 收据：零配额、零证据、状态不变、直接原子写 receipts
+  表；与嵌套 claim 的 nonce 一致保证外收据校验通过；2 测试：同态拒绝
+  落账 + 非拒绝决策拒绝）。
 
 ## 尚未完成
 
-- 剩余入口的全局 nonce 处理（deny 收据生产入口的统一 nonce 语义）；
 - 其他 ToolCall handler 与 evidence publication 的调用闭包，
   rollback handler 结果/Receipt 闭包的扩展边界；
 - 真实外部 Acceptor 的人类签署与独立环境复现（本地子进程/TCP 验证

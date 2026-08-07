@@ -39,6 +39,7 @@ from openworkproof.models import (
     SystemEventReceipt,
     TestResultEvidence,
     ToolCallReceipt,
+    ToolRequestArguments,
     WorkOrder,
     request_arguments_digest,
 )
@@ -1987,6 +1988,7 @@ __all__ = [
     "execute_rollback",
     "execute_run_tests",
     "make_candidate_rollback_handler",
+    "produce_deny_receipt",
 ]
 
 
@@ -2522,6 +2524,210 @@ def execute_repo_read(
         ) from release_errors[0]
     assert receipt is not None
     return receipt
+
+
+def produce_deny_receipt(
+    ledger_path: Path,
+    *,
+    evidence_root: Path,
+    context: AuthorizationContext,
+    request: AgentRequest,
+    arguments: object,
+    execution_facts: ProspectiveExecutionFacts,
+    sidecar_private_key: Ed25519PrivateKey,
+    decision: PolicyDecision,
+    clock: Callable[[], datetime],
+) -> ToolCallReceipt:
+    """Atomically record an authenticated same-state denial receipt.
+
+    The policy layer already denied the tool call (for example
+    ROLE_DENIED / CAPABILITY_DENIED / QUOTA_EXHAUSTED). This entry point
+    records an immutable, zero-charge denial receipt so the rejection
+    itself becomes auditable — without starting a handler, charging
+    quota, or changing task state. The nonce is derived from a dedicated
+    domain so it is globally unique and independent of the request nonce.
+
+    It is an optional audit entry: callers that only need the denial
+    error keep raising ToolCallDenied; callers that need a denial audit
+    trail call this function before surfacing the error.
+    """
+    path = Path(ledger_path)
+    root = Path(evidence_root)
+    try:
+        ToolRequestArguments.__class_getitem__  # noqa: B018 - type-alias marker
+    except (AttributeError, TypeError):
+        pass
+    if not _is_tool_request_arguments(arguments):
+        raise ValueError("deny receipt arguments must be a ToolRequestArguments")
+    if not isinstance(decision, PolicyDecision) or decision.allowed:
+        raise ValueError("deny receipt requires a non-allowed PolicyDecision")
+    if (
+        key_id(sidecar_private_key.public_key())
+        != execution_facts.controller_id
+    ):
+        raise HandlerCoordinationError(
+            "Sidecar signing key does not match execution controller"
+        )
+    evidence.recover_evidence_publications(path, evidence_root=root)
+    lock_descriptor = evidence._acquire_target_lock(path)
+    primary_error: Exception | None = None
+    receipt: ToolCallReceipt | None = None
+    try:
+        _ensure_handler_execution_schema(path, lock_descriptor)
+        now = evidence._freeze_trusted_utc_second(clock())
+        _require_current_context(
+            path,
+            root,
+            context,
+            now,
+            lock_descriptor,
+        )
+        state = context.current_state
+        receipt_id = hashlib.sha256(
+            rfc8785.dumps(
+                {
+                    "domain": "openworkproof/deny-receipt/v0.1",
+                    "work_order_digest": context.work_order.digest,
+                    "tool_name": request.tool_name,
+                    "arguments_digest": request.arguments_digest,
+                    "policy_error_code": decision.error_code,
+                    "sequence_hint": len(context.ledger_prefix.receipts) + 1,
+                }
+            )
+        ).hexdigest()
+        raw = {
+            "protocol_version": "0.1",
+            "receipt_id": receipt_id,
+            "work_order_digest": context.work_order.digest,
+            "actor_type": "agent",
+            "actor_id": request.actor_id,
+            "actor_key_id": request.actor_key_id,
+            "nested_claim_type": "agent-request",
+            "nested_claim_digest": request.digest,
+            "nested_claim": request.model_dump(mode="json"),
+            "gateway_signer_key_id": key_id(sidecar_private_key.public_key()),
+            "event_type": "tool_call",
+            "policy_decision": "deny",
+            "policy_error_code": decision.error_code,
+            "execution_status": "denied",
+            "execution_error_code": None,
+            "quota_charge": None,
+            "state_before": state,
+            "state_after": state,
+            "parent_receipt_ids": _causal_parents(context, request),
+            "correlation_factors": {
+                "model_id": request.model_id,
+                "model_version": request.model_version,
+                "prompt_template_digest": request.prompt_template_digest,
+                "context_source_digest": request.context_source_digest,
+                "toolchain_id": None,
+                "execution_context_id": None,
+                "container_instance_id_digest": None,
+                "controller_id": execution_facts.controller_id,
+                "fixed_test_source_digest": None,
+            },
+            "evidence_refs": [],
+            "occurred_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "sequence": len(context.ledger_prefix.receipts) + 1,
+            "nonce": request.nonce,
+            "previous_receipt_digest": (
+                context.ledger_prefix.receipts[-1].receipt_id
+                if context.ledger_prefix.receipts
+                else context.work_order.digest
+            ),
+            "grant_id": request.grant_id,
+            "tool_name": request.tool_name,
+            "tool_version": "0.1",
+            "request_arguments": arguments.model_dump(mode="json"),
+            "arguments_digest": request.arguments_digest,
+            "output_digest": None,
+            "predicate_results": [],
+        }
+        receipt = ToolCallReceipt.model_validate(
+            sign_payload("action-receipt", raw, sidecar_private_key)
+        )
+        receipt.validate_against_work_order(context.work_order)
+        connection = evidence.connect_ledger(path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO receipts (
+                        receipt_id,
+                        work_order_digest,
+                        nonce,
+                        sequence,
+                        previous_digest,
+                        receipt_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        receipt.receipt_id,
+                        context.work_order.digest,
+                        request.nonce,
+                        len(context.ledger_prefix.receipts) + 1,
+                        (
+                            context.ledger_prefix.receipts[-1].receipt_id
+                            if context.ledger_prefix.receipts
+                            else context.work_order.digest
+                        ),
+                        evidence._canonical_json(
+                            receipt.model_dump(mode="json")
+                        ),
+                    ),
+                )
+                for parent_receipt_id in _causal_parents(
+                    context, request
+                ):
+                    connection.execute(
+                        """
+                        INSERT INTO receipt_parents (
+                            child_receipt_id,
+                            parent_receipt_id
+                        )
+                        VALUES (?, ?)
+                        """,
+                        (receipt.receipt_id, parent_receipt_id),
+                    )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        finally:
+            connection.close()
+    except Exception as error:
+        primary_error = error
+    _, release_errors = evidence._release_target_lock(lock_descriptor)
+    if primary_error is not None:
+        if release_errors:
+            raise HandlerCoordinationError(
+                "deny receipt and lock release both failed"
+            ) from primary_error
+        raise primary_error
+    if release_errors:
+        raise HandlerCoordinationError(
+            "deny receipt lock release failed"
+        ) from release_errors[0]
+    assert receipt is not None
+    return receipt
+
+
+def _is_tool_request_arguments(value: object) -> bool:
+    """True when value is one of the registered ToolRequestArguments variants.
+
+    ToolRequestArguments is a pydantic Union alias, so isinstance is not
+    reliable; validate against the union adapter instead.
+    """
+    from pydantic import TypeAdapter  # noqa: PLC0415
+
+    adapter = TypeAdapter(ToolRequestArguments)
+    try:
+        adapter.validate_python(value)
+    except Exception:  # noqa: BLE001 - validation failure
+        return False
+    return True
 
 
 def _committed_evidence_from_ledger(

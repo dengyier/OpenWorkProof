@@ -109,11 +109,12 @@ WorkOrder            CapabilityGrant        ActionReceipt          AcceptanceRec
 - **全量测试：2281 passed、0 failed、0 skip**（required-live Docker 模式，
   含冻结计划规定的 candidate-inventory 供应链门，退出码 0）
 
-**尚未完成：** 剩余入口的全局 nonce 处理、真实外部 Acceptor 的人类签署
-（本地子进程/TCP 验证已完成，外部个人复核属线下事件）、正式赛事提交。
+**尚未完成：** 其他 ToolCall handler 与 evidence publication 的调用闭包、
+真实外部 Acceptor 的人类签署（本地子进程/TCP 验证已完成，外部个人复核
+属线下事件）、正式赛事提交。
 CLI、MCP 传输层、Docker 生产执行器、Acceptor 拒绝路径、rollback 生产
-事务、独立结果（independent-result）episode 与五维 recomposition 链均
-已实现并验证（见上方能力清单与 docs/status.md 的验证记录）。
+事务、deny 收据生产入口、独立结果（independent-result）episode 与五维
+recomposition 链均已实现并验证（见上方能力清单与 docs/status.md 的验证记录）。
 
 > 我们把「尚未完成什么」写得和「已经完成什么」一样清楚。
 > 这不是谦虚，这是协议项目应有的证据标准。
