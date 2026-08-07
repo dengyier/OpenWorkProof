@@ -137,10 +137,14 @@ python3.12 -m venv .venv
 # 运行全量测试（约 5 分钟）
 ./.venv/bin/python -m pytest -q
 
-# 预期结果：2276 passed, 7 skipped, 0 failed
+# 预期结果：2283 passed, 7 skipped, 0 failed
 ```
 
 ### 运行端到端演示
+
+OpenWorkProof 提供两个独立的端到端验证演示，覆盖不同的项目类型和协议场景：
+
+#### M2 — Rich #4196（开发者工具类）
 
 基于真实开源 Issue [Textualize/Rich #4196](https://github.com/Textualize/rich/issues/4196)
 的完整五角色工作流演示（约 9 秒）：
@@ -166,6 +170,45 @@ python3.12 -m venv .venv
 ```
 
 完整记录见 [docs/superpowers/2026-08-07-rich-4196-demo-log.md](docs/superpowers/2026-08-07-rich-4196-demo-log.md)。
+
+#### M3 — Dify #33013（AI 应用平台类）
+
+基于真实开源 Issue [langgenius/dify #33013](https://github.com/langgenius/dify/issues/33013)
+的完整五角色工作流演示（约 6 秒）：
+
+```bash
+./.venv/bin/python -m pytest tests/test_delivery_m3_dify.py -q
+
+# 预期结果：7 passed
+```
+
+该 Bug 发生在 Dify 的 QuestionClassifierNode 节点中——用户在工作流中
+添加问题分类器节点后执行时直接抛出 `TypeError`，因为 `invoke_llm()` 调用
+传入了 `structured_output_schema` 参数，但底层 LLM SDK 意外地将它转换为
+字典而非预期对象。上游修复将参数名更新为 `json_schema`，一行修改解决。
+
+Dify 是 AI 工作流平台，终端用户直接编排 Agent 工作流——这是与 Rich（开发
+者工具）完全不同的应用场景，证明 OpenWorkProof 协议跨项目类型通用。
+
+该演示覆盖与 M2 相同的九步证据链：
+
+```
+1. 初始化 WorkOrder（五角色 + root grant）        → running
+2. Developer repo_read（裁剪真实的 pre-fix 源码）  → 收据 + output_digest
+3. Developer apply_patch（一行精确修复）           → active patch 绑定
+4. Developer run_tests（开发者模式自检）            → 测试收据
+5. Manager compose_proof（首份报告）               → evidence_incomplete
+6. 独立 Verifier run_tests（新鲜上下文）           → 独立结果收据
+7. Manager recompose_proof（五维证据闭合）          → proof_ready
+8. request_acceptance + 外部 Acceptor 签名         → accepted
+9. 导出证据包 + 离线验签                           → verify_acceptance_bundle 通过
+```
+
+另外验证了两个功能层断言：
+- 裁剪代码中的 `invoke_llm` 调用确认复现了 TypeError（`structured_output_schema` 参数）
+- upstream fix 行级精确替换为 `json_schema`，验证修复有效
+
+完整记录见 [docs/superpowers/2026-08-07-dify-33013-demo-log.md](docs/superpowers/2026-08-07-dify-33013-demo-log.md)。
 
 ---
 
@@ -387,7 +430,7 @@ OpenWorkProof/
 │   ├── trusted_helper.py    # 可信助手请求分发
 │   └── schemas/v0.1/         # JSON Schema 文件
 ├── specs/v0.1/               # 协议 Schema（WorkOrder/Grant/Receipt/Acceptance）
-├── tests/                    # 2276 项一致性测试
+├── tests/                    # 2283 项一致性测试
 ├── docs/                     # 文档（状态、演示日志、离线验签说明）
 ├── supply-chain/             # 可信构建镜像 + 候选清单
 ├── pyproject.toml            # 打包元数据
@@ -416,7 +459,8 @@ OpenWorkProof/
 - AgentTeams TCP 网络客户端 + 执行适配层
 - Docker 生产执行器（STARTED_UNCONFIRMED 恢复）
 - Rich #4196 完整五角色端到端演示（外部 Acceptor TCP 签名 + 离线验签）
-- **全量测试：2276 passed、0 failed、7 skipped**
+- Dify #33013 完整五角色端到端演示（AI 应用平台类，跨项目类型通用性验证）
+- **全量测试：2283 passed、0 failed、7 skipped**
 
 **尚未完成：** 其他 ToolCall handler 与 evidence publication 的调用闭包、
 真实外部 Acceptor 的人类签署（本地子进程/TCP 验证已完成，外部个人复核
@@ -431,6 +475,8 @@ OpenWorkProof/
 
 ## 演示
 
+### M2：Rich #4196（开发者工具类）
+
 基于真实开源 Issue [Textualize/Rich #4196](https://github.com/Textualize/rich/issues/4196)，
 并固定到上游提交 `9d8f9a372cc5916fd4781fec207ced7ddac2f08f`，展示完整
 五角色工作流：
@@ -441,6 +487,17 @@ Manager 签发最小权限 → Developer 在受限工作区修改代码（repo_r
 完整证据链作出人工验收（真实外部 Acceptor 子进程 TCP 签名）→ 离线 bundle 验签。
 
 Rich 及其源码仍归属于原权利人；OpenWorkProof 只拥有自有协议和任务封装。
+
+### M3：Dify #33013（AI 应用平台类）
+
+基于真实开源 Issue [langgenius/dify #33013](https://github.com/langgenius/dify/issues/33013)，
+固定到上游提交 `9f7bea37e`。Bug 发生在 Dify 的 QuestionClassifierNode 节点中：
+用户在工作流中加问题分类器节点后执行时直接 `TypeError` 崩溃——一行修复将参数从
+`structured_output_schema` 更新为 `json_schema`。
+
+Dify 是面向终端用户的 AI 工作流平台，与 Rich 的开发者工具属性完全不同。
+该验证证明了 OpenWorkProof 协议的**跨项目类型通用性**：同样的九步五角色证据链
+同样适用于用户产品层的修复，且功能层额外验证了 bug 的真实复现和上游修复的有效性。
 
 ---
 
@@ -453,7 +510,8 @@ Rich 及其源码仍归属于原权利人；OpenWorkProof 只拥有自有协议�
 5. ~~完成 Rich #4196 自包含演示及外部独立验收~~（已完成）
 6. ~~完成 Acceptor 拒绝路径、真实外部 Acceptor 复现~~（已完成）
 7. ~~完成 deny 收据生产入口~~（已完成）
-8. 剩余：其他 ToolCall handler 与 evidence publication 的调用闭包、
+8. ~~完成 Dify #33013 自包含演示及跨项目类型通用性验证~~（已完成）
+9. 剩余：其他 ToolCall handler 与 evidence publication 的调用闭包、
    真实外部 Acceptor 人类签署（线下事件）、正式赛事提交。
 
 ---
