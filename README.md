@@ -123,18 +123,31 @@ running → locally_verified → proof_ready → awaiting_human → accepted
 
 ### 安装
 
+**直接使用（推荐）：**
+
+```bash
+pip install openworkproof
+```
+
+安装后即获得 `owp` CLI 命令和完整的 Python API。
+
+**本地开发环境：**
+
 ```bash
 git clone https://github.com/dengyier/OpenWorkProof.git
 cd OpenWorkProof
 python3.12 -m venv .venv
 ./.venv/bin/python -m pip install -r requirements-lock.txt
-./.venv/bin/python -m pip install -e .          # 安装 owp CLI 入口
+./.venv/bin/python -m pip install -e .          # 可编辑安装，同步代码修改
 ```
 
 ### 验证安装
 
 ```bash
-# 运行全量测试（约 5 分钟）
+# 检查 CLI 是否可用
+owp status
+
+# 运行全量测试（约 5 分钟，需本地开发环境）
 ./.venv/bin/python -m pytest -q
 
 # 预期结果：2283 passed, 7 skipped, 0 failed
