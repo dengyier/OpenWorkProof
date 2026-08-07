@@ -159,9 +159,9 @@ repo 管道、CLI/MCP 传输、AgentTeams 执行接入层、双终态验收事�
 | 项目说明 | README / 30 秒理解 / 市场定位 | 已有，待最终审校 |
 | 协议文档 | specs（4 份设计 + 实施）、schema、离线验签说明 | 已有 |
 | 代码 | 源码（HEAD）、requirements-lock、候选库存 | 已有 |
-| 验证 | 全量测试报告、focused/candidate/full 计数 | 已有，待更新最终数 |
-| 演示 | 环节 2 证据链 + 记录 | 待产出 |
-| 签署 | 环节 3 交付验证签名单 + 哈希 | 待产出 |
+| 验证 | 全量测试报告、focused/candidate/full 计数 | 已有，本地计数已更新；required-live 最终数待候选库存对齐 HEAD 后复跑 |
+| 演示 | 环节 2 证据链 + 记录 | ✅ 已完成（M2，test_delivery_m2 + rich-4196-demo-log） |
+| 签署 | 环节 3 交付验证签名单 + 哈希 | ✅ 已完成（M3，docs/delivery-signoff/ + tag） |
 | 法律 | Apache-2.0 LICENSE、版权主体声明 | 已有 |
 | 补充 | 路线图/边界声明、已知限制 | 已有 |
 

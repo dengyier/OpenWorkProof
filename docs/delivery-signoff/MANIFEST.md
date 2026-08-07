@@ -1,9 +1,13 @@
 # 交付验证签署冻结清单(FREEZE MANIFEST)
 
-- 冻结日期(UTC):2026-08-07T04:58:49Z
+- 冻结日期(UTC):2026-08-07T05:05:30Z(第二轮:材料审校后重签)
+  - 首轮冻结 2026-08-07T04:58:49Z(HEAD `14fd7d6`),因 M4 材料审校
+    更新 README/status/交付验证计划,SHA256SUMS 重生成并按
+    「签署后变更走新冻结周期」规则重签;
 - 冻结 HEAD:`14fd7d6c4047a4a6d5782e23499180eab9ed7b07`
-  (`refactor: rename Day 0 to delivery signoff (交付验证签署)`)
-- 冻结范围:HEAD 全部 112 个 git 跟踪文件(见 `SHA256SUMS`,排除本目录避免自引用)
+  (`refactor: rename Day 0 to delivery signoff (交付验证签署)`)+ M4 材料
+  审校变更(README、status、交付验证计划、新增离线验签说明与材料清单)
+- 冻结范围:HEAD 全部 git 跟踪文件(见 `SHA256SUMS`,排除本目录避免自引用)
 - 不可变锚点:`SHA256SUMS`(逐文件 SHA-256,复核脚本 `verify_sha256sums.py` 重算比对)
 
 ## 1. 材料清单(对应交付验证计划 4.3)
@@ -33,8 +37,8 @@
 
 | 角色 | key_id | 签署时间(UTC) | 签名文件 |
 |---|---|---|---|
-| 技术 Owner(dengyier) | `ed25519:1d153afca0cde7d3eed2d5736afefd520e8a7cf7525119be352854ba865b39f9` | 2026-08-07T04:59:38Z | `owner.signature` |
-| 独立见证人 | `ed25519:3ef752211ae092fb48c4f9a473b0bc4479178f9e01b74422cfb28dd1e970ff54` | 2026-08-07T04:59:38Z | `witness.signature` |
+| 技术 Owner(dengyier) | `ed25519:1d153afca0cde7d3eed2d5736afefd520e8a7cf7525119be352854ba865b39f9` | 2026-08-07T05:05:30Z(重签) | `owner.signature` |
+| 独立见证人 | `ed25519:3ef752211ae092fb48c4f9a473b0bc4479178f9e01b74422cfb28dd1e970ff54` | 2026-08-07T05:05:30Z(重签) | `witness.signature` |
 
 签署对象:`SHA256SUMS` 精确字节(Ed25519 明文签名,base64url)。
 复核:`verify_signature.py --role <role> --public-key-hex <32-byte-hex>`。

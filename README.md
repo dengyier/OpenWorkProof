@@ -106,14 +106,15 @@ WorkOrder            CapabilityGrant        ActionReceipt          AcceptanceRec
   在五维证据链闭合后到达 `proof_ready`（双报告离线验签、一一对应
   绑定与报告/收据/关联因子/公钥/账本表篡改拒绝、STARTED_UNCONFIRMED
   恢复与锁释放故障保持提交均已覆盖）
-- **全量测试：2226 passed、0 failed、0 skip**（required-live Docker 模式，
-  含冻结计划规定的 candidate-inventory 供应链门，退出码 0）
+- **全量测试：2271 passed、7 skipped、2 既有失败**（非 required-live 本地模式；
+  required-live Docker 模式含 candidate-inventory 供应链门，历史计数
+  2226 passed、0 failed、0 skip，需候选库存对齐 HEAD 后重跑确认最终数）
 
-**尚未完成：** CLI、MCP 传输服务器、Docker 生产执行器、
-deny/rollback 生产事务、交付验证执行门。Acceptor 拒绝路径已实现并验证
-（见上方能力清单与 docs/status.md 的验证记录）。独立结果（independent-result）执行
-episode 与五维 recomposition 链已实现并通过全量测试（见上方能力清单与
-docs/status.md 的验证记录）。
+**尚未完成：** deny/rollback 生产事务、真实外部 Acceptor 的人类签署
+（本地子进程/TCP 验证已完成，外部个人复核属线下事件）、正式赛事提交。
+CLI、MCP 传输层、Docker 生产执行器、Acceptor 拒绝路径、独立结果
+（independent-result）episode 与五维 recomposition 链均已实现并验证
+（见上方能力清单与 docs/status.md 的验证记录）。
 
 > 我们把「尚未完成什么」写得和「已经完成什么」一样清楚。
 > 这不是谦虚，这是协议项目应有的证据标准。
@@ -123,17 +124,19 @@ docs/status.md 的验证记录）。
 
 ---
 
-## 演示（进行中）
+## 演示（已完成，可复现）
 
 首个演示基于真实开源 Issue [Textualize/Rich #4196](https://github.com/Textualize/rich/issues/4196)，
 并固定到上游提交 `9d8f9a372cc5916fd4781fec207ced7ddac2f08f`，展示完整
 五角色工作流：
 
-Manager 签发最小权限 → Developer 在受限工作区修改代码 → 越权路径在执行前
-被拒绝 → Verifier 运行固定测试并形成独立证据 → 局部测试通过为何不自动等于
-最终接受 → Acceptor 基于完整证据链作出人工验收。
+Manager 签发最小权限 → Developer 在受限工作区修改代码（repo_read + apply_patch）→
+越权路径在执行前被拒绝 → Verifier 运行固定测试并形成独立证据 → 局部测试通过
+为何不自动等于最终接受 → 独立 Verifier 结果与 recomposition → Acceptor 基于
+完整证据链作出人工验收（真实外部 Acceptor 子进程 TCP 签名）→ 离线 bundle 验签。
 
-该演示目前是冻结设计目标，尚未完成，不应描述为已经可运行的 Demo。
+该演示端到端可复现（test_delivery_m2，5 测试），完整记录见
+[docs/superpowers/2026-08-07-rich-4196-demo-log.md](docs/superpowers/2026-08-07-rich-4196-demo-log.md)。
 Rich 及其源码仍归属于原权利人；OpenWorkProof 只拥有自有协议和任务封装。
 
 ---
@@ -150,24 +153,27 @@ python3.12 -m venv .venv
 ./.venv/bin/python -m pytest -q
 ```
 
-说明：pyproject.toml 已预留 `owp` 命令入口，但 CLI 模块尚未完成；
-不应把测试通过理解为交付验证签署、独立验收或赛事提交已经完成。
+说明：CLI（`owp status` / `owp run-tests` / `owp repo-read`）与 MCP stdio
+传输层已实现；不应把测试通过理解为交付验证签署、独立验收或赛事提交
+已经完成。赛事交付材料见 [docs/superpowers/plans/2026-08-07-openworkproof-delivery-validation-plan.md](docs/superpowers/plans/2026-08-07-openworkproof-delivery-validation-plan.md)。
 
 ---
 
 ## 路线图
 
-1. 接入真实无网执行器的稳定 execution ID 与启动/结果回执，
-   闭合 `STARTED_UNCONFIRMED` 恢复后再接入 MCP 传输层；
-2. 完成人工决策、回滚和终止策略 API；
-3. 独立结果（independent-result）执行 episode 与五维证据
-   recomposition → proof_ready 完整链已实现并验证（双报告离线验签、
-   篡改拒绝、并发一个赢家与非通过封印已覆盖）；待办为真实外部
-   Acceptor 复核与赛事交付；
-4. 完成 CLI、MCP Sidecar 和 AgentTeams 集成；
-5. 完成 Rich #4196 自包含演示及外部独立验收；
-6. 完成 Acceptor 拒绝路径、真实外部 Acceptor 复现与交付验证
-   人类签署和赛事交付材料（许可证已完成：Apache-2.0）。
+1. ~~接入真实无网执行器的稳定 execution ID 与启动/结果回执~~（已完成：
+   DockerRunTestsExecutor 生产入口 + STARTED_UNCONFIRMED 恢复）；
+2. ~~完成人工决策、回滚和终止策略 API~~（已完成：Task 8B2/8B3 事前授权）；
+3. ~~独立结果执行 episode 与五维 recomposition → proof_ready~~（已完成并验证，
+   双报告离线验签与篡改拒绝已覆盖）；
+4. ~~完成 CLI、MCP Sidecar 和 AgentTeams 集成~~（已完成：CLI、MCP stdio、
+   execution_adapter、真实 TCP 团队网络客户端）；
+5. ~~完成 Rich #4196 自包含演示及外部独立验收~~（已完成：M2 五角色 9 步
+   证据链，外部 Acceptor 子进程签名 + 离线验签）；
+6. ~~完成 Acceptor 拒绝路径、真实外部 Acceptor 复现~~（已完成：拒绝终态
+   事务 + M1 外部 Acceptor 端到端）；
+7. 剩余：deny/rollback 生产事务、真实外部 Acceptor 人类签署（线下事件）、
+   正式赛事提交。
 
 ---
 

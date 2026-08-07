@@ -114,10 +114,15 @@
   （image supply-chain 62 + candidate integration 83）；
 - 全量测试（required-live Docker，0 skip）：2226 passed、0 failed，
   退出码 0；固定 execution RepoDigest 与外部 artifact root 均按冻结计划提供；
+- 当前 HEAD 本地全量（非 required-live）：2271 passed、7 skipped、
+  2 既有失败（candidate-inventory 与当前 HEAD 定义不匹配，stash 对比
+  确认与最近改动无关；required-live 计数需候选库存对齐 HEAD 后重跑）；
 - M2 Rich #4196 演示专项：test_delivery_m2 5 passed（repo_read 管道
   output_digest 精确重算、apply_patch active patch、verifier 本地验证、
   compose→独立→recompose proof_ready、外部 Acceptor 子进程签名 + 离线
   bundle 验签）；M1 外部 Acceptor 专项：test_delivery_m1 8 passed；
+- M3 交付验证签署专项：docs/delivery-signoff/ 冻结清单 + SHA256SUMS
+  （112 项）+ Owner/见证人 Ed25519 签署 + 离线复核脚本全部通过；
 - 本轮精确验收修复提交：`cac4b51739d1bd1f18069fc957fe116bb8bb2d42`；
 - 独立结果与 recomposition 专项：test_independent_recomposition
   34 passed（独立 episode 推导、槽位一对一映射、前置闸门七项拒绝、
@@ -218,49 +223,41 @@ commit）已实现并验证。独立结果执行 episode 与五维 recomposition
 - Task 15 确定性 CompositionReport 与 `owp.compose_proof` 原子合成。
 - Task 16 独立验收事务链：原子 final-acceptance 请求、无密钥
   prepare 草稿与 Acceptor 签名 commit（awaiting_human → accepted）。
+- Task 17 `run_tests` 真实无网执行器生产路径：DockerRunTestsExecutor
+  驱动 execute_run_tests_production（稳定 execution ID、启动/结果回执、
+  STARTED_UNCONFIRMED 恢复，required-live 真实 Docker 执行已验证）。
+- Task 18 repo_pipeline 生产级仓库读取-分析管道（本地路径 / GitHub URL
+  输入、递归遍历 + 目录过滤 + 语言识别、统一数据模型、可扩展分析层、
+  canonical JSON 输出、分级日志与类型化错误；13 测试）。
+- Task 19 CLI 与 MCP 传输层（owp 命令：status/run-tests/repo-read；
+  MCP stdio 服务器：owp_status/owp_run_tests/owp_repo_read 工具，
+  承载 JSON 协议消息转发到协调器）。
+- Task 20 AgentTeams 执行接入层（execution_adapter：TeamTask/TeamTaskResult、
+  AgentTeamClient 协议 + LocalTeamClient 参考实现、TeamExecutionAdapter
+  数据转换/协议适配/状态同步/错误隔离/分级日志，团队→开发者闭环 6 测试）。
+- Task 21 真实团队网络客户端（team_network_client：TCP 会话 + token 鉴权 +
+  指数退避重试 + 环境配置 + 结构化日志；参考 TeamNetworkService 服务端；
+  网络版适配器端到端闭环 6 测试；阿里云 AgentTeams SDK 为治理面 API 且无
+  Python 版——执行面网络层按文档化 TCP 协议实现，SDK 接入点保留在适配器）。
+- Task 22 交付验证层 M1：真实外部 Acceptor 端到端验证（独立子进程 +
+  真实 TCP、隔离/接受/拒绝/冲突/一致/超时/断连/重试，8 测试）。
+- Task 23 交付验证层 M2：Rich #4196 五角色 9 步演示证据链（init →
+  repo_read → apply_patch → run_tests → compose → 独立 Verifier →
+  recompose → 外部 Acceptor 签名 → 离线验签）端到端可复现，5 测试；
+  同时修复真实因果缺口：repo_read 之后 apply_patch 的语义父规则
+  （composition.py），既有链行为不变。
+- Task 24 交付验证层 M3：交付验证签署（冻结 HEAD 14fd7d6、SHA256SUMS
+  112 项、Owner/见证人 Ed25519 明文签署、git tag delivery-signoff-2026-08-07）。
 
 ## 尚未完成
 
-- `run_tests` 真实无网执行器已接入生产路径：DockerRunTestsExecutor
-  驱动 execute_run_tests_production（稳定 execution ID、启动/结果回执、
-  STARTED_UNCONFIRMED 恢复，required-live 真实 Docker 执行已验证）；
-  剩余为 Developer mode 生产入口与 MCP 传输层；
-- repo_pipeline 生产级仓库读取-分析管道（本地路径 / GitHub URL 输入、
-  递归遍历 + 目录过滤 + 语言识别、统一数据模型、可扩展分析层、
-  canonical JSON 输出、分级日志与类型化错误；13 测试）；
-- 独立结果（independent-result）执行 episode 与五维证据 recomposition
-  → proof_ready 链已实现并验证（本切片测试使用五维 WorkOrder 变体：
-  独立结果占 verifier_independent_result 专属槽位，recomposition 在
-  五维闭合后到达 proof_ready，双报告离线验签证明两段 signed
-  report-to-trigger 绑定）；剩余为真实外部 Acceptor 复核与赛事交付；
 - deny/rollback 生产事务和剩余入口的全局 nonce 处理；
-- Acceptor 拒绝（rejection）收据与拒绝终态事务已实现并验证
-  （AcceptanceRejectionReceipt 独立签名对象、awaiting_human → rejected
-  原子事务、与 accepted 互斥、COMMIT-ACK 回读、离线 bundle 验签与
-  篡改拒绝）；真实外部 Acceptor 签署与复核仍为边界；
 - 其他 ToolCall handler 与 evidence publication 的调用闭包，
   rollback handler 及其结果/Receipt 闭包；
-- ResolutionManifest 原始字节独立读取与重哈希已实现并验证
-  （validate_resolution_manifest_bytes：preimage 解析 → 域分隔 digest
-  比对 → 与 trusted 对象一致，接入谓词权威门）；完整 Task 9
-  composition 和外部真实 Acceptor 独立环境复现仍为边界；
-- CLI 与 MCP 传输层已实现（owp 命令：status/run-tests/repo-read；
-  MCP stdio 服务器：owp_status/owp_run_tests/owp_repo_read 工具，
-  承载 JSON 协议消息转发到协调器）；
-- AgentTeams 执行接入层已实现（execution_adapter：TeamTask/TeamTaskResult、
-  AgentTeamClient 协议 + LocalTeamClient 参考实现、TeamExecutionAdapter
-  数据转换/协议适配/状态同步/错误隔离/分级日志，团队→开发者闭环 6 测试）；
-- 真实团队网络客户端已实现（team_network_client：TCP 会话 + token 鉴权 +
-  指数退避重试 + 环境配置 + 结构化日志；参考 TeamNetworkService 服务端；
-  网络版适配器端到端闭环 6 测试；阿里云 AgentTeams SDK 为治理面 API 且无
-  Python 版——执行面网络层按文档化 TCP 协议实现，SDK 接入点保留在适配器）；
-- Rich #4196 演示（M2 交付验证层环节 2）已完成：完整五角色 9 步工作流
-  （init → repo_read → apply_patch → run_tests → compose → 独立 Verifier →
-  recompose → 外部 Acceptor 签名 → 离线验签）端到端可复现，5 测试；
-  本轮同时修复真实因果缺口：repo_read 之后 apply_patch 的语义父规则
-  （composition.py），既有链行为不变；
-- Acceptor 独立环境复现；
-- 交付验证人类签署和完整执行门；
+- 真实外部 Acceptor 的人类签署与独立环境复现（本地子进程/TCP 验证
+  已完成；外部个人复核属线下事件，不由本仓库保证）；
+- required-live 最终门复跑（候选库存对齐当前 HEAD 后重跑，确认最终
+  full 计数并更新 README/status）；
 - 正式赛事提交、入围或获奖。
 
 ## 许可证状态
