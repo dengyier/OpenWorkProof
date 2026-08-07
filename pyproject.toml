@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openworkproof"
-version = "0.1.0"
+version = "0.2.0"
 description = "Agent work contracts and verifiable execution protocol"
 requires-python = ">=3.12,<3.13"
 dependencies = [
