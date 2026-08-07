@@ -168,7 +168,7 @@ execution ID 和可验证启动/结果回执。deny Receipt 与 rollback
 生产事务尚未完成；acceptance 生产事务（compose/request/prepare/
 commit）已实现并验证。独立结果执行 episode 与五维 recomposition
 链已实现并验证（含独立失败收据精确回放与失败后新签名重试），
-Day 0 执行门仍为 FAIL；deny/rollback 生产事务、真实无网执行器
+交付验证执行门仍为 FAIL；deny/rollback 生产事务、真实无网执行器
 生产 driver、MCP 传输服务器与 Acceptor 拒绝路径仍为边界。
 
 ## 已完成（按任务切片）
@@ -260,7 +260,7 @@ Day 0 执行门仍为 FAIL；deny/rollback 生产事务、真实无网执行器
   本轮同时修复真实因果缺口：repo_read 之后 apply_patch 的语义父规则
   （composition.py），既有链行为不变；
 - Acceptor 独立环境复现；
-- Day 0 人类签署和完整执行门；
+- 交付验证人类签署和完整执行门；
 - 正式赛事提交、入围或获奖。
 
 ## 许可证状态
@@ -274,5 +274,5 @@ Day 0 执行门仍为 FAIL；deny/rollback 生产事务、真实无网执行器
 独立 Acceptor：待定（当前不绑定真实个人）
 版权主体：成都星火领航科技有限公司
 
-以上角色已经作为项目责任角色记录，但不能据此推断 Day 0 人类签署、
+以上角色已经作为项目责任角色记录，但不能据此推断交付验证人类签署、
 独立验收已经完成。

@@ -41,6 +41,6 @@ addopts = "-ra"
 testpaths = ["tests"]
 markers = [
   "docker: requires a running local Docker daemon",
-  "agentteams: requires the Day 0 pinned AgentTeams runtime",
+  "agentteams: requires the delivery signoff pinned AgentTeams runtime",
   "supplychain: validates explicit external candidate artifacts and optional required live Docker",
 ]

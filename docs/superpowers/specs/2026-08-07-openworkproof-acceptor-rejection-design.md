@@ -212,4 +212,4 @@ meaning; replay never branches on it.
 - `prepare_acceptance_rejection` draft helper (D7).
 - Maintainer `termination` and `FROZEN -> rejected` paths (separate slice).
 - CLI/MCP transmission of the rejection transaction.
-- Day 0 human signing and contest delivery.
+- delivery signoff human signing and contest delivery.

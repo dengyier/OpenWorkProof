@@ -1,4 +1,4 @@
-"""Static contracts for the Day 0 candidate image supply chain."""
+"""Static contracts for the delivery signoff candidate image supply chain."""
 
 from __future__ import annotations
 
@@ -378,7 +378,7 @@ def _load_candidate_inventory(inventory_path: Path) -> dict[str, object]:
             "acceptor_access",
             "clean_cache_reacquisition",
             "final_trusted_helper",
-            "day0_pass",
+            "delivery_signoff_pass",
             "acceptor_acquisition_path",
         },
         "claims",
@@ -388,7 +388,7 @@ def _load_candidate_inventory(inventory_path: Path) -> dict[str, object]:
         "acceptor_access",
         "clean_cache_reacquisition",
         "final_trusted_helper",
-        "day0_pass",
+        "delivery_signoff_pass",
     ):
         assert type(claims[key]) is bool, f"{key} must be bool"
         assert claims[key] is False
@@ -815,7 +815,7 @@ def test_both_images_carry_auditable_oci_provenance() -> None:
         assert "org.openworkproof.base.digest=sha256:57cd7c3a7a273101" in dockerfile
 
 
-def test_supply_chain_record_keeps_day0_and_acceptor_claims_closed() -> None:
+def test_supply_chain_record_keeps_delivery_signoff_and_acceptor_claims_closed() -> None:
     record = _read("README.md")
 
     assert "requirements-lock.txt" in record
@@ -824,13 +824,13 @@ def test_supply_chain_record_keeps_day0_and_acceptor_claims_closed() -> None:
     assert "trusted-helper-candidate" in record
     assert "不构成 Acceptor access" in record
     assert "不构成 clean-cache reacquisition" in record
-    assert "不构成 Day 0 PASS" in record
+    assert "不构成交付验证 PASS" in record
     assert "execution-test candidate" in record
     assert "不是最终 trusted helper" in record
     assert "不构成 registry 推送证据" in record
     assert "不构成 Acceptor 独立验收证据" in record
     assert "不构成 D8 证据" in record
-    assert "不构成 Day 0 证据" in record
+    assert "不构成交付验证证据" in record
     assert "PID 1" in record
     assert "同为 UID/GID 65532" in record
     assert "零后代" in record
@@ -1018,7 +1018,7 @@ def test_inventory_loader_rejects_unknown_nested_fields(
 
 def test_inventory_loader_rejects_bool_as_integer_alias(tmp_path: Path) -> None:
     inventory = copy.deepcopy(_load_candidate_inventory(CANDIDATE_PATHS[-1]))
-    inventory["claims"]["day0_pass"] = 0
+    inventory["claims"]["delivery_signoff_pass"] = 0
 
     with pytest.raises(AssertionError, match="bool"):
         _load_candidate_inventory(_write_inventory(tmp_path, inventory))

@@ -106,7 +106,7 @@
   }
  },
  "external_layout": {
-  "local_root": "/Users/molin/Project/openWorkProof-day0",
+  "local_root": "/Users/molin/Project/openWorkProof-delivery",
   "path_rule": "join-local-root-with-relative-path-no-parent-traversal",
   "relative_paths": {
    "wheelhouse": "wheelhouse/linux-arm64-cp312-full",
@@ -126,7 +126,7 @@
   "acceptor_access": false,
   "clean_cache_reacquisition": false,
   "final_trusted_helper": false,
-  "day0_pass": false,
+  "delivery_signoff_pass": false,
   "acceptor_acquisition_path": null
  }
 }

@@ -1,4 +1,4 @@
-"""Explicit integration checks for the external Day 0 candidate artifacts."""
+"""Explicit integration checks for the external delivery signoff candidate artifacts."""
 
 from __future__ import annotations
 

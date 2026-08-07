@@ -17,7 +17,7 @@
   `docs/superpowers/specs/2026-08-04-openworkproof-run-tests-execution-recovery-design.md`
   at commit `e419c7d` or a descendant containing the same approved requirements.
 - Do not add Developer mode, real rollback execution, MCP transport, CLI,
-  AgentTeams, AcceptanceReceipt, LICENSE, registry publication, or Day 0 claims.
+  AgentTeams, AcceptanceReceipt, LICENSE, registry publication, or delivery signoff claims.
 - Keep the Sidecar private key outside Docker.
 - Do not overwrite any historical candidate inventory, context, or archive.
 - Add one focused failing test, observe the expected failure, implement only
@@ -671,7 +671,7 @@ worktree drift is ignored but revision-blob drift changes the generated runner.
 Require the exact entrypoint/CMD, regular non-symlink runner bytes, no shell
 entrypoint, no OpenWorkProof package install, and no Sidecar key or Docker
 socket. Document that this remains an execution-test candidate and does not
-establish final helper, registry, Acceptor, D8, or Day 0.
+establish final helper, registry, Acceptor, D8, or delivery signoff.
 
 - [x] **Step 6: Run GREEN**
 
@@ -1104,7 +1104,7 @@ After all code and test changes are committed and the worktree is clean:
 ```bash
 set -e
 OWP_REPO=/Users/molin/Project/openWorkProof
-OWP_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-day0
+OWP_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-delivery
 OWP_SOURCE_REVISION=$(git rev-parse HEAD)
 test ${#OWP_SOURCE_REVISION} -eq 40
 test ! -e "$OWP_ARTIFACT_ROOT/build-contexts/$OWP_SOURCE_REVISION"
@@ -1181,7 +1181,7 @@ digest. Keep these claims false:
 {
   "acceptor_access": false,
   "clean_cache_reacquisition": false,
-  "day0_pass": false,
+  "delivery_signoff_pass": false,
   "final_trusted_helper": false,
   "registry_pushed": false
 }
@@ -1261,7 +1261,7 @@ print(canonical)
 PY
 )"
 docker image inspect "$OPENWORKPROOF_DOCKER_TEST_IMAGE" >/dev/null
-OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-day0 \
+OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-delivery \
 OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 \
 ./.venv/bin/python -m pytest \
   tests/test_run_tests_runner.py \
@@ -1272,7 +1272,7 @@ OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 \
   tests/test_prepare_image_context.py \
   tests/test_candidate_supplychain_integration.py -q
 
-OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-day0 \
+OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-delivery \
 OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 \
 ./.venv/bin/python -m pytest -q
 ```
@@ -1318,6 +1318,6 @@ Record:
 - independent specification and code-quality review results.
 
 Keep local commit, merge, push, image-registry publication, Acceptor access,
-clean-cache reacquisition, final helper, D8, Day 0, contest delivery, and
+clean-cache reacquisition, final helper, D8, delivery signoff, contest delivery, and
 commercial validation as separate states. After all gates pass, use
 `finishing-a-development-branch` and present the standard four branch options.

@@ -4,7 +4,7 @@
 
 **Goal:** Replace the helper candidate's generic Python argument surface with a fixed, failure-closed `repo_read` dispatcher that verifies a read-only candidate checkpoint before returning at most 64 KiB of one canonical file.
 
-**Architecture:** `repo_tools.py` owns the package-private checkpoint and descriptor-anchored read boundary; `trusted_helper.py` owns only canonical framing, single-operation dispatch, closed responses, and exit codes. A second evidence stage rebuilds revision-bound contexts, images, archives, and inventory while retaining all final-helper, Acceptor, D8, and Day 0 boundaries.
+**Architecture:** `repo_tools.py` owns the package-private checkpoint and descriptor-anchored read boundary; `trusted_helper.py` owns only canonical framing, single-operation dispatch, closed responses, and exit codes. A second evidence stage rebuilds revision-bound contexts, images, archives, and inventory while retaining all final-helper, Acceptor, D8, and delivery signoff boundaries.
 
 **Tech Stack:** Python 3.12, dataclasses, Pydantic 2.13.4, RFC 8785, Git 2.47.3, Docker 29.5.2, pytest 9.1.1, OCI image-layout archives.
 
@@ -327,7 +327,7 @@ Save `OWP_SOURCE_REVISION=$(git rev-parse HEAD)`; only this exact commit is vali
 ```bash
 set -e
 OWP_REPO=/Users/molin/Project/openWorkProof
-OWP_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-day0
+OWP_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-delivery
 OWP_SOURCE_REVISION=$(git rev-parse HEAD)
 test ${#OWP_SOURCE_REVISION} -eq 40
 OWP_CONTEXT_ROOT="$OWP_ARTIFACT_ROOT/build-contexts/$OWP_SOURCE_REVISION"
@@ -348,20 +348,20 @@ Require linux/arm64, `65532:65532`, exact revision/role labels, no license label
 
 - [ ] **Step 3: Run live failure-closed smoke and export archives**
 
-With empty stdin and then one argv item, require helper exit 64, empty stderr, and exact canonical `REQUEST_INVALID`. Do not override the entrypoint. Export revision-specific Docker archives with `docker save` and true OCI archives with `docker buildx --output type=oci` under `/Users/molin/Project/openWorkProof-day0/oci/$OWP_SOURCE_REVISION`; generate and verify `SHA256SUMS`, `oci-layout`, `index.json`, descriptors, config, layers, sizes, and digests.
+With empty stdin and then one argv item, require helper exit 64, empty stderr, and exact canonical `REQUEST_INVALID`. Do not override the entrypoint. Export revision-specific Docker archives with `docker save` and true OCI archives with `docker buildx --output type=oci` under `/Users/molin/Project/openWorkProof-delivery/oci/$OWP_SOURCE_REVISION`; generate and verify `SHA256SUMS`, `oci-layout`, `index.json`, descriptors, config, layers, sizes, and digests.
 
 - [ ] **Step 4: Record measured inventory and RED/GREEN selectors**
 
-Create `supply-chain/images/candidates/$OWP_SOURCE_REVISION.json` from actual Git blobs, context manifests, `docker image inspect`, OCI descriptors, and archive bytes. Use revision-specific relative paths under `build-contexts/$OWP_SOURCE_REVISION/` and `oci/$OWP_SOURCE_REVISION/`. Keep registry push, Acceptor access, clean-cache reacquisition, final helper, and Day 0 false, with null Acceptor path.
+Create `supply-chain/images/candidates/$OWP_SOURCE_REVISION.json` from actual Git blobs, context manifests, `docker image inspect`, OCI descriptors, and archive bytes. Use revision-specific relative paths under `build-contexts/$OWP_SOURCE_REVISION/` and `oci/$OWP_SOURCE_REVISION/`. Keep registry push, Acceptor access, clean-cache reacquisition, final helper, and delivery signoff false, with null Acceptor path.
 
 Update tests to select the unique inventory whose tracked current Dockerfile and allowlist hashes match the working definitions. Fail on zero or multiple matches. Validate every historical inventory against its own Git revision.
 
 - [ ] **Step 5: Run focused and full verification**
 
 ```bash
-OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-day0 OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 ./.venv/bin/python -m pytest tests/test_trusted_helper.py tests/test_image_supply_chain.py tests/test_prepare_image_context.py tests/test_candidate_supplychain_integration.py -q
+OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-delivery OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 ./.venv/bin/python -m pytest tests/test_trusted_helper.py tests/test_image_supply_chain.py tests/test_prepare_image_context.py tests/test_candidate_supplychain_integration.py -q
 OWP_EXECUTION_IMAGE_ID=$(docker image inspect "openworkproof/execution-test:$OWP_SOURCE_REVISION" --format '{{.Id}}')
-OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-day0 OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 OPENWORKPROOF_DOCKER_TEST_IMAGE="docker.io/openworkproof/execution-test@$OWP_EXECUTION_IMAGE_ID" ./.venv/bin/python -m pytest -q
+OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-delivery OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 OPENWORKPROOF_DOCKER_TEST_IMAGE="docker.io/openworkproof/execution-test@$OWP_EXECUTION_IMAGE_ID" ./.venv/bin/python -m pytest -q
 ./.venv/bin/python -m pip check
 ./.venv/bin/python -m compileall -q src tests supply-chain/images
 git diff --check
@@ -385,4 +385,4 @@ git commit -m "build: bind repo read helper candidate"
 
 ## Completion Checkpoint
 
-Record branch/HEAD, commits, focused/full test counts and elapsed times, pip/compile/diff/archive/OCI/cleanup results, image IDs, OCI manifest digests, and revision-specific external paths. Keep merge, push, Acceptor access, clean-cache reacquisition, final helper, D8, Day 0, contest delivery, and commercial validation separate and unproven. Then use `finishing-a-development-branch` and present the standard four branch options.
+Record branch/HEAD, commits, focused/full test counts and elapsed times, pip/compile/diff/archive/OCI/cleanup results, image IDs, OCI manifest digests, and revision-specific external paths. Keep merge, push, Acceptor access, clean-cache reacquisition, final helper, D8, delivery signoff, contest delivery, and commercial validation separate and unproven. Then use `finishing-a-development-branch` and present the standard four branch options.

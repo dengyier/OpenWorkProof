@@ -110,7 +110,7 @@ WorkOrder            CapabilityGrant        ActionReceipt          AcceptanceRec
   含冻结计划规定的 candidate-inventory 供应链门，退出码 0）
 
 **尚未完成：** CLI、MCP 传输服务器、Docker 生产执行器、
-deny/rollback 生产事务、Day 0 执行门。Acceptor 拒绝路径已实现并验证
+deny/rollback 生产事务、交付验证执行门。Acceptor 拒绝路径已实现并验证
 （见上方能力清单与 docs/status.md 的验证记录）。独立结果（independent-result）执行
 episode 与五维 recomposition 链已实现并通过全量测试（见上方能力清单与
 docs/status.md 的验证记录）。
@@ -151,7 +151,7 @@ python3.12 -m venv .venv
 ```
 
 说明：pyproject.toml 已预留 `owp` 命令入口，但 CLI 模块尚未完成；
-不应把测试通过理解为 Day 0、独立验收或赛事提交已经完成。
+不应把测试通过理解为交付验证签署、独立验收或赛事提交已经完成。
 
 ---
 
@@ -166,7 +166,7 @@ python3.12 -m venv .venv
    Acceptor 复核与赛事交付；
 4. 完成 CLI、MCP Sidecar 和 AgentTeams 集成；
 5. 完成 Rich #4196 自包含演示及外部独立验收；
-6. 完成 Acceptor 拒绝路径、真实外部 Acceptor 复现与 Day 0
+6. 完成 Acceptor 拒绝路径、真实外部 Acceptor 复现与交付验证
    人类签署和赛事交付材料（许可证已完成：Apache-2.0）。
 
 ---

@@ -78,7 +78,7 @@ This slice does not add:
 - CLI, MCP transport, AgentTeams, or a long-lived service;
 - Rich #4196 end-to-end demo wiring;
 - new tool handlers or Developer-mode execution;
-- registry publication, clean-cache reacquisition, final-helper, D8, Day 0,
+- registry publication, clean-cache reacquisition, final-helper, D8, delivery signoff,
   contest-delivery, external-acceptance, or commercial-validation claims.
 
 Invalid, incomplete, stale, expired, or incorrectly signed acceptance attempts
@@ -505,5 +505,5 @@ This design is implemented only when:
    exact committed truth;
 9. focused, full, required-live, static, and cleanup gates pass;
 10. project status documents report the new local facts without claiming
-    independent human acceptance, Day 0, contest submission, or commercial
+    independent human acceptance, delivery signoff, contest submission, or commercial
     validation.

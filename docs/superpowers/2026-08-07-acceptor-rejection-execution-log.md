@@ -150,4 +150,4 @@ Plan: `docs/superpowers/plans/2026-08-07-openworkproof-acceptor-rejection-implem
 - 后续边界（status.md 权威清单）：真实无网执行器 driver、MCP/CLI/
   AgentTeams、Developer mode、repo_read/rollback handler、deny/rollback
   生产事务、ResolutionManifest 独立重哈希、真实外部 Acceptor、演示、
-  Day 0、赛事。
+  交付验证签署、赛事。

@@ -23,7 +23,7 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
 - Frozen causal and policy replay rules are not redesigned without a failing
   test that proves an inconsistency.
 - Python: `.venv/bin/python -m pytest -q`; freezes: python 3.12.13, Docker
-  mirror, day0 artifact root at `/Users/molin/Project/openWorkProof-day0`,
+  mirror, delivery artifact root at `/Users/molin/Project/openWorkProof-delivery`,
   repository-qualified execution image at
   `docker.io/openworkproof/execution-test@sha256:677cfa55596a640cc5a3c6988a878d88da133fc59d7ab3a08ea72a1ad2ddb8ca`.
 - No real-name binding in README, docs, or code.
@@ -247,7 +247,7 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
   Run:
 
   ```bash
-  OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-day0 \
+  OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-delivery \
   OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 \
   OPENWORKPROOF_DOCKER_TEST_IMAGE="$OPENWORKPROOF_DOCKER_TEST_IMAGE" \
   ./.venv/bin/python -m pytest -q
@@ -272,7 +272,7 @@ Spec: `docs/superpowers/specs/2026-08-07-openworkproof-acceptor-rejection-design
   implemented and tested; replace stale counts with the exact fresh counts;
   keep explicit boundaries for real external Acceptor signing, termination
   and `FROZEN -> rejected` paths, `prepare_acceptance_rejection` drafts,
-  CLI/MCP transmission, Day 0, and contest delivery.
+  CLI/MCP transmission, delivery signoff, and contest delivery.
 
 - [x] **Step 6: Record exact evidence and finish the branch**
   Record branch and implementation commit SHAs, focused/full counts,

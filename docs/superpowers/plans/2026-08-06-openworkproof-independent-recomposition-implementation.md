@@ -32,7 +32,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   test that proves an inconsistency.
 - Do not rewrite historical candidate inventories or external OCI artifacts.
 - Python: `.venv/bin/python -m pytest -q`; freezes: python 3.12.13, Docker
-  mirror, day0 artifact root at `/Users/molin/Project/openWorkProof-day0`,
+  mirror, delivery artifact root at `/Users/molin/Project/openWorkProof-delivery`,
   repository-qualified execution image at
   `docker.io/openworkproof/execution-test@sha256:677cfa55596a640cc5a3c6988a878d88da133fc59d7ab3a08ea72a1ad2ddb8ca`.
 - No real-name binding in README, docs, or code.
@@ -1054,7 +1054,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   selectable. Verify that fact rather than creating a new inventory:
 
   ```bash
-  OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-day0 \
+  OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-delivery \
   OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 \
   ./.venv/bin/python -m pytest \
     tests/test_image_supply_chain.py \
@@ -1104,7 +1104,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   Run with the exact existing artifact root:
 
   ```bash
-  OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-day0 \
+  OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-delivery \
   OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 \
   OPENWORKPROOF_DOCKER_TEST_IMAGE="$OPENWORKPROOF_DOCKER_TEST_IMAGE" \
   ./.venv/bin/python -m pytest -q
@@ -1135,7 +1135,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   - replace stale test counts with the exact fresh counts from this task;
   - keep explicit boundaries for Acceptor rejection, real external
     Acceptor signing, registry publication, clean-cache reacquisition,
-    final-helper, D8, Day 0, Rich demo, contest delivery, and external
+    final-helper, D8, delivery signoff, Rich demo, contest delivery, and external
     acceptance;
   - do not write "独立验收完成"; local recomposition success is not
     external human acceptance.
@@ -1174,7 +1174,7 @@ Spec: `docs/superpowers/specs/2026-08-06-openworkproof-independent-recomposition
   - Acceptor rejection transaction;
   - independent external environment reproduction;
   - registry publication and clean-cache reacquisition;
-  - final trusted helper, D8, Day 0, Rich demo, contest submission,
+  - final trusted helper, D8, delivery signoff, Rich demo, contest submission,
     award, and commercial validation.
 
 - [ ] **Step 3: Finish the branch**

@@ -20,7 +20,7 @@
   `main`.
 - Do not name or bind a real Acceptor. Test identity is `acceptor-local`.
 - Do not add rejection receipts, CLI, MCP transport, AgentTeams, Rich demo,
-  image-registry claims, Day 0 claims, or contest-delivery claims.
+  image-registry claims, delivery signoff claims, or contest-delivery claims.
 - For every behavior: add one focused test, run it and observe the expected
   failure, implement the minimum production code, then rerun the focused test.
 - Do not rewrite historical candidate inventories or external OCI artifacts.
@@ -1052,7 +1052,7 @@ reference.
 Run with the exact existing artifact root:
 
 ```bash
-OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-day0 \
+OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-delivery \
 OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 \
 OPENWORKPROOF_DOCKER_TEST_IMAGE="$OPENWORKPROOF_DOCKER_TEST_IMAGE" \
 ./.venv/bin/python -m pytest -q
@@ -1081,7 +1081,7 @@ In README and `docs/status.md`:
 - add CompositionReport and the successful Acceptance transaction;
 - replace stale test counts with the exact fresh counts from this task;
 - keep explicit boundaries for rejection, real Acceptor identity, CLI/MCP,
-  Rich demo, registry, clean-cache, final helper, D8, Day 0, contest delivery,
+  Rich demo, registry, clean-cache, final helper, D8, delivery signoff, contest delivery,
   and external acceptance.
 
 Do not write “独立验收完成”; local synthetic Acceptor tests are not external
@@ -1125,7 +1125,7 @@ Explicitly retain as unproven:
 - Acceptor rejection transaction;
 - independent external environment reproduction;
 - registry publication and clean-cache reacquisition;
-- final trusted helper, D8, Day 0, Rich demo, contest submission, award, and
+- final trusted helper, D8, delivery signoff, Rich demo, contest submission, award, and
   commercial validation.
 
 - [x] **Step 3: Finish the branch**

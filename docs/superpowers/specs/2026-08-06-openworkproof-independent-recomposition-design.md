@@ -111,7 +111,7 @@ This slice does not add or claim:
 - Developer-mode execution or other ToolCall handlers;
 - CLI, MCP transport, AgentTeams, or a long-lived service;
 - Rich #4196 end-to-end demo completion;
-- registry publication, clean-cache reacquisition, final-helper, D8, Day 0,
+- registry publication, clean-cache reacquisition, final-helper, D8, delivery signoff,
   contest delivery, external acceptance, or commercial validation.
 
 ## 6. Episode Classification
@@ -450,7 +450,7 @@ is implemented and tested. They must retain as unproven:
 - real independent-environment reproduction outside the developer machine;
 - Acceptor rejection and real external Acceptor signing;
 - CLI/MCP/AgentTeams integration;
-- registry, clean-cache, final-helper, D8, Day 0, Rich demo, contest delivery,
+- registry, clean-cache, final-helper, D8, delivery signoff, Rich demo, contest delivery,
   award, customer, payment, or commercial validation.
 
 ## 20. Acceptance Criteria
@@ -472,5 +472,5 @@ This design is complete only when:
 10. crash, concurrency, exact readback, and offline tamper tests pass;
 11. focused, candidate, full required-live, static, and cleanup gates pass;
 12. documentation keeps local implementation, remote push, external
-    verification, human acceptance, Day 0, contest delivery, and commercial
+    verification, human acceptance, delivery signoff, contest delivery, and commercial
     validation as separate claims.

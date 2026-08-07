@@ -1,4 +1,4 @@
-# Day 0 candidate image supply chain
+# Delivery signoff candidate image supply chain
 
 本目录保存可审计、可复建的镜像定义和最小 hash-lock；wheel、Debian
 `.deb`、外部构建上下文和 OCI archive 不进入 Git。
@@ -14,7 +14,7 @@ Dockerfile、requirements lock、`run_tests_runner.py`、`verifier_test.py`、he
 混用均拒绝。清单绑定构建
 revision、基础镜像、全部 build-context 清单哈希、本地 image ID、原样
 `.RepoDigests`、运行配置、OCI manifest 和 archive 哈希。当前外部本地根为
-`/Users/molin/Project/openWorkProof-day0`；清单中的外部路径必须按
+`/Users/molin/Project/openWorkProof-delivery`；清单中的外部路径必须按
 `local_root + relative_path` 解析，拒绝父目录穿越，不能把这个本机路径写成
 Acceptor 获取路径。
 
@@ -23,7 +23,7 @@ Acceptor 获取路径。
 - 基础镜像：`docker.io/library/python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de`，`linux/arm64`，Python 3.12.13，Debian 13 trixie。
 - 仓库 `requirements-lock.txt`：SHA-256 `be6f8e10d7a82b978913eb2b6a73ee11efc5a9af623e5a783163e3cb78179f8c`。
 - 外部 46-wheel `SHA256SUMS`：SHA-256 `e8d3ccaaa1cf735113e7bd533637cef028d710725981fbe20968179c70ea3a72`。
-- 完整 wheelhouse：`/Users/molin/Project/openWorkProof-day0/wheelhouse/linux-arm64-cp312-full`。它只是仓库外输入；两个构建上下文只复制各自 lock 列出的 wheel 和对应的精确 `SHA256SUMS` 子集。
+- 完整 wheelhouse：`/Users/molin/Project/openWorkProof-delivery/wheelhouse/linux-arm64-cp312-full`。它只是仓库外输入；两个构建上下文只复制各自 lock 列出的 wheel 和对应的精确 `SHA256SUMS` 子集。
 
 candidate inventory 将前两个哈希记录在闭合的 `build_inputs.global` 中；契约
 测试从仓库锁文件和外部 full wheelhouse 清单读取精确 bytes 后重新计算，不能
@@ -51,7 +51,7 @@ Git closure 由固定基础镜像中的 Debian 13 trixie sources 解析；实际
 ## 仓库外构建上下文
 
 当前上下文必须位于
-`/Users/molin/Project/openWorkProof-day0/build-contexts/<source-revision>/` 之类的
+`/Users/molin/Project/openWorkProof-delivery/build-contexts/<source-revision>/` 之类的
 revision 专属仓库外目录。每个上下文包含其 Dockerfile、`requirements.lock`、`wheels/`；
 execution 另含从指定 Git revision blob 逐字节复制的 `run_tests_runner.py`，
 以及同一 revision 的 `verifier_test.py`；helper 另含 `debs/` 和 `helper-src/`。
@@ -69,7 +69,7 @@ closure，再在同一临时根中生成并复核两个 context，最后原子�
 
 ```bash
 export OWP_REPO=/path/to/openWorkProof
-export OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/path/to/openWorkProof-day0
+export OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/path/to/openWorkProof-delivery
 export OWP_SOURCE_REVISION=0123456789abcdef0123456789abcdef01234567
 python "$OWP_REPO/supply-chain/images/prepare_context.py" \
   --repo "$OWP_REPO" \
@@ -96,7 +96,7 @@ python "$OWP_REPO/supply-chain/images/prepare_context.py" \
   它不安装或导入 OpenWorkProof，不接收 Sidecar
   key、Docker socket、网络或任意命令字符串；它不是最终 trusted helper，也
   不构成 registry 推送证据、不构成 Acceptor 独立验收证据、不构成 D8 证据、
-  不构成 Day 0 证据。execute runner 必须是 Linux 容器私有 PID namespace 的
+  不构成交付验证证据。execute runner 必须是 Linux 容器私有 PID namespace 的
   PID 1；runner 与 pytest 同为 UID/GID 65532，且不给 pytest 增加 capability。
   PID 1 在启动 pytest 前关闭自身 dumpability；pytest 在 exec 前以
   `no_new_privs` 加载 unprivileged Landlock 规则，处理当前已知的全部写入、创建、
@@ -113,7 +113,7 @@ python "$OWP_REPO/supply-chain/images/prepare_context.py" \
   WorkOrder 对应的 candidate runtime root 只读挂载为 `/runtime:ro`；helper
   拒绝全部 argv，唯一 operation 为 `repo_read`。initialize、apply、rollback、
   rebuild 和 destroy 仍未提供；镜像仍明确命名为 `trusted-helper-candidate`，
-  不是最终 trusted helper，也不构成 D8、Day 0 或 Acceptor 独立复现证据。
+  不是最终 trusted helper，也不构成 D8、交付验证签署或 Acceptor 独立复现证据。
 - 两者运行身份均为 `65532:65532`，并记录 source、revision、role 和基础
   digest OCI labels。
 
@@ -148,7 +148,7 @@ license OCI label。不得据此改写既有或 current candidate inventory 的 
 
 本地构建、断网 smoke、`docker save` 和 archive SHA-256 只证明本机 candidate
 产物可复核；它们不构成 Acceptor access，不构成 clean-cache reacquisition，
-不构成 Day 0 PASS，也不证明外部验收、推送、发布或比赛交付。
+不构成交付验证 PASS，也不证明外部验收、推送、发布或比赛交付。
 
 ## 验证命令
 
@@ -163,7 +163,7 @@ pytest
 daemon 或本地 candidate image 都是失败，不能降级为 skip：
 
 ```bash
-OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/path/to/openWorkProof-day0 \
+OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/path/to/openWorkProof-delivery \
 OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1 \
 pytest -m supplychain tests/test_candidate_supplychain_integration.py
 ```

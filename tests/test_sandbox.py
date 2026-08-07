@@ -5446,7 +5446,7 @@ def test_docker_run_tests_driver_required_live_detached_execution(
     artifact_root = (
         Path(artifact_root_text)
         if artifact_root_text is not None
-        else repository.parent / "openWorkProof-day0"
+        else repository.parent / "openWorkProof-delivery"
     ).resolve()
     if not (artifact_root / "wheelhouse/linux-arm64-cp312-full").is_dir():
         pytest.fail(f"live driver wheelhouse unavailable at {artifact_root}")

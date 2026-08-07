@@ -28,7 +28,7 @@ destruction, shell execution, generic Git execution, Docker control, signing,
 evidence publication, or network access.
 
 The image remains named and labelled `trusted-helper-candidate`. Completing this
-slice does not establish the final trusted helper, the D8 gate, Day 0, Acceptor
+slice does not establish the final trusted helper, the D8 gate, delivery signoff, Acceptor
 reproduction, or contest delivery.
 
 ## 3. Fixed Runtime Boundary
@@ -264,10 +264,10 @@ The work uses two evidence stages:
 
 The second commit may record a new local candidate inventory, but all claims for
 registry push, Acceptor access, clean-cache reacquisition, final trusted helper,
-D8, and Day 0 remain false unless separately evidenced.
+D8, and delivery signoff remain false unless separately evidenced.
 
 Neither commit is automatically merged or pushed. Merge, push, Acceptor review,
-Day 0 approval, and contest delivery remain distinct user-controlled steps.
+delivery signoff approval, and contest delivery remain distinct user-controlled steps.
 
 ## 11. Non-Goals
 
@@ -279,5 +279,5 @@ This slice does not:
 - provide a general-purpose repository browser;
 - add a shell, general Git, Python expression, module, or script execution API;
 - add a LICENSE or change the existing `PENDING/NOASSERTION` rights state;
-- claim D8, Day 0, independent acceptance, public release completion, contest
+- claim D8, delivery signoff, independent acceptance, public release completion, contest
   submission, award status, or commercial validation.

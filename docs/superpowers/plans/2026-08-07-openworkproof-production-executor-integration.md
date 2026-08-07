@@ -35,7 +35,7 @@ this slice:           production driver factory + execute_run_tests production
   request, and calls the existing `execute_run_tests`. Tests keep injecting
   fake drivers through `execute_run_tests` unchanged.
 - **E4:** The required-live integration test uses the frozen repository image
-  reference and the day0 artifact root; it must not invent or retag an image.
+  reference and the delivery artifact root; it must not invent or retag an image.
 - **E5:** The 08-04 plan checkboxes are updated only to the true
   implementation state revealed by the audit; no step is checked without
   evidence.
@@ -69,7 +69,7 @@ this slice:           production driver factory + execute_run_tests production
   - drives one full `execute_run_tests` chain on a verifier work order;
   - asserts a committed verifier result receipt with evidence on disk;
   - asserts container and volume cleanup after the run.
-- [ ] Run with `OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1` and the day0 root.
+- [ ] Run with `OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1` and the delivery root.
 
 ## 6. Task 4: Close-Out and Verification
 

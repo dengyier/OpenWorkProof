@@ -46,7 +46,7 @@ The following remain out of scope:
 - additional tool handlers;
 - AcceptanceReceipt and full proof composition;
 - image-registry publication, Acceptor access, clean-cache reacquisition,
-  final-helper status, D8, Day 0, contest delivery, or commercial validation;
+  final-helper status, D8, delivery signoff, contest delivery, or commercial validation;
 - any LICENSE decision.
 
 ## 3. Existing Authorities Reused
@@ -438,7 +438,7 @@ exact code-definition revision exists, the implementation must:
    inventory;
 6. retain historical inventories and validate each against its own revision;
 7. keep registry push, Acceptor access, clean-cache reacquisition, final helper,
-   D8, and Day 0 claims false.
+   D8, and delivery signoff claims false.
 
 No existing evidence directory or inventory is overwritten.
 
@@ -528,5 +528,5 @@ The slice is complete only when all of the following are demonstrated:
 
 These criteria establish only a Verifier `run_tests` candidate execution and
 recovery slice. They do not establish a final trusted helper, independent
-Acceptor acceptance, D8, Day 0, registry publication, contest delivery, or
+Acceptor acceptance, D8, delivery signoff, registry publication, contest delivery, or
 commercial validation.
