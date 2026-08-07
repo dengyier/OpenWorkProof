@@ -4,7 +4,7 @@
 > Agent Work Contracts and Verifiable Execution Protocol
 
 项目地址：https://github.com/dengyier/OpenWorkProof
-当前版本：0.2.0
+当前版本：1.0.0
 许可证：Apache-2.0
 
 ---
