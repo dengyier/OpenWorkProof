@@ -1,0 +1,557 @@
+# OpenWorkProof
+
+> Agents can generate results — but on what authority do we accept delivery?
+> Agent Work Contracts and Verifiable Execution Protocol
+
+Project: https://github.com/dengyier/OpenWorkProof
+Version: 1.0.0
+License: Apache-2.0
+
+---
+
+## 30-Second Overview
+
+MCP connects agents to tools. A2A connects agents to agents. AgentTeams orchestrates agent collaboration.
+
+But when an agent says "I'm done," no existing layer answers:
+
+- What authorization backs this work?
+- Did every step stay within scope and quota?
+- Do tests, patches, and reports form a complete causal chain?
+- Who has the authority to accept or reject the outcome?
+- In a dispute, can a third party verify all the facts offline, without connecting to any party's system?
+
+**OpenWorkProof fills this gap: contracts, authorization, evidence, and acceptance for agent work.**
+
+It doesn't try to make agents smarter. It makes their work authorizable, constrainable,
+verifiable, and acceptable — and rejectable when the evidence falls short.
+
+A contrarian thesis: the primary bottleneck for multi-agent systems isn't model capability
+— it's accountability, authority, evidence, and acceptance. Without these, agents can
+generate results, but they can't become delegatable, auditable, billable production actors.
+
+---
+
+## Why OpenWorkProof
+
+### Who Needs It
+
+| Role | Pain Point | What OpenWorkProof Provides |
+|------|------------|----------------------------|
+| **Agent platform / framework builders** | Agents can call tools, but can't prove "this call was authorized" | Signed AgentRequest + PolicyDecision pre-authorization — every call carries machine-checkable authorization evidence |
+| **Enterprise IT / compliance teams** | EU AI Act high-risk provisions require proof that agents are authorized, constrained, and auditable | Complete signed authorization chain, quota tracking, offline third-party verification for audit requirements |
+| **Multi-agent orchestrators** | Delegated permissions can't decay or be held accountable | CapabilityGrant with atomic attenuation — child grants can only shrink, never expand |
+| **Delivery reviewers / acceptors** | Agent claims completion but the causal link between tests, patches, and reports is opaque | Causal replay layer + policy replay layer + five-input offline verifier — the full evidence chain is reproducible |
+| **Dispute arbitrators** | Need to review facts without connecting to any party's system | `validate_grant_chain` — pure offline signature verification, only needs the evidence bundle + public keys |
+
+### Why Now
+
+**The market has turned.** Gartner predicts 40% of enterprise software will embed AI agents
+by end of 2026 (below 5% in 2025). The EU AI Act's high-risk provisions are already in effect
+— organizations that can't prove their agents are "authorized, constrained, and auditable"
+face real legal risk.
+
+**The space is being validated by capital.** In H1 2026, over $65M was publicly raised in
+the agent trust infrastructure category:
+
+| Project | Funding | Layer |
+|---------|---------|-------|
+| Catena Labs | $48M (a16z-led) | Agent identity + payment protocol |
+| GenLayer | $7.5M | Verifiable judgment + on-chain identity |
+| OpenBox AI | $5M | Runtime governance (identity/authorization) |
+| t54 Labs | $5M (Franklin Templeton / Ripple) | Agent financial trust layer |
+
+These projects solve "who is acting" and "how money moves" — the identity and payment layers.
+
+**OpenWorkProof solves the layer they all leave untouched: what authority backs this work,
+why the process is trustworthy, and what makes the outcome acceptable — the work-contract layer.**
+The two are complementary, not competitive.
+
+An analogy: OAuth defined "how humans authorize apps," spawning a $10B+ market
+(Okta / Auth0). OpenWorkProof defines "how humans authorize agent work and accept results."
+
+### Core Principles
+
+- **Proof-Carrying Work**: actions must carry machine-checkable authorization and result evidence
+- **No-Cloning Authority**: child grants can only attenuate or consume — never replicate equivalent or greater permissions
+- **Multi-Scale Proof Composition**: local credentials can only form an acceptable global proof when causality, evidence dimensions, correlation disclosure, and global conditions are simultaneously satisfied
+- **Fail Closed**: unverifiable permissions, signatures, history, state, or evidence must never resolve as success
+- **Offline Third-Party Verification**: `validate_grant_chain` enables third parties to verify the entire signed authorization history without connecting to any party's system
+
+---
+
+## How It Works
+
+Four protocol objects form the complete work-level proof chain:
+
+```
+WorkOrder            CapabilityGrant        ActionReceipt          AcceptanceReceipt
+Work contract        Capability grant       Action credential      Acceptance credential
+Freezes target/path/ Signable, attenuable,  Binds authorization,   Evidence coverage +
+tool/quota/          non-expanding          quota delta, and       causal completeness +
+acceptance criteria  → authority         →  evidence refs     →   independence disclosure
+                                                                   + human decision
+```
+
+Six-role identity binding:
+
+| Role | Responsibility | Key |
+|------|---------------|-----|
+| Maintainer | Initialize WorkOrder, issue Root Grant | Ed25519 |
+| Manager | Issue child grants, invoke compose_proof | Ed25519 |
+| Developer | Execute repo_read / apply_patch / run_tests | Ed25519 |
+| Verifier | Independently run tests, form independent evidence | Ed25519 |
+| Sidecar | Assign trusted execution facts (ReplayCheckpoint) | Ed25519 |
+| Acceptor | Human acceptance (accept / reject), independent key | Ed25519 (independent of system) |
+
+State machine:
+
+```
+running → locally_verified → proof_ready → awaiting_human → accepted
+                                                        ↘ rejected
+```
+
+Detailed protocol schemas in [specs/v0.1](specs/v0.1/).
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.12 (`>=3.12, <3.13`)
+- Git
+- macOS or Linux
+
+### Installation
+
+**Direct use (recommended):**
+
+```bash
+pip install openworkproof
+```
+
+After installation, the `owp` CLI command and full Python API are available.
+
+**Local development:**
+
+```bash
+git clone https://github.com/dengyier/OpenWorkProof.git
+cd OpenWorkProof
+python3.12 -m venv .venv
+./.venv/bin/python -m pip install -r requirements-lock.txt
+./.venv/bin/python -m pip install -e .          # editable install, picks up code changes
+```
+
+### Verify Installation
+
+```bash
+# Check if CLI is available
+owp status
+
+# Run full test suite (~5 minutes, requires local dev environment)
+./.venv/bin/python -m pytest -q
+
+# Expected: 2283 passed, 7 skipped, 0 failed
+```
+
+### End-to-End Demos
+
+OpenWorkProof provides two independent end-to-end demos, covering different project types:
+
+#### M2 — Rich #4196 (Developer Tooling)
+
+A complete five-role workflow demo (~9s) based on the real open-source issue
+[Textualize/Rich #4196](https://github.com/Textualize/rich/issues/4196):
+
+```bash
+./.venv/bin/python -m pytest tests/test_delivery_m2.py -q
+
+# Expected: 5 passed
+```
+
+Covers a 9-step evidence chain:
+
+```
+1. Initialize WorkOrder (five roles + root grant)    → running
+2. Developer repo_read (pipeline read of candidate)  → receipt + output_digest
+3. Developer apply_patch (publish fix for #4196)     → active patch binding
+4. Developer run_tests (self-check)                  → test receipt
+5. Manager compose_proof (first report)              → evidence_incomplete
+6. Independent Verifier run_tests (fresh context)    → independent result receipt
+7. Manager recompose_proof (five-dimension closure)  → proof_ready
+8. request_acceptance + Acceptor signing            → accepted
+9. Export evidence bundle + offline verification    → verify_acceptance_bundle passes
+```
+
+Full log: [docs/superpowers/2026-08-07-rich-4196-demo-log.md](docs/superpowers/2026-08-07-rich-4196-demo-log.md).
+
+#### M3 — Dify #33013 (AI Application Platform)
+
+A complete five-role workflow demo (~6s) based on the real open-source issue
+[langgenius/dify #33013](https://github.com/langgenius/dify/issues/33013):
+
+```bash
+./.venv/bin/python -m pytest tests/test_delivery_m3_dify.py -q
+
+# Expected: 7 passed
+```
+
+This bug occurs in Dify's QuestionClassifierNode — when a user adds a question
+classifier node to their workflow, execution throws a `TypeError`: the `invoke_llm()`
+call passes `structured_output_schema` which gets unexpectedly converted to a
+dict. The upstream fix updates the parameter to `json_schema` — a one-line change.
+
+Dify is an AI workflow platform where end users directly compose agent workflows —
+a completely different context from Rich (a developer tool). This demo proves the
+OpenWorkProof protocol's **cross-project-type generality**.
+
+Covers the same 9-step evidence chain as M2, plus two functional-layer assertions:
+- The pinned source code reproduces the `TypeError` (confirming the bug is real)
+- The upstream fix applies line-level precision (confirming the fix is effective)
+
+Full log: [docs/superpowers/2026-08-07-dify-33013-demo-log.md](docs/superpowers/2026-08-07-dify-33013-demo-log.md).
+
+---
+
+## Usage
+
+OpenWorkProof provides three entry points: CLI, MCP transport, and Python API.
+
+### 1. CLI
+
+```bash
+# View ledger status (replays all receipts, outputs current state)
+owp status path/to/ledger.db
+
+# Example output:
+# {
+#   "schema_version": "openworkproof/cli-status/0.1",
+#   "work_order_digest": "sha256:...",
+#   "current_state": "accepted",
+#   "version": 42,
+#   "receipt_count": 15
+# }
+
+# Forward a run-tests execution request
+owp run-tests path/to/ledger.db payload.json
+
+# Forward a repo-read execution request
+owp repo-read path/to/ledger.db payload.json
+
+# Text output mode
+owp --output text status path/to/ledger.db
+# state=accepted version=42 receipts=15
+```
+
+Example payload.json (run-tests):
+
+```json
+{
+  "request": {
+    "schema_version": "openworkproof/agent-request/0.1",
+    "work_order_digest": "sha256:abc123...",
+    "grant_id": "grant-uuid-here",
+    "role": "verifier",
+    "tool_name": "owp.run_tests",
+    "nonce": "unique-nonce-string",
+    "arguments": { "mode": "verifier", "test_filter": "test_basic" },
+    "signature": { "key_id": "verifier-key-1", "sig": "..." }
+  },
+  "arguments": { "mode": "verifier", "test_filter": "test_basic" },
+  "execution_facts": { ... },
+  "replay_checkpoint": { ... }
+}
+```
+
+### 2. MCP Transport (stdio)
+
+The OpenWorkProof coordinator is packaged as MCP tools callable by any MCP client
+(Claude Desktop, Cursor, etc.):
+
+```bash
+# Start the stdio MCP server
+./.venv/bin/python -m openworkproof.mcp_transport
+```
+
+Provided MCP tools:
+
+| Tool | Function |
+|------|----------|
+| `owp_status(ledger)` | Replay ledger and return authoritative state |
+| `owp_run_tests(ledger, payload)` | Forward run-tests execution |
+| `owp_repo_read(ledger, payload)` | Forward repo-read execution |
+
+Add to your MCP client configuration:
+
+```json
+{
+  "mcpServers": {
+    "openworkproof": {
+      "command": "/path/to/.venv/bin/python",
+      "args": ["-m", "openworkproof.mcp_transport"]
+    }
+  }
+}
+```
+
+### 3. Python API
+
+```python
+from openworkproof import evidence, mcp_server, policy
+from openworkproof.models import WorkOrder, CapabilityGrant, AgentRequest
+from openworkproof.signing import sign_payload, verify_payload
+from openworkproof.acceptance import verify_acceptance_bundle
+
+# 1. Initialize ledger (create WorkOrder + Root Grant)
+evidence.init_ledger("ledger.db", work_order, root_grant)
+
+# 2. Pre-authorization check (pure function, no execution, no ledger writes)
+auth_ctx = policy.derive_authorization_context(
+    work_order=work_order,
+    grants=grant_prefix,
+    receipts=receipts,
+    request=signed_request,
+    arguments=typed_args,
+    execution_facts=facts,
+    checkpoint=checkpoint,
+)
+decision = policy.authorize_tool_call(auth_ctx)
+if not decision.allowed:
+    # Deny path: audit trace but no execution
+    mcp_server.produce_deny_receipt("ledger.db", request, decision)
+    return
+
+# 3. Execute tool and commit receipt
+receipt = mcp_server.complete_receipt_publication(
+    "ledger.db", request, decision, execution_result, evidence_list
+)
+
+# 4. Offline verification (by a third party, no live ledger needed)
+result = verify_acceptance_bundle(
+    work_order=work_order,
+    report=report,
+    effective_grants=grants,
+    grant_attempts=attempts,
+    receipts=receipts,
+    committed_evidence=evidence,
+    acceptance_receipt=signed_receipt,
+    public_keys=public_keys,
+    reports=all_reports,
+)
+```
+
+### 4. External Acceptor Service
+
+The Acceptor runs as a standalone process, holding only the Acceptor private key,
+receiving signature requests over TCP:
+
+```bash
+# Start external Acceptor (default 127.0.0.1:18741)
+./.venv/bin/python -c "
+from openworkproof.external_acceptor import ExternalAcceptorService
+svc = ExternalAcceptorService(host='127.0.0.1', port=18741, key_hex='...')
+svc.serve()
+"
+
+# Client sends a signing request
+./.venv/bin/python -c "
+from openworkproof.external_acceptor import ExternalAcceptorClient
+client = ExternalAcceptorClient(host='127.0.0.1', port=18741)
+result = client.sign_acceptance(draft_receipt)
+print(result)
+"
+```
+
+### 5. AgentTeams Network Transport
+
+Connect to the AgentTeams execution layer via TCP:
+
+```bash
+# Environment variables
+export OWP_TEAM_ENDPOINT=127.0.0.1:18742
+export OWP_TEAM_TOKEN=shared-secret
+export OWP_TEAM_TIMEOUT=5.0
+```
+
+---
+
+## Offline Verification
+
+A core design goal: third parties verify all facts offline, using only the evidence
+bundle, without connecting to any party's system.
+
+```python
+from openworkproof.acceptance import verify_acceptance_bundle
+
+# Only needs the evidence bundle + public keys — no live ledger
+result = verify_acceptance_bundle(
+    work_order=work_order,           # WorkOrder (with six-role public key bindings)
+    report=report,                   # CompositionReport (authoritative ledger artifact)
+    effective_grants=grants,         # Normalized grant prefix
+    grant_attempts=attempts,          # Issuance attempts
+    receipts=receipts,               # ActionReceipt envelope sequence
+    committed_evidence=evidence,      # (CommittedEvidence, ...)
+    acceptance_receipt=signed,       # Terminal acceptance receipt
+    public_keys=public_keys,         # {key_id: Ed25519PublicKey}
+    reports=reports,                 # All CompositionReports
+)
+```
+
+What the verifier checks:
+1. **Signed authorization history**: rebuilds deterministic indexes, verifies Ed25519
+   signatures on every receipt
+2. **Policy replay**: recomputes grant attenuation, balance, revocation, single-use,
+   quota, and denial precedence
+3. **Evidence references**: validates EvidenceRef path, sha256, and publication closure
+4. **Causal completeness**: precise parent sets, single genesis, active patch / rework /
+   approval semantics
+5. **Terminal decision**: acceptance or rejection — exactly one of the two, bound to the request tip
+
+See [docs/offline-verification.md](docs/offline-verification.md) for details.
+
+---
+
+## Project Structure
+
+```
+OpenWorkProof/
+├── src/openworkproof/
+│   ├── models.py              # Four protocol object models (WorkOrder/Grant/Receipt/Acceptance)
+│   ├── policy.py              # Pre-authorization: authorize_tool_call / validate_human_decision / validate_rollback
+│   ├── evidence.py            # SQLite authoritative ledger, atomic commit, evidence staging & publication
+│   ├── composition.py         # Causal replay layer + deterministic CompositionReport
+│   ├── acceptance.py          # Terminal acceptance + offline verifier (verify_acceptance_bundle)
+│   ├── mcp_server.py          # Coordinator: complete_receipt_publication / compose_proof etc.
+│   ├── mcp_transport.py       # MCP stdio transport layer
+│   ├── cli.py                 # CLI transport layer (owp command)
+│   ├── execution_adapter.py   # AgentTeams execution adapter
+│   ├── team_network_client.py # TCP network client
+│   ├── external_acceptor.py   # Standalone Acceptor service
+│   ├── signing.py             # Ed25519 signing + RFC 8785 JCS canonicalization
+│   ├── schema_registry.py     # JSON Schema registry
+│   ├── predicates.py          # Predicate registry
+│   ├── repo_tools.py          # Repository pipeline tools
+│   ├── runtime_context.py     # Runtime context
+│   ├── trusted_helper.py      # Trusted helper request dispatch
+│   └── schemas/v0.1/          # JSON Schema files
+├── specs/v0.1/                # Protocol schemas (WorkOrder/Grant/Receipt/Acceptance)
+├── tests/                     # 2,283 conformance tests
+├── docs/                      # Documentation (status, demo logs, offline verification guide)
+├── supply-chain/              # Trusted build images + candidate inventory
+├── pyproject.toml             # Packaging metadata
+└── requirements-lock.txt      # Locked dependencies
+```
+
+---
+
+## Current Status
+
+**Implemented and verified (public snapshot):**
+
+- Four protocol object models, RFC 8785 JCS + Ed25519 signing, six-role identity binding
+- SQLite authoritative ledger, root/child Grant atomic issuance & revocation, quota replay
+- Pure pre-authorization: tool-call / human-decision / rollback PolicyDecision
+- Causal replay layer + policy replay layer + five-input offline verifier
+- Group-aware evidence staging, atomic commit, no-replace publication, crash recovery
+- First Verifier `run_tests` trusted coordinator slice (with real subprocess crash injection tests)
+- Deterministic CompositionReport and `owp.compose_proof` atomic composition transaction
+- Atomic final-acceptance request, keyless external signature draft, and Acceptor-signed acceptance commit
+- Acceptor rejection path: AcceptanceRejectionReceipt signed by the same authoritative Acceptor
+- Independent Verifier results and deterministic recomposition
+- Deny receipt entry point (`produce_deny_receipt`)
+- CLI (`owp status` / `owp run-tests` / `owp repo-read`)
+- MCP stdio transport layer
+- AgentTeams TCP network client + execution adapter
+- Docker production executor (STARTED_UNCONFIRMED recovery)
+- Rich #4196 full five-role E2E demo (Acceptor TCP signing + offline verification)
+- Dify #33013 full five-role E2E demo (AI application platform, cross-project-type generality)
+- **Full test suite: 2,283 passed / 0 failed / 7 skipped**
+
+**Not yet complete:** remaining ToolCall handler closures, event submission.
+
+> We state "what's not yet done" as clearly as "what is done."
+> This isn't modesty — it's the standard of evidence a protocol project demands.
+
+See [docs/status.md](docs/status.md) for the detailed implementation checklist and boundary declarations.
+
+---
+
+## Demos
+
+### M2: Rich #4196 (Developer Tooling)
+
+Based on the real open-source issue [Textualize/Rich #4196](https://github.com/Textualize/rich/issues/4196),
+pinned to upstream commit `9d8f9a372cc5916fd4781fec207ced7ddac2f08f`, demonstrating a complete
+five-role workflow:
+
+Manager issues minimal permissions → Developer modifies code in a constrained workspace
+(repo_read + apply_patch) → out-of-scope paths are denied pre-execution → Verifier runs
+pinned tests forming independent evidence → local test pass does not automatically equal
+final acceptance → independent Verifier results and recomposition → Acceptor makes a
+human acceptance decision based on the complete evidence chain (Acceptor subprocess TCP signing)
+→ offline bundle verification.
+
+Rich and its source code remain the property of the original rightsholders;
+OpenWorkProof owns only its protocol and task packaging.
+
+### M3: Dify #33013 (AI Application Platform)
+
+Based on the real open-source issue [langgenius/dify #33013](https://github.com/langgenius/dify/issues/33013),
+pinned to upstream commit `9f7bea37e`. The bug occurs in Dify's QuestionClassifierNode:
+when a user adds a question classifier node to their workflow, execution crashes with
+a `TypeError` — a one-line fix updates the parameter from `structured_output_schema`
+to `json_schema`.
+
+Dify is an AI workflow platform for end users — completely different from Rich's
+developer-tooling context. This demo proves **cross-project-type generality**: the same
+9-step, five-role evidence chain works equally well for user-product-level fixes,
+with additional functional-layer verification confirming both bug reproduction
+and fix effectiveness.
+
+---
+
+## Roadmap
+
+1. ~~Stable execution IDs and start/result receipts for real sandboxed executors~~ (done)
+2. ~~Human decision, rollback, and termination policy APIs~~ (done)
+3. ~~Independent result execution episode and five-dimension recomposition → proof_ready~~ (done)
+4. ~~CLI, MCP Sidecar, and AgentTeams integration~~ (done)
+5. ~~Rich #4196 self-contained demo with external independent acceptance~~ (done)
+6. ~~Acceptor rejection path and real external Acceptor reproduction~~ (done)
+7. ~~Deny receipt entry point~~ (done)
+8. ~~Dify #33013 self-contained demo with cross-project-type generality validation~~ (done)
+9. Remaining: other ToolCall handler closures, event submission.
+
+---
+
+## Contributing
+
+The project is still in its protocol and MVP phase. Current directions suitable for contribution include:
+
+- Protocol object and conformance tests
+- Authorization attenuation and quota replay
+- Verifiable builds and evidence bundles
+- MCP / agent framework adapters
+- Task packaging for real open-source issues
+- Security, privacy, and data governance review
+
+The repository is Apache-2.0 licensed. Contribution processes and contributor agreements
+are still being defined — please start with a GitHub Issue to propose ideas.
+
+## Project Ownership
+
+- Technical Owner: dengyier (currently serving as Maintainer, Manager, and Acceptor)
+- Rights Holder: 成都星火领航科技有限公司 (Chengdu Spark Navigation Technology Co., Ltd.)
+
+---
+
+## Vision
+
+OpenWorkProof aims to take agent work from "can generate results" to:
+
+> Authorizable, constrainable, verifiable, acceptable —
+> and rejectable when the evidence falls short.
+
+OpenWorkProof doesn't make agents smarter. It gives them the accountability
+structure needed to participate in social coordination.
