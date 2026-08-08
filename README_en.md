@@ -1,11 +1,15 @@
 # OpenWorkProof
 
+<!-- mcp-name: io.github.dengyier/OpenWorkProof -->
+
 > Agents can generate results — but on what authority do we accept delivery?
 > Agent Work Contracts and Verifiable Execution Protocol
 
 Project: https://github.com/dengyier/OpenWorkProof
-Version: 1.0.0
+Version: 1.1.1
 License: Apache-2.0
+PyPI: [openworkproof](https://pypi.org/project/openworkproof/)
+MCP Registry: [io.github.dengyier/OpenWorkProof](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.1.1)
 
 ---
 
@@ -119,7 +123,7 @@ Detailed protocol schemas in [specs/v0.1](specs/v0.1/).
 
 ### Prerequisites
 
-- Python 3.12 (`>=3.12, <3.13`)
+- Python ≥ 3.10 (supports 3.10 / 3.11 / 3.12 / 3.13)
 - Git
 - macOS or Linux
 
@@ -131,14 +135,14 @@ Detailed protocol schemas in [specs/v0.1](specs/v0.1/).
 pip install openworkproof
 ```
 
-After installation, the `owp` CLI command and full Python API are available.
+After installation, the `owp` CLI command, `owp-mcp` MCP Server command, and full Python API are available.
 
 **Local development:**
 
 ```bash
 git clone https://github.com/dengyier/OpenWorkProof.git
 cd OpenWorkProof
-python3.12 -m venv .venv
+python3 -m venv .venv
 ./.venv/bin/python -m pip install -r requirements-lock.txt
 ./.venv/bin/python -m pip install -e .          # editable install, picks up code changes
 ```
@@ -152,7 +156,7 @@ owp status
 # Run full test suite (~5 minutes, requires local dev environment)
 ./.venv/bin/python -m pytest -q
 
-# Expected: 2283 passed, 7 skipped, 0 failed
+# Expected: 1330+ passed, 0 failed
 ```
 
 ### End-to-End Demos
@@ -264,17 +268,35 @@ Example payload.json (run-tests):
 }
 ```
 
-### 2. MCP Transport (stdio)
+### 2. MCP Server (stdio)
 
-The OpenWorkProof coordinator is packaged as MCP tools callable by any MCP client
-(Claude Desktop, Cursor, etc.):
+OpenWorkProof is registered on the official MCP Registry (`io.github.dengyier/OpenWorkProof`),
+providing 14 MCP tools callable by any MCP client (Claude Desktop, Cursor, VS Code, etc.):
 
 ```bash
-# Start the stdio MCP server
-./.venv/bin/python -m openworkproof.mcp_transport
+# Start the MCP Server (available after pip install)
+owp-mcp
+
+# Or via Python module
+python -m openworkproof.mcp_transport
 ```
 
-Provided MCP tools:
+Provided MCP tools (14):
+
+**Standalone verification tools (no ledger required):**
+
+| Tool | Function |
+|------|----------|
+| `owp_generate_keypair` | Generate an Ed25519 key pair |
+| `owp_compute_key_id` | Derive key_id from a public key |
+| `owp_sign_payload` | Sign a canonical payload |
+| `owp_verify_signature` | Verify a signed payload |
+| `owp_compute_digest` | Compute JCS canonical SHA-256 digest |
+| `owp_verify_work_order` | Verify WorkOrder identity bindings |
+| `owp_verify_nested_claim` | Verify AgentRequest / HumanDecision nested claims |
+| `owp_list_domains` | List all canonical domains |
+
+**Ledger coordinator tools:**
 
 | Tool | Function |
 |------|----------|
@@ -282,18 +304,42 @@ Provided MCP tools:
 | `owp_run_tests(ledger, payload)` | Forward run-tests execution |
 | `owp_repo_read(ledger, payload)` | Forward repo-read execution |
 
+**Utility tools:**
+
+| Tool | Function |
+|------|----------|
+| `owp_get_schema` | Get an authoritative JSON Schema |
+| `owp_get_schema_digest` | Get the frozen digest of a schema |
+| `owp_analyze_repo` | Analyze a repository structure |
+
 Add to your MCP client configuration:
+
+**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 
 ```json
 {
   "mcpServers": {
     "openworkproof": {
-      "command": "/path/to/.venv/bin/python",
-      "args": ["-m", "openworkproof.mcp_transport"]
+      "command": "owp-mcp"
     }
   }
 }
 ```
+
+**Cursor / VS Code** (`.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "openworkproof": {
+      "command": "uvx",
+      "args": ["--from", "openworkproof", "owp-mcp"]
+    }
+  }
+}
+```
+
+See [MCP_SERVER.md](MCP_SERVER.md) for more configuration options.
 
 ### 3. Python API
 
@@ -423,7 +469,7 @@ OpenWorkProof/
 │   ├── composition.py         # Causal replay layer + deterministic CompositionReport
 │   ├── acceptance.py          # Terminal acceptance + offline verifier (verify_acceptance_bundle)
 │   ├── mcp_server.py          # Coordinator: complete_receipt_publication / compose_proof etc.
-│   ├── mcp_transport.py       # MCP stdio transport layer
+│   ├── mcp_transport.py       # MCP Server (14 tools, stdio transport)
 │   ├── cli.py                 # CLI transport layer (owp command)
 │   ├── execution_adapter.py   # AgentTeams execution adapter
 │   ├── team_network_client.py # TCP network client
@@ -436,7 +482,7 @@ OpenWorkProof/
 │   ├── trusted_helper.py      # Trusted helper request dispatch
 │   └── schemas/v0.1/          # JSON Schema files
 ├── specs/v0.1/                # Protocol schemas (WorkOrder/Grant/Receipt/Acceptance)
-├── tests/                     # 2,283 conformance tests
+├── tests/                     # 1,330+ conformance tests
 ├── docs/                      # Documentation (status, demo logs, offline verification guide)
 ├── supply-chain/              # Trusted build images + candidate inventory
 ├── pyproject.toml             # Packaging metadata
@@ -461,12 +507,12 @@ OpenWorkProof/
 - Independent Verifier results and deterministic recomposition
 - Deny receipt entry point (`produce_deny_receipt`)
 - CLI (`owp status` / `owp run-tests` / `owp repo-read`)
-- MCP stdio transport layer
+- MCP Server (14 tools, registered on MCP Registry as `io.github.dengyier/OpenWorkProof`)
 - AgentTeams TCP network client + execution adapter
 - Docker production executor (STARTED_UNCONFIRMED recovery)
 - Rich #4196 full five-role E2E demo (Acceptor TCP signing + offline verification)
 - Dify #33013 full five-role E2E demo (AI application platform, cross-project-type generality)
-- **Full test suite: 2,283 passed / 0 failed / 7 skipped**
+- **Full test suite: 1,330+ passed / 0 failed**
 
 **Not yet complete:** remaining ToolCall handler closures, event submission.
 
@@ -521,7 +567,8 @@ and fix effectiveness.
 6. ~~Acceptor rejection path and real external Acceptor reproduction~~ (done)
 7. ~~Deny receipt entry point~~ (done)
 8. ~~Dify #33013 self-contained demo with cross-project-type generality validation~~ (done)
-9. Remaining: other ToolCall handler closures, event submission.
+9. ~~MCP Server registered on official MCP Registry~~ (done, `io.github.dengyier/OpenWorkProof` v1.1.1 active)
+10. Remaining: other ToolCall handler closures, event submission.
 
 ---
 
@@ -536,8 +583,12 @@ The project is still in its protocol and MVP phase. Current directions suitable 
 - Task packaging for real open-source issues
 - Security, privacy, and data governance review
 
-The repository is Apache-2.0 licensed. Contribution processes and contributor agreements
-are still being defined — please start with a GitHub Issue to propose ideas.
+The repository is Apache-2.0 licensed. The PyPI package is published at
+[pypi.org/project/openworkproof](https://pypi.org/project/openworkproof/),
+and the MCP Server is registered on the
+[MCP Registry](https://registry.modelcontextprotocol.io/).
+Contribution processes and contributor agreements are still being defined —
+please start with a GitHub Issue to propose ideas.
 
 ## Project Ownership
 

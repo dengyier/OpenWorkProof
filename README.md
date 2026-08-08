@@ -6,8 +6,10 @@
 > Agent Work Contracts and Verifiable Execution Protocol
 
 项目地址：https://github.com/dengyier/OpenWorkProof
-当前版本：1.1.0
-许可证：MIT
+当前版本：1.1.1
+许可证：Apache-2.0
+PyPI：[openworkproof](https://pypi.org/project/openworkproof/)
+MCP Registry：[io.github.dengyier/OpenWorkProof](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.1.1)
 
 ---
 
@@ -119,7 +121,7 @@ running → locally_verified → proof_ready → awaiting_human → accepted
 
 ### 环境要求
 
-- Python 3.12（`>=3.12, <3.13`）
+- Python ≥ 3.10（支持 3.10 / 3.11 / 3.12 / 3.13）
 - Git
 - macOS 或 Linux
 
@@ -131,14 +133,14 @@ running → locally_verified → proof_ready → awaiting_human → accepted
 pip install openworkproof
 ```
 
-安装后即获得 `owp` CLI 命令和完整的 Python API。
+安装后即获得 `owp` CLI 命令、`owp-mcp` MCP Server 命令和完整的 Python API。
 
 **本地开发环境：**
 
 ```bash
 git clone https://github.com/dengyier/OpenWorkProof.git
 cd OpenWorkProof
-python3.12 -m venv .venv
+python3 -m venv .venv
 ./.venv/bin/python -m pip install -r requirements-lock.txt
 ./.venv/bin/python -m pip install -e .          # 可编辑安装，同步代码修改
 ```
@@ -152,7 +154,7 @@ owp status
 # 运行全量测试（约 5 分钟，需本地开发环境）
 ./.venv/bin/python -m pytest -q
 
-# 预期结果：2283 passed, 7 skipped, 0 failed
+# 预期结果：1330+ passed, 0 failed
 ```
 
 ### 运行端到端演示
@@ -277,17 +279,35 @@ payload.json 示例（run-tests）：
 }
 ```
 
-### 2. MCP 传输层（stdio）
+### 2. MCP Server（stdio）
 
-OpenWorkProof 协调器已封装为 MCP 工具，可被任何 MCP 客户端（如 Claude Desktop、
-Cursor 等）直接调用：
+OpenWorkProof 已注册到官方 MCP Registry（`io.github.dengyier/OpenWorkProof`），
+提供 14 个 MCP 工具，可被任何 MCP 客户端（Claude Desktop、Cursor、VS Code 等）直接调用：
 
 ```bash
-# 启动 stdio MCP 服务器
-./.venv/bin/python -m openworkproof.mcp_transport
+# 启动 MCP Server（pip install 后直接可用）
+owp-mcp
+
+# 或通过 Python 模块启动
+python -m openworkproof.mcp_transport
 ```
 
-提供的 MCP 工具：
+提供的 MCP 工具（14 个）：
+
+**独立验证工具（无需 ledger）：**
+
+| 工具 | 功能 |
+|------|------|
+| `owp_generate_keypair` | 生成 Ed25519 密钥对 |
+| `owp_compute_key_id` | 从公钥派生 key_id |
+| `owp_sign_payload` | 对规范化载荷签名 |
+| `owp_verify_signature` | 验证已签名载荷 |
+| `owp_compute_digest` | 计算 JCS 规范化 SHA-256 摘要 |
+| `owp_verify_work_order` | 验证 WorkOrder 身份绑定 |
+| `owp_verify_nested_claim` | 验证 AgentRequest / HumanDecision 嵌套声明 |
+| `owp_list_domains` | 列出所有规范域名 |
+
+**Ledger 协调工具：**
 
 | 工具 | 功能 |
 |------|------|
@@ -295,18 +315,42 @@ Cursor 等）直接调用：
 | `owp_run_tests(ledger, payload)` | 转发 run-tests 执行 |
 | `owp_repo_read(ledger, payload)` | 转发 repo-read 执行 |
 
+**实用工具：**
+
+| 工具 | 功能 |
+|------|------|
+| `owp_get_schema` | 获取权威 JSON Schema |
+| `owp_get_schema_digest` | 获取 Schema 冻结摘要 |
+| `owp_analyze_repo` | 分析仓库结构 |
+
 在 MCP 客户端配置中添加：
+
+**Claude Desktop**（`~/Library/Application Support/Claude/claude_desktop_config.json`）：
 
 ```json
 {
   "mcpServers": {
     "openworkproof": {
-      "command": "/path/to/.venv/bin/python",
-      "args": ["-m", "openworkproof.mcp_transport"]
+      "command": "owp-mcp"
     }
   }
 }
 ```
+
+**Cursor / VS Code**（`.cursor/mcp.json`）：
+
+```json
+{
+  "mcpServers": {
+    "openworkproof": {
+      "command": "uvx",
+      "args": ["--from", "openworkproof", "owp-mcp"]
+    }
+  }
+}
+```
+
+更多配置方式见 [MCP_SERVER.md](MCP_SERVER.md)。
 
 ### 3. Python API
 
@@ -432,7 +476,7 @@ OpenWorkProof/
 │   ├── composition.py         # 因果回放层 + 确定性 CompositionReport
 │   ├── acceptance.py         # 终态验收 + 离线验签器（verify_acceptance_bundle）
 │   ├── mcp_server.py         # 协调器：complete_receipt_publication / compose_proof 等
-│   ├── mcp_transport.py       # MCP stdio 传输层
+│   ├── mcp_transport.py       # MCP Server（14 工具，stdio 传输层）
 │   ├── cli.py                 # CLI 传输层（owp 命令）
 │   ├── execution_adapter.py  # AgentTeams 执行适配层
 │   ├── team_network_client.py # TCP 网络客户端
@@ -445,7 +489,7 @@ OpenWorkProof/
 │   ├── trusted_helper.py    # 可信助手请求分发
 │   └── schemas/v0.1/         # JSON Schema 文件
 ├── specs/v0.1/               # 协议 Schema（WorkOrder/Grant/Receipt/Acceptance）
-├── tests/                    # 2283 项一致性测试
+├── tests/                    # 1330+ 项一致性测试
 ├── docs/                     # 文档（状态、演示日志、离线验签说明）
 ├── supply-chain/             # 可信构建镜像 + 候选清单
 ├── pyproject.toml            # 打包元数据
@@ -470,12 +514,12 @@ OpenWorkProof/
 - 独立 Verifier 结果与确定性 recomposition
 - deny 收据生产入口（`produce_deny_receipt`）
 - CLI（`owp status` / `owp run-tests` / `owp repo-read`）
-- MCP stdio 传输层
+- MCP Server（14 工具，已注册到 MCP Registry `io.github.dengyier/OpenWorkProof`）
 - AgentTeams TCP 网络客户端 + 执行适配层
 - Docker 生产执行器（STARTED_UNCONFIRMED 恢复）
 - Rich #4196 完整五角色端到端演示（Acceptor TCP 签名 + 离线验签）
 - Dify #33013 完整五角色端到端演示（AI 应用平台类，跨项目类型通用性验证）
-- **全量测试：2283 passed、0 failed、7 skipped**
+- **全量测试：1330+ passed、0 failed**
 
 **尚未完成：** 其他 ToolCall handler 与 evidence publication 的调用闭包、
 正式赛事提交。
@@ -525,7 +569,8 @@ Dify 是面向终端用户的 AI 工作流平台，与 Rich 的开发者工具�
 6. ~~完成 Acceptor 拒绝路径、真实外部 Acceptor 复现~~（已完成）
 7. ~~完成 deny 收据生产入口~~（已完成）
 8. ~~完成 Dify #33013 自包含演示及跨项目类型通用性验证~~（已完成）
-9. 剩余：其他 ToolCall handler 与 evidence publication 的调用闭包、正式赛事提交。
+9. ~~MCP Server 注册到官方 MCP Registry~~（已完成，`io.github.dengyier/OpenWorkProof` v1.1.1 active）
+10. 剩余：其他 ToolCall handler 与 evidence publication 的调用闭包、正式赛事提交。
 
 ---
 
@@ -540,8 +585,9 @@ Dify 是面向终端用户的 AI 工作流平台，与 Rich 的开发者工具�
 - 真实开源 Issue 的任务封装
 - 安全、隐私和数据治理审查
 
-仓库采用 Apache-2.0 许可证。贡献流程与贡献者协议仍在制定中，
-欢迎先通过 GitHub Issue 提出建议。
+仓库采用 Apache-2.0 许可证。PyPI 包已发布至 [pypi.org/project/openworkproof](https://pypi.org/project/openworkproof/)，
+MCP Server 已注册至 [MCP Registry](https://registry.modelcontextprotocol.io/)。
+贡献流程与贡献者协议仍在制定中，欢迎先通过 GitHub Issue 提出建议。
 
 ## 项目主体
 
