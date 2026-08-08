@@ -1,0 +1,28 @@
+{
+  "display_name": "OpenWorkProof",
+  "description": "Verifiable execution for AI agents: Ed25519-signed work contracts and audit trails.",
+  "category": "Security",
+  "server": {
+    "type": "stdio",
+    "command": "owp-mcp",
+    "runtime": "python"
+  },
+  "environment_variables": [],
+  "build_spec": {
+    "language": "python",
+    "package_manager": "pip",
+    "install_command": "pip install openworkproof",
+    "run_command": "owp-mcp"
+  },
+  "tags": [
+    "ed25519",
+    "verifiable-execution",
+    "proof-carrying",
+    "audit-trail",
+    "work-contract",
+    "agent-authorization",
+    "signing",
+    "compliance",
+    "eu-ai-act"
+  ]
+}
