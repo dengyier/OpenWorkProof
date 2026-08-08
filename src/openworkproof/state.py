@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from enum import StrEnum
+from enum import Enum
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import ValidationError
@@ -35,7 +35,7 @@ from openworkproof.signing import (
 )
 
 
-class TaskState(StrEnum):
+class TaskState(str, Enum):
     ISSUED = "issued"
     RUNNING = "running"
     NEEDS_REWORK = "needs_rework"

@@ -8,7 +8,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterator, Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import Annotated, Any, Literal
 
@@ -181,10 +181,10 @@ def _parse_canonical_time(value: Any) -> datetime:
     if second > 59:
         raise ValueError("leap seconds are not permitted")
     try:
-        parsed = datetime(year, month, day, hour, minute, second, tzinfo=UTC)
+        parsed = datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
     except ValueError as error:
         raise ValueError("timestamp is not a valid UTC second") from error
-    if parsed < datetime(1970, 1, 1, tzinfo=UTC):
+    if parsed < datetime(1970, 1, 1, tzinfo=timezone.utc):
         raise ValueError("timestamp precedes the Unix epoch")
     return parsed
 

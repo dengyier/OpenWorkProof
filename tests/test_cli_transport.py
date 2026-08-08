@@ -196,8 +196,9 @@ def test_mcp_owp_status_tool(
         tmp_path, signed_work_order, ephemeral_role_keys, sidecar_receipt_factory, fixed_now
     )
     result = mcp_transport.owp_status(str(ledger_path))
+    assert result["schema_version"] == "openworkproof/mcp/0.2"
+    assert result["ok"] is True
     assert result["current_state"] == "running"
-    assert result["schema_version"] == "openworkproof/mcp/0.1"
 
 
 def test_mcp_owp_repo_read_tool(
@@ -270,6 +271,7 @@ def test_mcp_owp_repo_read_tool(
     result = mcp_transport.owp_repo_read(
         str(case["ledger_path"]), json.dumps(payload)
     )
-    assert result["schema_version"] == "openworkproof/mcp/0.1"
+    assert result["schema_version"] == "openworkproof/mcp/0.2"
+    assert result["ok"] is True
     assert result["tool_name"] == "owp.repo_read"
     assert result["execution_status"] == "succeeded"

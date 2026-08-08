@@ -722,7 +722,12 @@ def _error_cause(
 ) -> Exception:
     if len(errors) == 1:
         return errors[0]
-    return ExceptionGroup(label, list(errors))
+    # ExceptionGroup is Python 3.11+; fall back to RuntimeError on 3.10.
+    try:
+        return ExceptionGroup(label, list(errors))  # type: ignore[misc]
+    except NameError:
+        combined = "; ".join(str(e) for e in errors)
+        return RuntimeError(f"{label}: {combined}")
 
 
 def _contextualize_secondary(label: str, error: Exception) -> Exception:

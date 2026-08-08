@@ -1,30 +1,35 @@
 [build-system]
-requires = ["setuptools==83.0.0"]
+requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "openworkproof"
-version = "1.0.0"
-description = "Agent work contracts and verifiable execution protocol"
+version = "1.1.0"
+description = "Agent work contracts and verifiable execution protocol — Ed25519-signed, offline-verifiable proof-carrying work for AI agents."
 readme = "README.md"
 license = {text = "MIT"}
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
   "Topic :: Security :: Cryptography",
+  "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-keywords = ["agent", "verifiable", "ai", "work-contract", "mcp", "audit", "sign"]
-requires-python = ">=3.12,<3.13"
+keywords = ["agent", "verifiable", "ai", "work-contract", "mcp", "audit", "sign", "ed25519", "proof-carrying", "mcp-server"]
+requires-python = ">=3.10"
 dependencies = [
-  "cryptography==49.0.0",
-  "jsonschema==4.26.0",
-  "pydantic==2.13.4",
-  "rfc8785==0.1.4",
-  "rich==15.0.0",
-  "typer==0.27.0",
+  "cryptography>=43.0",
+  "jsonschema>=4.20",
+  "pydantic>=2.5",
+  "rfc8785>=0.1.2",
+  "rich>=13.0",
+  "typer>=0.12",
+  "mcp>=1.0",
 ]
 
 [project.urls]
@@ -34,14 +39,14 @@ Issues = "https://github.com/dengyier/OpenWorkProof/issues"
 
 [project.optional-dependencies]
 dev = [
-  "pip-tools==7.5.2",
-  "pytest==9.1.1",
-  "setuptools==83.0.0",
+  "pip-tools>=7.4",
+  "pytest>=8.0",
+  "setuptools>=68.0",
 ]
-mcp = ["mcp==1.28.1"]
 
 [project.scripts]
 owp = "openworkproof.cli:app"
+owp-mcp = "openworkproof.mcp_transport:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/registry/main/schema/server.schema.json",
+  "name": "openworkproof",
+  "description": "Verifiable execution protocol for AI agents — Ed25519-signed work contracts, offline-verifiable proof-carrying work, and cryptographic audit trails.",
+  "version": "1.1.0",
+  "repository": {
+    "url": "https://github.com/dengyier/OpenWorkProof",
+    "source": "github",
+    "id": "dengyier/OpenWorkProof"
+  },
+  "homepage": "https://github.com/dengyier/OpenWorkProof",
+  "author": {
+    "name": "OpenWorkProof"
+  },
+  "license": "MIT",
+  "categories": [
+    "security",
+    "developer-tools",
+    "ai-agents"
+  ],
+  "keywords": [
+    "ed25519",
+    "verifiable-execution",
+    "proof-carrying",
+    "audit",
+    "signing",
+    "work-contract",
+    "mcp-server"
+  ],
+  "installations": {
+    "pip": {
+      "type": "pip",
+      "command": "pip install openworkproof",
+      "runCommand": "owp-mcp"
+    },
+    "uvx": {
+      "type": "uvx",
+      "command": "uvx --from openworkproof owp-mcp"
+    },
+    "pipx": {
+      "type": "pipx",
+      "command": "pipx install openworkproof",
+      "runCommand": "owp-mcp"
+    }
+  },
+  "examples": [
+    {
+      "title": "Generate Ed25519 keypair",
+      "description": "Generate a new Ed25519 key pair for signing OpenWorkProof objects.",
+      "tool": "owp_generate_keypair",
+      "input": {}
+    },
+    {
+      "title": "Verify a signed payload",
+      "description": "Verify an Ed25519 signature on a signed OpenWorkProof payload.",
+      "tool": "owp_verify_signature",
+      "input": {
+        "object_type": "agent-request",
+        "signed_payload": "<JSON string of signed payload>",
+        "public_key_b64url": "<base64url public key>"
+      }
+    },
+    {
+      "title": "Compute canonical digest",
+      "description": "Compute the canonical SHA-256 digest of an OpenWorkProof payload using RFC 8785 JCS.",
+      "tool": "owp_compute_digest",
+      "input": {
+        "object_type": "work-order",
+        "payload": "<JSON string of payload>"
+      }
+    }
+  ]
+}
