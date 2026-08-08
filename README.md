@@ -5,7 +5,11 @@
 > Agent 可以生成结果，但凭什么交付？
 > Agent Work Contracts and Verifiable Execution Protocol
 
-<div align="right"><strong><a href="README_en.md">English</a></strong></div>
+<div align="center">
+  <a href="README_en.md">English</a> | <strong>中文</strong>
+</div>
+
+---
 
 项目地址：https://github.com/dengyier/OpenWorkProof
 当前版本：1.1.1
