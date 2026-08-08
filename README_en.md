@@ -5,6 +5,8 @@
 > Agents can generate results — but on what authority do we accept delivery?
 > Agent Work Contracts and Verifiable Execution Protocol
 
+<div align="right"><strong><a href="README.md">中文</a></strong></div>
+
 Project: https://github.com/dengyier/OpenWorkProof
 Version: 1.1.1
 License: Apache-2.0
