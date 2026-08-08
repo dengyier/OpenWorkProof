@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openworkproof"
-version = "1.1.0"
+version = "1.1.1"
 description = "Agent work contracts and verifiable execution protocol — Ed25519-signed, offline-verifiable proof-carrying work for AI agents."
 readme = "README.md"
 license = {text = "MIT"}
