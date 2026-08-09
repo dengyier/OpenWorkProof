@@ -20,14 +20,14 @@
 
 ### Task 1: Preserve V2 and isolate V3
 
-- [ ] Record the V2 baseline.
+- [x] Record the V2 baseline.
 
 ```bash
 shasum -a 256 '/Users/molin/Documents/成都星火领航科技/outputs/OpenWorkProof_港科大参赛暨天使轮融资路演_V2_含市场分析.pptx'
 stat -f 'SIZE_BYTES=%z' '/Users/molin/Documents/成都星火领航科技/outputs/OpenWorkProof_港科大参赛暨天使轮融资路演_V2_含市场分析.pptx'
 ```
 
-- [ ] Change only the export target in `build-deck.mjs`.
+- [x] Change only the export target in `build-deck.mjs`.
 
 ```js
 const PPTX_PATH = path.join(
@@ -36,7 +36,7 @@ const PPTX_PATH = path.join(
 );
 ```
 
-- [ ] Verify syntax.
+- [x] Verify syntax.
 
 ```bash
 node --check '/Users/molin/Documents/成都星火领航科技/outputs/.openworkproof_pitch_build/build-deck.mjs'
@@ -46,7 +46,7 @@ Expected: exit code 0.
 
 ### Task 2: Correct the MCP positioning on slide 5
 
-- [ ] Keep the existing stack comparison and add one concise evidence line below the four layers.
+- [x] Keep the existing stack comparison and add one concise evidence line below the four layers.
 
 ```js
 addText(
@@ -57,7 +57,7 @@ addText(
 );
 ```
 
-- [ ] Update the slide note to separate confirmed facts from inference.
+- [x] Update the slide note to separate confirmed facts from inference.
 
 ```js
 setNotes(slide, "官方规范确认无状态、自包含请求、逐请求能力协商和扩展机制；OpenWorkProof 可作为互补层是一项产品定位判断，不代表 MCP 采纳或认可。", [
@@ -69,11 +69,11 @@ setNotes(slide, "官方规范确认无状态、自包含请求、逐请求能力
 ]);
 ```
 
-- [ ] Do not use `最大修订`, `结构性利好`, `社区认可`, or `已被 MCP 采纳` as visible claims.
+- [x] Do not use `最大修订`, `结构性利好`, `社区认可`, or `已被 MCP 采纳` as visible claims.
 
 ### Task 3: Replace slide 12 with the payer loop
 
-- [ ] Replace the current three-customer-column slide with a four-step flat flow.
+- [x] Replace the current three-customer-column slide with a four-step flat flow.
 
 ```js
 addTitle(slide, "第一张采购单，来自需要通过企业验收的 Agent 方案商", 12);
@@ -89,9 +89,9 @@ const payerFlow = [
 ];
 ```
 
-- [ ] Render the four nodes with the existing typography; highlight `Agent 方案商` in green and keep the other three in navy/blue.
+- [x] Render the four nodes with the existing typography; highlight `Agent 方案商` in green and keep the other three in navy/blue.
 
-- [ ] Replace the bottom strip with:
+- [x] Replace the bottom strip with:
 
 ```js
 addText(slide, "没有可信验收 → PoC 难以上线 → 方案商难以结算", 66, 601, 1148, 28, {
@@ -99,11 +99,11 @@ addText(slide, "没有可信验收 → PoC 难以上线 → 方案商难以结�
 });
 ```
 
-- [ ] Add speaker-note sources from the approved commercial model design and current Obsidian business files. State explicitly that this is the selected first-payer hypothesis, not a confirmed customer.
+- [x] Add speaker-note sources from the approved commercial model design and current Obsidian business files. State explicitly that this is the selected first-payer hypothesis, not a confirmed customer.
 
 ### Task 4: Replace slide 13 with the revenue ladder
 
-- [ ] Use four equal-width stages instead of the existing three-stage timeline.
+- [x] Use four equal-width stages instead of the existing three-stage timeline.
 
 ```js
 addTitle(slide, "不卖抽象协议：从一条工作流改造，走向年度治理授权", 13);
@@ -115,7 +115,7 @@ const revenueLadder = [
 ];
 ```
 
-- [ ] Add the commercial progression line.
+- [x] Add the commercial progression line.
 
 ```js
 addText(slide, "诊断发现边界 → 付费改造验证价值 → 年度授权形成持续收入 → OEM 放大分销", 42, 604, 1150, 30, {
@@ -123,11 +123,11 @@ addText(slide, "诊断发现边界 → 付费改造验证价值 → 年度授权
 });
 ```
 
-- [ ] State in the speaker note: all four prices are validation hypotheses, not quotations, contracts, orders, or revenue.
+- [x] State in the speaker note: all four prices are validation hypotheses, not quotations, contracts, orders, or revenue.
 
 ### Task 5: Align slides 14–16
 
-- [ ] Add this distinction to slide 14 above the entity strip:
+- [x] Add this distinction to slide 14 above the entity strip:
 
 ```js
 addText(slide, "开源协议形成信任｜企业实施、年度授权与平台集成形成收入", 42, 552, 1196, 26, {
@@ -135,7 +135,7 @@ addText(slide, "开源协议形成信任｜企业实施、年度授权与平台�
 });
 ```
 
-- [ ] Preserve the confirmed entities and Owner exactly:
+- [x] Preserve the confirmed entities and Owner exactly:
 
 ```text
 参赛主体：舆意科技（上海）有限公司
@@ -143,7 +143,7 @@ addText(slide, "开源协议形成信任｜企业实施、年度授权与平台�
 技术 Owner：dengyier
 ```
 
-- [ ] Change slide 15 milestones to:
+- [x] Change slide 15 milestones to:
 
 ```js
 addText(slide, "① 3 个付费 PoC\n② 1 个可公开参考客户\n③ 1 个年度授权客户", 42, 382, 540, 128, {
@@ -154,9 +154,9 @@ addText(slide, "同步验证：真实客单价 · 销售周期 · 交付成本 �
 });
 ```
 
-- [ ] Preserve the 200万元 total and the 40% / 30% / 15% / 10% / 5% allocation.
+- [x] Preserve the 200万元 total and the 40% / 30% / 15% / 10% / 5% allocation.
 
-- [ ] Change slide 16 to close on the selected payer:
+- [x] Change slide 16 to close on the selected payer:
 
 ```text
 本轮融资不是为了证明协议能不能运行，
@@ -167,9 +167,9 @@ addText(slide, "同步验证：真实客单价 · 销售周期 · 交付成本 �
 
 ### Task 6: Update provenance records
 
-- [ ] Append the approved spec and verified MCP URLs to `source-notes.txt`.
-- [ ] Append the slide 5 and slide 12–15 narrative decisions to `design-notes.txt`.
-- [ ] Record these boundaries verbatim:
+- [x] Append the approved spec and verified MCP URLs to `source-notes.txt`.
+- [x] Append the slide 5 and slide 12–15 narrative decisions to `design-notes.txt`.
+- [x] Record these boundaries verbatim:
 
 ```text
 Discussion #3215 has zero replies and is not evidence of adoption.
@@ -178,7 +178,7 @@ Explicit MCP handles are state references, not equivalent to signed execution re
 The commercial prices are hypotheses pending interviews, quotations, contracts, delivery, and acceptance.
 ```
 
-- [ ] Scan for credentials and overclaims.
+- [x] Scan for credentials and overclaims.
 
 ```bash
 rg -n -i 'password|secret|token|已有客户|已有收入|已签合同|社区认可|MCP采纳' \
@@ -191,15 +191,15 @@ Expected: no credential or unsupported commercial/adoption claim.
 
 ### Task 7: Build and verify V3
 
-- [ ] Build with artifact-tool.
+- [x] Build with artifact-tool.
 
 ```bash
 node '/Users/molin/Documents/成都星火领航科技/outputs/.openworkproof_pitch_build/build-deck.mjs'
 ```
 
-- [ ] Recheck the V2 SHA-256 and size. Expected: identical to Task 1.
+- [x] Recheck the V2 SHA-256 and size. Expected: identical to Task 1.
 
-- [ ] Render all 16 slides.
+- [x] Render all 16 slides.
 
 ```bash
 python '/Users/molin/.codex/plugins/cache/openai-primary-runtime/presentations/26.805.11740/skills/presentations/container_tools/render_slides.py' \
@@ -207,9 +207,9 @@ python '/Users/molin/.codex/plugins/cache/openai-primary-runtime/presentations/2
   '/Users/molin/Documents/成都星火领航科技/outputs/OpenWorkProof_港科大参赛暨天使轮融资路演_V3_商业模式清晰版.pptx'
 ```
 
-- [ ] Inspect every rendered slide individually. Verify title wrapping, slide 5 source boundary, slide 12 payer emphasis, all four slide 13 prices, complete page numbers, slide 15 funding bars, and slide 16 ask.
+- [x] Inspect every rendered slide individually. Verify title wrapping, slide 5 source boundary, slide 12 payer emphasis, all four slide 13 prices, complete page numbers, slide 15 funding bars, and slide 16 ask.
 
-- [ ] Run overflow detection.
+- [x] Run overflow detection.
 
 ```bash
 '/Users/molin/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3' \
@@ -219,7 +219,7 @@ python '/Users/molin/.codex/plugins/cache/openai-primary-runtime/presentations/2
 
 Expected: `Test passed. No overflow detected.`
 
-- [ ] Verify 16 source-note blocks, ZIP integrity, size, and SHA-256.
+- [x] Verify 16 source-note blocks, ZIP integrity, size, and SHA-256.
 
 ```bash
 PPTX='/Users/molin/Documents/成都星火领航科技/outputs/OpenWorkProof_港科大参赛暨天使轮融资路演_V3_商业模式清晰版.pptx'
@@ -237,8 +237,8 @@ Expected: `NOTES_WITH_SOURCES=16`, no ZIP errors, positive size, and a recorded 
 
 ### Task 8: Record execution
 
-- [ ] Check off only steps actually completed.
-- [ ] Commit the updated plan on `codex/pitch-commercial-model`.
+- [x] Check off only steps actually completed.
+- [x] Commit the updated plan on `codex/pitch-commercial-model`.
 
 ```bash
 git add 'docs/superpowers/plans/2026-08-09-openworkproof-pitch-commercial-model-implementation.md'
