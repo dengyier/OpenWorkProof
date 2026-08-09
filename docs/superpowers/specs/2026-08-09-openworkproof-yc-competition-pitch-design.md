@@ -1,10 +1,10 @@
 # OpenWorkProof YC-Style Competition Pitch Design
 
-**Date:** 2026-08-09  
-**Status:** User-approved design  
-**Primary use:** 2026 港科大百万奖金创业大赛上海赛区，8–10 分钟主路演  
-**Secondary use:** 天使轮人民币 200 万元融资沟通  
-**Visual direction:** B2 — 机构化技术刊物  
+**Date:** 2026-08-09
+**Status:** User-approved design
+**Primary use:** 2026 港科大百万奖金创业大赛上海赛区，8–10 分钟主路演
+**Secondary use:** 天使轮人民币 200 万元融资沟通
+**Visual direction:** B2 — 机构化技术刊物
 
 ## 1. Communication Job
 
@@ -46,89 +46,89 @@ By the end of the pitch, non-technical competition judges and angel investors sh
 
 ### Slide 1 — Opening Thesis
 
-**Title:** Agent 完成了，企业凭什么接受？  
-**Job:** 十秒内解释项目与核心张力。  
-**Visible takeaway:** OpenWorkProof 是 AI Agent 工作的可验证授权与验收协议层。  
+**Title:** Agent 完成了，企业凭什么接受？
+**Job:** 十秒内解释项目与核心张力。
+**Visible takeaway:** OpenWorkProof 是 AI Agent 工作的可验证授权与验收协议层。
 **Visual:** image-2 生成抽象签名证据结构，主体在右、左侧留标题空间。
 
 ### Slide 2 — Enterprise Problem
 
-**Title:** Agent 越能干，企业承担的责任风险越大  
-**Job:** 把技术问题转成企业责任问题。  
+**Title:** Agent 越能干，企业承担的责任风险越大
+**Job:** 把技术问题转成企业责任问题。
 **Content:** 谁授权、谁验证、谁承担；强调“Agent 说完成”不是可验收事实。
 
 ### Slide 3 — Why Now
 
-**Title:** Agent 正从试验工具进入企业工作流  
-**Job:** 说明窗口为何现在打开。  
+**Title:** Agent 正从试验工具进入企业工作流
+**Job:** 说明窗口为何现在打开。
 **Evidence:** Agent 采用、企业集成预期、治理认知以及相邻赛道融资。来源必须保留年份与口径。
 
 ### Slide 4 — Market
 
-**Title:** 可信 Agent 工作正在形成新的企业预算池  
-**Job:** 用自下而上的方式解释市场。  
+**Title:** 可信 Agent 工作正在形成新的企业预算池
+**Job:** 用自下而上的方式解释市场。
 **Content:** 全球 TAM 上限、中国核心 SAM、三年 SOM；公式与假设进入备注。SOM 是经营目标，不是收入。
 
 ### Slide 5 — Ecosystem Gap
 
-**Title:** MCP 和 A2A 解决连接，但不决定工作是否成立  
-**Job:** 定义缺失层。  
+**Title:** MCP 和 A2A 解决连接，但不决定工作是否成立
+**Job:** 定义缺失层。
 **Content:** 模型、Agent 框架、MCP/A2A、OpenWorkProof 四层；准确引用 MCP 2026-07-28 规范，不声称 MCP 采纳。
 
 ### Slide 6 — Product
 
-**Title:** OpenWorkProof 把任务意图变成机器可验证的工作契约  
-**Job:** 让非技术观众理解产品。  
-**Content:** PolicyDecision、ActionReceipt、AcceptanceReceipt；避免一次展示全部内部类名。  
+**Title:** OpenWorkProof 把任务意图变成机器可验证的工作契约
+**Job:** 让非技术观众理解产品。
+**Content:** PolicyDecision、ActionReceipt、AcceptanceReceipt；避免一次展示全部内部类名。
 **Visual:** image-2 生成透明工作契约、授权链和验收印记的层叠结构，不含文字或 Logo。
 
 ### Slide 7 — Commercial Truth Flow
 
-**Title:** 一次 Agent 工作如何成为可结算的商业事实  
-**Job:** 展示端到端闭环。  
-**Flow:** 工作契约 → 授权 → 执行 → 证据 → 独立验收。  
+**Title:** 一次 Agent 工作如何成为可结算的商业事实
+**Job:** 展示端到端闭环。
+**Flow:** 工作契约 → 授权 → 执行 → 证据 → 独立验收。
 **Output:** 被接受或被拒绝的工作事实，而不是“Agent 自报完成”。
 
 ### Slide 8 — Real Open-Source Cases
 
-**Title:** 两个真实 Issue，复现同一套可信交付闭环  
-**Job:** 证明不是自造演示题。  
-**Content:** Rich #4196、Dify #33013；每个案例只展示来源、签名回执、组合报告与离线验证结果。  
+**Title:** 两个真实 Issue，复现同一套可信交付闭环
+**Job:** 证明不是自造演示题。
+**Content:** Rich #4196、Dify #33013；每个案例只展示来源、签名回执、组合报告与离线验证结果。
 **Boundary:** 不代表两个上游项目采用或验收。
 
 ### Slide 9 — Engineering Proof
 
-**Title:** 六角色、五阶段、2,283 项测试  
-**Job:** 证明工程成熟度。  
-**Content:** 六角色密钥体系、五阶段状态流、离线验证、篡改拒绝、发布入口。  
+**Title:** 六角色、五阶段、2,283 项测试
+**Job:** 证明工程成熟度。
+**Content:** 六角色密钥体系、五阶段状态流、离线验证、篡改拒绝、发布入口。
 **Distribution evidence:** 当前版本、PyPI、GitHub Release、MCP/Glama 展示仅在验证后使用。
 
 ### Slide 10 — Competition and Alternatives
 
-**Title:** Tracing 记录发生过什么，OpenWorkProof 证明什么可以被接受  
-**Job:** 回答为何不能用现有方案。  
-**Comparison:** 日志/Tracing、IAM、Eval、MCP/A2A、企业自建与 OpenWorkProof。  
+**Title:** Tracing 记录发生过什么，OpenWorkProof 证明什么可以被接受
+**Job:** 回答为何不能用现有方案。
+**Comparison:** 日志/Tracing、IAM、Eval、MCP/A2A、企业自建与 OpenWorkProof。
 **Position:** OpenWorkProof 是互补责任层，不把所有相邻工具描述成直接竞争者。
 
 ### Slide 11 — Public Ecosystem Signals
 
-**Title:** 项目已进入公开生态，外部反馈开始形成设计约束  
-**Job:** 展示公开性、可讨论性和外部问题质量。  
-**Layout:** 左侧两张 DEV Community 裁切评论；右侧 Glama 目录裁切。  
-**Visible interpretation:** 相邻方案、撤回语义、验证成本和公开目录可发现性。  
-**Boundary footer:** 公开讨论与目录展示，不等于官方采纳、客户使用或商业收入。  
+**Title:** 项目已进入公开生态，外部反馈开始形成设计约束
+**Job:** 展示公开性、可讨论性和外部问题质量。
+**Layout:** 左侧两张 DEV Community 裁切评论；右侧 Glama 目录裁切。
+**Visible interpretation:** 相邻方案、撤回语义、验证成本和公开目录可发现性。
+**Boundary footer:** 公开讨论与目录展示，不等于官方采纳、客户使用或商业收入。
 **Privacy decision:** 用户已允许保留公开用户名和头像；头像不额外放大。
 
 ### Slide 12 — First Payer
 
-**Title:** Agent 方案商为了上线、交付和回款而付费  
-**Job:** 明确使用者、决策者和付款者。  
+**Title:** Agent 方案商为了上线、交付和回款而付费
+**Job:** 明确使用者、决策者和付款者。
 **Flow:** 企业客户 → Agent 方案商 → OpenWorkProof → 验收与结算。
 
 ### Slide 13 — Business Model and Go-to-Market
 
-**Title:** 先卖工作流改造，再形成年度授权与平台集成  
-**Job:** 同时回答卖什么、多少钱、如何获得第一批客户。  
+**Title:** 先卖工作流改造，再形成年度授权与平台集成
+**Job:** 同时回答卖什么、多少钱、如何获得第一批客户。
 **Revenue ladder:**
 
 - 可信交付诊断：人民币 3–5 万；
@@ -140,8 +140,8 @@ By the end of the pitch, non-technical competition judges and angel investors sh
 
 ### Slide 14 — Team and Governance
 
-**Title:** 商业战略、协议工程与生态实践形成完整闭环  
-**Job:** 证明团队与角色匹配。  
+**Title:** 商业战略、协议工程与生态实践形成完整闭环
+**Job:** 证明团队与角色匹配。
 **People:**
 
 - 董浩宇博士｜商业战略负责人；北京大学博士，20+ 年品牌与数字化经验；
@@ -158,17 +158,17 @@ By the end of the pitch, non-technical competition judges and angel investors sh
 
 ### Slide 15 — Angel Round
 
-**Title:** 人民币 200 万元，换取三项商业可验证性  
-**Job:** 说明钱买到什么。  
-**Milestones:** 3 个付费 PoC、1 个公开参考客户、1 个年度授权客户。  
-**Validation metrics:** 真实客单价、销售周期、交付成本、续费理由。  
+**Title:** 人民币 200 万元，换取三项商业可验证性
+**Job:** 说明钱买到什么。
+**Milestones:** 3 个付费 PoC、1 个公开参考客户、1 个年度授权客户。
+**Validation metrics:** 真实客单价、销售周期、交付成本、续费理由。
 **Allocation:** 产品与协议研发 40%、企业试点与交付 30%、安全/法务/IP 15%、市场与社区 10%、储备 5%。
 
 ### Slide 16 — Vision and Ask
 
-**Title:** 让 Agent 从“能工作”走向“可以被企业正式雇用”  
-**Job:** 回答五年愿景并发出行动请求。  
-**Ask:** 首批 Agent 方案商、高责任企业试点、产业与生态合作伙伴。  
+**Title:** 让 Agent 从“能工作”走向“可以被企业正式雇用”
+**Job:** 回答五年愿景并发出行动请求。
+**Ask:** 首批 Agent 方案商、高责任企业试点、产业与生态合作伙伴。
 **Visual:** image-2 生成 Agent 节点通过可信证据桥接到企业系统的抽象结构；无人物、文字或 Logo。
 
 ## 5. Visual System — B2 Institutional Editorial
@@ -278,4 +278,3 @@ Only the final PPTX is delivered outside the build workspace. V2 and V3 must ret
 - No claim that Glama listing equals official MCP Registry adoption.
 - No claim that planned阿加犀实践 has already been completed.
 - No overwrite of V2 or V3.
-
