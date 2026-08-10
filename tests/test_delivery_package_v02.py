@@ -183,6 +183,7 @@ def delivery_case(
         "claim": signed_subject_claim,
         "profile": profile,
         "decision": decision,
+        "verifier_key": ephemeral_role_keys["Verifier"][0],
         "output": tmp_path / "delivery-package",
     }
 
@@ -729,6 +730,87 @@ def test_manifest_rewrite_cannot_change_media_type(delivery_case) -> None:
 
     _rewrite_manifest(delivery_case["output"], mutate)
     with pytest.raises(DeliveryPackageError, match="media type"):
+        verify_delivery_package(delivery_case["output"])
+
+
+def test_manifest_rebind_cannot_hide_public_key_tamper(delivery_case) -> None:
+    manifest = export_delivery_package(
+        delivery_case["ledger"], delivery_case["output"], privacy_view="public"
+    )
+    relative = next(
+        entry.path
+        for entry in manifest.entries
+        if entry.path.startswith("public-keys/")
+    )
+    _rewrite_bound_json(
+        delivery_case["output"],
+        relative,
+        lambda raw: raw.__setitem__("subject_id", "tampered-subject"),
+    )
+    with pytest.raises(DeliveryPackageError, match="public key set"):
+        verify_delivery_package(delivery_case["output"])
+
+
+def test_manifest_rebind_cannot_hide_receipt_parent_order_tamper(
+    delivery_case,
+) -> None:
+    export_delivery_package(
+        delivery_case["ledger"], delivery_case["output"], privacy_view="public"
+    )
+    relative = "execution-ledger/receipt-parents.json"
+
+    def reverse_parent_order(raw):
+        raw.extend(
+            (
+                {
+                    "child_receipt_id": "2" * 64,
+                    "parent_receipt_id": "4" * 64,
+                },
+                {
+                    "child_receipt_id": "2" * 64,
+                    "parent_receipt_id": "3" * 64,
+                },
+            )
+        )
+
+    _rewrite_bound_json(
+        delivery_case["output"], relative, reverse_parent_order
+    )
+    with pytest.raises(DeliveryPackageError, match="causal graph"):
+        verify_delivery_package(delivery_case["output"])
+
+
+def test_resigned_evidence_ref_tamper_still_fails_decision_binding(
+    delivery_case,
+) -> None:
+    manifest = export_delivery_package(
+        delivery_case["ledger"], delivery_case["output"], privacy_view="public"
+    )
+    relative = next(
+        entry.path
+        for entry in manifest.entries
+        if entry.path.startswith("evidence/positive/arm-results/")
+    )
+    path = delivery_case["output"] / relative
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    for field in ("digest", "signature", "signature_alg", "signer_key_id"):
+        raw.pop(field)
+    raw["evidence_refs"][0]["sha256"] = "0" * 64
+    resigned = sign_payload(
+        "verification-arm-result", raw, delivery_case["verifier_key"]
+    )
+    payload = _canonical(resigned)
+    path.write_bytes(payload)
+
+    def bind_resigned_result(manifest_raw):
+        entry = next(
+            item for item in manifest_raw["entries"] if item["path"] == relative
+        )
+        entry["sha256"] = hashlib.sha256(payload).hexdigest()
+        entry["size_bytes"] = len(payload)
+
+    _rewrite_manifest(delivery_case["output"], bind_resigned_result)
+    with pytest.raises(DeliveryPackageError, match="arm result binding"):
         verify_delivery_package(delivery_case["output"])
 
 

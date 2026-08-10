@@ -253,6 +253,60 @@ def test_profile_precommit_failure_has_zero_protocol_writes(
     assert _all_table_snapshot(v02_ledger) == before
 
 
+def test_profile_rejects_unknown_fault_before_start_with_zero_writes(
+    v02_ledger,
+    signed_subject_claim,
+    signed_verification_profile,
+) -> None:
+    before = _all_table_snapshot(v02_ledger)
+    with pytest.raises(VerificationTransactionError, match="unknown"):
+        commit_verification_profile(
+            v02_ledger,
+            signed_subject_claim,
+            signed_verification_profile,
+            fault="unsupported",  # type: ignore[arg-type]
+        )
+    assert _all_table_snapshot(v02_ledger) == before
+
+
+@pytest.mark.parametrize(
+    ("fault", "expected_error"),
+    (
+        ("commit_ack_loss", VerificationCommittedError),
+        ("readback_failure", VerificationCommitIndeterminateError),
+        ("cleanup_failure", VerificationCommittedError),
+    ),
+)
+def test_profile_commit_fault_matrix_preserves_exact_committed_row(
+    v02_ledger,
+    signed_subject_claim,
+    signed_verification_profile,
+    fault,
+    expected_error,
+) -> None:
+    with pytest.raises(expected_error) as raised:
+        commit_verification_profile(
+            v02_ledger,
+            signed_subject_claim,
+            signed_verification_profile,
+            fault=fault,
+        )
+    connection = sqlite3.connect(v02_ledger)
+    try:
+        stored = connection.execute(
+            "SELECT profile_json FROM verification_profiles_v02"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert stored == (
+        evidence._canonical_json(
+            signed_verification_profile.model_dump(mode="json")
+        ).encode("utf-8"),
+    )
+    if isinstance(raised.value, VerificationCommittedError):
+        assert raised.value.committed == signed_verification_profile
+
+
 def test_t1_t2_t3_commit_exact_canonical_rows(committed_v02_case) -> None:
     case = committed_v02_case
     decision = _signed_decision(case, _request())
@@ -313,6 +367,20 @@ def test_decision_commit_ack_loss_is_recoverable(committed_v02_case) -> None:
     assert raised.value.committed == decision
 
 
+def test_decision_precommit_failure_after_stage_has_zero_writes(
+    committed_v02_case,
+) -> None:
+    decision = _signed_decision(committed_v02_case, _request())
+    before = _all_table_snapshot(committed_v02_case["ledger"])
+    with pytest.raises(VerificationTransactionError, match="before commit"):
+        commit_verification_decision(
+            committed_v02_case["ledger"],
+            decision,
+            fault="before_commit",
+        )
+    assert _all_table_snapshot(committed_v02_case["ledger"]) == before
+
+
 def test_decision_failed_readback_is_indeterminate(committed_v02_case) -> None:
     decision = _signed_decision(committed_v02_case, _request())
     with pytest.raises(VerificationCommitIndeterminateError):
@@ -357,6 +425,49 @@ def test_arm_result_precommit_failure_is_zero_write_and_duplicate_is_recovered(
             case["ledger"], replacement, fault="before_commit"
         )
     assert _all_table_snapshot(case["ledger"]) == before
+
+
+@pytest.mark.parametrize(
+    ("fault", "expected_error"),
+    (
+        ("commit_ack_loss", VerificationCommittedError),
+        ("readback_failure", VerificationCommitIndeterminateError),
+        ("cleanup_failure", VerificationCommittedError),
+    ),
+)
+def test_arm_result_commit_fault_matrix_preserves_exact_committed_row(
+    committed_v02_case,
+    fault,
+    expected_error,
+) -> None:
+    case = committed_v02_case
+    replacement = _arm_result(
+        profile=case["profile"],
+        arm_kind="positive",
+        result_id="f" * 64,
+        receipt_id=case["results"][0].action_receipt_ids[0],
+        private_key=case["verifier_key"],
+    )
+    with pytest.raises(expected_error) as raised:
+        commit_verification_arm_result(
+            case["ledger"], replacement, fault=fault
+        )
+    connection = sqlite3.connect(case["ledger"])
+    try:
+        stored = connection.execute(
+            "SELECT arm_result_json FROM verification_arm_results "
+            "WHERE arm_result_id = ?",
+            (replacement.arm_result_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert stored == (
+        evidence._canonical_json(replacement.model_dump(mode="json")).encode(
+            "utf-8"
+        ),
+    )
+    if isinstance(raised.value, VerificationCommittedError):
+        assert raised.value.committed == replacement
 
 
 def test_concurrent_same_decision_has_one_commit_winner(committed_v02_case) -> None:
