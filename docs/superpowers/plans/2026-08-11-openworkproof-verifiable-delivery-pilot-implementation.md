@@ -384,9 +384,10 @@ Expected: only the new inventory and accurate status text are committed.
 - Modify: `src/openworkproof/models.py`
 - Modify: `src/openworkproof/signing.py`
 - Modify: `tests/conftest.py`
+- Modify: `tests/test_signing.py`
 - Create: `tests/test_verification_models_v02.py`
 
-- [ ] **Step 1: Write RED SubjectClaim tests**
+- [x] **Step 1: Write RED SubjectClaim tests**
 
 Add tests that construct a Manager-signed claim, require sorted unique
 acceptance conditions and required artifacts, bind the WorkOrder and customer
@@ -411,7 +412,7 @@ Run:
 
 Expected: collection fails because `SubjectClaim` does not exist.
 
-- [ ] **Step 2: Add the strict SubjectClaim model**
+- [x] **Step 2: Add the strict SubjectClaim model**
 
 In `models.py`, reuse `SignedProtocolModel`, `Digest64`, `Identifier`,
 `CanonicalUTCTime`, `KeyId`, and existing bounded-string helpers:
@@ -443,7 +444,10 @@ class SubjectClaim(SignedProtocolModel):
         return self
 ```
 
-Add `subject-claim` to both canonical and signed domain sets in `signing.py`.
+Add `subject-claim` and `verification-profile` to both canonical and signed
+domain sets in `signing.py`. New signed models opt in to canonical digest
+validation so stale signed bytes fail at model validation; existing v0.1
+signed models retain their current behavior.
 
 Add strict external-reference models in the same task:
 
@@ -473,7 +477,7 @@ Test that Level 2/3 fixtures require a `CommitmentAnchor` from the
 customer-controlled reference selected by the operator. These objects bind
 external state; they do not make OWP the Policy Registry or timestamp authority.
 
-- [ ] **Step 3: Write RED VerificationProfileV02 tests**
+- [x] **Step 3: Write RED VerificationProfileV02 tests**
 
 Cover: exactly one positive arm, at least one negative arm, negative arm differs
 by pinned mutant, profile binds SubjectClaim/WorkOrder, standard has one
@@ -488,7 +492,7 @@ Run:
 
 Expected: FAIL because profile and arm models do not exist.
 
-- [ ] **Step 4: Add closed arm and profile models**
+- [x] **Step 4: Add closed arm and profile models**
 
 Implement these exact public names in `models.py`:
 
@@ -544,7 +548,7 @@ anchor must reverse-bind the exact WorkOrder and SubjectClaim at T1 and must
 never be treated as payment evidence. Reuse existing WorkOrder key-binding
 parsing; do not add a seventh role.
 
-- [ ] **Step 5: Run model GREEN and commit**
+- [x] **Step 5: Run model GREEN and commit**
 
 Run:
 
@@ -552,7 +556,7 @@ Run:
 ./.venv/bin/python -m pytest tests/test_verification_models_v02.py -q
 ./.venv/bin/python -m pytest tests/test_contract.py tests/test_signing.py -q
 git add src/openworkproof/models.py src/openworkproof/signing.py \
-  tests/conftest.py tests/test_verification_models_v02.py
+  tests/conftest.py tests/test_signing.py tests/test_verification_models_v02.py
 git diff --cached --check
 git commit -m 'feat: freeze verifiable delivery claims and profiles'
 ```
