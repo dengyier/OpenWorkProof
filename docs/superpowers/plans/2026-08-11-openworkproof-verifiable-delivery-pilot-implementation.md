@@ -1337,7 +1337,7 @@ Expected: all mapping, authority, transition, replay, and regression tests pass.
 - Create: `tests/test_delivery_package_v02.py`
 - Modify: `pyproject.toml`
 
-- [ ] **Step 1: Write RED closed-manifest tests**
+- [x] **Step 1: Write RED closed-manifest tests**
 
 Test exact required paths, including PolicyAnchor and CommitmentAnchor when
 referenced; sorted entries, SHA-256, byte size, media type, privacy class, path
@@ -1376,7 +1376,7 @@ supersession objects exactly when the derived state references them. Require
 the signed Profile references their digests. `summary.pdf` is optional and is
 never replay authority.
 
-- [ ] **Step 2: Implement manifest models and privacy policy**
+- [x] **Step 2: Implement manifest models and privacy policy**
 
 Add a closed `DeliveryManifest` and `DeliveryManifestEntry` in
 `delivery_package.py`. Bind `anchors/policy-anchor.json` and
@@ -1411,7 +1411,7 @@ class DeliveryVerificationResult(ProtocolModel):
     manifest_digest: Digest64
 ```
 
-- [ ] **Step 3: Implement offline package replay**
+- [x] **Step 3: Implement offline package replay**
 
 Implement:
 
@@ -1470,21 +1470,21 @@ model style.
 The verifier must not read a live ledger, network, wall-clock policy, or report
 HTML.
 
-- [ ] **Step 4: Implement atomic export**
+- [x] **Step 4: Implement atomic export**
 
 Write into a same-parent dot-prefixed temporary directory, generate JSON truth
 and HTML from the same read model, verify the completed temporary package, then
 use `os.rename` for atomic publication. On any failure, remove only the exact
 temporary directory and leave the final path and ledger untouched.
 
-- [ ] **Step 5: Add tamper and failed-export tests**
+- [x] **Step 5: Add tamper and failed-export tests**
 
 Mutate every required file, manifest entry, public key, arm result, decision,
 acceptance, CSS-independent HTML label, and readiness file. Test pre-write,
 mid-write, verify, rename, and cleanup failures. Expected: replay fails closed;
 ledger snapshot and prior final directory remain byte-identical.
 
-- [ ] **Step 6: Run GREEN and commit**
+- [x] **Step 6: Run GREEN and commit**
 
 Run:
 
