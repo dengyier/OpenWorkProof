@@ -1684,34 +1684,34 @@ Expected: all static report, escaping, boundary, and parity tests pass.
 - Modify: `tests/test_delivery_package_v02.py`
 - Create: `docs/pilot/registered-adversarial-study.json`
 
-- [ ] **Step 1: Register the study before adding holdout results**
+- [x] **Step 1: Register the study before adding holdout results**
 
 Create a canonical JSON registration with exact source revision, protocol
 schemas, named cases, mutation classes, expected results, verifier bindings,
 exclusions, holdout case IDs, and analysis method. Do not record observed
 results in the registration object.
 
-- [ ] **Step 2: Add the semantic mutation matrix**
+- [x] **Step 2: Add the semantic mutation matrix**
 
 Cover correct fix/caught mutant, incorrect fix, survived mutant, not-applied
 mutant, verifier timeout, verifier crash, evidence missing, reused Verifier key,
 controller overlap, execution-context overlap, stale supersession, and
 withdrawn acceptance.
 
-- [ ] **Step 3: Add object and causal tamper tests**
+- [x] **Step 3: Add object and causal tamper tests**
 
 Rebuild through `model_dump -> mutate -> model_validate`, re-sign where the
 test targets semantic validation, and separately tamper WorkOrder, claim,
 profile, arm result, decision, receipt, parent order, EvidenceRef, public key,
 and package manifest. Each must fail at the intended layer.
 
-- [ ] **Step 4: Add all transaction injection points**
+- [x] **Step 4: Add all transaction injection points**
 
 For T1–T5 cover before start, after stage, before commit, commit-ACK loss,
 readback unavailable, cleanup failure, retry, and concurrency. Assert exact
 table snapshots and committed truth.
 
-- [ ] **Step 5: Run adversarial GREEN and commit**
+- [x] **Step 5: Run adversarial GREEN and commit**
 
 Run:
 
