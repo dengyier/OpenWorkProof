@@ -625,7 +625,12 @@ def load_signed_history(
     if _load_canonical_json(root, manifest, "settlement-readiness.json") != expected_readiness:
         raise DeliveryPackageError("settlement readiness is not derived truth")
     if _read_bound(root, manifest, "summary.html") != _summary_html(
-        claim=claim, decision=decision, effective=effective, readiness=readiness
+        work_order=work_order,
+        claim=claim,
+        decision=decision,
+        effective=effective,
+        readiness=readiness,
+        rejected=history.rejection is not None,
     ):
         raise DeliveryPackageError("delivery summary is not derived truth")
     if _read_bound(root, manifest, "verify.sh") != _VERIFY_SCRIPT:
@@ -720,30 +725,162 @@ python -c 'from pathlib import Path; from openworkproof.delivery_package import 
 """
 
 
+_DELIVERY_ROOM_CSS = """
+:root {
+  color-scheme: light;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #17202a;
+  background: #f5f7f8;
+}
+* { box-sizing: border-box; }
+body { max-width: 920px; margin: 0 auto; padding: 48px 24px 72px; }
+header { margin-bottom: 28px; }
+h1 { margin: 0 0 8px; font-size: clamp(30px, 5vw, 48px); }
+.lede { margin: 0; color: #52606d; font-size: 18px; }
+.state-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px;
+  margin: 28px 0; overflow: hidden; border: 1px solid #d8dee4; border-radius: 12px;
+  background: #d8dee4; }
+.state-strip div { padding: 14px 16px; background: #fff; }
+.state-strip span { display: block; color: #687785; font-size: 13px; }
+.state-strip strong { display: block; margin-top: 4px; overflow-wrap: anywhere; }
+.customer-question { margin: 0 0 14px; padding: 22px 24px; border: 1px solid #d8dee4;
+  border-radius: 12px; background: #fff; }
+.customer-question h2 { margin: 0 0 8px; font-size: 20px; }
+.customer-question p { margin: 5px 0; line-height: 1.65; }
+.next-action { margin-top: 24px; padding: 18px 22px; border-left: 5px solid #16835d;
+  background: #eaf7f1; font-weight: 700; }
+.boundary { margin-top: 18px; color: #52606d; font-size: 14px; }
+code { overflow-wrap: anywhere; }
+@media (max-width: 680px) { .state-strip { grid-template-columns: 1fr; } }
+""".strip()
+
+
+def _decision_answer(decision: VerificationDecision) -> str:
+    if decision.decision == "VERIFIED":
+        return "已验证：正向执行与反证控制满足约定。"
+    if decision.decision == "REFUTED":
+        return "已否证：存在可复现反证，当前交付不能通过。"
+    return (
+        "尚无确定结论：证据缺失、基础设施故障或独立性不足，"
+        "不能视为通过或失败。"
+    )
+
+
+def _falsification_answer(decision: VerificationDecision) -> str:
+    if decision.decision == "VERIFIED":
+        return "通过：负向或变异检查被正确识别，反证控制有效。"
+    if decision.decision == "REFUTED":
+        return "未通过：反证显示交付与约定不一致。"
+    return "未得出结论：反证证据不完整或不可独立复核。"
+
+
+def _readiness_answer(
+    readiness: SettlementReadiness,
+    *,
+    rejected: bool,
+) -> str:
+    if rejected:
+        return "客户已拒绝当前交付；当前不可进入验收或结算准备。"
+    return {
+        SettlementReadiness.NOT_READY: "当前不可进入验收或结算准备。",
+        SettlementReadiness.READY_FOR_ACCEPTANCE: "验证已完成，可提交客户验收。",
+        SettlementReadiness.ACCEPTED_FOR_SETTLEMENT: (
+            "客户验收证据已生效，具备进入外部结算流程的证据条件。"
+        ),
+        SettlementReadiness.SUSPENDED: "验收已暂停，暂停原因解除前不可继续。",
+        SettlementReadiness.WITHDRAWN: "验收已撤回，需要新的验收事实。",
+        SettlementReadiness.SUPERSEDED: "原验收已被替代，应使用最新验收记录。",
+    }[readiness]
+
+
+def _next_action(
+    decision: VerificationDecision,
+    readiness: SettlementReadiness,
+    *,
+    rejected: bool,
+) -> str:
+    if rejected:
+        return "下一步：处理拒绝原因，形成新版本后重新验证并提交验收。"
+    if decision.decision == "REFUTED":
+        return "下一步：修复被反证的问题，生成新版本并重新执行双臂验证。"
+    if decision.decision == "UNKNOWN":
+        return "下一步：补齐缺失证据或恢复独立执行环境后重新验证。"
+    return {
+        SettlementReadiness.NOT_READY: "下一步：补齐验收前置条件后重新计算状态。",
+        SettlementReadiness.READY_FOR_ACCEPTANCE: (
+            "下一步：由独立 Acceptor 审阅并签署验收结果。"
+        ),
+        SettlementReadiness.ACCEPTED_FOR_SETTLEMENT: (
+            "下一步：按外部合同与支付系统执行结算；本协议不执行付款。"
+        ),
+        SettlementReadiness.SUSPENDED: (
+            "下一步：解决暂停原因，由 Acceptor 签署新的状态转换。"
+        ),
+        SettlementReadiness.WITHDRAWN: "下一步：重新提交版本并启动新的验收。",
+        SettlementReadiness.SUPERSEDED: (
+            "下一步：切换到替代验收记录对应的最新交付包。"
+        ),
+    }[readiness]
+
+
 def _summary_html(
     *,
+    work_order: WorkOrder,
     claim: SubjectClaim,
     decision: VerificationDecision,
     effective: EffectiveAcceptance,
     readiness: SettlementReadiness,
+    rejected: bool,
 ) -> bytes:
-    values = {
-        "claim": claim.claim_statement,
-        "target": claim.delivery_target,
-        "decision": decision.decision,
-        "acceptance": effective.value,
-        "readiness": readiness.value,
-    }
-    body = "".join(
-        f"<dt>{html.escape(label)}</dt><dd>{html.escape(value)}</dd>"
-        for label, value in values.items()
+    def escape(value: object) -> str:
+        return html.escape(str(value), quote=True)
+
+    authority = (
+        f"签发主体：{escape(work_order.issuer_id)}；已签名工作单："
+        f"<code>{escape(work_order.digest)}</code>。"
+    )
+    target = (
+        f"交付目标：{escape(claim.delivery_target)}；源码版本："
+        f"<code>{escape(claim.source_revision)}</code>。"
+    )
+    agreed = (
+        f"<strong>{escape(decision.decision)}</strong> — "
+        f"{escape(_decision_answer(decision))}<br>约定声明："
+        f"{escape(claim.claim_statement)}"
+    )
+    falsification = escape(_falsification_answer(decision))
+    readiness_answer = escape(_readiness_answer(readiness, rejected=rejected))
+    next_action = escape(_next_action(decision, readiness, rejected=rejected))
+    sections = (
+        ("谁授权了这项工作？", authority),
+        ("验收的是哪个交付目标和版本？", target),
+        ("约定结果是否达成？", agreed),
+        ("反证检查是否通过？", falsification),
+        ("当前能否进入验收或结算准备？", readiness_answer),
+    )
+    questions = "".join(
+        '<section class="customer-question">'
+        f"<h2>{escape(question)}</h2><p>{answer}</p></section>"
+        for question, answer in sections
     )
     return (
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>OpenWorkProof Delivery</title>"
-        "<style>body{font:16px system-ui;max-width:760px;margin:48px auto;color:#17202a}"
-        "dt{font-weight:700;margin-top:18px}dd{margin:4px 0 0}</style></head>"
-        f"<body><h1>Verifiable delivery summary</h1><dl>{body}</dl>"
-        "<p>This page reports protocol-derived readiness; it does not prove payment or settlement.</p>"
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>OpenWorkProof 客户交付室</title>"
+        f"<style>{_DELIVERY_ROOM_CSS}</style></head>"
+        f'<body data-decision="{escape(decision.decision)}" '
+        f'data-acceptance="{escape(effective.value)}" '
+        f'data-readiness="{escape(readiness.value)}">'
+        "<header><h1>客户交付室</h1>"
+        "<p class=\"lede\">以下结论由交付包中的签名事实与离线回放结果生成。</p>"
+        "</header><div class=\"state-strip\">"
+        f"<div><span>验证结论</span><strong>{escape(decision.decision)}</strong></div>"
+        f"<div><span>有效验收</span><strong>{escape(effective.value)}</strong></div>"
+        f"<div><span>结算准备</span><strong>{escape(readiness.value)}</strong></div>"
+        f"</div><main>{questions}</main>"
+        f'<p class="next-action">{next_action}</p>'
+        "<p class=\"boundary\">本页面不作为付款、资金托管或实际结算事实的证明；"
+        "它只呈现可离线复核的授权、执行、验证与验收状态。</p>"
         "</body></html>"
     ).encode("utf-8")
 
@@ -1044,10 +1181,12 @@ def export_delivery_package(
         )
         files["summary.html"] = (
             _summary_html(
+                work_order=work_order,
                 claim=claim,
                 decision=decision,
                 effective=effective,
                 readiness=readiness,
+                rejected=history.rejection is not None,
             ),
             "public",
         )

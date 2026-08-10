@@ -179,10 +179,128 @@ def delivery_case(
     )
     return {
         "ledger": ledger,
+        "work_order": signed_work_order,
+        "claim": signed_subject_claim,
         "profile": profile,
         "decision": decision,
         "output": tmp_path / "delivery-package",
     }
+
+
+_CUSTOMER_QUESTIONS = (
+    "谁授权了这项工作？",
+    "验收的是哪个交付目标和版本？",
+    "约定结果是否达成？",
+    "反证检查是否通过？",
+    "当前能否进入验收或结算准备？",
+)
+
+
+def _render_room(
+    delivery_case,
+    *,
+    decision: str = "VERIFIED",
+    acceptance: str = "NONE",
+    readiness: str = "READY_FOR_ACCEPTANCE",
+    rejected: bool = False,
+) -> str:
+    return delivery_package._summary_html(
+        work_order=delivery_case["work_order"],
+        claim=delivery_case["claim"],
+        decision=delivery_case["decision"].model_copy(
+            update={"decision": decision}
+        ),
+        effective=delivery_package.EffectiveAcceptance(acceptance),
+        readiness=delivery_package.SettlementReadiness(readiness),
+        rejected=rejected,
+    ).decode("utf-8")
+
+
+def test_delivery_room_answers_exactly_five_customer_questions(
+    delivery_case,
+) -> None:
+    rendered = _render_room(delivery_case)
+    assert rendered.count('class="customer-question"') == 5
+    assert all(rendered.count(question) == 1 for question in _CUSTOMER_QUESTIONS)
+    assert "下一步：由独立 Acceptor 审阅并签署验收结果。" in rendered
+    assert "本页面不作为付款、资金托管或实际结算事实的证明" in rendered
+
+
+@pytest.mark.parametrize(
+    ("decision", "acceptance", "readiness", "rejected"),
+    (
+        ("VERIFIED", "NONE", "READY_FOR_ACCEPTANCE", False),
+        ("REFUTED", "NONE", "NOT_READY", False),
+        ("UNKNOWN", "NONE", "NOT_READY", False),
+        ("VERIFIED", "ACTIVE", "ACCEPTED_FOR_SETTLEMENT", False),
+        ("VERIFIED", "SUSPENDED", "SUSPENDED", False),
+        ("VERIFIED", "WITHDRAWN", "WITHDRAWN", False),
+        ("VERIFIED", "SUPERSEDED", "SUPERSEDED", False),
+        ("VERIFIED", "NONE", "NOT_READY", True),
+    ),
+)
+def test_delivery_room_labels_equal_recomputed_json_states(
+    delivery_case, decision, acceptance, readiness, rejected
+) -> None:
+    rendered = _render_room(
+        delivery_case,
+        decision=decision,
+        acceptance=acceptance,
+        readiness=readiness,
+        rejected=rejected,
+    )
+    assert f'data-decision="{decision}"' in rendered
+    assert f'data-acceptance="{acceptance}"' in rendered
+    assert f'data-readiness="{readiness}"' in rendered
+    assert f'<strong>{decision}</strong>' in rendered
+    assert f'<strong>{acceptance}</strong>' in rendered
+    assert f'<strong>{readiness}</strong>' in rendered
+
+
+def test_delivery_room_unknown_is_explained_with_next_action(delivery_case) -> None:
+    rendered = _render_room(
+        delivery_case,
+        decision="UNKNOWN",
+        readiness="NOT_READY",
+    )
+    assert "证据缺失、基础设施故障或独立性不足" in rendered
+    assert "不能视为通过或失败" in rendered
+    assert "下一步：补齐缺失证据或恢复独立执行环境后重新验证。" in rendered
+
+
+def test_delivery_room_rejected_is_not_presented_as_ready(delivery_case) -> None:
+    rendered = _render_room(
+        delivery_case,
+        readiness="NOT_READY",
+        rejected=True,
+    )
+    assert "客户已拒绝当前交付" in rendered
+    assert "下一步：处理拒绝原因，形成新版本后重新验证并提交验收。" in rendered
+    for forbidden_claim in ("已付款", "资金已托管", "结算已完成", "客户已采用"):
+        assert forbidden_claim not in rendered
+
+
+def test_delivery_room_escapes_verified_values(delivery_case) -> None:
+    claim = delivery_case["claim"].model_copy(
+        update={"claim_statement": '<script>alert("x")</script>'}
+    )
+    rendered = delivery_package._summary_html(
+        work_order=delivery_case["work_order"],
+        claim=claim,
+        decision=delivery_case["decision"],
+        effective=delivery_package.EffectiveAcceptance.NONE,
+        readiness=delivery_package.SettlementReadiness.READY_FOR_ACCEPTANCE,
+        rejected=False,
+    ).decode("utf-8")
+    assert "<script>" not in rendered
+    assert "&lt;script&gt;" in rendered
+
+
+def test_delivery_room_css_reference_matches_embedded_template() -> None:
+    reference = (
+        Path(__file__).parents[1] / "docs/pilot/delivery-room.css"
+    ).read_text(encoding="utf-8").strip()
+    assert reference == delivery_package._DELIVERY_ROOM_CSS
 
 
 def test_manifest_is_closed_sorted_and_digested() -> None:
@@ -239,6 +357,11 @@ def test_export_and_offline_verify_level_two_package(delivery_case) -> None:
     assert "evidence/positive/results/positive.json" in paths
     assert "evidence/negative/results/negative.json" in paths
     assert all(entry.privacy_class == "public" for entry in manifest.entries)
+    rendered = (delivery_case["output"] / "summary.html").read_text(
+        encoding="utf-8"
+    )
+    assert rendered.count('class="customer-question"') == 5
+    assert "<script" not in rendered.lower()
     result = verify_delivery_package(delivery_case["output"])
     assert result.current_decision == "VERIFIED"
     assert result.effective_acceptance == "NONE"
