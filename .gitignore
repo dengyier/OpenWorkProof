@@ -1,5 +1,6 @@
 .demo-state/
 .gate-evidence/
+.worktrees/
 .pytest_cache/
 .venv/
 __pycache__/
