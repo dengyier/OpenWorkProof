@@ -302,6 +302,10 @@ manager_signature:
 沿用已批准规格，包含：
 
 - profile、WorkOrder 和 SubjectClaim digest；
+- `delivery_trust_level = 1 | 2 | 3`；
+- 可选 `policy_anchor_digest`；
+- `commitment_anchor_digest`：Level 2/3 必填；对应 anchor 必须反向绑定
+  同一个 WorkOrder 和 SubjectClaim digest；
 - `subject_kind = tests_passed`；
 - assurance level；
 - verifier bindings；
@@ -762,13 +766,12 @@ Bundle。
 
 ### Level 2：客户验收
 
-独立 Verifier、Customer Acceptor、AcceptanceReceipt、SettlementReadiness 和
-Delivery Package。
+独立 Verifier、客户权威域 CommitmentAnchor、Customer Acceptor、
+AcceptanceReceipt、SettlementReadiness 和 Delivery Package。
 
 ### Level 3：高风险交付
 
-两个独立 Verifier、外部 CommitmentAnchor、更严格资源和证据保留规则、
-支持撤回与重新验证。
+两个独立 Verifier、更严格资源和证据保留规则、支持撤回与重新验证。
 
 ## 16. 产品接口
 
