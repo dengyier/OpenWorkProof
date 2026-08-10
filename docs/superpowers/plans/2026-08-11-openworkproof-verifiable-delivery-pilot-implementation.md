@@ -148,7 +148,7 @@
 
 **Files:** none
 
-- [ ] **Step 1: Confirm the approved source commit**
+- [x] **Step 1: Confirm the approved source commit**
 
 Run from `/Users/molin/Project/openWorkProof`:
 
@@ -167,7 +167,7 @@ the approved design clarification, it descends from `69a3a62`, both documents
 exist in that commit, and the status output exposes—but does not modify—the
 user-owned dirty files in the original worktree.
 
-- [ ] **Step 2: Create the isolated branch and worktree**
+- [x] **Step 2: Create the isolated branch and worktree**
 
 Run:
 
@@ -182,7 +182,7 @@ Expected: a new clean worktree on `codex/verifiable-delivery-pilot`. If either
 the branch or directory already exists, stop and inspect it; do not delete or
 reuse it blindly.
 
-- [ ] **Step 3: Create a clean development environment**
+- [x] **Step 3: Create a clean development environment**
 
 Run in the new worktree:
 
@@ -195,7 +195,7 @@ python3.12 -m venv .venv
 
 Expected: installation succeeds and pip reports no broken requirements.
 
-- [ ] **Step 4: Record the fresh baseline without changing tests**
+- [x] **Step 4: Record the fresh baseline without changing tests**
 
 Run:
 
@@ -220,7 +220,7 @@ bindings.
 - Test: `tests/test_candidate_supplychain_integration.py`
 - Test: `tests/test_image_supply_chain.py`
 
-- [ ] **Step 1: Prove package metadata uses the clean worktree**
+- [x] **Step 1: Prove package metadata uses the clean worktree**
 
 Run:
 
@@ -240,20 +240,20 @@ Expected: the imported path is this worktree and the package test passes. If
 it fails while both source version literals are already `1.1.1`, repair the
 environment instead of changing product version numbers.
 
-- [ ] **Step 2: Reproduce the two candidate selector failures**
+- [x] **Step 2: Reproduce the two candidate selector failures**
 
 Run:
 
 ```bash
 ./.venv/bin/python -m pytest \
-  tests/test_candidate_supplychain_integration.py::test_current_execution_definition_selects_exactly_one_inventory \
-  tests/test_candidate_supplychain_integration.py::test_current_trusted_helper_definition_selects_exactly_one_inventory \
+  tests/test_candidate_supplychain_integration.py::test_current_candidate_inventory_binds_execution_runner \
+  tests/test_candidate_supplychain_integration.py::test_current_candidate_inventory_binds_fixed_test_source \
   -q
 ```
 
 Expected: FAIL with `matched 0` before the new immutable inventory exists.
 
-- [ ] **Step 3: Assemble revision-specific build contexts**
+- [x] **Step 3: Assemble revision-specific build contexts**
 
 Run:
 
@@ -263,7 +263,7 @@ ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-delivery
 ./.venv/bin/python supply-chain/images/prepare_context.py \
   --repo /Users/molin/Project/openWorkProof-verifiable-delivery \
   --source-revision "$REV" \
-  --wheelhouse "$ARTIFACT_ROOT/wheelhouse" \
+  --wheelhouse "$ARTIFACT_ROOT/wheelhouse/linux-arm64-cp312-full" \
   --deb-closure "$ARTIFACT_ROOT/debs/linux-arm64-trixie-git" \
   --output-root "$ARTIFACT_ROOT/build-contexts/$REV"
 ```
@@ -271,7 +271,7 @@ ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-delivery
 Expected: exact `execution/` and `trusted-helper/` contexts with verified
 `SHA256SUMS`; no historical context changes.
 
-- [ ] **Step 4: Build two OCI archives and two Docker archives**
+- [x] **Step 4: Build two OCI archives and two Docker archives**
 
 Run:
 
@@ -280,18 +280,30 @@ REV=$(git rev-parse HEAD)
 ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-delivery
 CONTEXT_ROOT="$ARTIFACT_ROOT/build-contexts/$REV"
 ARCHIVE_ROOT="$ARTIFACT_ROOT/oci/$REV"
+SOURCE_EPOCH="$(git show -s --format=%ct "$REV")"
+OCI_CREATED="$(./.venv/bin/python -c \
+  'from datetime import datetime, timezone; import sys; print(datetime.fromtimestamp(int(sys.argv[1]), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))' \
+  "$SOURCE_EPOCH")"
 mkdir -p "$ARCHIVE_ROOT"
 
-docker buildx build --platform linux/arm64 --provenance=false --sbom=false \
+docker buildx build --platform linux/arm64 --network none --pull=false \
+  --provenance=false --sbom=false --build-arg "OWP_SOURCE_REVISION=$REV" \
+  --annotation "manifest-descriptor:org.opencontainers.image.created=$OCI_CREATED" \
   --output "type=oci,dest=$ARCHIVE_ROOT/openworkproof-execution-test-candidate.oci-archive.tar" \
   "$CONTEXT_ROOT/execution"
-docker buildx build --platform linux/arm64 --provenance=false --sbom=false \
+docker buildx build --platform linux/arm64 --network none --pull=false \
+  --provenance=false --sbom=false --build-arg "OWP_SOURCE_REVISION=$REV" \
+  --annotation "manifest-descriptor:org.opencontainers.image.created=$OCI_CREATED" \
   --output "type=oci,dest=$ARCHIVE_ROOT/openworkproof-trusted-helper-candidate.oci-archive.tar" \
   "$CONTEXT_ROOT/trusted-helper"
-docker buildx build --platform linux/arm64 --provenance=false --sbom=false \
+docker buildx build --platform linux/arm64 --network none --pull=false \
+  --provenance=false --sbom=false --build-arg "OWP_SOURCE_REVISION=$REV" \
+  --tag "openworkproof/execution-test:$REV" \
   --output "type=docker,dest=$ARCHIVE_ROOT/openworkproof-execution-test-candidate.docker-archive.tar" \
   "$CONTEXT_ROOT/execution"
-docker buildx build --platform linux/arm64 --provenance=false --sbom=false \
+docker buildx build --platform linux/arm64 --network none --pull=false \
+  --provenance=false --sbom=false --build-arg "OWP_SOURCE_REVISION=$REV" \
+  --tag "openworkproof/trusted-helper-candidate:$REV" \
   --output "type=docker,dest=$ARCHIVE_ROOT/openworkproof-trusted-helper-candidate.docker-archive.tar" \
   "$CONTEXT_ROOT/trusted-helper"
 ```
@@ -301,7 +313,7 @@ media types or fail identity-chain checks, stop; do not hand-edit tar members.
 Use the repository's previously reviewed OCI-to-Docker conversion path and
 rerun the integration tests before continuing.
 
-- [ ] **Step 5: Create the immutable inventory and archive sums**
+- [x] **Step 5: Create the immutable inventory and archive sums**
 
 Copy the structure of the newest valid v0.2 inventory, then replace every
 revision, input digest, archive digest, manifest digest, RepoDigest, label,
@@ -331,7 +343,7 @@ ARCHIVE_ROOT=/Users/molin/Project/openWorkProof-delivery/oci/$REV
 Expected: the inventory loader and archive checks accept measured values. Never
 copy digests from an older revision.
 
-- [ ] **Step 6: Run the M0 gates**
+- [x] **Step 6: Run the M0 gates**
 
 Run:
 
@@ -339,6 +351,11 @@ Run:
 REV=$(git rev-parse HEAD)
 export OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-delivery
 export OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1
+export OPENWORKPROOF_DOCKER_TEST_IMAGE="docker.io/openworkproof/execution-test@$(
+  jq -r '.images.execution.local_image_id' \
+    "supply-chain/images/candidates/$REV.json"
+)"
+docker image inspect "$OPENWORKPROOF_DOCKER_TEST_IMAGE" >/dev/null
 ./.venv/bin/python -m pytest tests/test_image_supply_chain.py -q
 ./.venv/bin/python -m pytest -m supplychain tests/test_candidate_supplychain_integration.py -q
 ./.venv/bin/python -m pytest -q
@@ -347,7 +364,7 @@ export OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1
 Expected: all three commands exit 0 with zero failures. Record exact pass/skip
 counts and elapsed times in `docs/status.md`.
 
-- [ ] **Step 7: Commit the release-truth repair**
+- [x] **Step 7: Commit the release-truth repair**
 
 Run:
 
