@@ -1152,13 +1152,13 @@ Expected: all focused ledger and replay tests pass.
 - Modify: `tests/test_acceptance.py`
 - Modify: `tests/test_acceptor_rejection.py`
 
-- [ ] **Step 1: Write RED deterministic mapping tests**
+- [x] **Step 1: Write RED deterministic mapping tests**
 
 Encode the approved priority table for WITHDRAWN, SUPERSEDED, SUSPENDED,
 ACCEPTED_FOR_SETTLEMENT, READY_FOR_ACCEPTANCE, rejection, and fallback
 NOT_READY. Run and expect missing model/service failures.
 
-- [ ] **Step 2: Add the transition model**
+- [x] **Step 2: Add the transition model**
 
 Implement:
 
@@ -1187,14 +1187,14 @@ class AcceptanceTransitionReceipt(SignedProtocolModel):
 Only the WorkOrder-bound Acceptor may sign. Withdrawal forbids replacement;
 supersession requires a different replacement acceptance.
 
-- [ ] **Step 3: Add T5 storage and commit**
+- [x] **Step 3: Add T5 storage and commit**
 
 Create `acceptance_transitions` and `acceptance_transition_parents` tables.
 Implement `commit_acceptance_transition` with exact current predecessor,
 Acceptor signature, COMMIT-ACK readback, zero-write failure, and one-winner
 concurrency.
 
-- [ ] **Step 4: Implement pure read models**
+- [x] **Step 4: Implement pure read models**
 
 In `settlement.py`, add:
 
@@ -1221,7 +1221,7 @@ class AcceptanceHistory(ProtocolModel):
     supersession: AcceptanceTransitionReceipt | None
     current_decision: VerificationDecision | None
 
-class SettlementSnapshot(ProtocolModel):
+class SettlementSnapshot(BaseModel):
     current_decision_id: Digest64 | None
     effective_acceptance: EffectiveAcceptance
     settlement_readiness: SettlementReadiness
@@ -1258,18 +1258,21 @@ def settlement_readiness(
     return SettlementReadiness.NOT_READY
 ```
 
+`SettlementSnapshot` is a frozen, extra-forbid read model rather than a signed
+`ProtocolModel`; its enum values must support normal JSON round trips.
+
 No database access inside either function. CLI, MCP, package replay, and
 Delivery Room must call these same functions. Add a bounded
 `read_settlement_snapshot(ledger: Path) -> SettlementSnapshot` loader that
 validates canonical rows, then calls only these pure functions.
 
-- [ ] **Step 5: Bind acceptance to current VERIFIED**
+- [x] **Step 5: Bind acceptance to current VERIFIED**
 
 Update acceptance request and commit validation so the exact current decision
 must be VERIFIED. A later REFUTED or UNKNOWN decision preserves historical
 AcceptanceReceipt but derives SUSPENDED.
 
-- [ ] **Step 6: Generate and freeze the complete v0.2 schema set**
+- [x] **Step 6: Generate and freeze the complete v0.2 schema set**
 
 Now that all v0.2 protocol models exist, register exactly SubjectClaim,
 PolicyAnchor, CommitmentAnchor, VerificationProfileV02,
@@ -1303,7 +1306,7 @@ PY
 Expected: mirrors are byte-identical, v0.1 is unchanged, and the wheel contains
 both schema versions.
 
-- [ ] **Step 7: Run lifecycle GREEN and commit**
+- [x] **Step 7: Run lifecycle GREEN and commit**
 
 Run:
 

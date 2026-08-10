@@ -403,6 +403,8 @@ SUPERSEDED
 ```
 
 这两个对象都是从 append-only 账本确定性计算的 read model，不是新的签名事实。
+承载最终派生值的 `SettlementSnapshot` 必须封闭、不可变并支持正常 JSON 往返，
+但不得伪装成签名 `ProtocolModel`。
 
 ## 9. 验证决策规则
 
