@@ -569,9 +569,10 @@ Expected: both suites pass and the commit contains only model/signing fixtures.
 
 - Modify: `src/openworkproof/models.py`
 - Modify: `src/openworkproof/signing.py`
+- Modify: `tests/test_signing.py`
 - Modify: `tests/test_verification_models_v02.py`
 
-- [ ] **Step 1: Write the RED three-axis result matrix**
+- [x] **Step 1: Write the RED three-axis result matrix**
 
 Add parameterized tests for positive success, caught mutant, survived mutant,
 not-applied mutant, timeout, crash, resource exhaustion, missing evidence, and
@@ -598,7 +599,7 @@ def test_negative_arm_result_axes_are_orthogonal(
 
 Run and expect import/validation failure before implementation.
 
-- [ ] **Step 2: Implement the result model and registry**
+- [x] **Step 2: Implement the result model and registry**
 
 Add this exact closed `VerificationReasonCode` literal registry; do not accept
 free-form status codes:
@@ -680,13 +681,16 @@ Enforce: positive uses `not_applicable`; negative uses applied/not-applied;
 not-applied and any non-completed execution require `indeterminate`; satisfied
 requires all required EvidenceRefs.
 
-- [ ] **Step 3: Add invalid-input tests**
+Register `verification-arm-result` as a canonical and signed domain, and keep
+the exact-domain regression in `tests/test_signing.py` synchronized.
+
+- [x] **Step 3: Add invalid-input tests**
 
 Prove bool-as-int, duplicate reason codes, unsorted receipt IDs, missing
 evidence, positive-with-mutant, and crash-with-satisfied fail at model
 validation rather than becoming UNKNOWN.
 
-- [ ] **Step 4: Run GREEN and commit**
+- [x] **Step 4: Run GREEN and commit**
 
 Run:
 
