@@ -38,6 +38,7 @@ ALLOWED_CANONICAL_DOMAINS = frozenset(
         "manifest",
         "subject-claim",
         "verification-profile",
+        "verification-arm-result",
     }
 )
 ALLOWED_SIGNED_DOMAINS = ALLOWED_CANONICAL_DOMAINS - {"sidecar-event"}

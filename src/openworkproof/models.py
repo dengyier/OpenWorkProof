@@ -1666,6 +1666,152 @@ class EvidenceRef(ProtocolModel):
         return self
 
 
+VerificationReasonCode = Literal[
+    "AUTH_SIGNATURE_INVALID",
+    "AUTH_GRANT_EXPIRED",
+    "AUTH_GRANT_REVOKED",
+    "AUTH_ROLE_MISMATCH",
+    "AUTH_CAPABILITY_MISSING",
+    "AUTH_NONCE_REUSED",
+    "AUTH_SUBJECT_MISMATCH",
+    "AUTH_POLICY_ANCHOR_UNAVAILABLE",
+    "EXEC_COMMAND_FAILED",
+    "EXEC_TIMEOUT",
+    "EXEC_CRASHED",
+    "EXEC_RESOURCE_EXHAUSTED",
+    "EXEC_OUTPUT_LIMIT",
+    "EXEC_WORKSPACE_DRIFT",
+    "EXEC_DEPENDENCY_DRIFT",
+    "MUTATION_APPLIED",
+    "MUTATION_NOT_APPLIED",
+    "MUTATION_SURVIVED",
+    "MUTATION_CAUGHT",
+    "MUTATION_TARGET_MISMATCH",
+    "MUTATION_CLASSIFIER_UNAVAILABLE",
+    "EVIDENCE_MISSING",
+    "EVIDENCE_DIGEST_MISMATCH",
+    "EVIDENCE_SIGNATURE_INVALID",
+    "EVIDENCE_CAUSAL_PARENT_MISSING",
+    "EVIDENCE_SIZE_LIMIT_EXCEEDED",
+    "EVIDENCE_PUBLICATION_INCOMPLETE",
+    "EVIDENCE_BUNDLE_REPLAY_FAILED",
+    "INDEPENDENCE_KEY_REUSED",
+    "INDEPENDENCE_DOMAIN_OVERLAP",
+    "INDEPENDENCE_BUILD_NOT_DISTINCT",
+    "INDEPENDENCE_CONTEXT_REUSED",
+    "INDEPENDENCE_INSUFFICIENT",
+    "INDEPENDENCE_UNPROVEN",
+    "ACCEPTANCE_DIGEST_MISMATCH",
+    "ACCEPTANCE_ACTOR_UNAUTHORIZED",
+    "ACCEPTANCE_ALREADY_TERMINAL",
+    "ACCEPTANCE_PREDECESSOR_STALE",
+    "ACCEPTANCE_WITHDRAWN",
+    "ACCEPTANCE_SUPERSEDED",
+    "ACCEPTANCE_TRANSITION_INVALID",
+]
+
+
+class VerificationArmResult(SignedProtocolModel):
+    _signed_domain = "verification-arm-result"
+
+    schema_version: Literal["openworkproof-verification-arm-result/0.2"]
+    arm_result_id: Digest64
+    profile_digest: Digest64
+    arm_id: Digest64
+    arm_kind: Literal["positive", "negative"]
+    mutation_status: Literal["not_applicable", "applied", "not_applied"]
+    execution_status: Literal[
+        "completed",
+        "timed_out",
+        "crashed",
+        "resource_exhausted",
+        "evidence_unavailable",
+    ]
+    expectation_status: Literal["satisfied", "contradicted", "indeterminate"]
+    reason_codes: tuple[VerificationReasonCode, ...]
+    action_receipt_ids: tuple[Digest64, ...]
+    evidence_refs: tuple[EvidenceRef, ...]
+    verifier_subject_id: Identifier
+    verifier_key_id: KeyId
+    verifier_build_digest: Digest64
+    dependency_lock_digest: Digest64
+    controller_factors: tuple[Identifier, ...]
+    execution_context_factors: tuple[Identifier, ...]
+    created_at: CanonicalUTCTime
+
+    @model_validator(mode="after")
+    def _closed_result(self) -> VerificationArmResult:
+        if self.signer_key_id != self.verifier_key_id:
+            raise ValueError("arm result signer must equal verifier key")
+        if self.arm_kind == "positive":
+            if self.mutation_status != "not_applicable":
+                raise ValueError("positive arm cannot apply a mutant")
+        elif self.mutation_status == "not_applicable":
+            raise ValueError("negative arm must report mutation status")
+
+        if self.mutation_status == "not_applied" and (
+            self.expectation_status != "indeterminate"
+        ):
+            raise ValueError("not-applied mutation must be indeterminate")
+        if self.execution_status != "completed" and (
+            self.expectation_status != "indeterminate"
+        ):
+            raise ValueError("incomplete execution must be indeterminate")
+
+        if self.reason_codes != tuple(sorted(set(self.reason_codes))):
+            raise ValueError("reason codes must be sorted and unique")
+        if not self.action_receipt_ids or self.action_receipt_ids != tuple(
+            sorted(set(self.action_receipt_ids))
+        ):
+            raise ValueError("receipt ids must be non-empty sorted and unique")
+        for values, label in (
+            (self.controller_factors, "controller_factors"),
+            (self.execution_context_factors, "execution_context_factors"),
+        ):
+            if not values or values != tuple(sorted(set(values))):
+                raise ValueError(f"{label} must be non-empty sorted and unique")
+
+        evidence_paths = tuple(ref.path for ref in self.evidence_refs)
+        if evidence_paths != tuple(sorted(set(evidence_paths))):
+            raise ValueError("evidence refs must be path sorted and unique")
+        if self.expectation_status in {"satisfied", "contradicted"} and (
+            not self.evidence_refs
+        ):
+            raise ValueError("conclusive arm result requires evidence")
+
+        reasons = set(self.reason_codes)
+        if self.arm_kind == "negative" and self.mutation_status == "applied":
+            if "MUTATION_APPLIED" not in reasons:
+                raise ValueError("applied mutant requires MUTATION_APPLIED")
+            if self.execution_status == "completed":
+                expected_reason = (
+                    "MUTATION_CAUGHT"
+                    if self.expectation_status == "satisfied"
+                    else "MUTATION_SURVIVED"
+                    if self.expectation_status == "contradicted"
+                    else None
+                )
+                if expected_reason is not None and expected_reason not in reasons:
+                    raise ValueError("mutation outcome reason is missing")
+        if self.mutation_status == "not_applied" and (
+            "MUTATION_NOT_APPLIED" not in reasons
+        ):
+            raise ValueError("not-applied mutant requires reason code")
+
+        required_execution_reason = {
+            "timed_out": "EXEC_TIMEOUT",
+            "crashed": "EXEC_CRASHED",
+            "resource_exhausted": "EXEC_RESOURCE_EXHAUSTED",
+            "evidence_unavailable": "EVIDENCE_MISSING",
+        }.get(self.execution_status)
+        if (
+            required_execution_reason is not None
+            and required_execution_reason not in reasons
+        ):
+            raise ValueError("execution status reason is missing")
+        return self
+
+
 class QuotaCharge(ProtocolModel):
     grant_id: Digest64
     metric: Literal["tool_calls", "repair_rounds"]
@@ -3613,7 +3759,9 @@ __all__ = [
     "ToolCallReceipt",
     "TransitionDecision",
     "VerificationArm",
+    "VerificationArmResult",
     "VerificationProfileV02",
+    "VerificationReasonCode",
     "VerifierBinding",
     "WorkOrder",
     "request_arguments_digest",
