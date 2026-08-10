@@ -25,6 +25,7 @@ from openworkproof.composition import replay_authorization_causality
 from openworkproof.models import (
     AcceptanceReceipt,
     AcceptanceRejectionReceipt,
+    AcceptanceTransitionReceipt,
     ActionReceiptEnvelope,
     AgentRequest,
     ApprovalRequestedReceipt,
@@ -1380,6 +1381,33 @@ def _latest_proof_composed_trigger(
     return matches[0]
 
 
+def _require_current_verified_decision_if_v02(
+    connection: sqlite3.Connection,
+):
+    """Require the current v0.2 decision when a v0.2 profile is present."""
+    from openworkproof import verification  # noqa: PLC0415
+
+    count = connection.execute(
+        "SELECT COUNT(*) FROM verification_profiles_v02"
+    ).fetchone()
+    if count == (0,):
+        return None
+    if count != (1,):
+        raise AcceptanceTransactionError(
+            "acceptance requires exactly one verification profile"
+        )
+    _, _, profile = verification._load_single_profile(connection)
+    current = verification._load_current_decision(
+        connection,
+        profile=profile,
+    )
+    if current is None or current.decision != "VERIFIED":
+        raise AcceptanceTransactionError(
+            "acceptance requires the current VERIFIED decision"
+        )
+    return current
+
+
 def request_acceptance_transaction(
     ledger_path: Path,
     *,
@@ -1458,6 +1486,7 @@ def request_acceptance_transaction(
         work_order, receipts, _, _ = (
             evidence._replay_receipt_publication_ledger(connection)
         )
+        _require_current_verified_decision_if_v02(connection)
         state_row = connection.execute(
             "SELECT current_state, version FROM work_order_state WHERE singleton = 1"
         ).fetchone()
@@ -1677,6 +1706,11 @@ def prepare_acceptance(
             raise AcceptanceTransactionError(
                 "acceptance preparation requires awaiting_human"
             )
+        verification_connection = evidence.connect_ledger(path)
+        try:
+            _require_current_verified_decision_if_v02(verification_connection)
+        finally:
+            verification_connection.close()
         work_order, receipts, _, _ = evidence._replay_receipt_publication_ledger(
             evidence.connect_ledger(path)
         )
@@ -1889,6 +1923,7 @@ def commit_acceptance(
             )
         connection = evidence.connect_ledger(path)
         connection.execute("BEGIN IMMEDIATE")
+        _require_current_verified_decision_if_v02(connection)
         existing = connection.execute(
             "SELECT COUNT(*) FROM acceptance_receipts"
         ).fetchone()
@@ -3004,3 +3039,259 @@ def reject_acceptance_transaction(
                 pass
         if owns_lock and lock_descriptor is not None:
             evidence._release_target_lock(lock_descriptor)
+
+
+def _exact_acceptance_transition_readback(
+    ledger_path: Path,
+    transition: AcceptanceTransitionReceipt,
+) -> bool:
+    try:
+        connection = evidence.connect_ledger(ledger_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT target_acceptance_id, verification_decision_id,
+                       transition_json
+                FROM acceptance_transitions
+                WHERE transition_id = ?
+                """,
+                (transition.transition_id,),
+            ).fetchone()
+            parents = tuple(
+                connection.execute(
+                    """
+                    SELECT ordinal, parent_id
+                    FROM acceptance_transition_parents
+                    WHERE transition_id = ?
+                    ORDER BY ordinal
+                    """,
+                    (transition.transition_id,),
+                )
+            )
+        finally:
+            connection.close()
+    except Exception:
+        return False
+    return row == (
+        transition.target_acceptance_id,
+        transition.verification_decision_id,
+        rfc8785.dumps(transition.model_dump(mode="json")),
+    ) and parents == tuple(
+        (ordinal, parent_id)
+        for ordinal, parent_id in enumerate(transition.causal_parent_ids)
+    )
+
+
+def commit_acceptance_transition(
+    ledger_path: Path,
+    transition: AcceptanceTransitionReceipt,
+    *,
+    fault: Literal[
+        "before_commit",
+        "commit_ack_loss",
+        "readback_failure",
+        "cleanup_failure",
+    ]
+    | None = None,
+) -> AcceptanceTransitionReceipt:
+    """Append an Acceptor-signed withdrawal or supersession receipt."""
+    from openworkproof import verification  # noqa: PLC0415
+    from openworkproof.signing import (  # noqa: PLC0415
+        decode_and_verify_key_binding,
+        verify_payload,
+    )
+
+    if fault not in {
+        None,
+        "before_commit",
+        "commit_ack_loss",
+        "readback_failure",
+        "cleanup_failure",
+    }:
+        raise AcceptanceTransactionError("unknown transition fault")
+    path = Path(ledger_path)
+    if not path.is_file():
+        raise AcceptanceTransactionError("acceptance ledger is unavailable")
+    try:
+        parsed = AcceptanceTransitionReceipt.model_validate(
+            transition.model_dump(mode="json")
+        )
+    except Exception as error:
+        raise AcceptanceTransactionError(
+            "acceptance transition is malformed"
+        ) from error
+
+    lock_descriptor: int | None = None
+    connection: sqlite3.Connection | None = None
+    committed = False
+    try:
+        lock_descriptor, _ = evidence._borrow_or_acquire_target_lock(path, None)
+        connection = evidence.connect_ledger(path)
+        connection.execute("BEGIN IMMEDIATE")
+        work_order = evidence.load_authoritative_work_order(connection)
+        try:
+            parsed.validate_against_work_order(work_order)
+        except ValueError as error:
+            raise AcceptanceTransactionError(str(error)) from error
+        acceptor = next(
+            binding
+            for binding in work_order.key_bindings
+            if binding.role == "Acceptor"
+        )
+        acceptor_key = decode_and_verify_key_binding(acceptor)
+        if not verify_payload(
+            "acceptance-transition",
+            parsed.model_dump(mode="json"),
+            acceptor_key,
+        ):
+            raise AcceptanceTransactionError(
+                "acceptance transition signature is invalid"
+            )
+        acceptances = evidence._validated_acceptance_receipts(
+            connection,
+            work_order,
+        )
+        if len(acceptances) != 1:
+            raise AcceptanceTransactionError(
+                "transition requires one exact acceptance"
+            )
+        acceptance = acceptances[0]
+        if (
+            parsed.target_acceptance_id != acceptance.acceptance_id
+            or parsed.target_acceptance_digest != acceptance.digest
+        ):
+            raise AcceptanceTransactionError(
+                "transition target acceptance is not current"
+            )
+        _, _, profile = verification._load_single_profile(connection)
+        decision = verification._load_current_decision(
+            connection,
+            profile=profile,
+        )
+        if (
+            decision is None
+            or parsed.verification_decision_id != decision.decision_id
+            or parsed.verification_decision_digest != decision.digest
+        ):
+            raise AcceptanceTransactionError(
+                "transition verification decision is not current"
+            )
+        if not (
+            acceptance.accepted_at <= parsed.decided_at <= work_order.deadline
+            and decision.decided_at <= parsed.decided_at
+        ):
+            raise AcceptanceTransactionError(
+                "transition time is outside its authoritative history"
+            )
+        if (
+            parsed.reason_code == "EVIDENCE_REFUTED"
+            and decision.decision != "REFUTED"
+        ) or (
+            parsed.reason_code == "EVIDENCE_UNKNOWN"
+            and decision.decision != "UNKNOWN"
+        ):
+            raise AcceptanceTransactionError(
+                "transition reason does not match the current decision"
+            )
+        existing = connection.execute(
+            """
+            SELECT target_acceptance_id, verification_decision_id,
+                   transition_json
+            FROM acceptance_transitions
+            WHERE transition_id = ?
+            """,
+            (parsed.transition_id,),
+        ).fetchone()
+        expected = (
+            parsed.target_acceptance_id,
+            parsed.verification_decision_id,
+            rfc8785.dumps(parsed.model_dump(mode="json")),
+        )
+        if existing is not None:
+            if existing == expected and _exact_acceptance_transition_readback(
+                path,
+                parsed,
+            ):
+                raise AcceptanceCommittedError(
+                    "the exact acceptance transition is already committed",
+                    parsed,
+                )
+            raise AcceptanceTransactionError(
+                "acceptance transition id is already used"
+            )
+        if connection.execute(
+            "SELECT 1 FROM acceptance_transitions WHERE target_acceptance_id = ?",
+            (parsed.target_acceptance_id,),
+        ).fetchone() is not None:
+            raise AcceptanceTransactionError(
+                "acceptance already has a terminal transition"
+            )
+        verification._assert_nonce_unused(connection, parsed.nonce)
+        connection.execute(
+            """
+            INSERT INTO acceptance_transitions (
+                transition_id, target_acceptance_id,
+                verification_decision_id, transition_json
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (parsed.transition_id, *expected),
+        )
+        for ordinal, parent_id in enumerate(parsed.causal_parent_ids):
+            connection.execute(
+                """
+                INSERT INTO acceptance_transition_parents (
+                    transition_id, ordinal, parent_id
+                ) VALUES (?, ?, ?)
+                """,
+                (parsed.transition_id, ordinal, parent_id),
+            )
+        if fault == "before_commit":
+            raise AcceptanceTransactionError("injected fault before commit")
+        connection.execute("COMMIT")
+        committed = True
+        if fault == "commit_ack_loss":
+            raise OSError("injected commit acknowledgement loss")
+        if fault == "readback_failure":
+            raise AcceptanceCommitIndeterminateError(
+                "acceptance transition readback was unavailable"
+            )
+        if not _exact_acceptance_transition_readback(path, parsed):
+            raise AcceptanceCommitIndeterminateError(
+                "acceptance transition readback did not confirm commit"
+            )
+    except Exception as error:
+        evidence._best_effort_rollback(connection)
+        if isinstance(error, AcceptanceCommittedError):
+            raise
+        if isinstance(error, AcceptanceCommitIndeterminateError):
+            raise
+        if committed:
+            if _exact_acceptance_transition_readback(path, parsed):
+                raise AcceptanceCommittedError(
+                    "acceptance transition committed but acknowledgement was lost",
+                    parsed,
+                ) from error
+            raise AcceptanceCommitIndeterminateError(
+                "acceptance transition commit outcome is indeterminate"
+            ) from error
+        if isinstance(error, AcceptanceTransactionError):
+            raise
+        raise AcceptanceTransactionError(
+            "acceptance transition transaction failed"
+        ) from error
+    finally:
+        close_error = evidence._best_effort_close(connection)
+        _, release_errors = evidence._release_target_lock(lock_descriptor)
+        cleanup_errors = tuple(
+            item
+            for item in (close_error, *release_errors)
+            if item is not None
+        )
+    if fault == "cleanup_failure":
+        cleanup_errors += (OSError("injected cleanup failure"),)
+    if cleanup_errors:
+        raise AcceptanceCommittedError(
+            "acceptance transition committed but cleanup failed",
+            parsed,
+        ) from cleanup_errors[0]
+    return parsed

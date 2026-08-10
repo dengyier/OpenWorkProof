@@ -1,4 +1,4 @@
-"""Generate and load the authoritative OpenWorkProof v0.1 JSON Schemas."""
+"""Generate and load frozen OpenWorkProof protocol JSON Schemas."""
 
 from __future__ import annotations
 
@@ -22,7 +22,14 @@ from openworkproof.models import (
     ACTION_RECEIPT_ADAPTER,
     AcceptanceReceipt,
     AcceptanceRejectionReceipt,
+    AcceptanceTransitionReceipt,
     CapabilityGrant,
+    CommitmentAnchor,
+    PolicyAnchor,
+    SubjectClaim,
+    VerificationArmResult,
+    VerificationDecision,
+    VerificationProfileV02,
     WorkOrder,
 )
 
@@ -82,11 +89,77 @@ V01_SCHEMA_FACTORIES: dict[str, Callable[[], dict[str, Any]]] = {
     "capability-grant": CapabilityGrant.model_json_schema,
     "work-order": WorkOrder.model_json_schema,
 }
+V02_OBJECT_PATHS = {
+    "acceptance-transition": "acceptance-transition.schema.json",
+    "commitment-anchor": "commitment-anchor.schema.json",
+    "policy-anchor": "policy-anchor.schema.json",
+    "subject-claim": "subject-claim.schema.json",
+    "verification-arm-result": "verification-arm-result.schema.json",
+    "verification-decision": "verification-decision.schema.json",
+    "verification-profile": "verification-profile.schema.json",
+}
+V02_SCHEMA_FACTORIES: dict[str, Callable[[], dict[str, Any]]] = {
+    "acceptance-transition": AcceptanceTransitionReceipt.model_json_schema,
+    "commitment-anchor": CommitmentAnchor.model_json_schema,
+    "policy-anchor": PolicyAnchor.model_json_schema,
+    "subject-claim": SubjectClaim.model_json_schema,
+    "verification-arm-result": VerificationArmResult.model_json_schema,
+    "verification-decision": VerificationDecision.model_json_schema,
+    "verification-profile": VerificationProfileV02.model_json_schema,
+}
+_FROZEN_V02_DIGESTS = {
+    "acceptance-transition.schema.json": (
+        "504a06d4748b0ea045f40c2182ee85e2b59cea8793d6c9259f695dc6c764e1a0"
+    ),
+    "commitment-anchor.schema.json": (
+        "ccd6116e57589a12e6a6015c39205f47731bf4fc011d719469f9a944d10cf61f"
+    ),
+    "policy-anchor.schema.json": (
+        "7423e5f09f6f22d8785daa7e9dd7c79489b494f63ad12b28a74e480967127d0b"
+    ),
+    "schema-registry.json": (
+        "ba555173e56743920b136b131505489f0e8765ea21433c96db7dcc3c354141ae"
+    ),
+    "subject-claim.schema.json": (
+        "ec9cd237217dc96a376ce1e67349414abcaa9369a9d4de8d1f85c17e635d1bfe"
+    ),
+    "verification-arm-result.schema.json": (
+        "c65913e8dc1f42d0f295be3d136b0566d2e0b7b2ae12b4e1b74634d010750310"
+    ),
+    "verification-decision.schema.json": (
+        "d4f15b2aabcf7eadfdf703d37ae7164de9c9d3a3ef0b2a6648a18094e6e7fec1"
+    ),
+    "verification-profile.schema.json": (
+        "22df63576418905c68d910f573a7f444700f9b3f7098590dca1876618d70b32c"
+    ),
+}
+_FROZEN_V02_REGISTRY = {
+    "schema_version": _REGISTRY_SCHEMA_VERSION,
+    "protocol_version": "0.2",
+    "schemas": [
+        {
+            "object_type": object_type,
+            "path": path,
+            "sha256": _FROZEN_V02_DIGESTS[path],
+        }
+        for object_type, path in V02_OBJECT_PATHS.items()
+    ],
+}
 _OBJECT_PATHS_BY_VERSION = {
     "0.1": V01_OBJECT_PATHS,
+    "0.2": V02_OBJECT_PATHS,
 }
 _SCHEMA_FACTORIES_BY_VERSION = {
     "0.1": V01_SCHEMA_FACTORIES,
+    "0.2": V02_SCHEMA_FACTORIES,
+}
+_FROZEN_DIGESTS_BY_VERSION = {
+    "0.1": _FROZEN_V01_DIGESTS,
+    "0.2": _FROZEN_V02_DIGESTS,
+}
+_FROZEN_REGISTRIES_BY_VERSION = {
+    "0.1": _FROZEN_V01_REGISTRY,
+    "0.2": _FROZEN_V02_REGISTRY,
 }
 _FILENAMES_BY_VERSION = {
     version: frozenset({_REGISTRY_FILENAME, *object_paths.values()})
@@ -169,9 +242,8 @@ def _validated_runtime_files(version: str) -> dict[str, bytes]:
     except (FileNotFoundError, IsADirectoryError, OSError) as error:
         raise RuntimeError("authoritative schema resource set is invalid") from error
 
-    if version != "0.1":
-        raise RuntimeError("registered schema version has no frozen anchors")
-    for filename, expected_digest in _FROZEN_V01_DIGESTS.items():
+    frozen_digests = _FROZEN_DIGESTS_BY_VERSION[version]
+    for filename, expected_digest in frozen_digests.items():
         if hashlib.sha256(files[filename]).hexdigest() != expected_digest:
             raise RuntimeError("authoritative schema anchor mismatch")
     for raw in files.values():
@@ -183,7 +255,7 @@ def _validated_runtime_files(version: str) -> dict[str, bytes]:
         files[_REGISTRY_FILENAME],
         error_message="authoritative schema registry is not canonical",
     )
-    if registry != _FROZEN_V01_REGISTRY:
+    if registry != _FROZEN_REGISTRIES_BY_VERSION[version]:
         raise RuntimeError("authoritative schema registry is not frozen")
     return files
 
@@ -210,7 +282,7 @@ def authoritative_digest(
 
     filename = _require_object_type(object_type, version)
     _validated_runtime_files(version)
-    return _FROZEN_V01_DIGESTS[filename]
+    return _FROZEN_DIGESTS_BY_VERSION[version][filename]
 
 
 def _generated_files(
@@ -223,28 +295,29 @@ def _generated_files(
         object_paths[object_type]: rfc8785.dumps(factory())
         for object_type, factory in factories.items()
     }
-    if version != "0.1":
-        raise RuntimeError("registered schema version has no frozen anchors")
+    frozen_digests = _FROZEN_DIGESTS_BY_VERSION[version]
     for filename, content in files.items():
         if (
             hashlib.sha256(content).hexdigest()
-            != _FROZEN_V01_DIGESTS[filename]
+            != frozen_digests[filename]
         ):
             raise RuntimeError(
-                f"frozen v0.1 schema drift: {filename}; "
+                f"frozen v{version} schema drift: {filename}; "
                 "anchor changes require protocol review"
             )
     generated = {
-        _REGISTRY_FILENAME: rfc8785.dumps(_FROZEN_V01_REGISTRY),
+        _REGISTRY_FILENAME: rfc8785.dumps(
+            _FROZEN_REGISTRIES_BY_VERSION[version]
+        ),
         **files,
     }
     for filename, content in generated.items():
         if (
             hashlib.sha256(content).hexdigest()
-            != _FROZEN_V01_DIGESTS[filename]
+            != frozen_digests[filename]
         ):
             raise RuntimeError(
-                f"frozen v0.1 schema drift: {filename}; "
+                f"frozen v{version} schema drift: {filename}; "
                 "anchor changes require protocol review"
             )
     return generated

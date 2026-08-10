@@ -3855,6 +3855,82 @@ class AcceptanceRejectionReceipt(SignedProtocolModel):
         return self
 
 
+class AcceptanceTransitionReceipt(SignedProtocolModel):
+    _signed_domain = "acceptance-transition"
+
+    schema_version: Literal["openworkproof-acceptance-transition/0.2"]
+    protocol_version: Literal["0.2"]
+    transition_id: Digest64
+    work_order_digest: Digest64
+    target_acceptance_id: Digest64
+    target_acceptance_digest: Digest64
+    verification_decision_id: Digest64
+    verification_decision_digest: Digest64
+    transition: Literal["withdrawn", "superseded"]
+    replacement_acceptance_id: Digest64 | None
+    replacement_acceptance_digest: Digest64 | None
+    reason_code: Literal[
+        "EVIDENCE_REFUTED",
+        "EVIDENCE_UNKNOWN",
+        "SCOPE_CHANGED",
+        "REPLACED_DELIVERY",
+        "MANUAL_WITHDRAWAL",
+    ]
+    causal_parent_ids: tuple[Digest64, ...]
+    decided_at: CanonicalUTCTime
+    nonce: Digest64
+
+    @model_validator(mode="after")
+    def _closed_transition(self) -> AcceptanceTransitionReceipt:
+        if self.causal_parent_ids != tuple(sorted(set(self.causal_parent_ids))):
+            raise ValueError("transition causal parents must be sorted and unique")
+        expected_parents = {
+            self.target_acceptance_id,
+            self.verification_decision_id,
+        }
+        if self.transition == "withdrawn":
+            if (
+                self.replacement_acceptance_id is not None
+                or self.replacement_acceptance_digest is not None
+            ):
+                raise ValueError("withdrawal forbids a replacement acceptance")
+        else:
+            if (
+                self.replacement_acceptance_id is None
+                or self.replacement_acceptance_digest is None
+                or self.replacement_acceptance_id == self.target_acceptance_id
+            ):
+                raise ValueError(
+                    "supersession requires a different replacement acceptance"
+                )
+            expected_parents.add(self.replacement_acceptance_id)
+        if set(self.causal_parent_ids) != expected_parents:
+            raise ValueError("transition causal parents do not match its bindings")
+        return self
+
+    def validate_against_work_order(
+        self,
+        work_order: WorkOrder,
+    ) -> AcceptanceTransitionReceipt:
+        acceptor = next(
+            (
+                binding
+                for binding in work_order.key_bindings
+                if binding.role == "Acceptor"
+            ),
+            None,
+        )
+        if (
+            acceptor is None
+            or self.work_order_digest != work_order.digest
+            or self.signer_key_id != acceptor.key_id
+        ):
+            raise ValueError(
+                "AcceptanceTransitionReceipt does not match WorkOrder"
+            )
+        return self
+
+
 class PolicyDecision(ProtocolModel):
     allowed: bool
     decision: Literal["allow", "deny"]

@@ -26,6 +26,7 @@ from openworkproof.models import (
     TestsPassedPredicateInput,
     ToolCallReceipt,
     TransitionDecision,
+    VerificationDecision,
     WorkOrder,
 )
 from openworkproof.signing import (
@@ -93,6 +94,17 @@ ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
     TaskState.REJECTED: frozenset(),
     TaskState.FROZEN: frozenset({TaskState.REJECTED}),
 }
+
+
+def state_for_verification_decision(
+    decision: VerificationDecision,
+) -> TaskState:
+    """Map the current validated v0.2 decision to its execution state."""
+    if not isinstance(decision, VerificationDecision):
+        raise ValueError("a validated VerificationDecision is required")
+    if decision.decision == "VERIFIED":
+        return TaskState.PROOF_READY
+    return TaskState.EVIDENCE_INCOMPLETE
 
 _EXPIRABLE_STATES = frozenset(
     {

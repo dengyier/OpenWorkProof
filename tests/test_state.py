@@ -13,6 +13,7 @@ from openworkproof.models import (
     ACTION_RECEIPT_ADAPTER,
     ActionReceipt,
     AcceptanceReceipt,
+    VerificationDecision,
     WorkOrder,
 )
 from openworkproof.signing import (
@@ -50,6 +51,20 @@ def _api():
     # Dynamic import keeps a missing state module as an intentional test
     # failure rather than a collection error during the RED phase.
     return importlib.import_module("openworkproof.state")
+
+
+@pytest.mark.parametrize(
+    ("decision", "expected"),
+    (
+        ("VERIFIED", "proof_ready"),
+        ("REFUTED", "evidence_incomplete"),
+        ("UNKNOWN", "evidence_incomplete"),
+    ),
+)
+def test_v02_decision_drives_proof_state(decision: str, expected: str) -> None:
+    api = _api()
+    value = VerificationDecision.model_construct(decision=decision)
+    assert api.state_for_verification_decision(value).value == expected
 
 
 def _validate(

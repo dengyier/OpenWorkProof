@@ -583,9 +583,11 @@ def _assert_nonce_unused(
 ) -> None:
     allowed_set = set(allowed)
     for table, identifier_column, json_column in (
+        ("receipts", "receipt_id", "receipt_json"),
         ("subject_claims", "claim_id", "claim_json"),
         ("verification_profiles_v02", "profile_id", "profile_json"),
         ("verification_decisions", "decision_id", "decision_json"),
+        ("acceptance_transitions", "transition_id", "transition_json"),
     ):
         for identifier, raw in connection.execute(
             f"SELECT {identifier_column}, {json_column} FROM {table}"

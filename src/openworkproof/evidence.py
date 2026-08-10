@@ -564,6 +564,26 @@ _SCHEMA = (
     )
     """,
     """
+    CREATE TABLE acceptance_transitions (
+        transition_id TEXT PRIMARY KEY,
+        target_acceptance_id TEXT NOT NULL UNIQUE
+            REFERENCES acceptance_receipts(acceptance_id),
+        verification_decision_id TEXT NOT NULL
+            REFERENCES verification_decisions(decision_id),
+        transition_json BLOB NOT NULL UNIQUE
+    )
+    """,
+    """
+    CREATE TABLE acceptance_transition_parents (
+        transition_id TEXT NOT NULL
+            REFERENCES acceptance_transitions(transition_id),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        parent_id TEXT NOT NULL,
+        PRIMARY KEY (transition_id, ordinal),
+        UNIQUE (transition_id, parent_id)
+    )
+    """,
+    """
     CREATE TABLE composition_reports (
         report_digest TEXT PRIMARY KEY,
         work_order_digest TEXT NOT NULL

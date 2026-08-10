@@ -212,7 +212,7 @@ def _request(
     *,
     decision_id: str = "a" * 64,
     decided_at: str = "2026-01-01T00:20:00Z",
-    nonce: str = "c" * 64,
+    nonce: str = "1" * 64,
 ) -> DecisionDraftRequest:
     return DecisionDraftRequest.model_validate(
         {
@@ -424,7 +424,7 @@ def test_competing_decisions_from_same_predecessor_have_one_winner(
         _request(
             decision_id="f" * 64,
             decided_at="2026-01-01T00:21:01Z",
-            nonce="0" * 64,
+            nonce="2" * 64,
         ),
     )
     assert (

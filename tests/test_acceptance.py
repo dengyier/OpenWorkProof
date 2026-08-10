@@ -759,6 +759,55 @@ def _request_case(
     return case, proof_ready_context, request, composed, expires_at
 
 
+def _commit_bound_v02_profile(
+    case,
+    *,
+    signed_subject_claim,
+    signed_verification_profile,
+    ephemeral_role_keys,
+) -> None:
+    from openworkproof.models import SubjectClaim, VerificationProfileV02  # noqa: PLC0415
+    from openworkproof.signing import sign_payload  # noqa: PLC0415
+    from openworkproof.verification import commit_verification_profile  # noqa: PLC0415
+
+    claim_raw = signed_subject_claim.model_dump(
+        mode="json",
+        exclude={"digest", "signature_alg", "signer_key_id", "signature"},
+    )
+    claim_raw.update(
+        work_order_digest=case["work_order"].digest,
+        source_revision=case["work_order"].source_commit,
+        customer_acceptor_key_id=case["work_order"].acceptor_key_ids[0],
+    )
+    bound_claim = SubjectClaim.model_validate(
+        sign_payload(
+            "subject-claim",
+            claim_raw,
+            ephemeral_role_keys["Manager"][0],
+        )
+    )
+    profile_raw = signed_verification_profile.model_dump(
+        mode="json",
+        exclude={"digest", "signature_alg", "signer_key_id", "signature"},
+    )
+    profile_raw.update(
+        work_order_digest=case["work_order"].digest,
+        subject_claim_digest=bound_claim.digest,
+    )
+    bound_profile = VerificationProfileV02.model_validate(
+        sign_payload(
+            "verification-profile",
+            profile_raw,
+            ephemeral_role_keys["Manager"][0],
+        )
+    )
+    commit_verification_profile(
+        case["ledger_path"],
+        bound_claim,
+        bound_profile,
+    )
+
+
 def test_request_acceptance_commits_awaiting_human(
     tmp_path,
     signed_work_order,
@@ -850,6 +899,66 @@ def test_request_acceptance_requires_proof_ready(
             expires_at=expires_at,
             clock=lambda: fixed_now,
         )
+
+
+def test_request_acceptance_requires_current_verified_v02_decision(
+    tmp_path,
+    signed_work_order,
+    signed_subject_claim,
+    signed_verification_profile,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, context, request, _, expires_at = _request_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    _commit_bound_v02_profile(
+        case,
+        signed_subject_claim=signed_subject_claim,
+        signed_verification_profile=signed_verification_profile,
+        ephemeral_role_keys=ephemeral_role_keys,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        before = (
+            connection.execute("SELECT COUNT(*) FROM receipts").fetchone(),
+            connection.execute(
+                "SELECT current_state, version FROM work_order_state WHERE singleton = 1"
+            ).fetchone(),
+        )
+    finally:
+        connection.close()
+    with pytest.raises(
+        acceptance.AcceptanceTransactionError,
+        match="current VERIFIED",
+    ):
+        acceptance.request_acceptance_transaction(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            request=request,
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            expires_at=expires_at,
+            clock=lambda: fixed_now,
+        )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        after = (
+            connection.execute("SELECT COUNT(*) FROM receipts").fetchone(),
+            connection.execute(
+                "SELECT current_state, version FROM work_order_state WHERE singleton = 1"
+            ).fetchone(),
+        )
+    finally:
+        connection.close()
+    assert after == before
 
 
 def _awaiting_case(
@@ -1010,6 +1119,58 @@ def test_commit_acceptance_reaches_accepted(
         connection.close()
     assert state == ("accepted", 8)
     assert acceptances == 1
+
+
+def test_commit_acceptance_requires_current_verified_v02_decision(
+    tmp_path,
+    signed_work_order,
+    signed_subject_claim,
+    signed_verification_profile,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, context, _, _ = _awaiting_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    draft = acceptance.prepare_acceptance(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        clock=lambda: fixed_now,
+    )
+    signed = _sign_draft(draft, ephemeral_role_keys)
+    _commit_bound_v02_profile(
+        case,
+        signed_subject_claim=signed_subject_claim,
+        signed_verification_profile=signed_verification_profile,
+        ephemeral_role_keys=ephemeral_role_keys,
+    )
+    with pytest.raises(
+        acceptance.AcceptanceTransactionError,
+        match="current VERIFIED",
+    ):
+        acceptance.commit_acceptance(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            acceptance=signed,
+            public_keys=None,
+            clock=lambda: fixed_now,
+        )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM acceptance_receipts"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
 
 
 def test_commit_acceptance_rejects_wrong_signer(

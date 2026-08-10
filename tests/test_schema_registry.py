@@ -1,4 +1,4 @@
-"""Authoritative, packaged, deterministic v0.1 schema registry tests."""
+"""Authoritative, packaged, deterministic schema registry tests."""
 
 from __future__ import annotations
 
@@ -62,6 +62,44 @@ FROZEN_V01_DIGESTS = {
     ),
     "work-order.schema.json": (
         "171b59390c66d586d7ee387d783ca8bc759779a08c36d31c85cf232998568013"
+    ),
+}
+V02_OBJECT_PATHS = {
+    "acceptance-transition": "acceptance-transition.schema.json",
+    "commitment-anchor": "commitment-anchor.schema.json",
+    "policy-anchor": "policy-anchor.schema.json",
+    "subject-claim": "subject-claim.schema.json",
+    "verification-arm-result": "verification-arm-result.schema.json",
+    "verification-decision": "verification-decision.schema.json",
+    "verification-profile": "verification-profile.schema.json",
+}
+V02_SCHEMA_FILENAMES = frozenset(
+    {"schema-registry.json", *V02_OBJECT_PATHS.values()}
+)
+FROZEN_V02_DIGESTS = {
+    "acceptance-transition.schema.json": (
+        "504a06d4748b0ea045f40c2182ee85e2b59cea8793d6c9259f695dc6c764e1a0"
+    ),
+    "commitment-anchor.schema.json": (
+        "ccd6116e57589a12e6a6015c39205f47731bf4fc011d719469f9a944d10cf61f"
+    ),
+    "policy-anchor.schema.json": (
+        "7423e5f09f6f22d8785daa7e9dd7c79489b494f63ad12b28a74e480967127d0b"
+    ),
+    "schema-registry.json": (
+        "ba555173e56743920b136b131505489f0e8765ea21433c96db7dcc3c354141ae"
+    ),
+    "subject-claim.schema.json": (
+        "ec9cd237217dc96a376ce1e67349414abcaa9369a9d4de8d1f85c17e635d1bfe"
+    ),
+    "verification-arm-result.schema.json": (
+        "c65913e8dc1f42d0f295be3d136b0566d2e0b7b2ae12b4e1b74634d010750310"
+    ),
+    "verification-decision.schema.json": (
+        "d4f15b2aabcf7eadfdf703d37ae7164de9c9d3a3ef0b2a6648a18094e6e7fec1"
+    ),
+    "verification-profile.schema.json": (
+        "22df63576418905c68d910f573a7f444700f9b3f7098590dca1876618d70b32c"
     ),
 }
 TRANSACTION_PREFIXES = (
@@ -183,6 +221,28 @@ def test_package_and_published_mirror_match_frozen_v01_anchors() -> None:
         assert package_bytes == rfc8785.dumps(json.loads(package_bytes))
 
 
+def test_package_and_published_mirror_match_frozen_v02_anchors() -> None:
+    package = resources.files("openworkproof").joinpath("schemas", "v0.2")
+    mirror = PROJECT_ROOT / "specs" / "v0.2"
+
+    assert {item.name for item in package.iterdir()} == V02_SCHEMA_FILENAMES
+    assert {item.name for item in mirror.iterdir()} == V02_SCHEMA_FILENAMES
+    for filename, expected_digest in FROZEN_V02_DIGESTS.items():
+        package_bytes = package.joinpath(filename).read_bytes()
+        mirror_bytes = mirror.joinpath(filename).read_bytes()
+        assert package_bytes == mirror_bytes
+        assert hashlib.sha256(package_bytes).hexdigest() == expected_digest
+        assert package_bytes == rfc8785.dumps(json.loads(package_bytes))
+
+    for object_type, filename in V02_OBJECT_PATHS.items():
+        assert _api().authoritative_digest(object_type, version="0.2") == (
+            FROZEN_V02_DIGESTS[filename]
+        )
+        assert _api().authoritative_schema(object_type, version="0.2") == (
+            json.loads(package.joinpath(filename).read_bytes())
+        )
+
+
 def test_current_generators_match_frozen_v01_schema_anchors() -> None:
     api = _api()
     generated = {
@@ -276,35 +336,46 @@ def test_unknown_version_and_object_type_fail_closed(tmp_path: Path) -> None:
 
     for function in (api.authoritative_schema, api.authoritative_digest):
         with pytest.raises(ValueError, match="unknown protocol version"):
-            function("work-order", version="0.2")
+            function("work-order", version="9.9")
         with pytest.raises(ValueError, match="unknown object type"):
             function("arbitrary-object")
 
-    result = api.compare_bundle_schemas_to_builtin(tmp_path, version="0.2")
+    result = api.compare_bundle_schemas_to_builtin(tmp_path, version="9.9")
     assert result.valid is False
     assert result.error_code == "UNKNOWN_PROTOCOL_VERSION"
 
 
-def test_v01_registry_routing_is_closed_and_explicit() -> None:
+def test_registry_routing_is_closed_and_explicit() -> None:
     api = _api()
 
-    assert api._OBJECT_PATHS_BY_VERSION == {"0.1": OBJECT_PATHS}
-    assert set(api._SCHEMA_FACTORIES_BY_VERSION) == {"0.1"}
+    assert api._OBJECT_PATHS_BY_VERSION == {
+        "0.1": OBJECT_PATHS,
+        "0.2": V02_OBJECT_PATHS,
+    }
+    assert set(api._SCHEMA_FACTORIES_BY_VERSION) == {"0.1", "0.2"}
     assert set(api._SCHEMA_FACTORIES_BY_VERSION["0.1"]) == set(OBJECT_PATHS)
+    assert set(api._SCHEMA_FACTORIES_BY_VERSION["0.2"]) == set(
+        V02_OBJECT_PATHS
+    )
     assert set(api._generated_files(version="0.1")) == SCHEMA_FILENAMES
+    assert set(api._generated_files(version="0.2")) == V02_SCHEMA_FILENAMES
 
 
-def test_v02_is_unregistered_before_complete_schema_freeze(tmp_path: Path) -> None:
+def test_v02_writer_emits_frozen_package_and_mirror(tmp_path: Path) -> None:
     api = _api()
-    destination = tmp_path / "v02"
+    destination = tmp_path / "package"
+    mirror = tmp_path / "mirror"
 
-    with pytest.raises(ValueError, match="unknown protocol version"):
-        api.write_authoritative_schemas(
-            destination,
-            version="0.2",
-        )
+    api.write_authoritative_schemas(
+        destination,
+        mirror=mirror,
+        version="0.2",
+    )
 
-    assert destination.exists() is False
+    assert _snapshot(destination) == _snapshot(mirror)
+    assert set(_snapshot(destination)) == V02_SCHEMA_FILENAMES
+    for name, expected in FROZEN_V02_DIGESTS.items():
+        assert hashlib.sha256(destination.joinpath(name).read_bytes()).hexdigest() == expected
 
 
 def test_cli_requires_explicit_registered_version_and_destination(
@@ -333,7 +404,7 @@ def test_cli_requires_explicit_registered_version_and_destination(
         api.main(
             [
                 "--version",
-                "0.2",
+                "9.9",
                 "--destination",
                 str(unknown_version),
             ]
@@ -843,6 +914,16 @@ def test_built_wheel_contains_all_authoritative_schema_resources(
         assert members == SCHEMA_FILENAMES
         for name, expected_digest in FROZEN_V01_DIGESTS.items():
             content = archive.read(f"openworkproof/schemas/v0.1/{name}")
+            assert hashlib.sha256(content).hexdigest() == expected_digest
+        v02_members = {
+            name.removeprefix("openworkproof/schemas/v0.2/")
+            for name in archive.namelist()
+            if name.startswith("openworkproof/schemas/v0.2/")
+            and not name.endswith("/")
+        }
+        assert v02_members == V02_SCHEMA_FILENAMES
+        for name, expected_digest in FROZEN_V02_DIGESTS.items():
+            content = archive.read(f"openworkproof/schemas/v0.2/{name}")
             assert hashlib.sha256(content).hexdigest() == expected_digest
 
 
