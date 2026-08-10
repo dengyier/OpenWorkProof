@@ -1812,6 +1812,182 @@ class VerificationArmResult(SignedProtocolModel):
         return self
 
 
+class VerificationIndependenceAssessment(ProtocolModel):
+    distinct_subjects: bool
+    distinct_keys: bool
+    distinct_controllers: bool
+    distinct_execution_contexts: bool
+    reason_codes: tuple[VerificationReasonCode, ...]
+
+    @property
+    def is_sufficient(self) -> bool:
+        return (
+            self.distinct_subjects
+            and self.distinct_keys
+            and self.distinct_controllers
+            and self.distinct_execution_contexts
+        )
+
+    @model_validator(mode="after")
+    def _closed_assessment(self) -> VerificationIndependenceAssessment:
+        if self.reason_codes != tuple(sorted(set(self.reason_codes))):
+            raise ValueError("independence reason codes must be sorted and unique")
+        expected = tuple(
+            sorted(
+                code
+                for satisfied, code in (
+                    (self.distinct_subjects, "INDEPENDENCE_INSUFFICIENT"),
+                    (self.distinct_keys, "INDEPENDENCE_KEY_REUSED"),
+                    (self.distinct_controllers, "INDEPENDENCE_DOMAIN_OVERLAP"),
+                    (
+                        self.distinct_execution_contexts,
+                        "INDEPENDENCE_CONTEXT_REUSED",
+                    ),
+                )
+                if not satisfied
+            )
+        )
+        if self.reason_codes != expected:
+            raise ValueError("independence reason codes do not match checks")
+        return self
+
+
+class VerificationArmResultReference(ProtocolModel):
+    arm_id: Digest64
+    arm_result_id: Digest64
+    arm_result_digest: Digest64
+    evidence_snapshot_digest: Digest64
+
+
+class VerificationDecisionSignature(ProtocolModel):
+    verifier_subject_id: Identifier
+    verifier_key_id: KeyId
+    signature_alg: Literal["Ed25519"]
+    signature: Signature
+
+
+def _validate_verification_decision_content(
+    *,
+    arm_results: tuple[VerificationArmResultReference, ...],
+    reason_codes: tuple[VerificationReasonCode, ...],
+    supersedes_decision_id: str | None,
+    supersedes_decision_digest: str | None,
+    causal_parent_receipt_ids: tuple[str, ...],
+    causal_parent_decision_ids: tuple[str, ...],
+) -> None:
+    arm_result_ids = tuple(item.arm_result_id for item in arm_results)
+    if not arm_results or arm_result_ids != tuple(sorted(set(arm_result_ids))):
+        raise ValueError("arm results must be non-empty sorted and unique")
+    arm_ids = tuple(item.arm_id for item in arm_results)
+    if len(set(arm_ids)) != len(arm_ids):
+        raise ValueError("arm references must be one-to-one")
+    if reason_codes != tuple(sorted(set(reason_codes))):
+        raise ValueError("decision reason codes must be sorted and unique")
+    if (supersedes_decision_id is None) != (supersedes_decision_digest is None):
+        raise ValueError("supersedes id and digest must be paired")
+    if not causal_parent_receipt_ids or causal_parent_receipt_ids != tuple(
+        sorted(set(causal_parent_receipt_ids))
+    ):
+        raise ValueError("causal receipt parents must be non-empty sorted and unique")
+    expected_decision_parents = (
+        () if supersedes_decision_id is None else (supersedes_decision_id,)
+    )
+    if causal_parent_decision_ids != expected_decision_parents:
+        raise ValueError("causal decision parents do not match supersedes")
+
+
+class VerificationDecisionDraft(ProtocolModel):
+    decision_id: Digest64
+    work_order_digest: Digest64
+    subject_claim_digest: Digest64
+    profile_id: Digest64
+    profile_digest: Digest64
+    arm_results: tuple[VerificationArmResultReference, ...]
+    assurance_level: Literal["standard", "high_risk"]
+    decision: Literal["VERIFIED", "REFUTED", "UNKNOWN"]
+    independence: VerificationIndependenceAssessment
+    reason_codes: tuple[VerificationReasonCode, ...]
+    supersedes_decision_id: Digest64 | None
+    supersedes_decision_digest: Digest64 | None
+    causal_parent_receipt_ids: tuple[Digest64, ...]
+    causal_parent_decision_ids: tuple[Digest64, ...]
+    decided_at: CanonicalUTCTime
+    nonce: Digest64
+
+    @model_validator(mode="after")
+    def _closed_draft(self) -> VerificationDecisionDraft:
+        _validate_verification_decision_content(
+            arm_results=self.arm_results,
+            reason_codes=self.reason_codes,
+            supersedes_decision_id=self.supersedes_decision_id,
+            supersedes_decision_digest=self.supersedes_decision_digest,
+            causal_parent_receipt_ids=self.causal_parent_receipt_ids,
+            causal_parent_decision_ids=self.causal_parent_decision_ids,
+        )
+        return self
+
+
+class DecisionDraftRequest(ProtocolModel):
+    decision_id: Digest64
+    decided_at: CanonicalUTCTime
+    nonce: Digest64
+
+
+class VerificationDecision(ProtocolModel):
+    schema_version: Literal["openworkproof-verification-decision/0.2"]
+    decision_id: Digest64
+    digest: Digest64
+    work_order_digest: Digest64
+    subject_claim_digest: Digest64
+    profile_id: Digest64
+    profile_digest: Digest64
+    arm_results: tuple[VerificationArmResultReference, ...]
+    assurance_level: Literal["standard", "high_risk"]
+    decision: Literal["VERIFIED", "REFUTED", "UNKNOWN"]
+    independence: VerificationIndependenceAssessment
+    reason_codes: tuple[VerificationReasonCode, ...]
+    supersedes_decision_id: Digest64 | None
+    supersedes_decision_digest: Digest64 | None
+    causal_parent_receipt_ids: tuple[Digest64, ...]
+    causal_parent_decision_ids: tuple[Digest64, ...]
+    decided_at: CanonicalUTCTime
+    nonce: Digest64
+    verifier_signatures: tuple[VerificationDecisionSignature, ...]
+
+    @model_validator(mode="after")
+    def _closed_decision(self) -> VerificationDecision:
+        _validate_verification_decision_content(
+            arm_results=self.arm_results,
+            reason_codes=self.reason_codes,
+            supersedes_decision_id=self.supersedes_decision_id,
+            supersedes_decision_digest=self.supersedes_decision_digest,
+            causal_parent_receipt_ids=self.causal_parent_receipt_ids,
+            causal_parent_decision_ids=self.causal_parent_decision_ids,
+        )
+        expected_signatures = 2 if self.assurance_level == "high_risk" else 1
+        if len(self.verifier_signatures) != expected_signatures:
+            raise ValueError("decision signature set has the wrong size")
+        signature_keys = tuple(
+            signature.verifier_key_id for signature in self.verifier_signatures
+        )
+        if signature_keys != tuple(
+            sorted(set(signature_keys), key=lambda value: value.encode("utf-8"))
+        ):
+            raise ValueError("decision signatures must be key-sorted and unique")
+        payload = self.model_dump(
+            mode="json", exclude={"digest", "verifier_signatures"}
+        )
+        expected_digest = _jcs_digest(
+            {
+                "domain": "openworkproof/verification-decision/v0.1",
+                "payload": payload,
+            }
+        )
+        if self.digest != expected_digest:
+            raise ValueError("digest does not match verification decision payload")
+        return self
+
+
 class QuotaCharge(ProtocolModel):
     grant_id: Digest64
     metric: Literal["tool_calls", "repair_rounds"]

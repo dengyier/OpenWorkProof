@@ -39,9 +39,13 @@ ALLOWED_CANONICAL_DOMAINS = frozenset(
         "subject-claim",
         "verification-profile",
         "verification-arm-result",
+        "verification-decision",
     }
 )
-ALLOWED_SIGNED_DOMAINS = ALLOWED_CANONICAL_DOMAINS - {"sidecar-event"}
+ALLOWED_SIGNED_DOMAINS = ALLOWED_CANONICAL_DOMAINS - {
+    "sidecar-event",
+    "verification-decision",
+}
 
 MAX_JSON_DEPTH = 128
 MAX_JSON_NODES = 10_000

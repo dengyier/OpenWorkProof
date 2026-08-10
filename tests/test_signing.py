@@ -167,10 +167,12 @@ def test_canonical_domains_are_exact_and_key_order_is_irrelevant() -> None:
             "subject-claim",
             "verification-profile",
             "verification-arm-result",
+            "verification-decision",
         }
     )
     assert ALLOWED_SIGNED_DOMAINS == ALLOWED_CANONICAL_DOMAINS - {
-        "sidecar-event"
+        "sidecar-event",
+        "verification-decision",
     }
     assert canonical_bytes("manifest", {"b": 2, "a": 1}) == canonical_bytes(
         "manifest", {"a": 1, "b": 2}
