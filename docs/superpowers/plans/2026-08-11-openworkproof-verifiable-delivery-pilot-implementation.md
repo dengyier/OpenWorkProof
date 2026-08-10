@@ -1641,27 +1641,27 @@ Expected: CLI/MCP/service parity and existing transport tests pass.
 - Modify: `docs/pilot/delivery-room.css`
 - Modify: `tests/test_delivery_package_v02.py`
 
-- [ ] **Step 1: Write RED customer-language tests**
+- [x] **Step 1: Write RED customer-language tests**
 
 Parse generated HTML and require exactly five customer questions: authority,
 target/version, agreed result, falsification control, and current acceptance
 readiness. Require visible UNKNOWN explanation and next action. Reject payment,
 escrow, settlement-completed, or customer-adoption claims.
 
-- [ ] **Step 2: Implement deterministic HTML rendering**
+- [x] **Step 2: Implement deterministic HTML rendering**
 
 Render only escaped values from verified JSON read models. Use fixed templates
 stored as Python string constants or packaged text resources; do not introduce
 a web framework or JavaScript build. The page may link to evidence details but
 must not execute signatures or hold private keys.
 
-- [ ] **Step 3: Verify JSON/HTML agreement**
+- [x] **Step 3: Verify JSON/HTML agreement**
 
 For every VERIFIED, REFUTED, UNKNOWN, ACCEPTED_FOR_SETTLEMENT, SUSPENDED,
 WITHDRAWN, SUPERSEDED, and rejected fixture, assert visible HTML labels equal
 the recomputed JSON states.
 
-- [ ] **Step 4: Run GREEN and commit**
+- [x] **Step 4: Run GREEN and commit**
 
 Run:
 
