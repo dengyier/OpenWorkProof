@@ -275,7 +275,7 @@ commit）已实现并验证。独立结果执行 episode 与五维 recomposition
 - 正式赛事提交、入围或获奖。
 
 > required-live 最终门已通过（2293 passed、0 failed、0 skipped，
-> 候选库存已为当前 HEAD 生成），不再列入未完成。
+> 候选库存已为本轮冻结定义闭包生成），不再列入未完成。
 
 ## 许可证状态
 
