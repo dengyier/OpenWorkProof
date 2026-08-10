@@ -576,6 +576,58 @@ _SCHEMA = (
     )
     """,
     """
+    CREATE TABLE subject_claims (
+        claim_id TEXT PRIMARY KEY,
+        claim_json BLOB NOT NULL UNIQUE
+    )
+    """,
+    """
+    CREATE TABLE verification_profiles_v02 (
+        profile_id TEXT PRIMARY KEY,
+        subject_claim_id TEXT NOT NULL UNIQUE
+            REFERENCES subject_claims(claim_id),
+        profile_json BLOB NOT NULL UNIQUE
+    )
+    """,
+    """
+    CREATE TABLE external_anchors (
+        anchor_digest TEXT PRIMARY KEY,
+        anchor_kind TEXT NOT NULL CHECK (
+            anchor_kind IN ('policy', 'commitment')
+        ),
+        anchor_json BLOB NOT NULL UNIQUE
+    )
+    """,
+    """
+    CREATE TABLE verification_arm_results (
+        arm_result_id TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL
+            REFERENCES verification_profiles_v02(profile_id),
+        arm_id TEXT NOT NULL,
+        arm_result_json BLOB NOT NULL UNIQUE,
+        UNIQUE(profile_id, arm_id, arm_result_id)
+    )
+    """,
+    """
+    CREATE TABLE verification_decisions (
+        decision_id TEXT PRIMARY KEY,
+        predecessor_id TEXT UNIQUE
+            REFERENCES verification_decisions(decision_id),
+        decision_json BLOB NOT NULL UNIQUE
+    )
+    """,
+    """
+    CREATE TABLE verification_decision_parents (
+        decision_id TEXT NOT NULL
+            REFERENCES verification_decisions(decision_id),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        arm_result_id TEXT NOT NULL
+            REFERENCES verification_arm_results(arm_result_id),
+        PRIMARY KEY(decision_id, ordinal),
+        UNIQUE(decision_id, arm_result_id)
+    )
+    """,
+    """
     CREATE TRIGGER work_orders_single_authority
     BEFORE INSERT ON work_orders
     WHEN EXISTS (SELECT 1 FROM work_orders)

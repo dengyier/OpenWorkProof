@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+import sqlite3
 from datetime import datetime
+from pathlib import Path
+from typing import Callable, Literal, TypeVar
 
+import rfc8785
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -14,7 +19,9 @@ from openworkproof.acceptance import (
     evidence_snapshot_digest,
 )
 from openworkproof.models import (
+    CommitmentAnchor,
     DecisionDraftRequest,
+    PolicyAnchor,
     SubjectClaim,
     VerificationArmResult,
     VerificationArmResultReference,
@@ -23,12 +30,35 @@ from openworkproof.models import (
     VerificationIndependenceAssessment,
     VerificationProfileV02,
     VerificationReasonCode,
+    WorkOrder,
 )
-from openworkproof.signing import canonical_bytes, verify_payload
+from openworkproof.signing import (
+    canonical_bytes,
+    decode_and_verify_key_binding,
+    verify_payload,
+    verify_work_order_identity_bindings,
+)
+import openworkproof.evidence as evidence
 
 
 class VerificationInputError(ValueError):
     """Authenticated protocol input is invalid; no decision may be created."""
+
+
+class VerificationTransactionError(RuntimeError):
+    """A verification ledger transaction did not commit."""
+
+
+class VerificationCommittedError(VerificationTransactionError):
+    """The exact result committed although acknowledgement or cleanup failed."""
+
+    def __init__(self, message: str, committed: object) -> None:
+        super().__init__(message)
+        self.committed = committed
+
+
+class VerificationCommitIndeterminateError(VerificationTransactionError):
+    """The transaction outcome cannot be proven and blind retry is unsafe."""
 
 
 def _decode_public_key(value: str) -> Ed25519PublicKey:
@@ -140,30 +170,50 @@ def _validate_arm_results(
         binding.verifier_key_id: binding for binding in profile.verifier_bindings
     }
     for result in arm_results:
-        arm = expected_arms[result.arm_id]
-        if result.arm_kind != arm.arm_kind:
-            raise VerificationInputError("arm result kind mismatch")
-        binding = bindings.get(result.verifier_key_id)
-        if binding is None or binding.verifier_subject_id != result.verifier_subject_id:
-            raise VerificationInputError("arm result verifier is not profile-bound")
-        if (
-            result.controller_factors != binding.controller_factors
-            or result.execution_context_factors
-            != binding.execution_context_factors
-        ):
-            raise VerificationInputError("arm result independence factors mismatch")
-        if not (
-            binding.valid_from <= result.created_at < binding.expires_at
-            and profile.created_at <= result.created_at < profile.expires_at
-        ):
-            raise VerificationInputError("arm result verifier binding is not current")
-        public_key = _decode_public_key(binding.verifier_public_key_b64url)
-        if not verify_payload(
-            "verification-arm-result",
-            result.model_dump(mode="json"),
-            public_key,
-        ):
-            raise VerificationInputError("arm result signature is invalid")
+        _validate_single_arm_result(
+            profile=profile,
+            result=result,
+            expected_arm=expected_arms[result.arm_id],
+            bindings=bindings,
+        )
+
+
+def _validate_single_arm_result(
+    *,
+    profile: VerificationProfileV02,
+    result: VerificationArmResult,
+    expected_arm=None,
+    bindings=None,
+) -> None:
+    expected_arms = {
+        arm.arm_id: arm for arm in (profile.positive_arm, *profile.negative_arms)
+    }
+    arm = expected_arm if expected_arm is not None else expected_arms.get(result.arm_id)
+    if arm is None or result.arm_kind != arm.arm_kind:
+        raise VerificationInputError("arm result kind or id mismatch")
+    profile_bindings = bindings or {
+        binding.verifier_key_id: binding for binding in profile.verifier_bindings
+    }
+    binding = profile_bindings.get(result.verifier_key_id)
+    if binding is None or binding.verifier_subject_id != result.verifier_subject_id:
+        raise VerificationInputError("arm result verifier is not profile-bound")
+    if (
+        result.controller_factors != binding.controller_factors
+        or result.execution_context_factors != binding.execution_context_factors
+    ):
+        raise VerificationInputError("arm result independence factors mismatch")
+    if not (
+        binding.valid_from <= result.created_at < binding.expires_at
+        and profile.created_at <= result.created_at < profile.expires_at
+    ):
+        raise VerificationInputError("arm result verifier binding is not current")
+    public_key = _decode_public_key(binding.verifier_public_key_b64url)
+    if not verify_payload(
+        "verification-arm-result",
+        result.model_dump(mode="json"),
+        public_key,
+    ):
+        raise VerificationInputError("arm result signature is invalid")
 
 
 def validate_verification_decision(
@@ -322,4 +372,721 @@ def compose_verification_decision(
         ),
         decided_at=request.model_dump(mode="json")["decided_at"],
         nonce=request.nonce,
+    )
+
+
+_T = TypeVar("_T")
+_Fault = Literal[
+    "before_commit",
+    "commit_ack_loss",
+    "readback_failure",
+    "cleanup_failure",
+]
+
+
+def _canonical_model_blob(value) -> bytes:
+    return rfc8785.dumps(value.model_dump(mode="json"))
+
+
+def _load_canonical_model(model_type: type[_T], raw: object, label: str) -> _T:
+    if not isinstance(raw, (bytes, str)):
+        raise VerificationTransactionError(f"{label} canonical row has the wrong type")
+    try:
+        parsed = model_type.model_validate_json(raw)
+    except Exception as error:
+        raise VerificationTransactionError(f"{label} canonical row is invalid") from error
+    encoded = raw.encode("utf-8") if isinstance(raw, str) else raw
+    if _canonical_model_blob(parsed) != encoded:
+        raise VerificationTransactionError(f"{label} canonical row is not canonical")
+    return parsed
+
+
+def external_anchor_digest(anchor: PolicyAnchor | CommitmentAnchor) -> str:
+    kind = "policy" if isinstance(anchor, PolicyAnchor) else "commitment"
+    if not isinstance(anchor, (PolicyAnchor, CommitmentAnchor)):
+        raise VerificationInputError("external anchor type is invalid")
+    return hashlib.sha256(
+        rfc8785.dumps(
+            {
+                "domain": f"openworkproof/external-anchor/{kind}/v0.2",
+                "anchor": anchor.model_dump(mode="json"),
+            }
+        )
+    ).hexdigest()
+
+
+def _manager_binding(work_order: WorkOrder):
+    if not verify_work_order_identity_bindings(work_order):
+        raise VerificationTransactionError("WorkOrder authority is invalid")
+    try:
+        return next(
+            binding for binding in work_order.key_bindings if binding.role == "Manager"
+        )
+    except StopIteration as error:
+        raise VerificationTransactionError("WorkOrder Manager binding is missing") from error
+
+
+def _validate_profile_authority(
+    *,
+    work_order: WorkOrder,
+    claim: SubjectClaim,
+    profile: VerificationProfileV02,
+) -> None:
+    manager = _manager_binding(work_order)
+    manager_key = decode_and_verify_key_binding(manager)
+    if (
+        claim.work_order_digest != work_order.digest
+        or profile.work_order_digest != work_order.digest
+        or profile.subject_claim_digest != claim.digest
+    ):
+        raise VerificationTransactionError("profile authority digests do not match")
+    if claim.customer_acceptor_key_id not in work_order.acceptor_key_ids:
+        raise VerificationTransactionError("claim Acceptor is not WorkOrder-bound")
+    if claim.signer_key_id != manager.key_id or not verify_payload(
+        "subject-claim", claim.model_dump(mode="json"), manager_key
+    ):
+        raise VerificationTransactionError("subject claim Manager signature is invalid")
+    if profile.signer_key_id != manager.key_id or not verify_payload(
+        "verification-profile", profile.model_dump(mode="json"), manager_key
+    ):
+        raise VerificationTransactionError("profile Manager signature is invalid")
+    if not (
+        claim.created_at <= profile.created_at < profile.expires_at
+        and profile.expires_at <= work_order.deadline
+    ):
+        raise VerificationTransactionError("profile validity is outside the WorkOrder")
+
+
+def _cleanup_transaction(
+    connection: sqlite3.Connection | None,
+    lock_descriptor: int | None,
+) -> tuple[Exception, ...]:
+    errors: list[Exception] = []
+    close_error = evidence._best_effort_close(connection)
+    if close_error is not None:
+        errors.append(close_error)
+    _, release_errors = evidence._release_target_lock(lock_descriptor)
+    errors.extend(release_errors)
+    return tuple(errors)
+
+
+def _commit_with_readback(
+    path: Path,
+    *,
+    stage: Callable[[sqlite3.Connection], _T],
+    readback: Callable[[_T], bool],
+    fault: _Fault | None,
+) -> _T:
+    if fault not in {None, "before_commit", "commit_ack_loss", "readback_failure", "cleanup_failure"}:
+        raise VerificationTransactionError("unknown transaction fault")
+    if not path.is_file():
+        raise VerificationTransactionError("verification ledger is unavailable")
+    lock_descriptor: int | None = None
+    connection: sqlite3.Connection | None = None
+    committed = False
+    result: _T | None = None
+    try:
+        lock_descriptor, _ = evidence._borrow_or_acquire_target_lock(path, None)
+        connection = evidence.connect_ledger(path)
+        connection.execute("BEGIN IMMEDIATE")
+        result = stage(connection)
+        if fault == "before_commit":
+            raise VerificationTransactionError("injected fault before commit")
+        connection.execute("COMMIT")
+        committed = True
+        if fault == "commit_ack_loss":
+            raise OSError("injected commit acknowledgement loss")
+        if fault == "readback_failure":
+            raise VerificationCommitIndeterminateError(
+                "verification readback was deliberately unavailable"
+            )
+        if not readback(result):
+            raise VerificationCommitIndeterminateError(
+                "verification readback could not confirm the exact commit"
+            )
+    except Exception as error:
+        evidence._best_effort_rollback(connection)
+        cleanup_errors = _cleanup_transaction(connection, lock_descriptor)
+        if isinstance(error, VerificationCommittedError):
+            raise error
+        if isinstance(error, VerificationCommitIndeterminateError):
+            raise error
+        if committed and result is not None:
+            try:
+                confirmed = readback(result)
+            except Exception as readback_error:
+                raise VerificationCommitIndeterminateError(
+                    "verification commit outcome is indeterminate"
+                ) from readback_error
+            if confirmed:
+                raise VerificationCommittedError(
+                    "verification committed but acknowledgement was lost",
+                    result,
+                ) from error
+            raise VerificationCommitIndeterminateError(
+                "verification commit outcome is indeterminate"
+            ) from error
+        if isinstance(error, VerificationTransactionError) and not cleanup_errors:
+            raise error
+        raise VerificationTransactionError("verification transaction failed") from error
+    assert result is not None
+    cleanup_errors = list(_cleanup_transaction(connection, lock_descriptor))
+    if fault == "cleanup_failure":
+        cleanup_errors.append(OSError("injected cleanup failure"))
+    if cleanup_errors:
+        raise VerificationCommittedError(
+            "verification committed but cleanup failed", result
+        ) from cleanup_errors[0]
+    return result
+
+
+def _exact_profile_readback(
+    path: Path,
+    *,
+    claim: SubjectClaim,
+    profile: VerificationProfileV02,
+    anchors: tuple[PolicyAnchor | CommitmentAnchor, ...],
+) -> bool:
+    connection = evidence.connect_ledger(path)
+    try:
+        claim_row = connection.execute(
+            "SELECT claim_json FROM subject_claims WHERE claim_id = ?",
+            (claim.claim_id,),
+        ).fetchone()
+        profile_row = connection.execute(
+            "SELECT subject_claim_id, profile_json FROM verification_profiles_v02 WHERE profile_id = ?",
+            (profile.profile_id,),
+        ).fetchone()
+        if claim_row != (_canonical_model_blob(claim),) or profile_row != (
+            claim.claim_id,
+            _canonical_model_blob(profile),
+        ):
+            return False
+        for anchor in anchors:
+            kind = "policy" if isinstance(anchor, PolicyAnchor) else "commitment"
+            row = connection.execute(
+                "SELECT anchor_kind, anchor_json FROM external_anchors WHERE anchor_digest = ?",
+                (external_anchor_digest(anchor),),
+            ).fetchone()
+            if row != (kind, _canonical_model_blob(anchor)):
+                return False
+        return True
+    finally:
+        connection.close()
+
+
+def _assert_nonce_unused(
+    connection: sqlite3.Connection,
+    nonce: str,
+    *,
+    allowed: tuple[tuple[str, str], ...] = (),
+) -> None:
+    allowed_set = set(allowed)
+    for table, identifier_column, json_column in (
+        ("subject_claims", "claim_id", "claim_json"),
+        ("verification_profiles_v02", "profile_id", "profile_json"),
+        ("verification_decisions", "decision_id", "decision_json"),
+    ):
+        for identifier, raw in connection.execute(
+            f"SELECT {identifier_column}, {json_column} FROM {table}"
+        ):
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError) as error:
+                raise VerificationTransactionError(
+                    "protocol nonce source row is invalid"
+                ) from error
+            if payload.get("nonce") == nonce and (table, identifier) not in allowed_set:
+                raise VerificationTransactionError("protocol nonce is already used")
+
+
+def commit_verification_profile(
+    ledger_path: Path,
+    claim: SubjectClaim,
+    profile: VerificationProfileV02,
+    *,
+    policy_anchor: PolicyAnchor | None = None,
+    commitment_anchor: CommitmentAnchor | None = None,
+    fault: _Fault | None = None,
+) -> VerificationProfileV02:
+    path = Path(ledger_path)
+    try:
+        parsed_claim = SubjectClaim.model_validate(claim.model_dump(mode="json"))
+        parsed_profile = VerificationProfileV02.model_validate(
+            profile.model_dump(mode="json")
+        )
+    except Exception as error:
+        raise VerificationTransactionError("profile inputs are malformed") from error
+    anchors = tuple(
+        anchor for anchor in (policy_anchor, commitment_anchor) if anchor is not None
+    )
+
+    def stage(connection: sqlite3.Connection) -> VerificationProfileV02:
+        work_order = evidence.load_authoritative_work_order(connection)
+        _validate_profile_authority(
+            work_order=work_order, claim=parsed_claim, profile=parsed_profile
+        )
+        if (parsed_profile.policy_anchor_digest is None) != (policy_anchor is None):
+            raise VerificationTransactionError("policy anchor binding is incomplete")
+        if policy_anchor is not None and parsed_profile.policy_anchor_digest != external_anchor_digest(policy_anchor):
+            raise VerificationTransactionError("policy anchor digest mismatch")
+        if (parsed_profile.commitment_anchor_digest is None) != (commitment_anchor is None):
+            raise VerificationTransactionError("commitment anchor binding is incomplete")
+        if commitment_anchor is not None:
+            if (
+                parsed_profile.commitment_anchor_digest
+                != external_anchor_digest(commitment_anchor)
+                or commitment_anchor.work_order_digest != work_order.digest
+                or commitment_anchor.subject_claim_digest != parsed_claim.digest
+            ):
+                raise VerificationTransactionError("commitment anchor binding mismatch")
+            if (
+                parsed_profile.delivery_trust_level in {2, 3}
+                and (
+                    commitment_anchor.anchor_provider != "customer_signed_document"
+                    or not commitment_anchor.anchor_reference.startswith("customer://")
+                )
+            ):
+                raise VerificationTransactionError(
+                    "level 2/3 requires a customer-domain commitment"
+                )
+        existing = connection.execute(
+            "SELECT subject_claim_id, profile_json FROM verification_profiles_v02 WHERE profile_id = ?",
+            (parsed_profile.profile_id,),
+        ).fetchone()
+        if existing is not None:
+            if existing == (parsed_claim.claim_id, _canonical_model_blob(parsed_profile)):
+                raise VerificationCommittedError(
+                    "the exact verification profile is already committed",
+                    parsed_profile,
+                )
+            raise VerificationTransactionError("verification profile id is already used")
+        claim_row = connection.execute(
+            "SELECT claim_json FROM subject_claims WHERE claim_id = ?",
+            (parsed_claim.claim_id,),
+        ).fetchone()
+        if claim_row is not None and claim_row != (_canonical_model_blob(parsed_claim),):
+            raise VerificationTransactionError("subject claim id is already used")
+        if parsed_claim.nonce == parsed_profile.nonce:
+            raise VerificationTransactionError(
+                "claim and profile must use distinct protocol nonces"
+            )
+        allowed_claim = (
+            ()
+            if claim_row is None
+            else (("subject_claims", parsed_claim.claim_id),)
+        )
+        _assert_nonce_unused(
+            connection,
+            parsed_claim.nonce,
+            allowed=allowed_claim,
+        )
+        _assert_nonce_unused(connection, parsed_profile.nonce)
+        if claim_row is None:
+            connection.execute(
+                "INSERT INTO subject_claims (claim_id, claim_json) VALUES (?, ?)",
+                (parsed_claim.claim_id, _canonical_model_blob(parsed_claim)),
+            )
+        for anchor in anchors:
+            kind = "policy" if isinstance(anchor, PolicyAnchor) else "commitment"
+            connection.execute(
+                "INSERT OR IGNORE INTO external_anchors (anchor_digest, anchor_kind, anchor_json) VALUES (?, ?, ?)",
+                (external_anchor_digest(anchor), kind, _canonical_model_blob(anchor)),
+            )
+            stored = connection.execute(
+                "SELECT anchor_kind, anchor_json FROM external_anchors WHERE anchor_digest = ?",
+                (external_anchor_digest(anchor),),
+            ).fetchone()
+            if stored != (kind, _canonical_model_blob(anchor)):
+                raise VerificationTransactionError("external anchor digest is already used")
+        connection.execute(
+            "INSERT INTO verification_profiles_v02 (profile_id, subject_claim_id, profile_json) VALUES (?, ?, ?)",
+            (
+                parsed_profile.profile_id,
+                parsed_claim.claim_id,
+                _canonical_model_blob(parsed_profile),
+            ),
+        )
+        return parsed_profile
+
+    return _commit_with_readback(
+        path,
+        stage=stage,
+        readback=lambda _: _exact_profile_readback(
+            path, claim=parsed_claim, profile=parsed_profile, anchors=anchors
+        ),
+        fault=fault,
+    )
+
+
+def _load_profile_context(
+    connection: sqlite3.Connection,
+    *,
+    profile_digest: str,
+) -> tuple[WorkOrder, SubjectClaim, VerificationProfileV02]:
+    work_order = evidence.load_authoritative_work_order(connection)
+    matches = []
+    for profile_id, claim_id, raw in connection.execute(
+        "SELECT profile_id, subject_claim_id, profile_json FROM verification_profiles_v02 ORDER BY profile_id"
+    ):
+        profile = _load_canonical_model(
+            VerificationProfileV02, raw, "verification profile"
+        )
+        if profile.profile_id != profile_id:
+            raise VerificationTransactionError("profile index does not match canonical row")
+        if profile.digest == profile_digest:
+            matches.append((claim_id, profile))
+    if len(matches) != 1:
+        raise VerificationTransactionError("verification profile is unavailable")
+    claim_id, profile = matches[0]
+    row = connection.execute(
+        "SELECT claim_json FROM subject_claims WHERE claim_id = ?", (claim_id,)
+    ).fetchone()
+    if row is None:
+        raise VerificationTransactionError("subject claim row is unavailable")
+    claim = _load_canonical_model(SubjectClaim, row[0], "subject claim")
+    if claim.claim_id != claim_id:
+        raise VerificationTransactionError("claim index does not match canonical row")
+    _validate_profile_authority(work_order=work_order, claim=claim, profile=profile)
+    return work_order, claim, profile
+
+
+def _validate_causal_receipts(
+    connection: sqlite3.Connection,
+    *,
+    work_order: WorkOrder,
+    receipt_ids: tuple[str, ...],
+) -> None:
+    sidecar = next(
+        binding for binding in work_order.key_bindings if binding.role == "Sidecar"
+    )
+    sidecar_key = decode_and_verify_key_binding(sidecar)
+    for receipt_id in receipt_ids:
+        row = connection.execute(
+            "SELECT receipt_json FROM receipts WHERE receipt_id = ?", (receipt_id,)
+        ).fetchone()
+        if row is None:
+            raise VerificationTransactionError("arm result causal parent is missing")
+        try:
+            receipt = evidence.ACTION_RECEIPT_ADAPTER.validate_json(row[0])
+        except Exception as error:
+            raise VerificationTransactionError("causal receipt canonical row is invalid") from error
+        encoded = row[0].encode("utf-8") if isinstance(row[0], str) else row[0]
+        if (
+            receipt.receipt_id != receipt_id
+            or receipt.work_order_digest != work_order.digest
+            or rfc8785.dumps(receipt.model_dump(mode="json")) != encoded
+            or not verify_payload(
+                "action-receipt", receipt.model_dump(mode="json"), sidecar_key
+            )
+        ):
+            raise VerificationTransactionError("causal receipt validation failed")
+
+
+def _exact_arm_result_readback(path: Path, result: VerificationArmResult) -> bool:
+    connection = evidence.connect_ledger(path)
+    try:
+        row = connection.execute(
+            "SELECT arm_result_json FROM verification_arm_results WHERE arm_result_id = ?",
+            (result.arm_result_id,),
+        ).fetchone()
+        return row == (_canonical_model_blob(result),)
+    finally:
+        connection.close()
+
+
+def commit_verification_arm_result(
+    ledger_path: Path,
+    result: VerificationArmResult,
+    *,
+    fault: _Fault | None = None,
+) -> VerificationArmResult:
+    path = Path(ledger_path)
+    try:
+        parsed = VerificationArmResult.model_validate(result.model_dump(mode="json"))
+    except Exception as error:
+        raise VerificationTransactionError("arm result input is malformed") from error
+
+    def stage(connection: sqlite3.Connection) -> VerificationArmResult:
+        work_order, _, profile = _load_profile_context(
+            connection, profile_digest=parsed.profile_digest
+        )
+        try:
+            _validate_single_arm_result(profile=profile, result=parsed)
+        except VerificationInputError as error:
+            raise VerificationTransactionError(str(error)) from error
+        _validate_causal_receipts(
+            connection,
+            work_order=work_order,
+            receipt_ids=parsed.action_receipt_ids,
+        )
+        if sum(ref.size_bytes for ref in parsed.evidence_refs) > profile.max_evidence_bytes:
+            raise VerificationTransactionError("arm result evidence limit exceeded")
+        arm = (
+            profile.positive_arm
+            if parsed.arm_id == profile.positive_arm.arm_id
+            else next(item for item in profile.negative_arms if item.arm_id == parsed.arm_id)
+        )
+        allowed_paths = set(arm.result_artifact_paths)
+        if any(ref.path not in allowed_paths for ref in parsed.evidence_refs):
+            raise VerificationTransactionError("arm result evidence path is outside profile")
+        existing = connection.execute(
+            "SELECT profile_id, arm_id, arm_result_json FROM verification_arm_results WHERE arm_result_id = ?",
+            (parsed.arm_result_id,),
+        ).fetchone()
+        expected = (profile.profile_id, parsed.arm_id, _canonical_model_blob(parsed))
+        if existing is not None:
+            if existing == expected:
+                raise VerificationCommittedError(
+                    "the exact arm result is already committed", parsed
+                )
+            raise VerificationTransactionError("arm result id is already used")
+        connection.execute(
+            "INSERT INTO verification_arm_results (arm_result_id, profile_id, arm_id, arm_result_json) VALUES (?, ?, ?, ?)",
+            (parsed.arm_result_id, *expected),
+        )
+        return parsed
+
+    return _commit_with_readback(
+        path,
+        stage=stage,
+        readback=lambda _: _exact_arm_result_readback(path, parsed),
+        fault=fault,
+    )
+
+
+def _load_arm_results(
+    connection: sqlite3.Connection,
+    *,
+    profile: VerificationProfileV02,
+    selected_ids: tuple[str, ...] | None = None,
+) -> tuple[VerificationArmResult, ...]:
+    values = []
+    for result_id, profile_id, arm_id, raw in connection.execute(
+        "SELECT arm_result_id, profile_id, arm_id, arm_result_json FROM verification_arm_results WHERE profile_id = ? ORDER BY arm_result_id",
+        (profile.profile_id,),
+    ):
+        result = _load_canonical_model(
+            VerificationArmResult, raw, "verification arm result"
+        )
+        if (
+            result.arm_result_id != result_id
+            or result.arm_id != arm_id
+            or profile_id != profile.profile_id
+        ):
+            raise VerificationTransactionError("arm result index does not match canonical row")
+        try:
+            _validate_single_arm_result(profile=profile, result=result)
+        except VerificationInputError as error:
+            raise VerificationTransactionError(str(error)) from error
+        values.append(result)
+    if selected_ids is not None:
+        selected = [item for item in values if item.arm_result_id in set(selected_ids)]
+        if len(selected) != len(selected_ids):
+            raise VerificationTransactionError("decision arm result is unavailable")
+        return tuple(sorted(selected, key=lambda item: item.arm_result_id))
+    latest = {}
+    for result in values:
+        key = (result.created_at, result.arm_result_id)
+        current = latest.get(result.arm_id)
+        if current is None or key > (current.created_at, current.arm_result_id):
+            latest[result.arm_id] = result
+    return tuple(sorted(latest.values(), key=lambda item: item.arm_result_id))
+
+
+def _load_current_decision(
+    connection: sqlite3.Connection,
+    *,
+    profile: VerificationProfileV02,
+) -> VerificationDecision | None:
+    previous = None
+    for decision_id, predecessor_id, raw in connection.execute(
+        "SELECT decision_id, predecessor_id, decision_json FROM verification_decisions ORDER BY rowid"
+    ):
+        decision = _load_canonical_model(
+            VerificationDecision, raw, "verification decision"
+        )
+        if decision.decision_id != decision_id or predecessor_id != (
+            None if previous is None else previous.decision_id
+        ):
+            raise VerificationTransactionError("verification decision chain is invalid")
+        try:
+            validate_verification_decision(profile=profile, decision=decision)
+        except VerificationInputError as error:
+            raise VerificationTransactionError(str(error)) from error
+        parents = tuple(
+            row[0]
+            for row in connection.execute(
+                "SELECT arm_result_id FROM verification_decision_parents WHERE decision_id = ? ORDER BY ordinal",
+                (decision_id,),
+            )
+        )
+        if parents != tuple(item.arm_result_id for item in decision.arm_results):
+            raise VerificationTransactionError("verification decision parents are invalid")
+        previous = decision
+    return previous
+
+
+def _load_single_profile(
+    connection: sqlite3.Connection,
+) -> tuple[WorkOrder, SubjectClaim, VerificationProfileV02]:
+    rows = tuple(connection.execute("SELECT profile_json FROM verification_profiles_v02"))
+    if len(rows) != 1:
+        raise VerificationTransactionError("exactly one verification profile is required")
+    profile = _load_canonical_model(
+        VerificationProfileV02, rows[0][0], "verification profile"
+    )
+    return _load_profile_context(connection, profile_digest=profile.digest)
+
+
+def prepare_verification_decision(
+    ledger_path: Path,
+    request: DecisionDraftRequest,
+) -> VerificationDecisionDraft:
+    path = Path(ledger_path)
+    if not path.is_file():
+        raise VerificationTransactionError("verification ledger is unavailable")
+    lock_descriptor: int | None = None
+    connection: sqlite3.Connection | None = None
+    try:
+        parsed_request = DecisionDraftRequest.model_validate(
+            request.model_dump(mode="json")
+        )
+        lock_descriptor, _ = evidence._borrow_or_acquire_target_lock(path, None)
+        connection = evidence.connect_ledger(path)
+        connection.execute("BEGIN")
+        _, claim, profile = _load_single_profile(connection)
+        results = _load_arm_results(connection, profile=profile)
+        previous = _load_current_decision(connection, profile=profile)
+        draft = compose_verification_decision(
+            profile=profile,
+            subject_claim=claim,
+            arm_results=results,
+            previous_decision=previous,
+            decision_id=parsed_request.decision_id,
+            decided_at=parsed_request.decided_at,
+            nonce=parsed_request.nonce,
+        )
+        connection.execute("ROLLBACK")
+        return draft
+    except VerificationTransactionError:
+        evidence._best_effort_rollback(connection)
+        raise
+    except Exception as error:
+        evidence._best_effort_rollback(connection)
+        raise VerificationTransactionError(
+            "verification decision preparation failed"
+        ) from error
+    finally:
+        cleanup = _cleanup_transaction(connection, lock_descriptor)
+        if cleanup:
+            raise VerificationCommitIndeterminateError(
+                "verification decision preparation cleanup failed"
+            ) from cleanup[0]
+
+
+def _exact_decision_readback(path: Path, decision: VerificationDecision) -> bool:
+    connection = evidence.connect_ledger(path)
+    try:
+        row = connection.execute(
+            "SELECT predecessor_id, decision_json FROM verification_decisions WHERE decision_id = ?",
+            (decision.decision_id,),
+        ).fetchone()
+        expected = (
+            decision.supersedes_decision_id,
+            _canonical_model_blob(decision),
+        )
+        if row != expected:
+            return False
+        parents = tuple(
+            connection.execute(
+                "SELECT ordinal, arm_result_id FROM verification_decision_parents WHERE decision_id = ? ORDER BY ordinal",
+                (decision.decision_id,),
+            )
+        )
+        return parents == tuple(
+            (ordinal, reference.arm_result_id)
+            for ordinal, reference in enumerate(decision.arm_results)
+        )
+    finally:
+        connection.close()
+
+
+def commit_verification_decision(
+    ledger_path: Path,
+    decision: VerificationDecision,
+    *,
+    fault: _Fault | None = None,
+) -> VerificationDecision:
+    path = Path(ledger_path)
+    try:
+        parsed = VerificationDecision.model_validate(decision.model_dump(mode="json"))
+    except Exception as error:
+        raise VerificationTransactionError("verification decision is malformed") from error
+
+    def stage(connection: sqlite3.Connection) -> VerificationDecision:
+        _, claim, profile = _load_profile_context(
+            connection, profile_digest=parsed.profile_digest
+        )
+        current = _load_current_decision(connection, profile=profile)
+        if current is not None and current.decision_id == parsed.decision_id:
+            if current == parsed and _exact_decision_readback(path, parsed):
+                raise VerificationCommittedError(
+                    "the exact verification decision is already committed", parsed
+                )
+            raise VerificationTransactionError(
+                "verification decision id is already used"
+            )
+        _assert_nonce_unused(connection, parsed.nonce)
+        selected_ids = tuple(item.arm_result_id for item in parsed.arm_results)
+        results = _load_arm_results(
+            connection, profile=profile, selected_ids=selected_ids
+        )
+        latest = _load_arm_results(connection, profile=profile)
+        if tuple(item.arm_result_id for item in results) != tuple(
+            item.arm_result_id for item in latest
+        ):
+            raise VerificationTransactionError("verification decision uses stale arm results")
+        try:
+            draft = compose_verification_decision(
+                profile=profile,
+                subject_claim=claim,
+                arm_results=results,
+                previous_decision=current,
+                decision_id=parsed.decision_id,
+                decided_at=parsed.decided_at,
+                nonce=parsed.nonce,
+            )
+            validate_verification_decision(profile=profile, decision=parsed)
+        except VerificationInputError as error:
+            raise VerificationTransactionError(str(error)) from error
+        if verification_decision_signing_bytes(draft) != verification_decision_signing_bytes(parsed):
+            raise VerificationTransactionError("verification decision draft mismatch")
+        existing = connection.execute(
+            "SELECT predecessor_id, decision_json FROM verification_decisions WHERE decision_id = ?",
+            (parsed.decision_id,),
+        ).fetchone()
+        expected = (parsed.supersedes_decision_id, _canonical_model_blob(parsed))
+        if existing is not None:
+            if existing == expected and _exact_decision_readback(path, parsed):
+                raise VerificationCommittedError(
+                    "the exact verification decision is already committed", parsed
+                )
+            raise VerificationTransactionError("verification decision id is already used")
+        connection.execute(
+            "INSERT INTO verification_decisions (decision_id, predecessor_id, decision_json) VALUES (?, ?, ?)",
+            (parsed.decision_id, parsed.supersedes_decision_id, _canonical_model_blob(parsed)),
+        )
+        for ordinal, reference in enumerate(parsed.arm_results):
+            connection.execute(
+                "INSERT INTO verification_decision_parents (decision_id, ordinal, arm_result_id) VALUES (?, ?, ?)",
+                (parsed.decision_id, ordinal, reference.arm_result_id),
+            )
+        return parsed
+
+    return _commit_with_readback(
+        path,
+        stage=stage,
+        readback=lambda _: _exact_decision_readback(path, parsed),
+        fault=fault,
     )
