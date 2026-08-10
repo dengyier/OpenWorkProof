@@ -1590,33 +1590,33 @@ Expected: facade and all existing MCP server regressions pass.
 - Modify: `tests/test_cli_transport.py`
 - Modify: `MCP_SERVER.md`
 
-- [ ] **Step 1: Write RED CLI parser tests**
+- [x] **Step 1: Write RED CLI parser tests**
 
 Require commands for `profile-validate`, `verify-positive`, `verify-negative`,
 `verify-compose`, `delivery-build`, `audit-replay`, `audit-explain`,
 `audit-compare`, and `settlement-status`. Test JSON error parity and no private
 key arguments for read-only operations.
 
-- [ ] **Step 2: Implement thin CLI commands**
+- [x] **Step 2: Implement thin CLI commands**
 
 Each parser branch loads bounded JSON/path inputs, invokes one
 `OpenWorkProofServices` method, and emits sorted JSON. No CLI branch constructs
 a VerificationDecision or SettlementReadiness directly. `delivery-build`
 requires `--privacy-view public|customer_private`; it has no silent default.
 
-- [ ] **Step 3: Write RED MCP registration and parity tests**
+- [x] **Step 3: Write RED MCP registration and parity tests**
 
 Require the approved tool names and compare their result dictionaries with the
 equivalent service call for the same fixture. Simulate COMMIT ACK loss and
 assert MCP returns committed/indeterminate truth without blind retry.
 
-- [ ] **Step 4: Implement minimal MCP tools**
+- [x] **Step 4: Implement minimal MCP tools**
 
 Register only the approved profile, evidence, verification, delivery, and
 settlement tools. Acceptor signing remains an external/local-key operation;
 MCP must never accept or store an Acceptor private key.
 
-- [ ] **Step 5: Run interface GREEN and commit**
+- [x] **Step 5: Run interface GREEN and commit**
 
 Run:
 
