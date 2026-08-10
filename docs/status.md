@@ -3,7 +3,8 @@
 > 本文档是项目实现状态的权威记录。README 只保留概览，
 > 「已经完成什么」和「尚未完成什么」的完整清单以本文为准。
 
-当前版本：0.1.0（开发中）
+当前分发版本：1.1.1；当前冻结协议 Schema：0.1。两类版本分别记录，
+不得把 Python 分发版本解释成协议版本。
 
 ## 当前已经实现的能力
 
@@ -110,13 +111,19 @@
 - Acceptance 事务专项：40 passed；
 - Acceptance、Contract、Signing、State、Composition、Policy、
   Receipt-chain、MCP 与 Schema focused 门：1058 passed；
-- candidate-inventory 供应链专项（required-live Docker）：157 passed
-  （image supply-chain 63 + candidate integration 83 + prepare 11，0 skip）；
-- 全量测试（required-live Docker，0 skip）：2281 passed、0 failed，
-  退出码 0；固定 execution RepoDigest 与外部 artifact root 均按冻结计划提供；
-- 当前 HEAD 本地全量（非 required-live）：2271 passed、7 skipped、0 failed；
-  候选库存已为当前 HEAD 重新生成（supply-chain/images/candidates/
-  21af516b…json），历史 2 个既有失败已消除；
+- 干净 Python 3.12 editable 环境：模块版本与 distribution metadata 均为
+  `1.1.1`，`tests/test_package.py` 1 passed；
+- M0 修复前本地全量基线：2283 passed、2 failed、7 skipped、1 warning；
+  两个失败均为 current candidate inventory 匹配数 0，版本测试已通过；
+- 新增不可变候选库存：`supply-chain/images/candidates/
+  e5e6d565bed346bcc0afd36ac08ed818bd2063a3.json`；历史库存未覆盖；
+- image supply-chain 静态契约：65 passed；current inventory 的 runner 与
+  fixed-test-source 选择器：2 passed；
+- candidate artifact chain（required-live Docker）：1 passed、82 deselected，
+  Docker/OCI archive、live image、revision 重建与断网 smoke 全链通过；
+- 全量测试（required-live Docker）：2293 passed、0 failed、0 skipped、
+  1 warning，退出码 0，耗时 480.31 秒；warning 为既有
+  `team_network_client` 服务重启测试中的关闭期线程竞态，未隐藏；
 - M2 Rich #4196 演示专项：test_delivery_m2 5 passed（repo_read 管道
   output_digest 精确重算、apply_patch active patch、verifier 本地验证、
   compose→独立→recompose proof_ready、外部 Acceptor 子进程签名 + 离线
@@ -136,11 +143,10 @@
 - pip check、compileall 和 git diff check：通过；
 - OpenWorkProof Docker 容器与卷残留：0。
 
-同一验证窗口的前两轮全量测试分别暴露一个未修改测试夹具的进程竞态：
-schema registry 交叉进程写入用例，以及 detached-survivor pidfile 就绪用例。
-两项均在不改代码的情况下独立重复 5 次并全部通过；最终完整 required-live
-门取得上述 2197/2197 结果（第四轮审核修复后复验，0 failed、0 skip）。
-该记录保留失败历史，不把一次最终绿灯改写成“从未出现过不稳定性”。
+历史验证窗口曾暴露 schema registry 交叉进程写入和 detached-survivor
+pidfile 就绪竞态；本轮又观察到 `team_network_client` 关闭期线程 warning。
+最新 required-live 门仍为 2293/2293 通过、0 failed、0 skipped，但这些历史
+与 warning 保留在记录中，不把一次最终绿灯改写成“从未出现过不稳定性”。
 
 ## 重要边界
 
@@ -268,7 +274,7 @@ commit）已实现并验证。独立结果执行 episode 与五维 recomposition
   已完成；外部个人复核属线下事件，不由本仓库保证）；
 - 正式赛事提交、入围或获奖。
 
-> required-live 最终门已通过（2281 passed、0 failed、0 skip，
+> required-live 最终门已通过（2293 passed、0 failed、0 skipped，
 > 候选库存已为当前 HEAD 生成），不再列入未完成。
 
 ## 许可证状态
