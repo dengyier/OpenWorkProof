@@ -1029,7 +1029,7 @@ Expected: the complete matrix and independence tests pass.
 - Modify: `src/openworkproof/verification.py`
 - Create: `tests/test_verification_transactions_v02.py`
 
-- [ ] **Step 1: Write RED schema and zero-write tests**
+- [x] **Step 1: Write RED schema and zero-write tests**
 
 Assert exact new tables and snapshot all protocol tables before injecting a
 pre-COMMIT failure:
@@ -1049,7 +1049,7 @@ def test_profile_precommit_failure_has_zero_protocol_writes(v02_case) -> None:
 
 Run and expect missing-table/function failures.
 
-- [ ] **Step 2: Add append-only tables**
+- [x] **Step 2: Add append-only tables**
 
 Extend the authoritative ledger schema with canonical JSON plus indexed
 identifiers:
@@ -1092,7 +1092,7 @@ CREATE TABLE verification_decision_parents (
 
 Canonical bytes remain replay authority; indexed values are revalidated.
 
-- [ ] **Step 3: Implement T1 and T2**
+- [x] **Step 3: Implement T1 and T2**
 
 Add `commit_verification_profile` and `commit_verification_arm_result` using
 the existing target lock and `BEGIN IMMEDIATE`. T1 atomically stores the exact
@@ -1101,7 +1101,7 @@ reject a missing customer-domain commitment. Each transaction validates
 exact WorkOrder, role, signature, nonce, digest, predecessor, evidence limit,
 and replay state inside the transaction.
 
-- [ ] **Step 4: Implement T3 and readback**
+- [x] **Step 4: Implement T3 and readback**
 
 Add `prepare_verification_decision`, which loads a frozen validated ledger
 snapshot and calls the pure composer to return exact signing bytes. Add
@@ -1110,14 +1110,14 @@ frozen inputs, compares exact canonical bytes, inserts decision plus ordered
 parents, commits, then performs exact readback. Expose committed and
 indeterminate error types matching existing acceptance transaction behavior.
 
-- [ ] **Step 5: Add COMMIT-ACK, concurrency, and tamper tests**
+- [x] **Step 5: Add COMMIT-ACK, concurrency, and tamper tests**
 
 Cover commit-then-raise ACK loss, failed readback, concurrent same predecessor,
 duplicate result, stale supersedes, tampered canonical JSON, and cleanup
 failure. Expected: committed truth is recoverable, indeterminate blocks blind
 retry, and concurrency has one winner.
 
-- [ ] **Step 6: Run GREEN and commit**
+- [x] **Step 6: Run GREEN and commit**
 
 Run:
 
