@@ -285,6 +285,62 @@ def test_unknown_version_and_object_type_fail_closed(tmp_path: Path) -> None:
     assert result.error_code == "UNKNOWN_PROTOCOL_VERSION"
 
 
+def test_v01_registry_routing_is_closed_and_explicit() -> None:
+    api = _api()
+
+    assert api._OBJECT_PATHS_BY_VERSION == {"0.1": OBJECT_PATHS}
+    assert set(api._SCHEMA_FACTORIES_BY_VERSION) == {"0.1"}
+    assert set(api._SCHEMA_FACTORIES_BY_VERSION["0.1"]) == set(OBJECT_PATHS)
+    assert set(api._generated_files(version="0.1")) == SCHEMA_FILENAMES
+
+
+def test_v02_is_unregistered_before_complete_schema_freeze(tmp_path: Path) -> None:
+    api = _api()
+    destination = tmp_path / "v02"
+
+    with pytest.raises(ValueError, match="unknown protocol version"):
+        api.write_authoritative_schemas(
+            destination,
+            version="0.2",
+        )
+
+    assert destination.exists() is False
+
+
+def test_cli_requires_explicit_registered_version_and_destination(
+    tmp_path: Path,
+) -> None:
+    api = _api()
+    destination = tmp_path / "v01"
+
+    assert api.main(
+        [
+            "--version",
+            "0.1",
+            "--destination",
+            str(destination),
+        ]
+    ) == 0
+    assert set(_snapshot(destination)) == SCHEMA_FILENAMES
+
+    missing_version = tmp_path / "missing-version"
+    with pytest.raises(SystemExit):
+        api.main(["--destination", str(missing_version)])
+    assert missing_version.exists() is False
+
+    unknown_version = tmp_path / "unknown-version"
+    with pytest.raises(SystemExit):
+        api.main(
+            [
+                "--version",
+                "0.2",
+                "--destination",
+                str(unknown_version),
+            ]
+        )
+    assert unknown_version.exists() is False
+
+
 def test_runtime_authority_is_independent_of_current_working_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -357,7 +413,16 @@ def test_writer_and_cli_emit_exact_repeatable_package_and_mirror_bytes(
     package = tmp_path / "package"
     mirror = tmp_path / "mirror"
 
-    assert api.main([str(package), "--mirror", str(mirror)]) == 0
+    assert api.main(
+        [
+            "--version",
+            "0.1",
+            "--destination",
+            str(package),
+            "--mirror",
+            str(mirror),
+        ]
+    ) == 0
     first_package = {
         path.name: path.read_bytes() for path in package.iterdir()
     }
@@ -388,7 +453,16 @@ def test_cli_accepts_real_macos_mktemp_parent() -> None:
     mirror = root / "mirror"
 
     try:
-        assert api.main([str(package), "--mirror", str(mirror)]) == 0
+        assert api.main(
+            [
+                "--version",
+                "0.1",
+                "--destination",
+                str(package),
+                "--mirror",
+                str(mirror),
+            ]
+        ) == 0
         assert set(_snapshot(package)) == SCHEMA_FILENAMES
         assert _snapshot(mirror) == _snapshot(package)
     finally:
@@ -668,7 +742,11 @@ def delayed_stage(target, files):
     return stage
 
 api._stage_schema_directory = delayed_stage
-raise SystemExit(api.main([sys.argv[2], "--mirror", sys.argv[3]]))
+raise SystemExit(api.main([
+    "--version", "0.1",
+    "--destination", sys.argv[2],
+    "--mirror", sys.argv[3],
+]))
 """
     environment = {
         **os.environ,

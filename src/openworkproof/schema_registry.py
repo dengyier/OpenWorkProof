@@ -27,10 +27,10 @@ from openworkproof.models import (
 )
 
 
-_VERSION = "0.1"
+_DEFAULT_VERSION = "0.1"
 _REGISTRY_FILENAME = "schema-registry.json"
 _REGISTRY_SCHEMA_VERSION = "openworkproof-schema-registry/0.1"
-_OBJECT_PATHS = {
+V01_OBJECT_PATHS = {
     "acceptance-receipt": "acceptance-receipt.schema.json",
     "acceptance-rejection-receipt": (
         "acceptance-rejection-receipt.schema.json"
@@ -63,17 +63,17 @@ _FROZEN_V01_DIGESTS = {
 }
 _FROZEN_V01_REGISTRY = {
     "schema_version": _REGISTRY_SCHEMA_VERSION,
-    "protocol_version": _VERSION,
+    "protocol_version": _DEFAULT_VERSION,
     "schemas": [
         {
             "object_type": object_type,
             "path": path,
             "sha256": _FROZEN_V01_DIGESTS[path],
         }
-        for object_type, path in _OBJECT_PATHS.items()
+        for object_type, path in V01_OBJECT_PATHS.items()
     ],
 }
-_SCHEMA_FACTORIES: dict[str, Callable[[], dict[str, Any]]] = {
+V01_SCHEMA_FACTORIES: dict[str, Callable[[], dict[str, Any]]] = {
     "acceptance-receipt": AcceptanceReceipt.model_json_schema,
     "acceptance-rejection-receipt": (
         AcceptanceRejectionReceipt.model_json_schema
@@ -82,7 +82,21 @@ _SCHEMA_FACTORIES: dict[str, Callable[[], dict[str, Any]]] = {
     "capability-grant": CapabilityGrant.model_json_schema,
     "work-order": WorkOrder.model_json_schema,
 }
-_FILENAMES = frozenset({_REGISTRY_FILENAME, *_OBJECT_PATHS.values()})
+_OBJECT_PATHS_BY_VERSION = {
+    "0.1": V01_OBJECT_PATHS,
+}
+_SCHEMA_FACTORIES_BY_VERSION = {
+    "0.1": V01_SCHEMA_FACTORIES,
+}
+_FILENAMES_BY_VERSION = {
+    version: frozenset({_REGISTRY_FILENAME, *object_paths.values()})
+    for version, object_paths in _OBJECT_PATHS_BY_VERSION.items()
+}
+# Backward-compatible private aliases retained for focused v0.1 tamper tests.
+_VERSION = _DEFAULT_VERSION
+_OBJECT_PATHS = V01_OBJECT_PATHS
+_SCHEMA_FACTORIES = V01_SCHEMA_FACTORIES
+_FILENAMES = _FILENAMES_BY_VERSION[_DEFAULT_VERSION]
 _LOCK_PREFIX = ".openworkproof-schema-lock-"
 _STAGE_PREFIX = ".openworkproof-schema-stage-"
 _BACKUP_PREFIX = ".openworkproof-schema-backup-"
@@ -112,20 +126,21 @@ class SchemaCleanupError(RuntimeError):
 
 
 def _require_version(version: str) -> None:
-    if version != _VERSION:
+    if version not in _OBJECT_PATHS_BY_VERSION:
         raise ValueError(f"unknown protocol version: {version}")
 
 
-def _require_object_type(object_type: str) -> str:
+def _require_object_type(object_type: str, version: str) -> str:
+    _require_version(version)
     try:
-        return _OBJECT_PATHS[object_type]
+        return _OBJECT_PATHS_BY_VERSION[version][object_type]
     except KeyError as error:
         raise ValueError(f"unknown object type: {object_type}") from error
 
 
 def _runtime_directory(version: str):
     _require_version(version)
-    return resources.files("openworkproof").joinpath("schemas", "v0.1")
+    return resources.files("openworkproof").joinpath("schemas", f"v{version}")
 
 
 def _parse_canonical_json(raw: bytes, *, error_message: str) -> dict:
@@ -140,9 +155,10 @@ def _parse_canonical_json(raw: bytes, *, error_message: str) -> dict:
 
 def _validated_runtime_files(version: str) -> dict[str, bytes]:
     directory = _runtime_directory(version)
+    filenames = _FILENAMES_BY_VERSION[version]
     try:
         entries = tuple(directory.iterdir())
-        if {entry.name for entry in entries} != _FILENAMES:
+        if {entry.name for entry in entries} != filenames:
             raise RuntimeError("authoritative schema resource set is invalid")
         files: dict[str, bytes] = {}
         for entry in entries:
@@ -153,6 +169,8 @@ def _validated_runtime_files(version: str) -> dict[str, bytes]:
     except (FileNotFoundError, IsADirectoryError, OSError) as error:
         raise RuntimeError("authoritative schema resource set is invalid") from error
 
+    if version != "0.1":
+        raise RuntimeError("registered schema version has no frozen anchors")
     for filename, expected_digest in _FROZEN_V01_DIGESTS.items():
         if hashlib.sha256(files[filename]).hexdigest() != expected_digest:
             raise RuntimeError("authoritative schema anchor mismatch")
@@ -172,11 +190,11 @@ def _validated_runtime_files(version: str) -> dict[str, bytes]:
 
 def authoritative_schema(
     object_type: str,
-    version: str = _VERSION,
+    version: str = _DEFAULT_VERSION,
 ) -> dict:
     """Load one schema from installed package authority."""
 
-    filename = _require_object_type(object_type)
+    filename = _require_object_type(object_type, version)
     files = _validated_runtime_files(version)
     return _parse_canonical_json(
         files[filename],
@@ -186,20 +204,27 @@ def authoritative_schema(
 
 def authoritative_digest(
     object_type: str,
-    version: str = _VERSION,
+    version: str = _DEFAULT_VERSION,
 ) -> str:
     """Return the verified SHA-256 from the installed schema registry."""
 
-    filename = _require_object_type(object_type)
+    filename = _require_object_type(object_type, version)
     _validated_runtime_files(version)
     return _FROZEN_V01_DIGESTS[filename]
 
 
-def _generated_files() -> dict[str, bytes]:
+def _generated_files(
+    *, version: str = _DEFAULT_VERSION,
+) -> dict[str, bytes]:
+    _require_version(version)
+    object_paths = _OBJECT_PATHS_BY_VERSION[version]
+    factories = _SCHEMA_FACTORIES_BY_VERSION[version]
     files = {
-        _OBJECT_PATHS[object_type]: rfc8785.dumps(factory())
-        for object_type, factory in _SCHEMA_FACTORIES.items()
+        object_paths[object_type]: rfc8785.dumps(factory())
+        for object_type, factory in factories.items()
     }
+    if version != "0.1":
+        raise RuntimeError("registered schema version has no frozen anchors")
     for filename, content in files.items():
         if (
             hashlib.sha256(content).hexdigest()
@@ -225,7 +250,10 @@ def _generated_files() -> dict[str, bytes]:
     return generated
 
 
-def _preflight_target(directory: Path) -> tuple[Path, tuple[Path, ...]]:
+def _preflight_target(
+    directory: Path,
+    filenames: frozenset[str] = _FILENAMES,
+) -> tuple[Path, tuple[Path, ...]]:
     requested_target = Path(os.path.abspath(directory))
     if requested_target.is_symlink():
         raise ValueError("schema destination must be a real directory")
@@ -255,7 +283,7 @@ def _preflight_target(directory: Path) -> tuple[Path, tuple[Path, ...]]:
         raise ValueError("schema destination must be a real directory")
     existing = tuple(target.iterdir()) if target.exists() else ()
     if any(
-        path.name not in _FILENAMES
+        path.name not in filenames
         or path.is_symlink()
         or not path.is_file()
         for path in existing
@@ -364,7 +392,7 @@ def _stage_schema_directory(
             stage.joinpath(filename).write_bytes(content)
     except Exception:
         try:
-            _remove_schema_directory(stage)
+            _remove_schema_directory(stage, frozenset(files))
         except (OSError, RuntimeError) as cleanup_error:
             raise SchemaCleanupError(
                 "schema staging failed and its directory could not be cleaned",
@@ -375,7 +403,10 @@ def _stage_schema_directory(
     return stage
 
 
-def _remove_schema_directory(directory: Path) -> None:
+def _remove_schema_directory(
+    directory: Path,
+    filenames: frozenset[str] = _FILENAMES,
+) -> None:
     last_error: OSError | None = None
     for _ in range(3):
         try:
@@ -391,7 +422,7 @@ def _remove_schema_directory(directory: Path) -> None:
                 )
             entries = tuple(directory.iterdir())
             if any(
-                entry.name not in _FILENAMES
+                entry.name not in filenames
                 or entry.is_symlink()
                 or not entry.is_file()
                 for entry in entries
@@ -433,7 +464,10 @@ def _transaction_artifacts(target: Path, prefix: str) -> tuple[Path, ...]:
     )
 
 
-def _recover_target(target: Path) -> None:
+def _recover_target(
+    target: Path,
+    filenames: frozenset[str] = _FILENAMES,
+) -> None:
     backups = _transaction_artifacts(target, _backup_prefix(target))
     stages = _transaction_artifacts(target, _stage_prefix(target))
     if not target.exists() and backups:
@@ -452,13 +486,13 @@ def _recover_target(target: Path) -> None:
     first_error: Exception | None = None
     for backup in backups:
         try:
-            _remove_schema_directory(backup)
+            _remove_schema_directory(backup, filenames)
         except (OSError, RuntimeError) as error:
             failed_backups.append(backup)
             first_error = first_error or error
     for stage in stages:
         try:
-            _remove_schema_directory(stage)
+            _remove_schema_directory(stage, filenames)
         except (OSError, RuntimeError) as error:
             failed_stages.append(stage)
             first_error = first_error or error
@@ -473,6 +507,7 @@ def _recover_target(target: Path) -> None:
 
 def _commit_staged_directories(
     targets: Sequence[tuple[Path, Path]],
+    filenames: frozenset[str] = _FILENAMES,
 ) -> None:
     backups: dict[Path, Path] = {}
     installed: set[Path] = set()
@@ -489,7 +524,7 @@ def _commit_staged_directories(
         for target, _ in reversed(targets):
             try:
                 if target in installed:
-                    _remove_schema_directory(target)
+                    _remove_schema_directory(target, filenames)
                 backup = backups.get(target)
                 if backup is not None and backup.exists():
                     backup.replace(target)
@@ -502,7 +537,7 @@ def _commit_staged_directories(
     first_error: Exception | None = None
     for backup in backups.values():
         try:
-            _remove_schema_directory(backup)
+            _remove_schema_directory(backup, filenames)
         except (OSError, RuntimeError) as error:
             failed_backups.append(backup)
             first_error = first_error or error
@@ -517,12 +552,15 @@ def _commit_staged_directories(
 def write_authoritative_schemas(
     destination: Path,
     mirror: Path | None = None,
+    *,
+    version: str = _DEFAULT_VERSION,
 ) -> None:
     """Generate the frozen package schemas and optional published mirror."""
 
-    files = _generated_files()
+    files = _generated_files(version=version)
+    filenames = _FILENAMES_BY_VERSION[version]
     requested = [destination] + ([mirror] if mirror is not None else [])
-    plans = [_preflight_target(path) for path in requested]
+    plans = [_preflight_target(path, filenames) for path in requested]
     targets = [target for target, _ in plans]
     if len(targets) == 2 and (
         targets[0] == targets[1]
@@ -535,26 +573,29 @@ def write_authoritative_schemas(
     try:
         created_parents = _create_missing_parents(plans)
         with _locked_targets(targets):
-            locked_plans = [_preflight_target(path) for path in requested]
+            locked_plans = [
+                _preflight_target(path, filenames) for path in requested
+            ]
             locked_targets = [target for target, _ in locked_plans]
             if locked_targets != targets:
                 raise ValueError("schema destination changed before locking")
             for target in targets:
-                _recover_target(target)
+                _recover_target(target, filenames)
 
             stages: list[Path] = []
             try:
                 for target in targets:
                     stages.append(_stage_schema_directory(target, files))
                 _commit_staged_directories(
-                    tuple(zip(targets, stages, strict=True))
+                    tuple(zip(targets, stages, strict=True)),
+                    filenames,
                 )
             finally:
                 failed_stages: list[Path] = []
                 first_error: Exception | None = None
                 for stage in stages:
                     try:
-                        _remove_schema_directory(stage)
+                        _remove_schema_directory(stage, filenames)
                     except (OSError, RuntimeError) as error:
                         failed_stages.append(stage)
                         first_error = first_error or error
@@ -578,20 +619,21 @@ def compare_bundle_schemas_to_builtin(
 ) -> SchemaComparisonResult:
     """Compare a bundle schema directory byte-for-byte with installed authority."""
 
-    if version != _VERSION:
+    if version not in _OBJECT_PATHS_BY_VERSION:
         return SchemaComparisonResult(False, "UNKNOWN_PROTOCOL_VERSION")
     try:
         builtin_files = _validated_runtime_files(version)
+        filenames = _FILENAMES_BY_VERSION[version]
         if (
             directory.is_symlink()
             or not directory.is_dir()
-            or {path.name for path in directory.iterdir()} != _FILENAMES
+            or {path.name for path in directory.iterdir()} != filenames
         ):
             return SchemaComparisonResult(
                 False,
                 "AUTHORITATIVE_SCHEMA_MISMATCH",
             )
-        for filename in _FILENAMES:
+        for filename in filenames:
             candidate = directory / filename
             if candidate.is_symlink() or not candidate.is_file():
                 return SchemaComparisonResult(
@@ -610,12 +652,21 @@ def compare_bundle_schemas_to_builtin(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Generate authoritative OpenWorkProof v0.1 schemas."
+        description="Generate authoritative OpenWorkProof protocol schemas."
     )
-    parser.add_argument("destination", type=Path)
+    parser.add_argument(
+        "--version",
+        required=True,
+        choices=tuple(_OBJECT_PATHS_BY_VERSION),
+    )
+    parser.add_argument("--destination", required=True, type=Path)
     parser.add_argument("--mirror", type=Path)
     arguments = parser.parse_args(argv)
-    write_authoritative_schemas(arguments.destination, mirror=arguments.mirror)
+    write_authoritative_schemas(
+        arguments.destination,
+        mirror=arguments.mirror,
+        version=arguments.version,
+    )
     return 0
 
 
