@@ -365,10 +365,14 @@ VERIFIED | REFUTED | UNKNOWN
 - SubjectClaim digest；
 - VerificationProfile digest；
 - 精确的 ordered arm result references；
-- IndependenceAssessment；
+- VerificationIndependenceAssessment；
 - reason codes；
 - supersedes；
 - 所需 Verifier signatures。
+
+`VerificationIndependenceAssessment` 是 v0.2 验证决策专用对象。已公开并由
+v0.1 `CompositionReport` 使用的 `IndependenceAssessment` 保持原名、原结构和
+原 schema bytes，不得被新对象覆盖或静默升级。
 
 ### 8.6 AcceptanceTransitionReceipt
 

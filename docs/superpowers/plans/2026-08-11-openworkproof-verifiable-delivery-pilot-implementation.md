@@ -768,7 +768,7 @@ Expected: v0.1 schema tests pass and no v0.1 byte changes.
 - Modify: `src/openworkproof/signing.py`
 - Modify: `tests/test_verification_models_v02.py`
 
-- [ ] **Step 1: Write RED decision-table tests**
+- [x] **Step 1: Write RED decision-table tests**
 
 Encode the approved matrix:
 
@@ -793,12 +793,12 @@ def test_compose_verification_decision_matrix(
 Also test no negative arm, missing required evidence, duplicate/reordered arm
 results, extra signatures, and current-decision supersession.
 
-- [ ] **Step 2: Add decision and independence models**
+- [x] **Step 2: Add decision and independence models**
 
 Implement exact public types in `models.py`:
 
 ```python
-class IndependenceAssessment(ProtocolModel):
+class VerificationIndependenceAssessment(ProtocolModel):
     distinct_subjects: bool
     distinct_keys: bool
     distinct_controllers: bool
@@ -837,7 +837,7 @@ class VerificationDecision(ProtocolModel):
     arm_results: tuple[VerificationArmResultReference, ...]
     assurance_level: Literal["standard", "high_risk"]
     decision: Literal["VERIFIED", "REFUTED", "UNKNOWN"]
-    independence: IndependenceAssessment
+    independence: VerificationIndependenceAssessment
     reason_codes: tuple[VerificationReasonCode, ...]
     supersedes_decision_id: Digest64 | None
     supersedes_decision_digest: Digest64 | None
@@ -856,7 +856,7 @@ class VerificationDecisionDraft(ProtocolModel):
     arm_results: tuple[VerificationArmResultReference, ...]
     assurance_level: Literal["standard", "high_risk"]
     decision: Literal["VERIFIED", "REFUTED", "UNKNOWN"]
-    independence: IndependenceAssessment
+    independence: VerificationIndependenceAssessment
     reason_codes: tuple[VerificationReasonCode, ...]
     supersedes_decision_id: Digest64 | None
     supersedes_decision_digest: Digest64 | None
@@ -885,7 +885,7 @@ class VerificationInputError(ValueError):
     """Authenticated protocol input is invalid; no decision may be created."""
 ```
 
-- [ ] **Step 3: Implement a pure composer**
+- [x] **Step 3: Implement a pure composer**
 
 In `verification.py`, implement:
 
@@ -893,7 +893,7 @@ In `verification.py`, implement:
 def assess_independence(
     profile: VerificationProfileV02,
     arm_results: tuple[VerificationArmResult, ...],
-) -> IndependenceAssessment:
+) -> VerificationIndependenceAssessment:
     required = 2 if profile.assurance_level == "high_risk" else 1
     subjects = {result.verifier_subject_id for result in arm_results}
     keys = {result.verifier_key_id for result in arm_results}
@@ -915,11 +915,11 @@ def assess_independence(
         )
         if not checks[field]
     )
-    return IndependenceAssessment(**checks, reason_codes=codes)
+    return VerificationIndependenceAssessment(**checks, reason_codes=codes)
 
 def decision_reason_codes(
     arm_results: tuple[VerificationArmResult, ...],
-    independence: IndependenceAssessment,
+    independence: VerificationIndependenceAssessment,
 ) -> tuple[VerificationReasonCode, ...]:
     return tuple(sorted({
         *independence.reason_codes,
@@ -999,14 +999,14 @@ by reading wall time inside the composer. Import and reuse
 `openworkproof.acceptance.evidence_snapshot_digest`; do not create a second
 snapshot-digest algorithm.
 
-- [ ] **Step 4: Separate invalid input from UNKNOWN**
+- [x] **Step 4: Separate invalid input from UNKNOWN**
 
 Malformed schema, bad signatures, unordered/duplicate arm IDs, wrong profile,
 wrong claim, stale supersedes, or missing causal parents must raise
 `VerificationInputError` before a decision object exists. Valid infrastructure
 or evidence uncertainty produces signed UNKNOWN with explicit reason codes.
 
-- [ ] **Step 5: Run GREEN and commit**
+- [x] **Step 5: Run GREEN and commit**
 
 Run:
 
