@@ -711,7 +711,7 @@ Expected: all result-axis and invalid-input tests pass.
 - Modify: `src/openworkproof/schema_registry.py`
 - Modify: `tests/test_schema_registry.py`
 
-- [ ] **Step 1: Write RED routing tests without freezing incomplete v0.2 bytes**
+- [x] **Step 1: Write RED routing tests without freezing incomplete v0.2 bytes**
 
 Test that v0.1 digests remain byte-identical, an unknown version is rejected,
 and a caller can request an explicitly registered version map. Do not generate
@@ -726,7 +726,7 @@ Run:
 
 Expected: FAIL because the registry still assumes one global `_VERSION`.
 
-- [ ] **Step 2: Implement explicit version routing**
+- [x] **Step 2: Implement explicit version routing**
 
 Replace the single `_VERSION` assumption with closed version maps:
 
@@ -745,7 +745,7 @@ Extend the module CLI with a required `--version` choice sourced from the same
 closed map; `--destination` and `--mirror` remain explicit paths. An unknown or
 unregistered version must fail before any file is written.
 
-- [ ] **Step 3: Run v0.1 regression and commit routing only**
+- [x] **Step 3: Run v0.1 regression and commit routing only**
 
 Run:
 
