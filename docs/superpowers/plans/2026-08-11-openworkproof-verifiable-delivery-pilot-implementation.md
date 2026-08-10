@@ -1741,24 +1741,24 @@ no result is generalized beyond the registered study.
 - Create: `tests/evidence-bundles/rich-4196-v02-delivery-package.json`
 - Create: `tests/evidence-bundles/dify-33013-v02-delivery-package.json`
 
-- [ ] **Step 1: Write RED v0.2 bundle dispatcher tests**
+- [x] **Step 1: Write RED v0.2 bundle dispatcher tests**
 
 Require exact v0.1/v0.2 schema dispatch, reject unknown versions, and assert
 the two historical v0.1 bundle hashes do not change.
 
-- [ ] **Step 2: Add fixed positive and negative arms to each case**
+- [x] **Step 2: Add fixed positive and negative arms to each case**
 
 For each real Issue, bind source revision, candidate revision, fixed tests,
 container, dependency lock, positive expected pass, Manager-pinned mutant, and
 negative expected fail. Do not reuse a positive candidate as a fake mutant.
 
-- [ ] **Step 3: Export new package objects**
+- [x] **Step 3: Export new package objects**
 
 Append v0.2 exporter functions that produce SubjectClaim, Profile, arm results,
 VerificationDecision, acceptance history, manifest, public keys, and committed
 evidence. Write to the two new filenames only.
 
-- [ ] **Step 4: Verify offline and tamper fail-closed**
+- [x] **Step 4: Verify offline and tamper fail-closed**
 
 Run:
 
@@ -1774,7 +1774,7 @@ Expected: both report `VERIFICATION PASSED`, current decision VERIFIED, and
 current readiness matches the included acceptance history. Tamper fixtures
 must fail.
 
-- [ ] **Step 5: Commit the immutable cases**
+- [x] **Step 5: Commit the immutable cases**
 
 Run:
 
