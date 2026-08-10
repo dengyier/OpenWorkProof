@@ -36,6 +36,8 @@ ALLOWED_CANONICAL_DOMAINS = frozenset(
         "human-decision",
         "sidecar-event",
         "manifest",
+        "subject-claim",
+        "verification-profile",
     }
 )
 ALLOWED_SIGNED_DOMAINS = ALLOWED_CANONICAL_DOMAINS - {"sidecar-event"}

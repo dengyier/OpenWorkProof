@@ -10,7 +10,7 @@ import re
 from collections.abc import Iterator, Mapping
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, ClassVar, Literal
 
 import rfc8785
 from pydantic import (
@@ -399,6 +399,14 @@ def _signature(value: Any) -> str:
 Signature = Annotated[str, BeforeValidator(_signature)]
 
 
+def _public_key_b64url(value: Any) -> str:
+    _decode_unpadded_base64url(value, 32)
+    return value
+
+
+PublicKeyB64Url = Annotated[str, BeforeValidator(_public_key_b64url)]
+
+
 def _is_utf8_sorted_unique(values: tuple[str, ...]) -> bool:
     return list(values) == sorted(set(values), key=lambda item: item.encode("utf-8"))
 
@@ -481,10 +489,30 @@ class ProtocolModel(BaseModel):
 
 
 class SignedProtocolModel(ProtocolModel):
+    _signed_domain: ClassVar[str | None] = None
+
     digest: Digest64
     signature_alg: Literal["Ed25519"]
     signer_key_id: KeyId
     signature: Signature
+
+    @model_validator(mode="after")
+    def _validate_signed_digest(self) -> SignedProtocolModel:
+        if self._signed_domain is None:
+            return self
+        payload = self.model_dump(
+            mode="json",
+            exclude={"digest", "signature"},
+        )
+        expected = _jcs_digest(
+            {
+                "domain": f"openworkproof/{self._signed_domain}/v0.1",
+                "payload": payload,
+            }
+        )
+        if self.digest != expected:
+            raise ValueError("digest does not match canonical signed payload")
+        return self
 
 
 class Quota(ProtocolModel):
@@ -1416,6 +1444,213 @@ class WorkOrder(SignedProtocolModel):
         }
         if tests_passed[0].arguments != expected_arguments:
             raise ValueError("tests_passed does not match verifier profile")
+
+
+class SubjectClaim(SignedProtocolModel):
+    _signed_domain = "subject-claim"
+
+    schema_version: Literal["openworkproof-subject-claim/0.1"]
+    claim_id: Digest64
+    work_order_digest: Digest64
+    claim_statement: Annotated[
+        str, _strict_bounded_text(4096, "claim_statement")
+    ]
+    delivery_target: Annotated[
+        str, _strict_bounded_text(1024, "delivery_target")
+    ]
+    source_revision: ObjectId40
+    acceptance_conditions: tuple[Identifier, ...]
+    excluded_scope: tuple[Identifier, ...]
+    required_artifacts: tuple[CanonicalRoot, ...]
+    customer_acceptor_key_id: KeyId
+    created_at: CanonicalUTCTime
+    nonce: Digest64
+
+    @model_validator(mode="after")
+    def _closed_claim(self) -> SubjectClaim:
+        for values, label in (
+            (self.acceptance_conditions, "acceptance_conditions"),
+            (self.excluded_scope, "excluded_scope"),
+            (self.required_artifacts, "required_artifacts"),
+        ):
+            if not values or values != tuple(sorted(set(values))):
+                raise ValueError(f"{label} must be non-empty sorted and unique")
+        return self
+
+
+class PolicyAnchor(ProtocolModel):
+    schema_version: Literal["openworkproof-policy-anchor/0.1"]
+    policy_registry_uri: Annotated[
+        str, _strict_bounded_text(2048, "policy_registry_uri")
+    ]
+    policy_version: Identifier
+    policy_digest: Digest64
+    effective_at: CanonicalUTCTime
+    resolved_at: CanonicalUTCTime
+    resolver_identity: Identifier
+
+    @model_validator(mode="after")
+    def _ordered_times(self) -> PolicyAnchor:
+        if self.resolved_at < self.effective_at:
+            raise ValueError("policy anchor times are not ordered")
+        return self
+
+
+class CommitmentAnchor(ProtocolModel):
+    schema_version: Literal["openworkproof-commitment-anchor/0.1"]
+    work_order_digest: Digest64
+    subject_claim_digest: Digest64
+    anchored_at: CanonicalUTCTime
+    anchor_provider: Literal[
+        "git_commit",
+        "git_tag",
+        "github_release",
+        "customer_signed_document",
+        "enterprise_timestamp",
+    ]
+    anchor_reference: Annotated[
+        str, _strict_bounded_text(2048, "anchor_reference")
+    ]
+
+
+class VerificationArm(ProtocolModel):
+    arm_id: Digest64
+    arm_kind: Literal["positive", "negative"]
+    source_commit: ObjectId40
+    candidate_commit: ObjectId40
+    mutant_patch_digest: Digest64 | None
+    workspace_manifest_digest: Digest64
+    command_digest: Digest64
+    container_image_digest: ImageDigest
+    fixed_test_source_digest: Digest64
+    expected_exit_codes: tuple[SafeNonNegativeInt, ...]
+    expected_outcome: Literal["pass", "fail"]
+    required_evidence_purposes: tuple[Identifier, ...]
+    result_artifact_paths: tuple[CanonicalRoot, ...]
+
+    @model_validator(mode="after")
+    def _closed_arm(self) -> VerificationArm:
+        if (self.arm_kind == "positive") != (self.mutant_patch_digest is None):
+            raise ValueError("positive arm forbids and negative arm requires mutant")
+        for values, label in (
+            (self.expected_exit_codes, "expected_exit_codes"),
+            (self.required_evidence_purposes, "required_evidence_purposes"),
+            (self.result_artifact_paths, "result_artifact_paths"),
+        ):
+            if not values or values != tuple(sorted(set(values))):
+                raise ValueError(f"{label} must be non-empty sorted and unique")
+        return self
+
+
+class VerifierBinding(ProtocolModel):
+    binding_id: Digest64
+    verifier_subject_id: Identifier
+    verifier_key_id: KeyId
+    verifier_public_key_b64url: PublicKeyB64Url
+    controller_factors: tuple[Identifier, ...]
+    execution_context_factors: tuple[Identifier, ...]
+    valid_from: CanonicalUTCTime
+    expires_at: CanonicalUTCTime
+
+    @model_validator(mode="after")
+    def _closed_binding(self) -> VerifierBinding:
+        raw = _decode_unpadded_base64url(self.verifier_public_key_b64url, 32)
+        if self.verifier_key_id != f"ed25519:{hashlib.sha256(raw).hexdigest()}":
+            raise ValueError("verifier key id does not match public key")
+        for values, label in (
+            (self.controller_factors, "controller_factors"),
+            (self.execution_context_factors, "execution_context_factors"),
+        ):
+            if not values or values != tuple(sorted(set(values))):
+                raise ValueError(f"{label} must be non-empty sorted and unique")
+        if not self.valid_from < self.expires_at:
+            raise ValueError("verifier binding times are not ordered")
+        return self
+
+
+class VerificationProfileV02(SignedProtocolModel):
+    _signed_domain = "verification-profile"
+
+    schema_version: Literal["openworkproof-verification-profile/0.2"]
+    profile_id: Digest64
+    work_order_digest: Digest64
+    subject_claim_digest: Digest64
+    delivery_trust_level: Literal[1, 2, 3]
+    policy_anchor_digest: Digest64 | None
+    commitment_anchor_digest: Digest64 | None
+    subject_kind: Literal["tests_passed"]
+    assurance_level: Literal["standard", "high_risk"]
+    verifier_bindings: tuple[VerifierBinding, ...]
+    positive_arm: VerificationArm
+    negative_arms: tuple[VerificationArm, ...]
+    max_evidence_bytes: SafePositiveInt
+    max_output_bytes: SafePositiveInt
+    created_at: CanonicalUTCTime
+    expires_at: CanonicalUTCTime
+    nonce: Digest64
+
+    @model_validator(mode="after")
+    def _closed_profile(self) -> VerificationProfileV02:
+        if not self.created_at < self.expires_at:
+            raise ValueError("profile times are not ordered")
+        if self.delivery_trust_level in {2, 3} and (
+            self.commitment_anchor_digest is None
+        ):
+            raise ValueError("commitment_anchor_digest is required for level 2/3")
+        if self.delivery_trust_level == 3 and self.assurance_level != "high_risk":
+            raise ValueError("level 3 requires high_risk assurance")
+
+        expected_bindings = 2 if self.assurance_level == "high_risk" else 1
+        if len(self.verifier_bindings) != expected_bindings:
+            label = "two distinct" if expected_bindings == 2 else "one"
+            raise ValueError(f"{label} verifier bindings required")
+        binding_ids = tuple(binding.binding_id for binding in self.verifier_bindings)
+        if binding_ids != tuple(sorted(set(binding_ids))):
+            raise ValueError("verifier bindings must be sorted and unique")
+        if expected_bindings == 2:
+            for values in (
+                {binding.verifier_subject_id for binding in self.verifier_bindings},
+                {binding.verifier_key_id for binding in self.verifier_bindings},
+                {binding.controller_factors for binding in self.verifier_bindings},
+                {
+                    binding.execution_context_factors
+                    for binding in self.verifier_bindings
+                },
+            ):
+                if len(values) != 2:
+                    raise ValueError("two distinct verifier bindings required")
+
+        if self.positive_arm.arm_kind != "positive":
+            raise ValueError("positive_arm must be positive")
+        if not self.negative_arms:
+            raise ValueError("at least one negative arm is required")
+        negative_ids = tuple(arm.arm_id for arm in self.negative_arms)
+        if negative_ids != tuple(sorted(set(negative_ids))):
+            raise ValueError("negative arms must be sorted and unique")
+        if self.positive_arm.arm_id in set(negative_ids) or any(
+            arm.arm_kind != "negative" for arm in self.negative_arms
+        ):
+            raise ValueError("profile arm kinds or ids are invalid")
+        mutant_digests = tuple(arm.mutant_patch_digest for arm in self.negative_arms)
+        if len(set(mutant_digests)) != len(mutant_digests):
+            raise ValueError("negative arm mutants must be unique")
+        frozen_inputs = (
+            "source_commit",
+            "candidate_commit",
+            "workspace_manifest_digest",
+            "command_digest",
+            "container_image_digest",
+            "fixed_test_source_digest",
+        )
+        if any(
+            any(
+                getattr(arm, field) != getattr(self.positive_arm, field)
+                for field in frozen_inputs
+            )
+            for arm in self.negative_arms
+        ):
+            raise ValueError("negative arms must share the pinned positive inputs")
+        return self
 
 
 class EvidenceRef(ProtocolModel):
@@ -3338,6 +3573,7 @@ __all__ = [
     "BUNDLE_FINALIZATION_GRACE_SECONDS",
     "CapabilityGrant",
     "Command",
+    "CommitmentAnchor",
     "CompositionReport",
     "CorrelationFactors",
     "EvidencePolicy",
@@ -3351,10 +3587,12 @@ __all__ = [
     "KeyBinding",
     "McpErrorEnvelope",
     "PatchResultEvidence",
+    "PolicyAnchor",
     "PolicyDecision",
     "PredicateResult",
     "PredicateSpec",
     "ProtocolModel",
+    "PublicKeyB64Url",
     "QuotaCharge",
     "ReportDiagnostic",
     "ReplayProfile",
@@ -3366,6 +3604,7 @@ __all__ = [
     "SidecarEvent",
     "SignedProtocolModel",
     "SourceArtifact",
+    "SubjectClaim",
     "SystemEventReceipt",
     "TestProfile",
     "TestResultEvidence",
@@ -3373,6 +3612,9 @@ __all__ = [
     "TerminationHumanDecision",
     "ToolCallReceipt",
     "TransitionDecision",
+    "VerificationArm",
+    "VerificationProfileV02",
+    "VerifierBinding",
     "WorkOrder",
     "request_arguments_digest",
     "validate_receipt_or_error",

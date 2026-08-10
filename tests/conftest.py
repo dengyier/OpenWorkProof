@@ -26,6 +26,10 @@ from openworkproof.models import (
     ActionReceipt,
     AcceptanceReceipt,
     CapabilityGrant,
+    CommitmentAnchor,
+    PolicyAnchor,
+    SubjectClaim,
+    VerificationProfileV02,
     WorkOrder,
 )
 from openworkproof.signing import key_id, sign_payload
@@ -601,6 +605,149 @@ def public_keys(
 @pytest.fixture
 def fixed_now() -> datetime:
     return datetime(2026, 1, 1, 0, 0, 5, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def signed_subject_claim(
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+) -> SubjectClaim:
+    candidate = {
+        "schema_version": "openworkproof-subject-claim/0.1",
+        "claim_id": "7" * 64,
+        "work_order_digest": signed_work_order.digest,
+        "claim_statement": "The frozen verifier tests pass for this delivery.",
+        "delivery_target": "customer/release-candidate",
+        "source_revision": signed_work_order.source_commit,
+        "acceptance_conditions": ["artifact_digest_matches", "tests_passed"],
+        "excluded_scope": ["payment_status"],
+        "required_artifacts": ["evidence", "results"],
+        "customer_acceptor_key_id": signed_work_order.acceptor_key_ids[0],
+        "created_at": "2026-01-01T00:00:05Z",
+        "nonce": "8" * 64,
+    }
+    return SubjectClaim.model_validate(
+        sign_payload(
+            "subject-claim",
+            candidate,
+            ephemeral_role_keys["Manager"][0],
+        )
+    )
+
+
+@pytest.fixture
+def policy_anchor() -> PolicyAnchor:
+    return PolicyAnchor.model_validate(
+        {
+            "schema_version": "openworkproof-policy-anchor/0.1",
+            "policy_registry_uri": "https://policy.example.invalid/agent-delivery",
+            "policy_version": "customer-policy-v1",
+            "policy_digest": "9" * 64,
+            "effective_at": "2026-01-01T00:00:00Z",
+            "resolved_at": "2026-01-01T00:00:04Z",
+            "resolver_identity": "customer-policy-resolver",
+        }
+    )
+
+
+@pytest.fixture
+def commitment_anchor(
+    signed_work_order: WorkOrder,
+    signed_subject_claim: SubjectClaim,
+) -> CommitmentAnchor:
+    return CommitmentAnchor.model_validate(
+        {
+            "schema_version": "openworkproof-commitment-anchor/0.1",
+            "work_order_digest": signed_work_order.digest,
+            "subject_claim_digest": signed_subject_claim.digest,
+            "anchored_at": "2026-01-01T00:00:04Z",
+            "anchor_provider": "customer_signed_document",
+            "anchor_reference": "customer://acceptance-criteria/2026-001",
+        }
+    )
+
+
+@pytest.fixture
+def verification_profile_dict(
+    signed_work_order: WorkOrder,
+    signed_subject_claim: SubjectClaim,
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+) -> dict[str, Any]:
+    verifier = ephemeral_role_keys["Verifier"][1]
+    positive_arm = {
+        "arm_id": "1" * 64,
+        "arm_kind": "positive",
+        "source_commit": signed_work_order.source_commit,
+        "candidate_commit": "2" * 40,
+        "mutant_patch_digest": None,
+        "workspace_manifest_digest": "3" * 64,
+        "command_digest": "4" * 64,
+        "container_image_digest": IMAGE_A,
+        "fixed_test_source_digest": SHA256_B,
+        "expected_exit_codes": [0],
+        "expected_outcome": "pass",
+        "required_evidence_purposes": ["verifier_result"],
+        "result_artifact_paths": ["results/positive.json"],
+    }
+    negative_arm = {
+        **positive_arm,
+        "arm_id": "2" * 64,
+        "arm_kind": "negative",
+        "mutant_patch_digest": "5" * 64,
+        "expected_exit_codes": [1],
+        "expected_outcome": "fail",
+        "result_artifact_paths": ["results/negative.json"],
+    }
+    return {
+        "schema_version": "openworkproof-verification-profile/0.2",
+        "profile_id": "6" * 64,
+        "work_order_digest": signed_work_order.digest,
+        "subject_claim_digest": signed_subject_claim.digest,
+        "delivery_trust_level": 1,
+        "policy_anchor_digest": None,
+        "commitment_anchor_digest": None,
+        "subject_kind": "tests_passed",
+        "assurance_level": "standard",
+        "verifier_bindings": [
+            {
+                "binding_id": "a" * 64,
+                "verifier_subject_id": verifier["subject_id"],
+                "verifier_key_id": verifier["key_id"],
+                "verifier_public_key_b64url": verifier["public_key_b64url"],
+                "controller_factors": ["customer-independent-verifier"],
+                "execution_context_factors": ["isolated-container-a"],
+                "valid_from": "2026-01-01T00:00:04Z",
+                "expires_at": "2026-01-01T01:00:00Z",
+            }
+        ],
+        "positive_arm": positive_arm,
+        "negative_arms": [negative_arm],
+        "max_evidence_bytes": 1048576,
+        "max_output_bytes": 65536,
+        "created_at": "2026-01-01T00:00:05Z",
+        "expires_at": "2026-01-01T01:00:00Z",
+        "nonce": "b" * 64,
+    }
+
+
+@pytest.fixture
+def signed_verification_profile(
+    verification_profile_dict: dict[str, Any],
+    ephemeral_role_keys: dict[
+        str, tuple[Ed25519PrivateKey, dict[str, str]]
+    ],
+) -> VerificationProfileV02:
+    return VerificationProfileV02.model_validate(
+        sign_payload(
+            "verification-profile",
+            verification_profile_dict,
+            ephemeral_role_keys["Manager"][0],
+        )
+    )
 
 
 def _bind_and_sign_nested_claim(

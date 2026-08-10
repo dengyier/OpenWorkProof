@@ -164,6 +164,8 @@ def test_canonical_domains_are_exact_and_key_order_is_irrelevant() -> None:
             "human-decision",
             "sidecar-event",
             "manifest",
+            "subject-claim",
+            "verification-profile",
         }
     )
     assert ALLOWED_SIGNED_DOMAINS == ALLOWED_CANONICAL_DOMAINS - {
