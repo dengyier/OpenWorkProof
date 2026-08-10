@@ -10,11 +10,13 @@ Run::
 
     python -m pytest tests/test_export_evidence_bundles.py -s -v
 
-Output is written to ``tests/evidence-bundles/``.
+The tests export to their temporary directories. Frozen reviewed examples live
+under ``tests/evidence-bundles/`` and are verified separately.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import sqlite3
@@ -26,14 +28,36 @@ import pytest
 import rfc8785
 
 import openworkproof.acceptance as acceptance
+import openworkproof.evidence as evidence
+from openworkproof.delivery_package import (
+    export_delivery_package,
+    verify_delivery_package,
+)
 from openworkproof.models import (
     AcceptanceReceipt,
     ActionReceipt,
     CapabilityGrant,
+    CommitmentAnchor,
+    DecisionDraftRequest,
+    SubjectClaim,
+    VerificationDecision,
+    VerificationProfileV02,
     WorkOrder,
 )
-from openworkproof.signing import decode_and_verify_key_binding
+from openworkproof.signing import (
+    decode_and_verify_key_binding,
+    key_id,
+    sign_payload,
+)
 from openworkproof.policy import CommittedEvidence
+from openworkproof.verification import (
+    commit_verification_arm_result,
+    commit_verification_decision,
+    commit_verification_profile,
+    external_anchor_digest,
+    prepare_verification_decision,
+    verification_decision_signing_bytes,
+)
 
 # Re-use every helper from the delivery test suites — no duplication.
 from test_delivery_m2 import (
@@ -70,6 +94,8 @@ from test_independent_recomposition import (
     _recompose_request,
     _signed_compose_request,
 )
+from test_delivery_package_v02 import _arm_result, _canonical
+from test_verification_transactions_v02 import _insert_causal_receipt
 
 BUNDLE_DIR = Path(__file__).parent / "evidence-bundles"
 
@@ -261,6 +287,206 @@ def _export_bundle(
     print(f"   Offline verification: PASSED")
 
 
+def _stable_digest(label: str) -> str:
+    return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+def _export_v02_issue_package(
+    *,
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    verification_profile_dict: dict[str, Any],
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    output_path: Path,
+    slug: str,
+    bug_id: str,
+    bug_url: str,
+    pinned_commit: str,
+    candidate_commit: str,
+    candidate_revision_type: str,
+    fix_description: str,
+) -> None:
+    """Build one deterministic Level-2 package with a real negative arm."""
+    ledger = tmp_path / f"{slug}-v02.sqlite3"
+    evidence.initialize_ledger(ledger, signed_work_order)
+    claim_raw = {
+        "schema_version": "openworkproof-subject-claim/0.1",
+        "claim_id": _stable_digest(f"{slug}:claim"),
+        "work_order_digest": signed_work_order.digest,
+        "claim_statement": f"The frozen regression for {bug_id} passes.",
+        "delivery_target": bug_url,
+        "source_revision": pinned_commit,
+        "acceptance_conditions": ["artifact_digest_matches", "tests_passed"],
+        "excluded_scope": ["customer_adoption", "payment_status"],
+        "required_artifacts": ["evidence", "results"],
+        "customer_acceptor_key_id": signed_work_order.acceptor_key_ids[0],
+        "created_at": "2026-01-01T00:00:05Z",
+        "nonce": _stable_digest(f"{slug}:claim:nonce"),
+    }
+    claim = SubjectClaim.model_validate(
+        sign_payload(
+            "subject-claim", claim_raw, ephemeral_role_keys["Manager"][0]
+        )
+    )
+    commitment = CommitmentAnchor.model_validate(
+        {
+            "schema_version": "openworkproof-commitment-anchor/0.1",
+            "work_order_digest": signed_work_order.digest,
+            "subject_claim_digest": claim.digest,
+            "anchored_at": "2026-01-01T00:00:04Z",
+            "anchor_provider": "customer_signed_document",
+            "anchor_reference": f"customer://registered-case/{slug}",
+        }
+    )
+    fixed_test_digest = _stable_digest(f"{slug}:fixed-regression-test")
+    mutant_digest = _stable_digest(f"{slug}:manager-pinned-mutant")
+    profile_raw = json.loads(json.dumps(verification_profile_dict))
+    profile_raw.update(
+        profile_id=_stable_digest(f"{slug}:profile"),
+        subject_claim_digest=claim.digest,
+        delivery_trust_level=2,
+        commitment_anchor_digest=external_anchor_digest(commitment),
+        nonce=_stable_digest(f"{slug}:profile:nonce"),
+    )
+    shared = {
+        "source_commit": pinned_commit,
+        "candidate_commit": candidate_commit,
+        "workspace_manifest_digest": _stable_digest(f"{slug}:workspace"),
+        "command_digest": _stable_digest(f"{slug}:pytest-command"),
+        "fixed_test_source_digest": fixed_test_digest,
+    }
+    profile_raw["positive_arm"].update(
+        **shared,
+        arm_id=_stable_digest(f"{slug}:positive-arm"),
+        result_artifact_paths=[f"results/{slug}-positive.json"],
+    )
+    profile_raw["negative_arms"][0].update(
+        **shared,
+        arm_id=_stable_digest(f"{slug}:negative-arm"),
+        mutant_patch_digest=mutant_digest,
+        result_artifact_paths=[f"results/{slug}-negative.json"],
+    )
+    profile = VerificationProfileV02.model_validate(
+        sign_payload(
+            "verification-profile",
+            profile_raw,
+            ephemeral_role_keys["Manager"][0],
+        )
+    )
+    commit_verification_profile(
+        ledger,
+        claim,
+        profile,
+        commitment_anchor=commitment,
+    )
+    receipt = sidecar_receipt_factory(
+        state_before="locally_verified",
+        state_after="evidence_incomplete",
+        event_type="system_event",
+        event_name="proof_composed",
+        sequence=1,
+    )
+    _insert_causal_receipt(ledger, receipt)
+    payloads = {
+        "positive": _canonical(
+            {
+                "bug_id": bug_id,
+                "candidate_commit": candidate_commit,
+                "exit_code": 0,
+                "fixed_regression": "passed",
+            }
+        ),
+        "negative": _canonical(
+            {
+                "bug_id": bug_id,
+                "exit_code": 1,
+                "mutant_patch_digest": mutant_digest,
+                "fixed_regression": "caught",
+            }
+        ),
+    }
+    for arm_kind, payload in payloads.items():
+        path = tmp_path / f"results/{slug}-{arm_kind}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        result = _arm_result(
+            profile=profile,
+            arm_kind=arm_kind,
+            result_id=_stable_digest(f"{slug}:{arm_kind}:result"),
+            receipt_id=receipt.receipt_id,
+            private_key=ephemeral_role_keys["Verifier"][0],
+            payload=payload,
+        )
+        commit_verification_arm_result(ledger, result)
+    request = DecisionDraftRequest.model_validate(
+        {
+            "decision_id": _stable_digest(f"{slug}:decision"),
+            "decided_at": "2026-01-01T00:20:00Z",
+            "nonce": _stable_digest(f"{slug}:decision:nonce"),
+        }
+    )
+    draft = prepare_verification_decision(ledger, request)
+    encoded = verification_decision_signing_bytes(draft)
+    verifier_key = ephemeral_role_keys["Verifier"][0]
+    binding = profile.verifier_bindings[0]
+    decision = VerificationDecision.model_validate(
+        {
+            "schema_version": "openworkproof-verification-decision/0.2",
+            **draft.model_dump(mode="json"),
+            "digest": hashlib.sha256(encoded).hexdigest(),
+            "verifier_signatures": [
+                {
+                    "verifier_subject_id": binding.verifier_subject_id,
+                    "verifier_key_id": key_id(verifier_key.public_key()),
+                    "signature_alg": "Ed25519",
+                    "signature": base64.urlsafe_b64encode(
+                        verifier_key.sign(encoded)
+                    ).decode("ascii").rstrip("="),
+                }
+            ],
+        }
+    )
+    commit_verification_decision(ledger, decision)
+    package_root = tmp_path / f"{slug}-delivery-package"
+    export_delivery_package(ledger, package_root, privacy_view="public")
+    replay = verify_delivery_package(package_root)
+    assert replay.current_decision == "VERIFIED"
+    assert replay.settlement_readiness == "READY_FOR_ACCEPTANCE"
+    files = []
+    for path in sorted(
+        (item for item in package_root.rglob("*") if item.is_file()),
+        key=lambda item: item.relative_to(package_root).as_posix().encode("utf-8"),
+    ):
+        payload = path.read_bytes()
+        files.append(
+            {
+                "path": path.relative_to(package_root).as_posix(),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "payload_b64": base64.b64encode(payload).decode("ascii"),
+            }
+        )
+    envelope = {
+        "schema_version": "openworkproof/delivery-package-envelope/0.2",
+        "metadata": {
+            "bug_id": bug_id,
+            "bug_url": bug_url,
+            "pinned_source_commit": pinned_commit,
+            "positive_candidate_commit": candidate_commit,
+            "candidate_revision_type": candidate_revision_type,
+            "fixed_test_source_digest": fixed_test_digest,
+            "negative_mutant_patch_digest": mutant_digest,
+            "container_image_digest": profile.positive_arm.container_image_digest,
+            "dependency_lock_digest": "5" * 64,
+            "fix_description": fix_description,
+            "current_decision": replay.current_decision,
+            "current_readiness": replay.settlement_readiness,
+        },
+        "files": files,
+    }
+    output_path.write_bytes(rfc8785.dumps(envelope) + b"\n")
+
+
 # ---------------------------------------------------------------------------
 # Export: Rich #4196
 # ---------------------------------------------------------------------------
@@ -408,7 +634,7 @@ def test_export_rich_4196_bundle(
     _export_bundle(
         case=case,
         acceptance_receipt=signed_acceptance,
-        output_path=BUNDLE_DIR / "rich-4196-evidence-bundle.json",
+        output_path=tmp_path / "rich-4196-evidence-bundle.json",
         bug_id="Textualize/Rich #4196",
         bug_url="https://github.com/Textualize/rich/issues/4196",
         pinned_commit=RICH_PINNED_COMMIT,
@@ -568,7 +794,7 @@ def test_export_dify_33013_bundle(
     _export_bundle(
         case=case,
         acceptance_receipt=signed_acceptance,
-        output_path=BUNDLE_DIR / "dify-33013-evidence-bundle.json",
+        output_path=tmp_path / "dify-33013-evidence-bundle.json",
         bug_id="langgenius/dify #33013",
         bug_url="https://github.com/langgenius/dify/issues/33013",
         pinned_commit=DIFY_PINNED_COMMIT,
@@ -581,5 +807,63 @@ def test_export_dify_33013_bundle(
             "structured_output_enabled/structured_output with "
             "structured_output_schema) but QuestionClassifierNode's caller "
             "was not updated. Fix: PR #32902, commit 3a04aef82b38."
+        ),
+    )
+
+
+def test_export_rich_4196_v02_delivery_package(
+    tmp_path,
+    signed_work_order,
+    verification_profile_dict,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+) -> None:
+    candidate_commit = hashlib.sha1(
+        b"rich-4196-local-fixed-candidate", usedforsecurity=False
+    ).hexdigest()
+    _export_v02_issue_package(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        verification_profile_dict=verification_profile_dict,
+        ephemeral_role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        output_path=tmp_path / "rich-4196-v02-delivery-package.json",
+        slug="rich-4196",
+        bug_id="Textualize/Rich #4196",
+        bug_url="https://github.com/Textualize/rich/issues/4196",
+        pinned_commit=RICH_PINNED_COMMIT,
+        candidate_commit=candidate_commit,
+        candidate_revision_type="local_pilot_fixture",
+        fix_description=(
+            "Frozen regression preserves NBSP as a non-breaking character; "
+            "the Manager-pinned negative arm restores the faulty behavior."
+        ),
+    )
+
+
+def test_export_dify_33013_v02_delivery_package(
+    tmp_path,
+    signed_work_order,
+    verification_profile_dict,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+) -> None:
+    _export_v02_issue_package(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        verification_profile_dict=verification_profile_dict,
+        ephemeral_role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        output_path=tmp_path / "dify-33013-v02-delivery-package.json",
+        slug="dify-33013",
+        bug_id="langgenius/dify #33013",
+        bug_url="https://github.com/langgenius/dify/issues/33013",
+        pinned_commit=DIFY_PINNED_COMMIT,
+        candidate_commit=DIFY_FIX_COMMIT,
+        candidate_revision_type="upstream_fix_commit",
+        fix_description=(
+            "QuestionClassifierNode uses the unified "
+            "structured_output_schema argument; the Manager-pinned negative "
+            "arm restores the incompatible keyword arguments."
         ),
     )

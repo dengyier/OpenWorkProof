@@ -21,10 +21,22 @@ import base64
 import hashlib
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 
-def verify_bundle(bundle_path: str) -> bool:
+def bundle_schema(bundle_path: str | Path) -> str:
+    """Return the exact supported-schema discriminator candidate."""
+    try:
+        bundle = json.loads(Path(bundle_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError("bundle is not valid JSON") from error
+    if type(bundle) is not dict or type(bundle.get("schema_version")) is not str:
+        raise ValueError("bundle schema_version is missing")
+    return bundle["schema_version"]
+
+
+def _verify_v01_bundle(bundle_path: str) -> bool:
     """Verify an evidence bundle and print the results."""
     import rfc8785
 
@@ -185,6 +197,85 @@ def verify_bundle(bundle_path: str) -> bool:
     print(f"   Composition reports: {len(reports)}")
     print(f"{'=' * 60}\n")
     return True
+
+
+def _verify_v02_envelope(bundle_path: str) -> bool:
+    """Materialize and verify one closed v0.2 Delivery Package envelope."""
+    from openworkproof.delivery_package import (
+        DeliveryPackageError,
+        verify_delivery_package,
+    )
+
+    envelope = json.loads(Path(bundle_path).read_text(encoding="utf-8"))
+    if set(envelope) != {"schema_version", "metadata", "files"}:
+        raise DeliveryPackageError("delivery envelope fields are not closed")
+    if type(envelope["metadata"]) is not dict or type(envelope["files"]) is not list:
+        raise DeliveryPackageError("delivery envelope shape is invalid")
+    expected_metadata = {
+        "bug_id",
+        "bug_url",
+        "pinned_source_commit",
+        "positive_candidate_commit",
+        "candidate_revision_type",
+        "fixed_test_source_digest",
+        "negative_mutant_patch_digest",
+        "container_image_digest",
+        "dependency_lock_digest",
+        "fix_description",
+        "current_decision",
+        "current_readiness",
+    }
+    if set(envelope["metadata"]) != expected_metadata:
+        raise DeliveryPackageError("delivery envelope metadata is not closed")
+    paths = tuple(item.get("path") for item in envelope["files"] if type(item) is dict)
+    if (
+        len(paths) != len(envelope["files"])
+        or any(type(path) is not str for path in paths)
+        or paths != tuple(sorted(set(paths), key=lambda value: value.encode("utf-8")))
+        or "manifest.json" not in paths
+    ):
+        raise DeliveryPackageError("delivery envelope paths are not closed")
+    with tempfile.TemporaryDirectory(prefix="openworkproof-v02-") as temporary:
+        root = Path(temporary)
+        for item in envelope["files"]:
+            if set(item) != {"path", "sha256", "payload_b64"}:
+                raise DeliveryPackageError("delivery envelope file fields are invalid")
+            relative = item["path"]
+            if (
+                type(relative) is not str
+                or relative.startswith("/")
+                or any(part in {"", ".", ".."} for part in relative.split("/"))
+            ):
+                raise DeliveryPackageError("delivery envelope path is unsafe")
+            try:
+                payload = base64.b64decode(item["payload_b64"], validate=True)
+            except (TypeError, ValueError) as error:
+                raise DeliveryPackageError("delivery envelope payload is invalid") from error
+            if hashlib.sha256(payload).hexdigest() != item["sha256"]:
+                raise DeliveryPackageError("delivery envelope file hash mismatch")
+            target = root.joinpath(*relative.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+        result = verify_delivery_package(root)
+    metadata = envelope["metadata"]
+    print(f"\n{'=' * 60}")
+    print(f"✅ VERIFICATION PASSED")
+    print(f"   Case: {metadata.get('bug_id', 'unknown')}")
+    print(f"   Current decision: {result.current_decision}")
+    print(f"   Current readiness: {result.settlement_readiness}")
+    print(f"   Manifest digest: {result.manifest_digest}")
+    print(f"{'=' * 60}\n")
+    return True
+
+
+def verify_bundle(bundle_path: str) -> bool:
+    """Dispatch to the exact offline verifier selected by schema_version."""
+    schema = bundle_schema(bundle_path)
+    if schema == "openworkproof/evidence-bundle/v0.1":
+        return _verify_v01_bundle(bundle_path)
+    if schema == "openworkproof/delivery-package-envelope/0.2":
+        return _verify_v02_envelope(bundle_path)
+    raise ValueError(f"unsupported bundle schema: {schema}")
 
 
 def main() -> int:
