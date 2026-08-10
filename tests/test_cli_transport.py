@@ -275,3 +275,109 @@ def test_mcp_owp_repo_read_tool(
     assert result["ok"] is True
     assert result["tool_name"] == "owp.repo_read"
     assert result["execution_status"] == "succeeded"
+
+
+@pytest.mark.parametrize(
+    ("argv", "command"),
+    (
+        (["profile-validate", "profile.json"], "profile-validate"),
+        (["verify-positive", "ledger.sqlite3", "result.json"], "verify-positive"),
+        (["verify-negative", "ledger.sqlite3", "result.json"], "verify-negative"),
+        (
+            [
+                "verify-compose",
+                "ledger.sqlite3",
+                "decision.json",
+                "--mode",
+                "commit",
+            ],
+            "verify-compose",
+        ),
+        (
+            [
+                "delivery-build",
+                "ledger.sqlite3",
+                "package",
+                "--privacy-view",
+                "public",
+            ],
+            "delivery-build",
+        ),
+        (["audit-replay", "package"], "audit-replay"),
+        (["audit-explain", "package"], "audit-explain"),
+        (["audit-compare", "old", "new"], "audit-compare"),
+        (["settlement-status", "ledger.sqlite3"], "settlement-status"),
+    ),
+)
+def test_v02_cli_parser_registers_explicit_commands(argv, command) -> None:
+    parsed = cli.build_parser().parse_args(argv)
+    assert parsed.command == command
+    assert not any("private_key" in key for key in vars(parsed))
+
+
+def test_v02_cli_requires_explicit_compose_mode_and_privacy_view() -> None:
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["verify-compose", "ledger.sqlite3", "payload.json"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["delivery-build", "ledger.sqlite3", "package"])
+
+
+def test_v02_cli_routes_through_services(tmp_path, monkeypatch) -> None:
+    payload = tmp_path / "payload.json"
+    payload.write_text('{"arm_kind":"positive"}', encoding="utf-8")
+    calls = []
+
+    class FakeServices:
+        def commit_arm_result(self, ledger, value):
+            calls.append((ledger, value))
+            return {"arm_kind": "positive", "committed": True}
+
+    monkeypatch.setattr(cli, "OpenWorkProofServices", FakeServices)
+    result = cli.cli_verify_arm(
+        tmp_path / "ledger.sqlite3",
+        cli._load_payload(payload),
+        expected_kind="positive",
+    )
+    assert result == {"arm_kind": "positive", "committed": True}
+    assert calls == [
+        (tmp_path / "ledger.sqlite3", {"arm_kind": "positive"})
+    ]
+
+
+def test_read_only_v02_cli_operations_have_no_private_key_parameters() -> None:
+    import inspect
+
+    for function in (
+        cli.cli_profile_validate,
+        cli.cli_delivery_build,
+        cli.cli_audit_replay,
+        cli.cli_audit_explain,
+        cli.cli_audit_compare,
+        cli.cli_settlement_status,
+    ):
+        assert "private_key" not in inspect.signature(function).parameters
+
+
+def test_v02_cli_and_mcp_report_equivalent_json_errors(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from openworkproof import mcp_transport
+
+    profile = tmp_path / "profile.json"
+    profile.write_text('{"profile_id":"invalid"}', encoding="utf-8")
+
+    class FakeServices:
+        def validate_profile(self, payload):
+            raise ValueError("profile is not valid")
+
+    monkeypatch.setattr(cli, "OpenWorkProofServices", FakeServices)
+    monkeypatch.setattr(mcp_transport, "OpenWorkProofServices", FakeServices)
+
+    assert cli.app(["profile-validate", str(profile)]) == 1
+    cli_error = json.loads(capsys.readouterr().err)
+    mcp_error = mcp_transport.owp_validate_profile(profile.read_text())
+
+    assert cli_error == {"error": "profile is not valid"}
+    assert mcp_error["ok"] is False
+    assert mcp_error["error"] == cli_error["error"]

@@ -142,3 +142,110 @@ def test_services_settlement_status_delegates_without_recomputing(
     result = OpenWorkProofServices().get_settlement_readiness(ledger)
     assert result == {"settlement_readiness": "READY_FOR_ACCEPTANCE"}
     assert calls == [ledger]
+
+
+def test_v02_mcp_tools_are_registered() -> None:
+    from openworkproof import mcp_transport
+
+    names = set(mcp_transport.mcp._tool_manager._tools)
+    assert {
+        "owp_validate_profile",
+        "owp_run_verification",
+        "owp_get_decision",
+        "owp_build_delivery_package",
+        "owp_get_settlement_readiness",
+    } <= names
+
+
+def test_v02_mcp_validate_profile_matches_service(monkeypatch) -> None:
+    from openworkproof import mcp_transport
+
+    calls = []
+
+    class FakeServices:
+        def validate_profile(self, payload):
+            calls.append(payload)
+            return {"profile_id": "validated"}
+
+    monkeypatch.setattr(mcp_transport, "OpenWorkProofServices", FakeServices)
+    result = mcp_transport.owp_validate_profile('{"profile_id":"candidate"}')
+    assert result == {
+        "schema_version": "openworkproof/mcp/0.2",
+        "ok": True,
+        "profile_id": "validated",
+    }
+    assert calls == [{"profile_id": "candidate"}]
+
+
+@pytest.mark.parametrize(
+    ("operation", "method"),
+    (("commit_arm", "commit_arm_result"), ("commit_decision", "commit_decision")),
+)
+def test_v02_mcp_verification_commit_calls_service_once(
+    monkeypatch, operation, method
+) -> None:
+    from openworkproof import mcp_transport
+
+    calls = []
+
+    class FakeServices:
+        def commit_arm_result(self, ledger, payload):
+            calls.append(("commit_arm_result", ledger, payload))
+            return {"committed": "arm"}
+
+        def commit_decision(self, ledger, payload):
+            calls.append(("commit_decision", ledger, payload))
+            return {"committed": "decision"}
+
+    monkeypatch.setattr(mcp_transport, "OpenWorkProofServices", FakeServices)
+    result = mcp_transport.owp_run_verification(
+        "ledger.sqlite3", '{"id":"candidate"}', operation
+    )
+    assert result["ok"] is True
+    assert calls == [(method, Path("ledger.sqlite3"), {"id": "candidate"})]
+
+
+def test_v02_mcp_commit_ack_loss_returns_committed_truth(monkeypatch) -> None:
+    from openworkproof import mcp_transport
+    from openworkproof.verification import VerificationCommittedError
+
+    calls = 0
+
+    class FakeServices:
+        def commit_decision(self, ledger, payload):
+            nonlocal calls
+            calls += 1
+            raise VerificationCommittedError(
+                "ack lost",
+                _Dumpable({"decision_id": "committed"}),
+            )
+
+    monkeypatch.setattr(mcp_transport, "OpenWorkProofServices", FakeServices)
+    result = mcp_transport.owp_run_verification(
+        "ledger.sqlite3", '{"id":"candidate"}', "commit_decision"
+    )
+    assert result["ok"] is True
+    assert result["commit_status"] == "committed_after_ack_loss"
+    assert result["decision_id"] == "committed"
+    assert calls == 1
+
+
+def test_v02_mcp_indeterminate_commit_blocks_retry(monkeypatch) -> None:
+    from openworkproof import mcp_transport
+    from openworkproof.verification import VerificationCommitIndeterminateError
+
+    calls = 0
+
+    class FakeServices:
+        def commit_arm_result(self, ledger, payload):
+            nonlocal calls
+            calls += 1
+            raise VerificationCommitIndeterminateError("readback unavailable")
+
+    monkeypatch.setattr(mcp_transport, "OpenWorkProofServices", FakeServices)
+    result = mcp_transport.owp_run_verification(
+        "ledger.sqlite3", '{"id":"candidate"}', "commit_arm"
+    )
+    assert result["ok"] is False
+    assert result["commit_status"] == "indeterminate"
+    assert calls == 1

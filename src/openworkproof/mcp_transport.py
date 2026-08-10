@@ -19,6 +19,14 @@ over stdio.  The server is organised in three layers:
 - ``owp_status``                 — replay a ledger and return its state
 - ``owp_run_tests``              — forward a run-tests execution
 - ``owp_repo_read``              — forward a repo-read execution
+- ``owp_run_verification``       — prepare or commit one v0.2 verification step
+- ``owp_get_decision``           — prepare a v0.2 verification decision draft
+- ``owp_build_delivery_package`` — export a closed delivery package
+- ``owp_get_settlement_readiness`` — derive the current readiness snapshot
+
+**Standalone v0.2 validation tools:**
+
+- ``owp_validate_profile``       — validate a signed verification profile
 
 **Utility tools:**
 
@@ -61,6 +69,7 @@ from openworkproof.schema_registry import (
     authoritative_digest,
     authoritative_schema,
 )
+from openworkproof.services import OpenWorkProofServices
 from openworkproof.signing import (
     ALLOWED_CANONICAL_DOMAINS,
     ALLOWED_SIGNED_DOMAINS,
@@ -72,10 +81,15 @@ from openworkproof.signing import (
     verify_payload,
     verify_work_order_identity_bindings,
 )
+from openworkproof.verification import (
+    VerificationCommittedError,
+    VerificationCommitIndeterminateError,
+)
 
 mcp = _McpServer("openworkproof")
 
 _SCHEMA = "openworkproof/mcp/0.2"
+_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
 
 
 # ── helpers ──────────────────────────────────────────────────────────
@@ -100,6 +114,37 @@ def _err(message: str, **extra: Any) -> dict[str, Any]:
     }
     result.update(extra)
     return result
+
+
+def _json_object(value: str, *, field: str) -> dict[str, Any]:
+    """Decode one bounded JSON object for a v0.2 transport call."""
+    if len(value.encode("utf-8")) > _MAX_PAYLOAD_BYTES:
+        raise ValueError(f"{field} exceeds 8 MiB")
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{field} is not valid JSON: {error}") from error
+    if type(parsed) is not dict:
+        raise ValueError(f"{field} must be a JSON object")
+    return parsed
+
+
+def _service_call(callable_, *args: Any) -> dict[str, Any]:
+    """Map one application-service call to stable MCP commit semantics."""
+    try:
+        return _ok(callable_(*args))
+    except VerificationCommittedError as error:
+        committed = error.committed
+        payload = (
+            committed.model_dump(mode="json")
+            if hasattr(committed, "model_dump")
+            else dict(committed)
+        )
+        return _ok({"commit_status": "committed_after_ack_loss", **payload})
+    except VerificationCommitIndeterminateError as error:
+        return _err(str(error), commit_status="indeterminate")
+    except Exception as error:
+        return _err(str(error))
 
 
 def _decode_public_key(public_key_b64url: str) -> Ed25519PublicKey | None:
@@ -394,6 +439,16 @@ def owp_list_domains() -> dict[str, Any]:
     })
 
 
+@mcp.tool()
+def owp_validate_profile(profile_json: str) -> dict[str, Any]:
+    """Validate a signed Evidence Lifecycle v0.2 verification profile."""
+    try:
+        payload = _json_object(profile_json, field="profile_json")
+    except ValueError as error:
+        return _err(str(error))
+    return _service_call(OpenWorkProofServices().validate_profile, payload)
+
+
 # ── ledger coordination tools ────────────────────────────────────────
 
 
@@ -432,6 +487,75 @@ def owp_repo_read(ledger: str, payload: str) -> dict[str, Any]:
         payload: JSON string of the repo-read execution payload.
     """
     return _forward(cli_module.cli_repo_read, ledger, payload)
+
+
+@mcp.tool()
+def owp_run_verification(
+    ledger: str,
+    payload: str,
+    operation: str,
+) -> dict[str, Any]:
+    """Run exactly one explicit v0.2 verification operation.
+
+    ``operation`` must be ``commit_arm``, ``prepare_decision``, or
+    ``commit_decision``.  The tool never retries an indeterminate commit.
+    """
+    try:
+        parsed = _json_object(payload, field="payload")
+    except ValueError as error:
+        return _err(str(error))
+    service = OpenWorkProofServices()
+    if operation == "commit_arm":
+        callable_ = service.commit_arm_result
+    elif operation == "prepare_decision":
+        callable_ = service.prepare_decision
+    elif operation == "commit_decision":
+        callable_ = service.commit_decision
+    else:
+        return _err(
+            "operation must be commit_arm, prepare_decision, or commit_decision"
+        )
+    return _service_call(callable_, Path(ledger), parsed)
+
+
+@mcp.tool()
+def owp_get_decision(ledger: str, request_json: str) -> dict[str, Any]:
+    """Prepare, but do not sign or commit, a v0.2 decision draft."""
+    try:
+        payload = _json_object(request_json, field="request_json")
+    except ValueError as error:
+        return _err(str(error))
+    return _service_call(
+        OpenWorkProofServices().prepare_decision,
+        Path(ledger),
+        payload,
+    )
+
+
+@mcp.tool()
+def owp_build_delivery_package(
+    ledger: str,
+    output: str,
+    privacy_view: str,
+) -> dict[str, Any]:
+    """Export a public or customer-private offline delivery package."""
+    if privacy_view not in {"public", "customer_private"}:
+        return _err("privacy_view must be public or customer_private")
+    return _service_call(
+        OpenWorkProofServices().build_delivery,
+        Path(ledger),
+        Path(output),
+        privacy_view,
+    )
+
+
+@mcp.tool()
+def owp_get_settlement_readiness(ledger: str) -> dict[str, Any]:
+    """Derive readiness only; this does not prove payment or settlement."""
+    return _service_call(
+        OpenWorkProofServices().get_settlement_readiness,
+        Path(ledger),
+    )
 
 
 def _forward(forwarder, ledger: str, payload: str) -> dict[str, Any]:
