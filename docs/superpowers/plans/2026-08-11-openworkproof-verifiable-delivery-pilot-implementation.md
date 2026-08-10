@@ -1506,13 +1506,13 @@ Expected: package export, replay, privacy, and fault suites pass.
 - Modify: `src/openworkproof/mcp_server.py`
 - Create: `tests/test_v02_interfaces.py`
 
-- [ ] **Step 1: Write RED facade parity tests**
+- [x] **Step 1: Write RED facade parity tests**
 
 Test that profile validation, arm commit, decision composition, package export,
 audit replay, and settlement status return one closed result shape without
 importing CLI or MCP modules.
 
-- [ ] **Step 2: Implement the facade**
+- [x] **Step 2: Implement the facade**
 
 Expose only:
 
@@ -1557,12 +1557,15 @@ class OpenWorkProofServices:
 Each method calls existing model/transaction/package functions. It must not
 duplicate decision, acceptance, or settlement rules.
 
-- [ ] **Step 3: Remove v0.2 business decisions from transport code**
+- [x] **Step 3: Remove v0.2 business decisions from transport code**
 
 If any v0.2 branch was temporarily added to `mcp_server.py`, replace it with a
 service call. Preserve all existing v0.1 handler behavior.
 
-- [ ] **Step 4: Run GREEN and commit**
+Checkpoint: no v0.2 business branch existed in `mcp_server.py`; the audit
+therefore required no transport-code edit, and the 70 existing MCP tests pass.
+
+- [x] **Step 4: Run GREEN and commit**
 
 Run:
 
