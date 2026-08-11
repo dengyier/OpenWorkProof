@@ -31,6 +31,7 @@ in without changing the business layer.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -56,6 +57,15 @@ DEFAULT_BACKOFF = 0.2
 
 _ACTION_PATHS = frozenset(
     {"auth", "dispatch", "list-pending", "store-result", "collect"}
+)
+_CLOSED_SOCKET_ERRNOS = frozenset(
+    {
+        errno.EBADF,
+        errno.ECONNABORTED,
+        errno.EINVAL,
+        errno.ENOTSOCK,
+        getattr(errno, "WSAENOTSOCK", 10038),
+    }
 )
 
 
@@ -306,34 +316,62 @@ class TeamNetworkService:
         self._results: dict[str, TeamTaskResult] = {}
         self._socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
+        self._lifecycle_lock = threading.Lock()
+        self._stop_event = threading.Event()
 
     @property
     def port(self) -> int:
         return self._port
 
     def start(self) -> None:
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._socket.bind((self._host, self._port))
-        self._socket.listen(4)
-        self._thread = threading.Thread(target=self._serve, daemon=True)
-        self._thread.start()
+        service_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        service_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        service_socket.bind((self._host, self._port))
+        service_socket.listen(4)
+        with self._lifecycle_lock:
+            self._stop_event.clear()
+            self._socket = service_socket
+            self._thread = threading.Thread(target=self._serve, daemon=True)
+            thread = self._thread
+        thread.start()
 
     def stop(self) -> None:
-        if self._socket is not None:
+        self.close()
+
+    def close(self) -> None:
+        self._stop_event.set()
+        with self._lifecycle_lock:
+            service_socket = self._socket
+            self._socket = None
+        if service_socket is not None:
             try:
-                self._socket.close()
+                service_socket.close()
             except OSError:
                 pass
-            self._socket = None
+
+    def join(self, timeout: float | None = None) -> None:
+        with self._lifecycle_lock:
+            thread = self._thread
+        if thread is not None:
+            thread.join(timeout=timeout)
 
     def _serve(self) -> None:
-        assert self._socket is not None
         while True:
+            with self._lifecycle_lock:
+                service_socket = self._socket
+            if service_socket is None:
+                if self._stop_event.is_set():
+                    return
+                raise RuntimeError("team service socket is not available")
             try:
-                conn, _ = self._socket.accept()
-            except OSError:
-                return
+                conn, _ = service_socket.accept()
+            except OSError as error:
+                if (
+                    self._stop_event.is_set()
+                    and error.errno in _CLOSED_SOCKET_ERRNOS
+                ):
+                    return
+                raise
             try:
                 self._handle(conn)
             finally:

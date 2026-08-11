@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import socket
+import threading
 
 import pytest
 
@@ -57,6 +59,12 @@ def _free_port() -> int:
     return port
 
 
+def _started_test_client() -> TeamNetworkService:
+    client = TeamNetworkService(port=_free_port())
+    client.start()
+    return client
+
+
 @pytest.fixture
 def service():
     services = []
@@ -70,6 +78,42 @@ def service():
     yield launch
     for svc in services:
         svc.stop()
+        svc.join(timeout=1)
+        assert svc._thread is not None
+        assert not svc._thread.is_alive()
+
+
+def test_close_while_accepting_has_no_uncaught_thread_exception(
+    monkeypatch,
+) -> None:
+    uncaught: list[BaseException] = []
+    monkeypatch.setattr(
+        threading,
+        "excepthook",
+        lambda args: uncaught.append(args.exc_value),
+    )
+    for _ in range(100):
+        client = _started_test_client()
+        with socket.create_connection(("127.0.0.1", client.port)) as connection:
+            connection.sendall(b'{"action":"list-pending"}\n')
+            assert connection.recv(65536)
+            client.close()
+        client.join(timeout=1)
+        assert client._thread is not None
+        assert not client._thread.is_alive()
+    assert uncaught == []
+
+
+def test_unexpected_accept_error_is_not_swallowed() -> None:
+    class FailingSocket:
+        def accept(self):
+            raise OSError(errno.ECONNABORTED, "unexpected accept failure")
+
+    client = TeamNetworkService(port=_free_port())
+    client._socket = FailingSocket()  # type: ignore[assignment]
+
+    with pytest.raises(OSError, match="unexpected accept failure"):
+        client._serve()
 
 
 def test_network_client_dispatch_store_collect_round_trip(service) -> None:

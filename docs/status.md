@@ -7,6 +7,38 @@
 0.3。分发版本
 和协议版本分别记录，不得把 Python 分发版本解释成协议版本。
 
+## Judgment-to-Action Binding v0.4 稳定性前置修复
+
+Task 1 只修复 `TeamNetworkService` 的关闭期 `close/accept` 竞态，不改变
+任何协议对象、签名、账本、状态机或授权语义。修复前的 100 轮真实 TCP
+回归稳定捕获 100 个未处理的
+`AttributeError: 'NoneType' object has no attribute 'accept'`。修复后，监听
+socket 在生命周期锁内复制到局部引用；只有 stop event 已设置且 errno 为
+`EBADF`、`EINVAL`、`ENOTSOCK`/`WSAENOTSOCK` 或 macOS 实测的
+`ECONNABORTED` 时才按正常关闭退出，其他 accept 错误继续抛出。测试 fixture
+会显式关闭并 join 全部服务线程，100 轮回归也逐轮验证线程已经退出。
+
+本切片 focused 结果：正确放置 pytest warning filter 后，
+`tests/test_team_network_client.py` 为 `8 passed`，没有
+`PytestUnhandledThreadExceptionWarning`；使用隔离临时根执行 `-W error`
+同样为 `8 passed`。计划中的字面命令把 `-W` 放在 `-m pytest` 之前，
+本机 Python 因 pytest 尚未导入而报告
+`Invalid -W option ignored: invalid module name: 'pytest'`；将同一 filter
+交给 pytest 解析后才得到上述有效门结果。三文件稳定性回归
+`test_team_network_client.py + test_mcp_server.py + test_cli_transport.py` 为
+`98 passed、9 warnings`，`git diff --check` 通过；这 9 项均为下述默认
+临时根的既有清理 warning，不含未处理线程异常。
+
+macOS 默认 pytest 临时根仍有既有清理警告，精确内容为
+`PytestWarning: (rm_rf) error removing .../test_execute_rejects_invalid_f1/fixed-tests`
+与 `OSError: [Errno 66] Directory not empty`。owner 是
+`tests/test_run_tests_runner.py::test_execute_rejects_invalid_fixed_test_before_started_or_process[symlink]`：
+该参数化用例把 `fixed-tests` 设为只读并留下 symlink；它不由本 Task 1 的
+网络线程或文件句柄产生。默认临时根下的 `-W error` 因 pytest session
+cleanup 将这个既有 warning 升级而非零退出；本切片没有全局过滤或弱化它，
+也没有越过三文件范围修改其 owner 测试。以上是本地测试证据，不表示 v0.4
+协议工作已完成、required-live 候选已重新冻结、分支已合并或远端已发布。
+
 ## Scope-Bound Verification v0.3 本地开发状态
 
 隔离分支 `codex/scope-bound-verification-v03` 已实现签名
