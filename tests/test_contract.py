@@ -204,12 +204,19 @@ def test_frozen_dict_nested_maps_are_frozen_in_one_linear_pass(
     original = contract_models._freeze_json
 
     def counted_freeze(
-        item: object, current_depth: int = 1, *, freeze_mapping: bool = True
+        item: object,
+        current_depth: int = 1,
+        *,
+        freeze_mapping: bool = True,
+        max_array_items: int = 64,
     ) -> object:
         nonlocal calls
         calls += 1
         return original(
-            item, current_depth, freeze_mapping=freeze_mapping
+            item,
+            current_depth,
+            freeze_mapping=freeze_mapping,
+            max_array_items=max_array_items,
         )
 
     monkeypatch.setattr(contract_models, "_freeze_json", counted_freeze)
