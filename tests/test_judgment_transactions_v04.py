@@ -576,20 +576,32 @@ def test_identical_concurrent_judgment_commits_share_one_exact_truth(
 ) -> None:
     barrier = threading.Barrier(2)
 
-    def commit_once(_: int) -> JudgmentCommitment:
+    def commit_once(_: int) -> tuple[str, JudgmentCommitment]:
         barrier.wait()
         try:
-            return commit_judgment_commitment(
-                judgment_ledger, judgment_commitment_v04, authority_context
+            return (
+                "committed",
+                commit_judgment_commitment(
+                    judgment_ledger,
+                    judgment_commitment_v04,
+                    authority_context,
+                ),
             )
         except BindingCommittedError as error:
             assert isinstance(error.committed, JudgmentCommitment)
-            return error.committed
+            return "already_committed", error.committed
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         outcomes = tuple(pool.map(commit_once, range(2)))
 
-    assert outcomes == (judgment_commitment_v04, judgment_commitment_v04)
+    assert sorted(status for status, _ in outcomes) == [
+        "already_committed",
+        "committed",
+    ]
+    assert tuple(value for _, value in outcomes) == (
+        judgment_commitment_v04,
+        judgment_commitment_v04,
+    )
     connection = evidence.connect_ledger(judgment_ledger)
     try:
         assert connection.execute(
