@@ -2542,6 +2542,7 @@ _UNBOUND_BINDING_REASONS = frozenset(
         "JUDGMENT_FACTS_DIGEST_MISMATCH",
         "JUDGMENT_DISPOSITION_DIGEST_MISMATCH",
         "JUDGMENT_SUPERSEDED",
+        "ADAPTER_PROFILE_DIGEST_MISMATCH",
         "ACTION_DIGEST_MISMATCH",
         "ACTION_ARGUMENTS_MISMATCH",
         "ACTION_MAPPING_REJECTED",
@@ -2557,7 +2558,6 @@ _UNBOUND_BINDING_REASONS = frozenset(
 _INDETERMINATE_BINDING_REASONS = frozenset(
     {
         "JUDGMENT_ARTIFACT_MISSING",
-        "ADAPTER_PROFILE_DIGEST_MISMATCH",
         "REPLAY_UNAVAILABLE",
         "EVALUATOR_VERSION_DRIFT",
         "AUTHORITY_CHECKPOINT_MISSING",
@@ -2566,6 +2566,15 @@ _INDETERMINATE_BINDING_REASONS = frozenset(
         "EVIDENCE_INCOMPLETE",
         "VERIFICATION_NOT_CURRENT",
         "INDEPENDENCE_UNPROVEN",
+    }
+)
+_AUTHORITY_CHECKPOINT_FAILURE_REASONS = frozenset(
+    {
+        "AUTHORITY_CHECKPOINT_MISSING",
+        "AUTHORITY_CHECKPOINT_STALE",
+        "AUTHORITY_CHECKPOINT_SIGNATURE_INVALID",
+        "AUTHORITY_FORK_DETECTED",
+        "AUTHORITY_ROLLBACK_DETECTED",
     }
 )
 
@@ -2761,10 +2770,57 @@ def _validate_binding_decision_content(
         )
         if any(code not in allowed for code in reason_codes):
             raise ValueError(f"reason code is not compatible with {decision}")
-    if authority_status == "current" and authority_checkpoint_digest is None:
-        raise ValueError("current authority requires a checkpoint digest")
-    if authority_status == "not_required" and authority_checkpoint_digest is not None:
-        raise ValueError("not-required authority forbids a checkpoint digest")
+    reason_set = set(reason_codes)
+    authority_failure_reasons = reason_set.intersection(
+        _AUTHORITY_CHECKPOINT_FAILURE_REASONS
+    )
+    if authority_status == "not_required":
+        if authority_checkpoint_digest is not None or authority_failure_reasons:
+            raise ValueError(
+                "not-required authority forbids checkpoint evidence or failures"
+            )
+    elif authority_status == "current":
+        if authority_checkpoint_digest is None or authority_failure_reasons:
+            raise ValueError(
+                "current authority requires a checkpoint and no checkpoint failure"
+            )
+    elif authority_status == "missing":
+        if (
+            authority_checkpoint_digest is not None
+            or authority_failure_reasons != {"AUTHORITY_CHECKPOINT_MISSING"}
+        ):
+            raise ValueError(
+                "missing authority requires only the missing-checkpoint failure"
+            )
+    elif authority_status == "stale":
+        stale_reasons = {
+            "AUTHORITY_CHECKPOINT_STALE",
+            "AUTHORITY_ROLLBACK_DETECTED",
+        }
+        if (
+            authority_checkpoint_digest is None
+            or not authority_failure_reasons.intersection(stale_reasons)
+            or not authority_failure_reasons.issubset(stale_reasons)
+        ):
+            raise ValueError(
+                "stale authority requires a checkpoint and stale or rollback failure"
+            )
+    elif authority_status == "forked":
+        if (
+            authority_checkpoint_digest is None
+            or authority_failure_reasons != {"AUTHORITY_FORK_DETECTED"}
+        ):
+            raise ValueError(
+                "forked authority requires a checkpoint and fork failure"
+            )
+    elif (
+        authority_checkpoint_digest is not None
+        or "REPLAY_UNAVAILABLE" not in reason_set
+        or authority_failure_reasons
+    ):
+        raise ValueError(
+            "unavailable authority requires replay-unavailable without checkpoint"
+        )
     if not _is_utf8_sorted_unique(causal_parent_decision_ids):
         raise ValueError("causal decision parents must be sorted and unique")
     if (supersedes_binding_decision_id is None) != (

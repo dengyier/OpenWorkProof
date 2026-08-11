@@ -45,6 +45,17 @@ def _redigest_binding_decision(candidate: dict) -> None:
     ).hexdigest()
 
 
+def _rebuild_binding_shape(candidate: dict, model_kind: str) -> object:
+    rebuilt = copy.deepcopy(candidate)
+    if model_kind == "draft":
+        rebuilt.pop("schema_version")
+        rebuilt.pop("verifier_signatures")
+        rebuilt.pop("digest")
+        return BindingDecisionDraft.model_validate(rebuilt)
+    _redigest_binding_decision(rebuilt)
+    return BindingDecision.model_validate(rebuilt)
+
+
 def test_valid_v04_models_construct(
     judgment_commitment_v04: JudgmentCommitment,
     action_binding_manifest_v04: ActionBindingManifest,
@@ -382,33 +393,173 @@ def test_binding_decision_enforces_reason_outcome_and_authority_compatibility(
         BindingDecision.model_validate(indeterminate_counterevidence)
 
 
-def test_adapter_profile_drift_is_indeterminate(
+@pytest.mark.parametrize("model_kind", ["draft", "decision"])
+def test_adapter_profile_digest_mismatch_is_unbound_only(
     binding_decision_v04_dict: dict,
+    model_kind: str,
 ) -> None:
+    unbound = copy.deepcopy(binding_decision_v04_dict)
+    unbound["decision"] = "UNBOUND"
+    unbound["reason_codes"] = ["ADAPTER_PROFILE_DIGEST_MISMATCH"]
+    assert _rebuild_binding_shape(unbound, model_kind).decision == "UNBOUND"
+
     candidate = copy.deepcopy(binding_decision_v04_dict)
     candidate["decision"] = "INDETERMINATE"
     candidate["reason_codes"] = ["ADAPTER_PROFILE_DIGEST_MISMATCH"]
-    candidate["authority_status"] = "unavailable"
-    candidate["authority_checkpoint_digest"] = None
-    _redigest_binding_decision(candidate)
-    assert BindingDecision.model_validate(candidate).decision == "INDETERMINATE"
+    with pytest.raises(ValidationError, match="reason|INDETERMINATE"):
+        _rebuild_binding_shape(candidate, model_kind)
 
 
 @pytest.mark.parametrize(
-    ("authority_status", "authority_checkpoint_digest"),
-    [("current", None), ("not_required", "1" * 64)],
+    "model_kind", ["draft", "decision"]
 )
-def test_binding_decision_pairs_authority_status_with_checkpoint_digest(
+@pytest.mark.parametrize(
+    (
+        "decision",
+        "reason_codes",
+        "authority_status",
+        "authority_checkpoint_digest",
+    ),
+    [
+        ("BOUND", [], "not_required", None),
+        (
+            "UNBOUND",
+            ["ALTERNATIVE_WORK_ORDER_DETECTED"],
+            "current",
+            "1" * 64,
+        ),
+        (
+            "INDETERMINATE",
+            ["AUTHORITY_CHECKPOINT_MISSING"],
+            "missing",
+            None,
+        ),
+        (
+            "UNBOUND",
+            ["AUTHORITY_CHECKPOINT_STALE"],
+            "stale",
+            "1" * 64,
+        ),
+        (
+            "UNBOUND",
+            ["AUTHORITY_ROLLBACK_DETECTED"],
+            "stale",
+            "1" * 64,
+        ),
+        (
+            "UNBOUND",
+            ["AUTHORITY_FORK_DETECTED"],
+            "forked",
+            "1" * 64,
+        ),
+        (
+            "INDETERMINATE",
+            ["EVIDENCE_INCOMPLETE", "REPLAY_UNAVAILABLE"],
+            "unavailable",
+            None,
+        ),
+    ],
+)
+def test_binding_authority_status_valid_matrix_is_shared_by_both_shapes(
     binding_decision_v04_dict: dict,
+    model_kind: str,
+    decision: str,
+    reason_codes: list[str],
     authority_status: str,
     authority_checkpoint_digest: str | None,
 ) -> None:
     candidate = copy.deepcopy(binding_decision_v04_dict)
+    candidate["decision"] = decision
+    candidate["reason_codes"] = reason_codes
     candidate["authority_status"] = authority_status
     candidate["authority_checkpoint_digest"] = authority_checkpoint_digest
-    _redigest_binding_decision(candidate)
+    assert _rebuild_binding_shape(candidate, model_kind).authority_status == (
+        authority_status
+    )
+
+
+@pytest.mark.parametrize("model_kind", ["draft", "decision"])
+@pytest.mark.parametrize(
+    (
+        "decision",
+        "reason_codes",
+        "authority_status",
+        "authority_checkpoint_digest",
+    ),
+    [
+        ("BOUND", [], "not_required", "1" * 64),
+        (
+            "UNBOUND",
+            ["AUTHORITY_CHECKPOINT_STALE"],
+            "not_required",
+            None,
+        ),
+        ("BOUND", [], "current", None),
+        (
+            "INDETERMINATE",
+            ["AUTHORITY_CHECKPOINT_MISSING"],
+            "current",
+            "1" * 64,
+        ),
+        (
+            "INDETERMINATE",
+            ["AUTHORITY_CHECKPOINT_MISSING"],
+            "missing",
+            "1" * 64,
+        ),
+        (
+            "INDETERMINATE",
+            ["EVIDENCE_INCOMPLETE"],
+            "missing",
+            None,
+        ),
+        (
+            "UNBOUND",
+            ["AUTHORITY_CHECKPOINT_STALE"],
+            "stale",
+            None,
+        ),
+        (
+            "UNBOUND",
+            ["ACTION_ARGUMENTS_MISMATCH"],
+            "stale",
+            "1" * 64,
+        ),
+        (
+            "UNBOUND",
+            ["ALTERNATIVE_WORK_ORDER_DETECTED"],
+            "forked",
+            "1" * 64,
+        ),
+        (
+            "INDETERMINATE",
+            ["REPLAY_UNAVAILABLE"],
+            "unavailable",
+            "1" * 64,
+        ),
+        (
+            "INDETERMINATE",
+            ["EVIDENCE_INCOMPLETE"],
+            "unavailable",
+            None,
+        ),
+    ],
+)
+def test_binding_authority_status_invalid_matrix_is_shared_by_both_shapes(
+    binding_decision_v04_dict: dict,
+    model_kind: str,
+    decision: str,
+    reason_codes: list[str],
+    authority_status: str,
+    authority_checkpoint_digest: str | None,
+) -> None:
+    candidate = copy.deepcopy(binding_decision_v04_dict)
+    candidate["decision"] = decision
+    candidate["reason_codes"] = reason_codes
+    candidate["authority_status"] = authority_status
+    candidate["authority_checkpoint_digest"] = authority_checkpoint_digest
     with pytest.raises(ValidationError, match="authority|checkpoint"):
-        BindingDecision.model_validate(candidate)
+        _rebuild_binding_shape(candidate, model_kind)
 
 
 @pytest.mark.parametrize(
@@ -439,7 +590,7 @@ def test_alternative_work_order_is_compatible_with_both_nonbound_outcomes(
     candidate = copy.deepcopy(binding_decision_v04_dict)
     candidate["decision"] = decision
     candidate["reason_codes"] = ["ALTERNATIVE_WORK_ORDER_DETECTED"]
-    candidate["authority_status"] = "forked"
+    candidate["authority_status"] = "current"
     _redigest_binding_decision(candidate)
     assert BindingDecision.model_validate(candidate).decision == decision
 
