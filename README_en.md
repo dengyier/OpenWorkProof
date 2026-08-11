@@ -162,12 +162,12 @@ owp status
 # Run full test suite (~5 minutes, requires local dev environment)
 ./.venv/bin/python -m pytest -q
 
-# Use the command's current output; final release-gate counts follow Task 16
+# Use the command's current output; the fresh release-candidate snapshot is below
 ```
 
 ### Evidence Lifecycle v0.2 and the 21-Day Pilot
 
-The current development branch exposes v0.2 profile validation, positive and
+The current release candidate exposes v0.2 profile validation, positive and
 negative evidence commits, verification decisions, Delivery Packages, offline
 audits, and settlement-readiness derivation:
 
@@ -186,8 +186,23 @@ See the [21-day verifiable-delivery pilot kit](docs/pilot/README.md) for the
 operator sequence, assurance-level cost boundaries, and a technical/commercial
 scorecard. The examples are local integration fixtures; they do not evidence a
 real customer, customer acceptance, payment, fund release, or production
-deployment. Final Task 16 test counts will be added only after the final
-supply-chain and release gates run.
+deployment.
+
+Task 16 completed the release gates on source revision
+`64f6ba65a26e0038e6ce8be7925913a4cc7726a3` and added an immutable
+[candidate inventory](supply-chain/images/candidates/64f6ba65a26e0038e6ce8be7925913a4cc7726a3.json):
+
+- focused v0.2: `173 passed`;
+- portable full suite: `2484 passed, 0 failed, 7 skipped, 1 warning`;
+- required-live full suite: `2491 passed, 0 failed, 0 skipped, 1 warning`;
+- the Rich #4196 and Dify #33013 v0.2 bundles both replayed offline as
+  `VERIFICATION PASSED / VERIFIED / READY_FOR_ACCEPTANCE`.
+
+The single warning is the existing `team_network_client` shutdown-thread race;
+it is not hidden. `READY_FOR_ACCEPTANCE` means that the evidence package meets
+the protocol conditions for entering acceptance. It does not mean that a
+customer accepted, paid for, or deployed it. See [docs/status.md](docs/status.md)
+for the environment, timings, and full claim boundaries.
 
 ### End-to-End Demos
 
@@ -544,7 +559,7 @@ OpenWorkProof/
 - Docker production executor (STARTED_UNCONFIRMED recovery)
 - Rich #4196 full five-role E2E demo (Acceptor TCP signing + offline verification)
 - Dify #33013 full five-role E2E demo (AI application platform, cross-project-type generality)
-- **Final full-suite gate: pending Task 16 on the final source revision**
+- **Final v0.2 required-live gate: 2491 passed, 0 failed, 0 skipped, 1 warning**
 
 **Not yet complete:** remaining ToolCall handler closures, event submission.
 

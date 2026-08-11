@@ -160,12 +160,12 @@ owp status
 # 运行全量测试（约 5 分钟，需本地开发环境）
 ./.venv/bin/python -m pytest -q
 
-# 精确数量以当前命令输出为准；最终发布门数量将在 Task 16 后记录
+# 精确数量以当前命令输出为准；下方记录最终发布候选的 fresh 验证快照
 ```
 
 ### Evidence Lifecycle v0.2 与 21 天试点
 
-当前开发分支提供 v0.2 的 Profile 校验、正负证据提交、验证决定、Delivery
+当前发布候选提供 v0.2 的 Profile 校验、正负证据提交、验证决定、Delivery
 Package、离线审计和结算就绪度接口：
 
 ```bash
@@ -182,7 +182,20 @@ owp settlement-status pilot.sqlite3
 完整运营步骤、信任等级成本和商业证据计分卡见
 [21 天可验证交付试点](docs/pilot/README.md)。示例对象只用于本地解析和
 接入演练，不代表真实客户、客户验收、付款、资金释放或正式部署。
-Task 16 的最终测试数量将在最终供应链与发布门完成后更新；此处不预填。
+
+Task 16 已在 source revision
+`64f6ba65a26e0038e6ce8be7925913a4cc7726a3` 上完成发布门，并新增不可变
+[候选库存](supply-chain/images/candidates/64f6ba65a26e0038e6ce8be7925913a4cc7726a3.json)：
+
+- focused v0.2：`173 passed`；
+- 便携全量：`2484 passed、0 failed、7 skipped、1 warning`；
+- required-live 全量：`2491 passed、0 failed、0 skipped、1 warning`；
+- Rich #4196 与 Dify #33013 v0.2 包离线重放均为
+  `VERIFICATION PASSED / VERIFIED / READY_FOR_ACCEPTANCE`。
+
+唯一 warning 是既有 `team_network_client` 关闭期线程竞态，未隐藏。
+`READY_FOR_ACCEPTANCE` 表示证据包满足进入验收的协议条件，不等于客户已经
+验收、付款或部署。详细环境、耗时与边界见 [docs/status.md](docs/status.md)。
 
 ### 运行端到端演示
 
@@ -547,7 +560,7 @@ OpenWorkProof/
 - Docker 生产执行器（STARTED_UNCONFIRMED 恢复）
 - Rich #4196 完整五角色端到端演示（Acceptor TCP 签名 + 离线验签）
 - Dify #33013 完整五角色端到端演示（AI 应用平台类，跨项目类型通用性验证）
-- **最终全量测试门：等待 Task 16 在最终 source revision 上运行并记录**
+- **v0.2 最终 required-live 门：2491 passed、0 failed、0 skipped、1 warning**
 
 **尚未完成：** 其他 ToolCall handler 与 evidence publication 的调用闭包、
 正式赛事提交。

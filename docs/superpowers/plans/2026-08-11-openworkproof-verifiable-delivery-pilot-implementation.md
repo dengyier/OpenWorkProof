@@ -1969,7 +1969,7 @@ Expected: clean implementation worktree and a reviewable commit series. Report
 local implementation, tests, remote branch, release, customer validation, and
 payment as separate statuses.
 
-- [ ] **Step 4: Request explicit integration direction**
+- [x] **Step 4: Request explicit integration direction**
 
 Offer exactly these options:
 
