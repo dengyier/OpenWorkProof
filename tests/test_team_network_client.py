@@ -65,6 +65,40 @@ def _started_test_client() -> TeamNetworkService:
     return client
 
 
+class _BlockingAcceptSocket:
+    def __init__(self) -> None:
+        self.accept_entered = threading.Event()
+        self.accept_release = threading.Event()
+        self.listen_entered = threading.Event()
+        self.listen_release = threading.Event()
+        self.pause_listen = False
+        self.shutdown_calls: list[int] = []
+        self.close_calls = 0
+
+    def setsockopt(self, *args) -> None:
+        pass
+
+    def bind(self, address) -> None:
+        pass
+
+    def listen(self, backlog: int) -> None:
+        self.listen_entered.set()
+        if self.pause_listen:
+            assert self.listen_release.wait(timeout=1)
+
+    def accept(self):
+        self.accept_entered.set()
+        assert self.accept_release.wait(timeout=2)
+        raise OSError(errno.EBADF, "listener closed")
+
+    def shutdown(self, how: int) -> None:
+        self.shutdown_calls.append(how)
+        self.accept_release.set()
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
 @pytest.fixture
 def service():
     services = []
@@ -94,26 +128,353 @@ def test_close_while_accepting_has_no_uncaught_thread_exception(
     )
     for _ in range(100):
         client = _started_test_client()
-        with socket.create_connection(("127.0.0.1", client.port)) as connection:
+        connection = None
+        try:
+            connection = socket.create_connection(("127.0.0.1", client.port))
             connection.sendall(b'{"action":"list-pending"}\n')
             assert connection.recv(65536)
             client.close()
-        client.join(timeout=1)
-        assert client._thread is not None
-        assert not client._thread.is_alive()
+            connection.close()
+            connection = None
+            client.join(timeout=1)
+            assert client._thread is not None
+            assert not client._thread.is_alive()
+        finally:
+            if connection is not None:
+                connection.close()
+            client.close()
+            client.join(timeout=1)
     assert uncaught == []
 
 
-def test_unexpected_accept_error_is_not_swallowed() -> None:
+def test_blocked_accept_is_woken_before_listener_close(monkeypatch) -> None:
+    service_socket = _BlockingAcceptSocket()
+    monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: service_socket)
+    client = TeamNetworkService(port=1)
+
+    try:
+        client.start()
+        assert service_socket.accept_entered.wait(timeout=1)
+        client.close()
+        client.join(timeout=1)
+        assert service_socket.shutdown_calls == [socket.SHUT_RDWR]
+        assert service_socket.close_calls == 1
+        assert client._thread is not None
+        assert not client._thread.is_alive()
+    finally:
+        service_socket.accept_release.set()
+        client.close()
+        client.join(timeout=1)
+
+
+def test_real_socket_close_wakes_worker_blocked_in_accept(monkeypatch) -> None:
+    accept_entered = threading.Event()
+    real_socket_type = socket.socket
+
+    class AcceptBarrierSocket(real_socket_type):
+        def accept(self):
+            accept_entered.set()
+            return super().accept()
+
+    monkeypatch.setattr(socket, "socket", AcceptBarrierSocket)
+    client = TeamNetworkService(port=_free_port())
+
+    try:
+        client.start()
+        assert accept_entered.wait(timeout=1)
+        client.close()
+        client.join(timeout=1)
+        assert client._thread is not None
+        assert not client._thread.is_alive()
+    finally:
+        client.close()
+        client.join(timeout=1)
+
+
+def test_start_and_close_are_serialized(monkeypatch) -> None:
+    service_socket = _BlockingAcceptSocket()
+    service_socket.pause_listen = True
+    monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: service_socket)
+    client = TeamNetworkService(port=1)
+    close_lock_classified = threading.Event()
+
+    class TrackingLock:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+
+        def __enter__(self):
+            if threading.current_thread().name == "close-caller":
+                acquired = self._lock.acquire(blocking=False)
+                close_lock_classified.set()
+                if not acquired:
+                    self._lock.acquire()
+            else:
+                self._lock.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback) -> None:
+            self._lock.release()
+
+    client._lifecycle_lock = TrackingLock()  # type: ignore[assignment]
+    start_errors: list[BaseException] = []
+    close_errors: list[BaseException] = []
+
+    def start_client() -> None:
+        try:
+            client.start()
+        except BaseException as error:
+            start_errors.append(error)
+
+    def close_client() -> None:
+        try:
+            client.close()
+        except BaseException as error:
+            close_errors.append(error)
+
+    start_thread = threading.Thread(target=start_client, name="start-caller")
+    close_thread = threading.Thread(target=close_client, name="close-caller")
+    try:
+        start_thread.start()
+        assert service_socket.listen_entered.wait(timeout=1)
+        close_thread.start()
+        assert close_lock_classified.wait(timeout=1)
+        service_socket.listen_release.set()
+        start_thread.join(timeout=1)
+        close_thread.join(timeout=1)
+        client.join(timeout=1)
+        assert start_errors == []
+        assert close_errors == []
+        assert not start_thread.is_alive()
+        assert not close_thread.is_alive()
+        assert client._thread is not None
+        assert not client._thread.is_alive()
+    finally:
+        service_socket.listen_release.set()
+        service_socket.accept_release.set()
+        client.close()
+        client.join(timeout=1)
+        start_thread.join(timeout=1)
+        close_thread.join(timeout=1)
+
+
+def test_start_after_completed_close_is_rejected() -> None:
+    client = TeamNetworkService(port=_free_port())
+    client.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        client.start()
+
+
+def test_join_cannot_observe_an_unstarted_service_thread(monkeypatch) -> None:
+    service_socket = _BlockingAcceptSocket()
+    monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: service_socket)
+    real_thread_type = threading.Thread
+    service_start_entered = threading.Event()
+    service_start_release = threading.Event()
+    join_lock_attempted = threading.Event()
+
+    class BarrierThread(real_thread_type):
+        def start(self) -> None:
+            service_start_entered.set()
+            assert service_start_release.wait(timeout=1)
+            super().start()
+
+    class TrackingLock:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+
+        def __enter__(self):
+            if threading.current_thread().name == "join-caller":
+                join_lock_attempted.set()
+            self._lock.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback) -> None:
+            self._lock.release()
+
+    client = TeamNetworkService(port=1)
+    client._lifecycle_lock = TrackingLock()  # type: ignore[assignment]
+    monkeypatch.setattr(threading, "Thread", BarrierThread)
+    start_errors: list[BaseException] = []
+    join_errors: list[BaseException] = []
+
+    def capture(operation, errors: list[BaseException]) -> None:
+        try:
+            operation()
+        except BaseException as error:
+            errors.append(error)
+
+    start_thread = real_thread_type(
+        target=lambda: capture(client.start, start_errors),
+        name="start-caller",
+    )
+    join_thread = real_thread_type(
+        target=lambda: capture(lambda: client.join(timeout=0), join_errors),
+        name="join-caller",
+    )
+    try:
+        start_thread.start()
+        assert service_start_entered.wait(timeout=1)
+        join_thread.start()
+        assert join_lock_attempted.wait(timeout=1)
+        service_start_release.set()
+        start_thread.join(timeout=1)
+        join_thread.join(timeout=1)
+        assert start_errors == []
+        assert join_errors == []
+    finally:
+        service_start_release.set()
+        service_socket.accept_release.set()
+        client.close()
+        client.join(timeout=1)
+        start_thread.join(timeout=1)
+        join_thread.join(timeout=1)
+
+
+def test_start_closes_local_socket_when_setup_fails(monkeypatch) -> None:
+    service_socket = _BlockingAcceptSocket()
+
+    def fail_bind(address) -> None:
+        raise OSError(errno.EADDRINUSE, "address already in use")
+
+    service_socket.bind = fail_bind  # type: ignore[method-assign]
+    monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: service_socket)
+    client = TeamNetworkService(port=1)
+
+    with pytest.raises(OSError, match="address already in use"):
+        client.start()
+
+    assert service_socket.close_calls == 1
+    assert client._socket is None
+    assert client._thread is None
+
+
+def test_start_failure_does_not_publish_unstarted_thread(monkeypatch) -> None:
+    service_socket = _BlockingAcceptSocket()
+    monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: service_socket)
+
+    class FailingThread:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("thread start failed")
+
+    monkeypatch.setattr(threading, "Thread", FailingThread)
+    client = TeamNetworkService(port=1)
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        client.start()
+
+    assert service_socket.close_calls == 1
+    assert client._socket is None
+    assert client._thread is None
+
+
+@pytest.mark.parametrize(
+    "error_number",
+    (
+        errno.EBADF,
+        errno.ECONNABORTED,
+        errno.EINVAL,
+        errno.ENOTSOCK,
+        getattr(errno, "WSAENOTSOCK", 10038),
+    ),
+)
+def test_allowlisted_accept_error_is_normal_only_after_stop(error_number) -> None:
     class FailingSocket:
         def accept(self):
-            raise OSError(errno.ECONNABORTED, "unexpected accept failure")
+            raise OSError(error_number, "listener closed")
+
+    client = TeamNetworkService(port=_free_port())
+    client._socket = FailingSocket()  # type: ignore[assignment]
+    client._stop_event.set()
+
+    client._serve()
+
+
+def test_allowlisted_accept_error_before_stop_is_not_swallowed() -> None:
+    class FailingSocket:
+        def accept(self):
+            raise OSError(errno.EBADF, "unexpected accept failure")
 
     client = TeamNetworkService(port=_free_port())
     client._socket = FailingSocket()  # type: ignore[assignment]
 
     with pytest.raises(OSError, match="unexpected accept failure"):
         client._serve()
+
+
+def test_unexpected_accept_error_after_stop_is_not_swallowed() -> None:
+    class FailingSocket:
+        def accept(self):
+            raise OSError(errno.EIO, "unexpected accept failure")
+
+    client = TeamNetworkService(port=_free_port())
+    client._socket = FailingSocket()  # type: ignore[assignment]
+    client._stop_event.set()
+
+    with pytest.raises(OSError, match="unexpected accept failure"):
+        client._serve()
+
+
+def test_close_propagates_unexpected_shutdown_error_after_close_attempt() -> None:
+    service_socket = _BlockingAcceptSocket()
+
+    def fail_shutdown(how: int) -> None:
+        raise OSError(errno.EIO, "shutdown failed")
+
+    service_socket.shutdown = fail_shutdown  # type: ignore[method-assign]
+    client = TeamNetworkService(port=_free_port())
+    client._socket = service_socket  # type: ignore[assignment]
+
+    with pytest.raises(OSError, match="shutdown failed"):
+        client.close()
+
+    assert service_socket.close_calls == 1
+
+
+@pytest.mark.parametrize("operation", ("shutdown", "close"))
+def test_close_suppresses_only_allowlisted_cleanup_error(operation) -> None:
+    service_socket = _BlockingAcceptSocket()
+
+    if operation == "shutdown":
+        def fail_shutdown(how: int) -> None:
+            service_socket.shutdown_calls.append(how)
+            raise OSError(errno.EBADF, "closed")
+
+        service_socket.shutdown = fail_shutdown  # type: ignore[method-assign]
+    else:
+        def fail_close() -> None:
+            service_socket.close_calls += 1
+            raise OSError(errno.EBADF, "closed")
+
+        service_socket.close = fail_close  # type: ignore[method-assign]
+    client = TeamNetworkService(port=_free_port())
+    client._socket = service_socket  # type: ignore[assignment]
+
+    client.close()
+
+    assert service_socket.shutdown_calls == [socket.SHUT_RDWR]
+    assert service_socket.close_calls == 1
+
+
+def test_close_propagates_unexpected_close_error() -> None:
+    service_socket = _BlockingAcceptSocket()
+
+    def fail_close() -> None:
+        service_socket.close_calls += 1
+        raise OSError(errno.EIO, "close failed")
+
+    service_socket.close = fail_close  # type: ignore[method-assign]
+    client = TeamNetworkService(port=_free_port())
+    client._socket = service_socket  # type: ignore[assignment]
+
+    with pytest.raises(OSError, match="close failed"):
+        client.close()
+
+    assert service_socket.shutdown_calls == [socket.SHUT_RDWR]
+    assert service_socket.close_calls == 1
 
 
 def test_network_client_dispatch_store_collect_round_trip(service) -> None:

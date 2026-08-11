@@ -15,18 +15,31 @@ Task 1 只修复 `TeamNetworkService` 的关闭期 `close/accept` 竞态，不�
 `AttributeError: 'NoneType' object has no attribute 'accept'`。修复后，监听
 socket 在生命周期锁内复制到局部引用；只有 stop event 已设置且 errno 为
 `EBADF`、`EINVAL`、`ENOTSOCK`/`WSAENOTSOCK` 或 macOS 实测的
-`ECONNABORTED` 时才按正常关闭退出，其他 accept 错误继续抛出。测试 fixture
-会显式关闭并 join 全部服务线程，100 轮回归也逐轮验证线程已经退出。
+`ECONNABORTED` 时才按正常关闭退出，其他 accept 错误继续抛出。关闭监听器
+前先执行 `shutdown(SHUT_RDWR)`，用 barrier fake socket 证明 wakeup 发生在
+close 前，并用 macOS 和 `linux/arm64` 的真实 socket 证明已进入阻塞
+`accept()` 的线程会在 1 秒 join 门内退出。Linux probe 使用冻结
+`openworkproof/execution-test:3e8f7b863f7936ded99c76d02b84d8e641e80640`
+镜像并返回
+`LINUX_BLOCKED_ACCEPT_PASS`。
+
+start 的 socket 创建、listen、线程发布与 `Thread.start()` 现在全部位于同一
+生命周期锁内；join 只能观察到已启动线程，并发 close 不能被迟到的 start
+清除，已完成 close 后的 start 被明确拒绝。setup 或 thread-start 失败会关闭
+局部 socket 且不发布半初始化状态。close/shutdown 只忽略明确 allowlist 中的
+已关闭错误；即使 shutdown 失败也会尝试 close，`EIO` 等非预期清理错误会
+向调用方抛出。测试 fixture 会显式关闭并 join 全部服务线程，100 轮回归每轮
+都用 `try/finally` 清理连接与线程。
 
 本切片 focused 结果：正确放置 pytest warning filter 后，
-`tests/test_team_network_client.py` 为 `8 passed`，没有
+`tests/test_team_network_client.py` 为 `25 passed`，没有
 `PytestUnhandledThreadExceptionWarning`；使用隔离临时根执行 `-W error`
-同样为 `8 passed`。计划中的字面命令把 `-W` 放在 `-m pytest` 之前，
+同样为 `25 passed`。计划中的字面命令把 `-W` 放在 `-m pytest` 之前，
 本机 Python 因 pytest 尚未导入而报告
 `Invalid -W option ignored: invalid module name: 'pytest'`；将同一 filter
 交给 pytest 解析后才得到上述有效门结果。三文件稳定性回归
 `test_team_network_client.py + test_mcp_server.py + test_cli_transport.py` 为
-`98 passed、9 warnings`，`git diff --check` 通过；这 9 项均为下述默认
+`115 passed、9 warnings`，`git diff --check` 通过；这 9 项均为下述默认
 临时根的既有清理 warning，不含未处理线程异常。
 
 macOS 默认 pytest 临时根仍有既有清理警告，精确内容为

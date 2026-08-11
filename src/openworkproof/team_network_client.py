@@ -67,6 +67,7 @@ _CLOSED_SOCKET_ERRNOS = frozenset(
         getattr(errno, "WSAENOTSOCK", 10038),
     }
 )
+_SOCKET_CLEANUP_ERRNOS = _CLOSED_SOCKET_ERRNOS | {errno.ENOTCONN}
 
 
 class TeamNetworkError(Exception):
@@ -324,16 +325,32 @@ class TeamNetworkService:
         return self._port
 
     def start(self) -> None:
-        service_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        service_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        service_socket.bind((self._host, self._port))
-        service_socket.listen(4)
         with self._lifecycle_lock:
-            self._stop_event.clear()
-            self._socket = service_socket
-            self._thread = threading.Thread(target=self._serve, daemon=True)
-            thread = self._thread
-        thread.start()
+            if self._stop_event.is_set():
+                raise RuntimeError("team service is closed")
+            if self._socket is not None or self._thread is not None:
+                raise RuntimeError("team service is already started")
+            service_socket: socket.socket | None = None
+            try:
+                service_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                service_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                service_socket.bind((self._host, self._port))
+                service_socket.listen(4)
+                thread = threading.Thread(target=self._serve, daemon=True)
+                self._socket = service_socket
+                thread.start()
+            except BaseException:
+                self._socket = None
+                self._thread = None
+                if service_socket is not None:
+                    try:
+                        service_socket.close()
+                    except OSError:
+                        _logger.exception(
+                            "failed to close team service socket after start failure"
+                        )
+                raise
+            self._thread = thread
 
     def stop(self) -> None:
         self.close()
@@ -345,9 +362,27 @@ class TeamNetworkService:
             self._socket = None
         if service_socket is not None:
             try:
+                service_socket.shutdown(socket.SHUT_RDWR)
+            except OSError as error:
+                if error.errno not in _SOCKET_CLEANUP_ERRNOS:
+                    shutdown_error: OSError | None = error
+                else:
+                    shutdown_error = None
+            else:
+                shutdown_error = None
+            try:
                 service_socket.close()
-            except OSError:
-                pass
+            except OSError as error:
+                if error.errno not in _SOCKET_CLEANUP_ERRNOS:
+                    if shutdown_error is None:
+                        shutdown_error = error
+                    else:
+                        _logger.error(
+                            "team service socket close also failed: %s",
+                            error,
+                        )
+            if shutdown_error is not None:
+                raise shutdown_error
 
     def join(self, timeout: float | None = None) -> None:
         with self._lifecycle_lock:
