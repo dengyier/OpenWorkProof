@@ -116,7 +116,7 @@
 
 **Files:** none
 
-- [ ] **Step 1: Resolve the approved plan commit**
+- [x] **Step 1: Resolve the approved plan commit**
 
 Run in `/Users/molin/Project/openWorkProof/.worktrees/scope-bound-verification-v03-spec`:
 
@@ -132,7 +132,7 @@ git status --short
 
 Expected: both documents exist in `PLAN_COMMIT`, the approved-state line is present, and only known documentation state is shown.
 
-- [ ] **Step 2: Create the execution branch and worktree**
+- [x] **Step 2: Create the execution branch and worktree**
 
 Run from `/Users/molin/Project/openWorkProof`:
 
@@ -145,7 +145,7 @@ git worktree add \
 
 Expected: a clean new worktree. If either path or branch exists, stop and inspect it; do not delete or reuse it blindly.
 
-- [ ] **Step 3: Create the environment and prove package identity**
+- [x] **Step 3: Create the environment and prove package identity**
 
 Run in the new worktree:
 
@@ -166,7 +166,7 @@ PY
 
 Expected: imports resolve inside the new worktree and package/source versions agree.
 
-- [ ] **Step 4: Record the untouched baseline**
+- [x] **Step 4: Record the untouched baseline**
 
 ```bash
 ./.venv/bin/python -m pytest \
