@@ -110,7 +110,47 @@ owp settlement-status pilot.sqlite3
 
 它们是公开 Issue 的协议复现样本，不是客户采用、客户验收或商业收入证据。
 
-## 7. 边界与诚实声明
+## 7. v0.3 Scope Coverage Delivery Package
+
+v0.3 在 v0.2 的正负臂验证之上增加签名 `EvaluationScopeManifest`，把
+“验证了哪些文件、测试与交付对象”冻结为协议事实。导出端支持三种单调
+隐私视图：
+
+| 视图 | 可见内容 | 完整离线重放 |
+|---|---|---|
+| `public` | 聚合范围、计数、决定、原因码、Scope 摘要 | 否 |
+| `diagnostic` | public + 双臂状态与诊断原因 | 否 |
+| `customer_private` | diagnostic + 原始签名对象、成员、选择器、证据和公钥 | 是 |
+
+Python 导出与复核入口：
+
+```python
+from pathlib import Path
+from openworkproof.delivery_package import (
+    export_delivery_package,
+    verify_delivery_package,
+)
+
+manifest = export_delivery_package(
+    Path("pilot.sqlite3"),
+    Path("delivery-package-private"),
+    privacy_view="customer_private",
+)
+result = verify_delivery_package(Path("delivery-package-private"))
+assert manifest.full_offline_replay is True
+assert result.full_offline_replay is True
+```
+
+公开包明确写入 `full_offline_replay: false`，只保留原始 Scope Manifest
+摘要与聚合覆盖事实；它不包含 locator、pytest node ID、源码字节、客户
+身份或选择器规格字节。只有客户私有包的 `verify.sh` 可以重算成员/选择器
+绑定、双臂 ObservedScope、签名决定和验收/结算准备快照。
+
+Scope Coverage Report 的 `VERIFIED` 结论严格限定在签名 Scope 内：声明
+人口与各臂观察人口一致、必选目标已覆盖、已注册负向控制被捕获。它不表示
+绝对正确、法规合规、客户采用、付款、自动结算或部署已经发生。
+
+## 8. 边界与诚实声明
 
 - 离线验签**证明证据链与签名的有效性**,不证明"外部真实人类复核过"——
   外部个人签署属线下事件,不由本仓库保证;

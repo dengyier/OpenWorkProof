@@ -539,8 +539,24 @@ def v03_transaction_case(
 ):
     ledger = tmp_path / "verification-v03.sqlite3"
     evidence.initialize_ledger(ledger, signed_work_order)
+    selector_spec = {
+        "schema_version": "openworkproof-selector-spec/0.3",
+        "selector_kind": "explicit",
+        "locators": sorted(
+            member["locator"]
+            for member in evaluation_scope_payload_v03["members"]
+        ),
+    }
+    selector_raw = rfc8785.dumps(selector_spec)
+    selector_path = tmp_path / "scope/selectors/explicit.json"
+    selector_path.parent.mkdir(parents=True, exist_ok=True)
+    selector_path.write_bytes(selector_raw)
+    scope_payload = copy.deepcopy(evaluation_scope_payload_v03)
+    scope_payload["selector_rules"][0]["selector_spec_digest"] = (
+        hashlib.sha256(selector_raw).hexdigest()
+    )
     manifest = _transaction_manifest(
-        evaluation_scope_payload_v03,
+        scope_payload,
         work_order=signed_work_order,
         claim=signed_subject_claim,
         manager_key=ephemeral_role_keys["Manager"][0],

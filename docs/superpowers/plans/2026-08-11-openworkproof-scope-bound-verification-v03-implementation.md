@@ -824,13 +824,13 @@ git commit -m 'feat: route acceptance across protocol versions'
 - Create: `tests/test_delivery_package_v03.py`
 - Modify: `docs/offline-verification.md`
 
-- [ ] **Step 1: Write RED package and privacy tests**
+- [x] **Step 1: Write RED package and privacy tests**
 
 Require customer-private full replay, diagnostic redaction, public aggregate-only output, manifest digest preservation, scope report contents, selector-spec evidence, member evidence, v0.3 decision replay, and v0.2 package replay unchanged.
 
 Explicitly assert no locator, pytest node ID, source bytes, customer identity, or selector spec bytes occur anywhere in a public package.
 
-- [ ] **Step 2: Extend manifest privacy classes and view rules**
+- [x] **Step 2: Extend manifest privacy classes and view rules**
 
 Use:
 
@@ -841,15 +841,15 @@ PrivacyView = Literal["public", "diagnostic", "customer_private"]
 
 Allowed visibility is monotonic: public sees public; diagnostic sees public+diagnostic; customer-private sees all. A public package contains aggregate scope facts and original Manifest digest but must state `full_offline_replay: false`.
 
-- [ ] **Step 3: Add version-aware ledger export and replay**
+- [x] **Step 3: Add version-aware ledger export and replay**
 
 Load exactly one v0.2/v0.3 decision family. For v0.3 include canonical Evaluation Scope, Profile, Arm Results, Decision, selector evidence, observed-scope evidence, keys, Acceptance, settlement snapshot, and generated Scope Coverage Report.
 
-- [ ] **Step 4: Generate the customer-readable report without overclaiming**
+- [x] **Step 4: Generate the customer-readable report without overclaiming**
 
 The report must show claim, revisions, selector versions, declared/observed counts, required coverage, exclusions, cross-arm consistency, decision/reasons, signature digests, and exact replay command. Render the approved bounded VERIFIED sentence. Never render payment, automatic settlement, absolute correctness, or regulatory-compliance claims.
 
-- [ ] **Step 5: Run package and tamper tests**
+- [x] **Step 5: Run package and tamper tests**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_delivery_package_v03.py -q
@@ -857,7 +857,7 @@ The report must show claim, revisions, selector versions, declared/observed coun
   tests/test_delivery_package_v02.py tests/test_v02_bundles.py -q
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/openworkproof/delivery_package.py \

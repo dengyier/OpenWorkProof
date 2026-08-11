@@ -364,6 +364,7 @@ def test_export_and_offline_verify_level_two_package(delivery_case) -> None:
     assert rendered.count('class="customer-question"') == 5
     assert "<script" not in rendered.lower()
     result = verify_delivery_package(delivery_case["output"])
+    assert "full_offline_replay" not in result.model_dump(mode="json")
     assert result.current_decision == "VERIFIED"
     assert result.effective_acceptance == "NONE"
     assert result.settlement_readiness == "READY_FOR_ACCEPTANCE"
