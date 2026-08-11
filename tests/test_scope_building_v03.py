@@ -22,6 +22,8 @@ from openworkproof.scope import (
     evaluation_scope_id,
     population_digest,
     requirement_digest,
+    select_git_diff_closure,
+    select_pytest_collection,
     scope_member_id,
     validate_evaluation_scope,
 )
@@ -353,3 +355,208 @@ def test_complete_but_different_population_is_contradicted(
     )
     assert result.scope_status == "contradicted"
     assert result.reason_codes == ("SCOPE_POPULATION_DRIFT",)
+
+
+def _git(*args: str, cwd: Path) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _committed_selector_repo(tmp_path: Path) -> tuple[Path, str, str]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git("init", "-q", cwd=repo)
+    _git("config", "user.name", "Scope Test", cwd=repo)
+    _git("config", "user.email", "scope@example.invalid", cwd=repo)
+    (repo / "src").mkdir()
+    (repo / "tests").mkdir()
+    (repo / "src/keep.py").write_text("VALUE = 'source'\n")
+    (repo / "src/rename_old.py").write_text("RENAMED = True\n")
+    (repo / "src/delete.py").write_text("DELETED = True\n")
+    (repo / "tests/test_alpha.py").write_text("def test_alpha(): pass\n")
+    _git("add", ".", cwd=repo)
+    _git("commit", "-q", "-m", "source", cwd=repo)
+    source = _git("rev-parse", "HEAD", cwd=repo)
+
+    (repo / "src/keep.py").write_text("VALUE = 'candidate'\n")
+    _git("mv", "src/rename_old.py", "src/rename_new.py", cwd=repo)
+    _git("rm", "-q", "src/delete.py", cwd=repo)
+    _git("add", ".", cwd=repo)
+    _git("commit", "-q", "-m", "candidate", cwd=repo)
+    candidate = _git("rev-parse", "HEAD", cwd=repo)
+    return repo, source, candidate
+
+
+def test_git_diff_selector_uses_committed_blobs_and_tracks_renames(
+    tmp_path: Path,
+) -> None:
+    repo, source, candidate = _committed_selector_repo(tmp_path)
+    (repo / "src/keep.py").write_text("VALUE = 'dirty'\n")
+    execution = select_git_diff_closure(
+        repo,
+        source_revision=source,
+        candidate_commit=candidate,
+    )
+    assert execution.status == "satisfied"
+    assert {member.locator for member in execution.members} == {
+        "src/delete.py",
+        "src/keep.py",
+        "src/rename_new.py",
+        "src/rename_old.py",
+    }
+    assert execution.members == tuple(
+        sorted(
+            execution.members,
+            key=lambda member: (
+                member.member_kind,
+                member.locator_digest,
+                member.member_id,
+            ),
+        )
+    )
+    keep = next(member for member in execution.members if member.locator == "src/keep.py")
+    assert keep.content_digest == hashlib.sha256(
+        b"VALUE = 'candidate'\n"
+    ).hexdigest()
+    assert execution.evidence_path == "scope/selectors/git-diff-closure.json"
+    assert execution.selector_spec_bytes
+
+
+def test_git_diff_selector_requires_full_commits(tmp_path: Path) -> None:
+    repo, source, candidate = _committed_selector_repo(tmp_path)
+    with pytest.raises(ValueError, match="40-character"):
+        select_git_diff_closure(
+            repo,
+            source_revision=source[:12],
+            candidate_commit=candidate,
+        )
+
+
+def test_git_diff_selector_engine_drift_is_indeterminate(tmp_path: Path) -> None:
+    repo, source, candidate = _committed_selector_repo(tmp_path)
+    execution = select_git_diff_closure(
+        repo,
+        source_revision=source,
+        candidate_commit=candidate,
+        expected_engine_digest="f" * 64,
+    )
+    assert execution.status == "indeterminate"
+    assert execution.reason_codes == ("SCOPE_SELECTOR_MISMATCH",)
+
+
+def test_git_diff_selector_empty_population_is_indeterminate(tmp_path: Path) -> None:
+    repo, _source, candidate = _committed_selector_repo(tmp_path)
+    execution = select_git_diff_closure(
+        repo,
+        source_revision=candidate,
+        candidate_commit=candidate,
+    )
+    assert execution.status == "indeterminate"
+    assert execution.reason_codes == ("SCOPE_EMPTY",)
+
+
+def test_git_diff_selector_rejects_committed_symlink(tmp_path: Path) -> None:
+    repo, _source, candidate = _committed_selector_repo(tmp_path)
+    (repo / "src/linked.py").symlink_to(repo / "src/keep.py")
+    _git("add", "src/linked.py", cwd=repo)
+    _git("commit", "-q", "-m", "symlink", cwd=repo)
+    symlink_commit = _git("rev-parse", "HEAD", cwd=repo)
+    with pytest.raises(ValueError, match="symlink"):
+        select_git_diff_closure(
+            repo,
+            source_revision=candidate,
+            candidate_commit=symlink_commit,
+        )
+
+
+def _fake_python(path: Path, body: str) -> Path:
+    path.write_text("#!/bin/sh\nset -eu\n" + body)
+    path.chmod(0o755)
+    return path
+
+
+def test_pytest_collection_is_fixed_sorted_and_unique(tmp_path: Path) -> None:
+    repo, source, candidate = _committed_selector_repo(tmp_path)
+    fake = _fake_python(
+        tmp_path / "fake-python",
+        """
+test "$1" = "-I"
+test "$2" = "-m"
+test "$3" = "pytest"
+test "$4" = "--collect-only"
+test "$5" = "-q"
+test "$PYTEST_DISABLE_PLUGIN_AUTOLOAD" = "1"
+test "$LC_ALL" = "C.UTF-8"
+test "$TZ" = "UTC"
+printf '%s\n' \
+  'tests/test_alpha.py::test_z[param-一]' \
+  'tests/test_alpha.py::test_a' \
+  'tests/test_alpha.py::test_a'
+""",
+    )
+    execution = select_pytest_collection(
+        repo,
+        source_revision=source,
+        candidate_commit=candidate,
+        python_executable=fake,
+        timeout_seconds=5,
+        required_node_ids=("tests/test_alpha.py::test_a",),
+    )
+    assert execution.status == "satisfied"
+    assert sorted(member.locator for member in execution.members) == [
+        "tests/test_alpha.py::test_a",
+        "tests/test_alpha.py::test_z[param-一]",
+    ]
+    assert execution.evidence_path == "scope/selectors/pytest-collection.json"
+
+
+@pytest.mark.parametrize(
+    ("body", "timeout", "reason"),
+    (
+        ("exit 3\n", 5, "SCOPE_SELECTOR_MISMATCH"),
+        ("printf 'no tests collected\\n'\n", 5, "SCOPE_EMPTY"),
+        ("sleep 2\n", 1, "SCOPE_SELECTOR_MISMATCH"),
+    ),
+)
+def test_pytest_collection_failures_are_indeterminate(
+    tmp_path: Path,
+    body: str,
+    timeout: int,
+    reason: str,
+) -> None:
+    repo, source, candidate = _committed_selector_repo(tmp_path)
+    fake = _fake_python(tmp_path / "fake-python", body)
+    execution = select_pytest_collection(
+        repo,
+        source_revision=source,
+        candidate_commit=candidate,
+        python_executable=fake,
+        timeout_seconds=timeout,
+    )
+    assert execution.status == "indeterminate"
+    assert reason in execution.reason_codes
+
+
+def test_pytest_collection_missing_required_node_is_indeterminate(
+    tmp_path: Path,
+) -> None:
+    repo, source, candidate = _committed_selector_repo(tmp_path)
+    fake = _fake_python(
+        tmp_path / "fake-python",
+        "printf 'tests/test_alpha.py::test_alpha\\n'\n",
+    )
+    execution = select_pytest_collection(
+        repo,
+        source_revision=source,
+        candidate_commit=candidate,
+        python_executable=fake,
+        timeout_seconds=5,
+        required_node_ids=("tests/test_alpha.py::test_missing",),
+    )
+    assert execution.status == "indeterminate"
+    assert execution.reason_codes == ("SCOPE_REQUIRED_TARGET_MISSING",)

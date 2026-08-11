@@ -427,7 +427,7 @@ git commit -m 'feat: build and compare explicit evaluation scopes'
 - Modify: `src/openworkproof/scope.py`
 - Modify: `tests/test_scope_building_v03.py`
 
-- [ ] **Step 1: Write RED selector tests in frozen temporary repositories**
+- [x] **Step 1: Write RED selector tests in frozen temporary repositories**
 
 Add cases proving:
 
@@ -446,12 +446,12 @@ Run:
 
 Expected RED: selector functions are absent.
 
-- [ ] **Step 2: Implement the two concrete adapters without a plugin registry**
+- [x] **Step 2: Implement the two concrete adapters without a plugin registry**
 
 ```python
 def select_git_diff_closure(
     repo: Path, *, source_revision: str, candidate_commit: str
-) -> tuple[ScopeMember, ...]: ...
+) -> ScopeSelectorExecution: ...
 
 
 def select_pytest_collection(
@@ -461,23 +461,23 @@ def select_pytest_collection(
     candidate_commit: str,
     python_executable: Path,
     timeout_seconds: int,
-) -> tuple[ScopeMember, ...]: ...
+) -> ScopeSelectorExecution: ...
 ```
 
 Use `git diff --name-status -z`, `git cat-file`, and a detached temporary tree. Use `python -I -m pytest --collect-only -q` with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, `LC_ALL=C.UTF-8`, and `TZ=UTC`. Do not accept arbitrary selector commands.
 
-- [ ] **Step 3: Bind selector specs and engine bytes as evidence**
+- [x] **Step 3: Bind selector specs and engine bytes as evidence**
 
 Persist no evidence in this task. Return deterministic `ScopeSelectorExecution` data containing canonical selector spec bytes, engine digest, evidence path, members, and status for later transaction/package tasks.
 
-- [ ] **Step 4: Run focused and backward regressions**
+- [x] **Step 4: Run focused and backward regressions**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_scope_building_v03.py -q
 ./.venv/bin/python -m pytest tests/test_prepare_image_context.py tests/test_sandbox.py -q
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/openworkproof/scope.py tests/test_scope_building_v03.py

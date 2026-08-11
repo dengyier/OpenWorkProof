@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import re
+import shutil
+import subprocess
+import tempfile
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -27,6 +33,18 @@ from openworkproof.models import (
 
 
 ScopeStatus = Literal["satisfied", "contradicted", "indeterminate"]
+_FULL_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+
+
+@dataclass(frozen=True)
+class ScopeSelectorExecution:
+    selector_kind: Literal["git_diff_closure", "pytest_collection"]
+    selector_spec_bytes: bytes
+    engine_digest: str
+    evidence_path: str
+    members: tuple[ScopeMember, ...]
+    status: Literal["satisfied", "indeterminate"]
+    reason_codes: tuple[str, ...]
 
 
 class ObservedScope(ProtocolModel):
@@ -378,4 +396,330 @@ def compare_observed_scope(
         scope_status=status,
         reason_codes=tuple(reasons),
         missing_required_target_ids=missing_required,
+    )
+
+
+def _selector_engine_digest() -> str:
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
+def _selector_spec_bytes(selector_kind: str, payload: Mapping[str, object]) -> bytes:
+    return rfc8785.dumps(
+        {
+            "schema_version": "openworkproof-scope-selector/0.3",
+            "selector_kind": selector_kind,
+            **dict(payload),
+        }
+    )
+
+
+def _validated_repo(repo: Path) -> Path:
+    candidate = Path(repo)
+    if candidate.is_symlink():
+        raise ValueError("repository root cannot be a symlink")
+    root = candidate.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("repository root must be a directory")
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or Path(result.stdout.strip()).resolve() != root:
+        raise ValueError("repository root must be the Git top level")
+    return root
+
+
+def _validate_commit(repo: Path, value: str, label: str) -> None:
+    if type(value) is not str or _FULL_COMMIT.fullmatch(value) is None:
+        raise ValueError(f"{label} must be a full 40-character commit")
+    result = subprocess.run(
+        ["git", "cat-file", "-t", value],
+        cwd=repo,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or result.stdout.strip() != "commit":
+        raise ValueError(f"{label} is not a committed Git revision")
+
+
+def _git_blob_member(
+    repo: Path,
+    *,
+    commit: str,
+    source_revision: str,
+    locator: str,
+    member_kind: Literal["source_file", "test_case"] = "source_file",
+) -> ScopeMember:
+    tree = subprocess.run(
+        ["git", "ls-tree", "-z", commit, "--", locator.partition("::")[0]],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    ).stdout
+    if not tree:
+        raise ValueError("selector path is absent from the committed tree")
+    metadata, _, _ = tree.partition(b"\t")
+    mode, object_type, _object_id = metadata.decode("ascii").split(" ")
+    if object_type != "blob" or mode not in {"100644", "100755"}:
+        label = "symlink" if mode == "120000" else "non-file"
+        raise ValueError(f"selector path resolves to a {label} Git entry")
+    path = locator.partition("::")[0]
+    content = subprocess.run(
+        ["git", "cat-file", "blob", f"{commit}:{path}"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    ).stdout
+    return ScopeMember.model_validate(
+        {
+            "member_id": scope_member_id(member_kind, locator),
+            "member_kind": member_kind,
+            "locator": locator,
+            "locator_digest": hashlib.sha256(locator.encode("utf-8")).hexdigest(),
+            "content_digest": hashlib.sha256(content).hexdigest(),
+            "source_revision": source_revision,
+        }
+    )
+
+
+def _sorted_members(members: Sequence[ScopeMember]) -> tuple[ScopeMember, ...]:
+    ordered = tuple(
+        sorted(
+            members,
+            key=lambda member: (
+                member.member_kind,
+                member.locator_digest,
+                member.member_id,
+            ),
+        )
+    )
+    if len({member.member_id for member in ordered}) != len(ordered):
+        raise ValueError("selector produced duplicate member identities")
+    return ordered
+
+
+def select_git_diff_closure(
+    repo: Path,
+    *,
+    source_revision: str,
+    candidate_commit: str,
+    expected_engine_digest: str | None = None,
+) -> ScopeSelectorExecution:
+    root = _validated_repo(repo)
+    _validate_commit(root, source_revision, "source_revision")
+    _validate_commit(root, candidate_commit, "candidate_commit")
+    raw = subprocess.run(
+        [
+            "git",
+            "diff",
+            "--name-status",
+            "-z",
+            "--find-renames",
+            source_revision,
+            candidate_commit,
+            "--",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    ).stdout
+    tokens = raw.split(b"\x00")
+    if tokens and tokens[-1] == b"":
+        tokens.pop()
+    members: list[ScopeMember] = []
+    index = 0
+    while index < len(tokens):
+        status = tokens[index].decode("ascii")
+        index += 1
+        if status.startswith(("R", "C")):
+            if index + 1 >= len(tokens):
+                raise ValueError("Git rename record is truncated")
+            old_path = tokens[index].decode("utf-8")
+            new_path = tokens[index + 1].decode("utf-8")
+            index += 2
+            members.append(
+                _git_blob_member(
+                    root,
+                    commit=source_revision,
+                    source_revision=source_revision,
+                    locator=old_path,
+                )
+            )
+            members.append(
+                _git_blob_member(
+                    root,
+                    commit=candidate_commit,
+                    source_revision=source_revision,
+                    locator=new_path,
+                )
+            )
+            continue
+        if index >= len(tokens):
+            raise ValueError("Git diff record is truncated")
+        path = tokens[index].decode("utf-8")
+        index += 1
+        if status == "D":
+            commit = source_revision
+        elif status[:1] in {"A", "M", "T"}:
+            commit = candidate_commit
+        else:
+            raise ValueError(f"unsupported committed Git status: {status}")
+        members.append(
+            _git_blob_member(
+                root,
+                commit=commit,
+                source_revision=source_revision,
+                locator=path,
+            )
+        )
+
+    engine_digest = _selector_engine_digest()
+    reasons: list[str] = []
+    if not members:
+        reasons.append("SCOPE_EMPTY")
+    if (
+        expected_engine_digest is not None
+        and expected_engine_digest != engine_digest
+    ):
+        reasons.append("SCOPE_SELECTOR_MISMATCH")
+    reason_codes = tuple(reasons)
+    return ScopeSelectorExecution(
+        selector_kind="git_diff_closure",
+        selector_spec_bytes=_selector_spec_bytes(
+            "git_diff_closure",
+            {
+                "source_revision": source_revision,
+                "candidate_commit": candidate_commit,
+                "git_diff_mode": "name-status-z-find-renames",
+            },
+        ),
+        engine_digest=engine_digest,
+        evidence_path="scope/selectors/git-diff-closure.json",
+        members=_sorted_members(members),
+        status="indeterminate" if reason_codes else "satisfied",
+        reason_codes=reason_codes,
+    )
+
+
+def select_pytest_collection(
+    repo: Path,
+    *,
+    source_revision: str,
+    candidate_commit: str,
+    python_executable: Path,
+    timeout_seconds: int,
+    expected_engine_digest: str | None = None,
+    required_node_ids: Sequence[str] = (),
+) -> ScopeSelectorExecution:
+    root = _validated_repo(repo)
+    _validate_commit(root, source_revision, "source_revision")
+    _validate_commit(root, candidate_commit, "candidate_commit")
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 300:
+        raise ValueError("timeout_seconds must be in 1..300")
+    python = Path(python_executable).resolve(strict=True)
+    if not python.is_file():
+        raise ValueError("python_executable must be a file")
+    python_digest = hashlib.sha256(python.read_bytes()).hexdigest()
+    command = (str(python), "-I", "-m", "pytest", "--collect-only", "-q")
+    spec = _selector_spec_bytes(
+        "pytest_collection",
+        {
+            "source_revision": source_revision,
+            "candidate_commit": candidate_commit,
+            "python_executable_digest": python_digest,
+            "argv": list(command[1:]),
+            "timeout_seconds": timeout_seconds,
+        },
+    )
+    engine_digest = _selector_engine_digest()
+    reasons: list[str] = []
+    members: tuple[ScopeMember, ...] = ()
+    temporary_parent = Path(tempfile.mkdtemp(prefix="owp-scope-pytest-"))
+    checkout = temporary_parent / "checkout"
+    added = False
+    try:
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", "--quiet", str(checkout), candidate_commit],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+        added = True
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+                "LC_ALL": "C.UTF-8",
+                "TZ": "UTC",
+            }
+        )
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=checkout,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            reasons.append("SCOPE_SELECTOR_MISMATCH")
+        else:
+            if completed.returncode != 0:
+                reasons.append("SCOPE_SELECTOR_MISMATCH")
+            else:
+                node_ids = tuple(
+                    sorted(
+                        {
+                            line.strip()
+                            for line in completed.stdout.splitlines()
+                            if "::" in line.strip()
+                        },
+                        key=lambda node_id: node_id.encode("utf-8"),
+                    )
+                )
+                if not node_ids:
+                    reasons.append("SCOPE_EMPTY")
+                else:
+                    members = _sorted_members(
+                        tuple(
+                            _git_blob_member(
+                                root,
+                                commit=candidate_commit,
+                                source_revision=source_revision,
+                                locator=node_id,
+                                member_kind="test_case",
+                            )
+                            for node_id in node_ids
+                        )
+                    )
+                    missing = set(required_node_ids) - set(node_ids)
+                    if missing:
+                        reasons.append("SCOPE_REQUIRED_TARGET_MISSING")
+    finally:
+        if added:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(checkout)],
+                cwd=root,
+                check=False,
+                capture_output=True,
+            )
+        shutil.rmtree(temporary_parent, ignore_errors=True)
+
+    if expected_engine_digest is not None and expected_engine_digest != engine_digest:
+        reasons.append("SCOPE_SELECTOR_MISMATCH")
+    reason_codes = tuple(dict.fromkeys(reasons))
+    return ScopeSelectorExecution(
+        selector_kind="pytest_collection",
+        selector_spec_bytes=spec,
+        engine_digest=engine_digest,
+        evidence_path="scope/selectors/pytest-collection.json",
+        members=members,
+        status="indeterminate" if reason_codes else "satisfied",
+        reason_codes=reason_codes,
     )
