@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from openworkproof.models import (
     AgentRequest,
     ApprovalHumanDecision,
+    AuthorityCheckpoint,
     HumanDecision,
     KeyBinding,
     TerminationHumanDecision,
@@ -77,6 +78,18 @@ _V03_CANONICAL_DOMAINS = frozenset(
 _V03_SIGNED_DOMAINS = frozenset(
     {"evaluation-scope", "verification-profile", "verification-arm-result"}
 )
+_V04_CANONICAL_DOMAINS = frozenset(
+    {
+        "action-binding-manifest",
+        "agent-request",
+        "authority-checkpoint",
+        "binding-decision",
+        "judgment-commitment",
+    }
+)
+_V04_SIGNED_DOMAINS = frozenset(
+    {"action-binding-manifest", "agent-request", "judgment-commitment"}
+)
 
 
 def _canonical_domains_for_version(version: str) -> frozenset[str]:
@@ -84,6 +97,8 @@ def _canonical_domains_for_version(version: str) -> frozenset[str]:
         return _V01_CANONICAL_DOMAINS
     if version == "0.3":
         return _V03_CANONICAL_DOMAINS
+    if version == "0.4":
+        return _V04_CANONICAL_DOMAINS
     raise ValueError("unknown protocol version")
 
 
@@ -92,6 +107,8 @@ def _signed_domains_for_version(version: str) -> frozenset[str]:
         return ALLOWED_SIGNED_DOMAINS
     if version == "0.3":
         return _V03_SIGNED_DOMAINS
+    if version == "0.4":
+        return _V04_SIGNED_DOMAINS
     raise ValueError("unknown protocol version")
 
 MAX_JSON_DEPTH = 128
@@ -284,7 +301,7 @@ def canonical_bytes(
     object_type: str,
     payload: Mapping[str, Any],
     *,
-    version: Literal["0.1", "0.3"] = "0.1",
+    version: Literal["0.1", "0.3", "0.4"] = "0.1",
 ) -> bytes:
     allowed_domains = _canonical_domains_for_version(version)
     if (
@@ -306,7 +323,7 @@ def digest_payload(
     object_type: str,
     payload: Mapping[str, Any],
     *,
-    version: Literal["0.1", "0.3"] = "0.1",
+    version: Literal["0.1", "0.3", "0.4"] = "0.1",
 ) -> str:
     return hashlib.sha256(
         canonical_bytes(object_type, payload, version=version)
@@ -348,7 +365,7 @@ def sign_payload(
     payload: Mapping[str, Any],
     private_key: Ed25519PrivateKey,
     *,
-    version: Literal["0.1", "0.3"] = "0.1",
+    version: Literal["0.1", "0.3", "0.4"] = "0.1",
 ) -> dict[str, Any]:
     allowed_domains = _signed_domains_for_version(version)
     if type(object_type) is not str or object_type not in allowed_domains:
@@ -372,7 +389,7 @@ def verify_payload(
     signed: Mapping[str, Any],
     public_key: Ed25519PublicKey,
     *,
-    version: Literal["0.1", "0.3"] = "0.1",
+    version: Literal["0.1", "0.3", "0.4"] = "0.1",
 ) -> bool:
     try:
         allowed_domains = _signed_domains_for_version(version)
@@ -395,6 +412,73 @@ def verify_payload(
         ):
             return False
         encoded = canonical_bytes(object_type, snapshot, version=version)
+        if snapshot.get("digest") != hashlib.sha256(encoded).hexdigest():
+            return False
+        signature = _decode_base64url(snapshot.get("signature"), 64)
+        public_key.verify(signature, encoded)
+    except (InvalidSignature, ValueError, TypeError):
+        return False
+    return True
+
+
+def authority_checkpoint_signing_bytes(
+    checkpoint: AuthorityCheckpoint | Mapping[str, Any],
+) -> bytes:
+    if isinstance(checkpoint, AuthorityCheckpoint):
+        payload = checkpoint.model_dump(mode="json")
+    elif isinstance(checkpoint, Mapping):
+        payload = checkpoint
+    else:
+        raise ValueError("authority checkpoint must be a mapping")
+    if "signer_key_id" in payload:
+        raise ValueError("authority checkpoint must use authority_key_id")
+    return canonical_bytes("authority-checkpoint", payload, version="0.4")
+
+
+def sign_authority_checkpoint(
+    payload: Mapping[str, Any],
+    private_key: Ed25519PrivateKey,
+) -> dict[str, Any]:
+    if not isinstance(private_key, Ed25519PrivateKey):
+        raise ValueError("private key must be Ed25519")
+    result = unsigned_payload(payload)
+    expected_key_id = key_id(private_key.public_key())
+    supplied_key_id = result.get("authority_key_id")
+    if supplied_key_id not in {None, expected_key_id}:
+        raise ValueError("authority_key_id does not match private key")
+    result["authority_key_id"] = expected_key_id
+    result["signature_alg"] = "Ed25519"
+    encoded = authority_checkpoint_signing_bytes(result)
+    result["digest"] = hashlib.sha256(encoded).hexdigest()
+    result["signature"] = _encode_base64url(private_key.sign(encoded))
+    signed_snapshot = _snapshot_json(result)
+    if not isinstance(signed_snapshot, dict):
+        raise ValueError("authority checkpoint snapshot must be an object")
+    return signed_snapshot
+
+
+def verify_authority_checkpoint(
+    checkpoint: AuthorityCheckpoint | Mapping[str, Any],
+    public_key: Ed25519PublicKey,
+) -> bool:
+    if not isinstance(public_key, Ed25519PublicKey):
+        return False
+    try:
+        if isinstance(checkpoint, AuthorityCheckpoint):
+            snapshot = checkpoint.model_dump(mode="json")
+        elif isinstance(checkpoint, Mapping):
+            snapshot = _snapshot_json(checkpoint)
+        else:
+            return False
+        if not isinstance(snapshot, dict):
+            return False
+        if (
+            snapshot.get("signature_alg") != "Ed25519"
+            or snapshot.get("authority_key_id") != key_id(public_key)
+            or "signer_key_id" in snapshot
+        ):
+            return False
+        encoded = authority_checkpoint_signing_bytes(snapshot)
         if snapshot.get("digest") != hashlib.sha256(encoded).hexdigest():
             return False
         signature = _decode_base64url(snapshot.get("signature"), 64)

@@ -2503,6 +2503,380 @@ class AgentRequest(SignedProtocolModel):
         return self
 
 
+BindingOutcome = Literal["BOUND", "UNBOUND", "INDETERMINATE"]
+AuthorityStatus = Literal[
+    "not_required", "current", "missing", "stale", "forked", "unavailable"
+]
+BindingReasonCode = Literal[
+    "JUDGMENT_SIGNATURE_INVALID",
+    "JUDGMENT_EXPIRED",
+    "JUDGMENT_ARTIFACT_MISSING",
+    "JUDGMENT_DIGEST_MISMATCH",
+    "JUDGMENT_FACTS_DIGEST_MISMATCH",
+    "JUDGMENT_DISPOSITION_DIGEST_MISMATCH",
+    "JUDGMENT_SUPERSEDED",
+    "ADAPTER_PROFILE_DIGEST_MISMATCH",
+    "ACTION_DIGEST_MISMATCH",
+    "ACTION_ARGUMENTS_MISMATCH",
+    "ACTION_MAPPING_REJECTED",
+    "ACTION_OUTSIDE_APPROVED_SCOPE",
+    "ACTION_SIDE_EFFECT_UNDECLARED",
+    "REPLAY_UNAVAILABLE",
+    "REPLAY_DIVERGED",
+    "EVALUATOR_VERSION_DRIFT",
+    "AUTHORITY_CHECKPOINT_MISSING",
+    "AUTHORITY_CHECKPOINT_STALE",
+    "AUTHORITY_CHECKPOINT_SIGNATURE_INVALID",
+    "AUTHORITY_FORK_DETECTED",
+    "AUTHORITY_ROLLBACK_DETECTED",
+    "ALTERNATIVE_WORK_ORDER_DETECTED",
+    "UNSIGNED_METADATA_REFERENCE",
+    "EVIDENCE_INCOMPLETE",
+    "VERIFICATION_NOT_CURRENT",
+    "INDEPENDENCE_UNPROVEN",
+]
+
+_UNBOUND_BINDING_REASONS = frozenset(
+    {
+        "JUDGMENT_DIGEST_MISMATCH",
+        "JUDGMENT_FACTS_DIGEST_MISMATCH",
+        "JUDGMENT_DISPOSITION_DIGEST_MISMATCH",
+        "JUDGMENT_SUPERSEDED",
+        "ACTION_DIGEST_MISMATCH",
+        "ACTION_ARGUMENTS_MISMATCH",
+        "ACTION_MAPPING_REJECTED",
+        "ACTION_OUTSIDE_APPROVED_SCOPE",
+        "ACTION_SIDE_EFFECT_UNDECLARED",
+        "REPLAY_DIVERGED",
+        "AUTHORITY_CHECKPOINT_STALE",
+        "AUTHORITY_FORK_DETECTED",
+        "AUTHORITY_ROLLBACK_DETECTED",
+        "ALTERNATIVE_WORK_ORDER_DETECTED",
+    }
+)
+_INDETERMINATE_BINDING_REASONS = frozenset(
+    {
+        "JUDGMENT_ARTIFACT_MISSING",
+        "ADAPTER_PROFILE_DIGEST_MISMATCH",
+        "REPLAY_UNAVAILABLE",
+        "EVALUATOR_VERSION_DRIFT",
+        "AUTHORITY_CHECKPOINT_MISSING",
+        "ALTERNATIVE_WORK_ORDER_DETECTED",
+        "UNSIGNED_METADATA_REFERENCE",
+        "EVIDENCE_INCOMPLETE",
+        "VERIFICATION_NOT_CURRENT",
+        "INDEPENDENCE_UNPROVEN",
+    }
+)
+
+
+def _validate_named_nonempty_sorted_unique(
+    values: tuple[str, ...], label: str
+) -> None:
+    if not values or not _is_utf8_sorted_unique(values):
+        raise ValueError(f"{label} must be non-empty UTF-8 sorted and unique")
+
+
+class JudgmentCommitment(SignedProtocolModel):
+    _signed_domain = "judgment-commitment"
+    _signed_version = "0.4"
+
+    schema_version: Literal["openworkproof-judgment-commitment/0.4"]
+    commitment_id: Digest64
+    authority_namespace: Identifier
+    subject_id: Identifier
+    judgment_kind: Identifier
+    judgment_artifact_uri: ProtocolString
+    judgment_artifact_digest: Digest64
+    normalized_facts_digest: Digest64
+    disposition_digest: Digest64
+    action_constraint_digest: Digest64
+    adapter_id: ProtocolString
+    adapter_version: ProtocolString
+    adapter_profile_digest: Digest64
+    repository: ProtocolString
+    source_revision: ObjectId40
+    target_branch: ProtocolString
+    acceptance_condition_digests: tuple[Digest64, ...]
+    excluded_scope_digests: tuple[Digest64, ...]
+    required_artifact_digests: tuple[Digest64, ...]
+    valid_from: CanonicalUTCTime
+    expires_at: CanonicalUTCTime
+    created_at: CanonicalUTCTime
+    nonce: Digest64
+
+    @model_validator(mode="after")
+    def _closed_commitment(self) -> JudgmentCommitment:
+        for values, label in (
+            (self.acceptance_condition_digests, "acceptance_condition_digests"),
+            (self.excluded_scope_digests, "excluded_scope_digests"),
+            (self.required_artifact_digests, "required_artifact_digests"),
+        ):
+            _validate_named_nonempty_sorted_unique(values, label)
+        if not self.created_at <= self.valid_from < self.expires_at:
+            raise ValueError("commitment created/valid/expiry times are not ordered")
+        return self
+
+
+class ActionBindingManifest(SignedProtocolModel):
+    _signed_domain = "action-binding-manifest"
+    _signed_version = "0.4"
+
+    schema_version: Literal["openworkproof-action-binding-manifest/0.4"]
+    binding_manifest_id: Digest64
+    work_order_digest: Digest64
+    judgment_commitment_id: Digest64
+    judgment_commitment_digest: Digest64
+    evaluation_scope_id: Digest64
+    evaluation_scope_digest: Digest64
+    adapter_id: ProtocolString
+    adapter_version: ProtocolString
+    adapter_profile_digest: Digest64
+    allowed_tool_names: tuple[ProtocolString, ...]
+    allowed_action_kinds: tuple[Identifier, ...]
+    allowed_path_roots: tuple[CanonicalRoot, ...]
+    required_test_profile_digests: tuple[Digest64, ...]
+    source_revision: ObjectId40
+    supersedes_binding_manifest_id: Digest64 | None
+    supersedes_binding_manifest_digest: Digest64 | None
+    causal_parent_manifest_ids: tuple[Digest64, ...]
+    created_at: CanonicalUTCTime
+    expires_at: CanonicalUTCTime
+    nonce: Digest64
+
+    @model_validator(mode="after")
+    def _closed_manifest(self) -> ActionBindingManifest:
+        for values, label in (
+            (self.allowed_tool_names, "allowed_tool_names"),
+            (self.allowed_action_kinds, "allowed_action_kinds"),
+            (self.allowed_path_roots, "allowed_path_roots"),
+            (self.required_test_profile_digests, "required_test_profile_digests"),
+        ):
+            _validate_named_nonempty_sorted_unique(values, label)
+        if any(tool not in _ALL_TOOLS for tool in self.allowed_tool_names):
+            raise ValueError("allowed_tool_names contains an unknown tool")
+        if not _is_utf8_sorted_unique(self.causal_parent_manifest_ids):
+            raise ValueError("causal_parent_manifest_ids must be sorted and unique")
+        if (self.supersedes_binding_manifest_id is None) != (
+            self.supersedes_binding_manifest_digest is None
+        ):
+            raise ValueError("supersedes manifest id and digest must be paired")
+        expected_parents = (
+            ()
+            if self.supersedes_binding_manifest_id is None
+            else (self.supersedes_binding_manifest_id,)
+        )
+        if self.causal_parent_manifest_ids != expected_parents:
+            raise ValueError("causal manifest parents do not match supersedes")
+        if not self.created_at < self.expires_at:
+            raise ValueError("manifest created_at must precede expires_at")
+        return self
+
+
+class AuthorityCheckpoint(ProtocolModel):
+    schema_version: Literal["openworkproof-authority-checkpoint/0.4"]
+    checkpoint_id: Digest64
+    authority_namespace: Identifier
+    subject_id: Identifier
+    monotonic_revision: SafePositiveInt
+    current_judgment_commitment_digest: Digest64
+    predecessor_checkpoint_digest: Digest64 | None
+    effective_at: CanonicalUTCTime
+    expires_at: CanonicalUTCTime
+    authority_key_id: KeyId
+    signature_alg: Literal["Ed25519"]
+    signature: Signature
+    digest: Digest64
+
+    @model_validator(mode="after")
+    def _closed_checkpoint(self) -> AuthorityCheckpoint:
+        if (self.monotonic_revision == 1) != (
+            self.predecessor_checkpoint_digest is None
+        ):
+            raise ValueError("checkpoint predecessor does not match revision")
+        if not self.effective_at < self.expires_at:
+            raise ValueError("checkpoint effective_at must precede expires_at")
+        payload = self.model_dump(mode="json", exclude={"digest", "signature"})
+        expected_digest = _jcs_digest(
+            {
+                "domain": "openworkproof/authority-checkpoint/v0.4",
+                "payload": payload,
+            }
+        )
+        if self.digest != expected_digest:
+            raise ValueError("digest does not match authority checkpoint payload")
+        return self
+
+
+class AgentRequestV04(AgentRequest):
+    _signed_domain = "agent-request"
+    _signed_version = "0.4"
+
+    schema_version: Literal["openworkproof-agent-request/0.4"]
+    judgment_commitment_id: Digest64
+    judgment_commitment_digest: Digest64
+    action_binding_manifest_id: Digest64
+    action_binding_manifest_digest: Digest64
+
+
+class BindingDecisionSignature(ProtocolModel):
+    verifier_subject_id: Identifier
+    verifier_key_id: KeyId
+    signature_alg: Literal["Ed25519"]
+    signature: Signature
+
+
+def _validate_binding_decision_content(
+    *,
+    action_receipt_ids: tuple[str, ...],
+    action_receipt_digests: tuple[str, ...],
+    decision: BindingOutcome,
+    reason_codes: tuple[BindingReasonCode, ...],
+    authority_status: AuthorityStatus,
+    authority_checkpoint_digest: str | None,
+    causal_parent_decision_ids: tuple[str, ...],
+    supersedes_binding_decision_id: str | None,
+    supersedes_binding_decision_digest: str | None,
+) -> None:
+    if not action_receipt_ids or not _is_utf8_sorted_unique(action_receipt_ids):
+        raise ValueError("action receipt ids must be non-empty sorted and unique")
+    if len(action_receipt_ids) != len(action_receipt_digests):
+        raise ValueError("action receipt ids and digests must be one-to-one")
+    if len(set(action_receipt_digests)) != len(action_receipt_digests):
+        raise ValueError("action receipt digests must be one-to-one")
+    if reason_codes != tuple(sorted(set(reason_codes))):
+        raise ValueError("binding reason codes must be sorted and unique")
+    if decision == "BOUND":
+        if reason_codes:
+            raise ValueError("BOUND requires no reason codes")
+        if authority_status not in {"not_required", "current"}:
+            raise ValueError("BOUND requires current or not-required authority")
+    else:
+        if not reason_codes:
+            raise ValueError(f"{decision} requires at least one reason code")
+        allowed = (
+            _UNBOUND_BINDING_REASONS
+            if decision == "UNBOUND"
+            else _INDETERMINATE_BINDING_REASONS
+        )
+        if any(code not in allowed for code in reason_codes):
+            raise ValueError(f"reason code is not compatible with {decision}")
+    if authority_status == "current" and authority_checkpoint_digest is None:
+        raise ValueError("current authority requires a checkpoint digest")
+    if authority_status == "not_required" and authority_checkpoint_digest is not None:
+        raise ValueError("not-required authority forbids a checkpoint digest")
+    if not _is_utf8_sorted_unique(causal_parent_decision_ids):
+        raise ValueError("causal decision parents must be sorted and unique")
+    if (supersedes_binding_decision_id is None) != (
+        supersedes_binding_decision_digest is None
+    ):
+        raise ValueError("supersedes decision id and digest must be paired")
+    expected_parents = (
+        ()
+        if supersedes_binding_decision_id is None
+        else (supersedes_binding_decision_id,)
+    )
+    if causal_parent_decision_ids != expected_parents:
+        raise ValueError("causal decision parents do not match supersedes")
+
+
+class BindingDecisionDraft(ProtocolModel):
+    binding_decision_id: Digest64
+    work_order_digest: Digest64
+    judgment_commitment_digest: Digest64
+    action_binding_manifest_digest: Digest64
+    verification_decision_id: Digest64
+    verification_decision_digest: Digest64
+    action_receipt_ids: tuple[Digest64, ...]
+    action_receipt_digests: tuple[Digest64, ...]
+    adapter_replay_digest: Digest64
+    authority_checkpoint_digest: Digest64 | None
+    decision: BindingOutcome
+    reason_codes: tuple[BindingReasonCode, ...]
+    authority_status: AuthorityStatus
+    causal_parent_decision_ids: tuple[Digest64, ...]
+    supersedes_binding_decision_id: Digest64 | None
+    supersedes_binding_decision_digest: Digest64 | None
+    decided_at: CanonicalUTCTime
+    nonce: Digest64
+
+    @model_validator(mode="after")
+    def _closed_draft(self) -> BindingDecisionDraft:
+        _validate_binding_decision_content(
+            action_receipt_ids=self.action_receipt_ids,
+            action_receipt_digests=self.action_receipt_digests,
+            decision=self.decision,
+            reason_codes=self.reason_codes,
+            authority_status=self.authority_status,
+            authority_checkpoint_digest=self.authority_checkpoint_digest,
+            causal_parent_decision_ids=self.causal_parent_decision_ids,
+            supersedes_binding_decision_id=self.supersedes_binding_decision_id,
+            supersedes_binding_decision_digest=(
+                self.supersedes_binding_decision_digest
+            ),
+        )
+        return self
+
+
+class BindingDecision(ProtocolModel):
+    schema_version: Literal["openworkproof-binding-decision/0.4"]
+    binding_decision_id: Digest64
+    work_order_digest: Digest64
+    judgment_commitment_digest: Digest64
+    action_binding_manifest_digest: Digest64
+    verification_decision_id: Digest64
+    verification_decision_digest: Digest64
+    action_receipt_ids: tuple[Digest64, ...]
+    action_receipt_digests: tuple[Digest64, ...]
+    adapter_replay_digest: Digest64
+    authority_checkpoint_digest: Digest64 | None
+    decision: BindingOutcome
+    reason_codes: tuple[BindingReasonCode, ...]
+    authority_status: AuthorityStatus
+    causal_parent_decision_ids: tuple[Digest64, ...]
+    supersedes_binding_decision_id: Digest64 | None
+    supersedes_binding_decision_digest: Digest64 | None
+    decided_at: CanonicalUTCTime
+    nonce: Digest64
+    verifier_signatures: tuple[BindingDecisionSignature, ...]
+    digest: Digest64
+
+    @model_validator(mode="after")
+    def _closed_decision(self) -> BindingDecision:
+        _validate_binding_decision_content(
+            action_receipt_ids=self.action_receipt_ids,
+            action_receipt_digests=self.action_receipt_digests,
+            decision=self.decision,
+            reason_codes=self.reason_codes,
+            authority_status=self.authority_status,
+            authority_checkpoint_digest=self.authority_checkpoint_digest,
+            causal_parent_decision_ids=self.causal_parent_decision_ids,
+            supersedes_binding_decision_id=self.supersedes_binding_decision_id,
+            supersedes_binding_decision_digest=(
+                self.supersedes_binding_decision_digest
+            ),
+        )
+        if not 1 <= len(self.verifier_signatures) <= 2:
+            raise ValueError("binding decision requires 1..2 verifier signatures")
+        signature_keys = tuple(
+            signature.verifier_key_id for signature in self.verifier_signatures
+        )
+        if not _is_utf8_sorted_unique(signature_keys):
+            raise ValueError("decision signatures must be key-sorted and unique")
+        payload = self.model_dump(
+            mode="json", exclude={"digest", "verifier_signatures"}
+        )
+        expected_digest = _jcs_digest(
+            {
+                "domain": "openworkproof/binding-decision/v0.4",
+                "payload": payload,
+            }
+        )
+        if self.digest != expected_digest:
+            raise ValueError("digest does not match binding decision payload")
+        return self
+
+
 class ApprovalHumanDecision(SignedProtocolModel):
     claim_type: Literal["human-decision"]
     decision_type: Literal["approval_decision"]
@@ -4421,14 +4795,23 @@ class TransitionDecision(ProtocolModel):
 __all__ = [
     "ACTION_RECEIPT_ADAPTER",
     "AcceptanceReceipt",
+    "ActionBindingManifest",
     "ActionReceipt",
     "AgentRequest",
+    "AgentRequestV04",
     "ApprovalGate",
     "ApprovalDecisionReceipt",
     "ApprovalHumanDecision",
     "ApprovalRequestedReceipt",
+    "AuthorityCheckpoint",
+    "AuthorityStatus",
     "Artifact",
     "BUNDLE_FINALIZATION_GRACE_SECONDS",
+    "BindingDecision",
+    "BindingDecisionDraft",
+    "BindingDecisionSignature",
+    "BindingOutcome",
+    "BindingReasonCode",
     "CapabilityGrant",
     "Command",
     "CommitmentAnchor",
@@ -4443,6 +4826,7 @@ __all__ = [
     "HumanDecision",
     "IndependenceAssessment",
     "KeyBinding",
+    "JudgmentCommitment",
     "McpErrorEnvelope",
     "PatchResultEvidence",
     "PolicyAnchor",

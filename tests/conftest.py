@@ -25,16 +25,21 @@ from openworkproof.models import (
     ACTION_RECEIPT_ADAPTER,
     ActionReceipt,
     AcceptanceReceipt,
+    ActionBindingManifest,
+    AgentRequestV04,
+    AuthorityCheckpoint,
+    BindingDecision,
     CapabilityGrant,
     CommitmentAnchor,
     EvaluationScopeManifest,
+    JudgmentCommitment,
     PolicyAnchor,
     ScopeMember,
     SubjectClaim,
     VerificationProfileV02,
     WorkOrder,
 )
-from openworkproof.signing import key_id, sign_payload
+from openworkproof.signing import canonical_bytes, key_id, sign_payload
 
 
 WORK_ORDER_ID = "0" * 64
@@ -613,6 +618,237 @@ def _v03_digest(domain: str, payload: Any) -> str:
     return jcs_digest(
         {"domain": f"openworkproof/{domain}/v0.3", "payload": payload}
     )
+
+
+def _v04_digest(domain: str, payload: Any) -> str:
+    return hashlib.sha256(
+        canonical_bytes(domain, payload, version="0.4")
+    ).hexdigest()
+
+
+@pytest.fixture
+def binding_private_key_v04() -> Ed25519PrivateKey:
+    return Ed25519PrivateKey.from_private_bytes(bytes([43]) * 32)
+
+
+@pytest.fixture
+def judgment_commitment_v04_dict(
+    binding_private_key_v04: Ed25519PrivateKey,
+) -> dict[str, Any]:
+    return sign_payload(
+        "judgment-commitment",
+        {
+            "schema_version": "openworkproof-judgment-commitment/0.4",
+            "commitment_id": SHA256_A,
+            "authority_namespace": "customer.example",
+            "subject_id": "issue-123",
+            "judgment_kind": "code-delivery",
+            "judgment_artifact_uri": "evidence/judgment.json",
+            "judgment_artifact_digest": SHA256_B,
+            "normalized_facts_digest": SHA256_C,
+            "disposition_digest": SHA256_D,
+            "action_constraint_digest": SHA256_E,
+            "adapter_id": "openworkproof/code-delivery-github/0.1",
+            "adapter_version": "0.1",
+            "adapter_profile_digest": "1" * 64,
+            "repository": "https://github.com/example/project",
+            "source_revision": SOURCE_COMMIT,
+            "target_branch": "main",
+            "acceptance_condition_digests": ["2" * 64],
+            "excluded_scope_digests": ["3" * 64],
+            "required_artifact_digests": ["4" * 64],
+            "valid_from": "2026-01-01T00:00:01Z",
+            "expires_at": "2026-01-02T00:00:00Z",
+            "created_at": "2026-01-01T00:00:00Z",
+            "nonce": "5" * 64,
+        },
+        binding_private_key_v04,
+        version="0.4",
+    )
+
+
+@pytest.fixture
+def judgment_commitment_v04(
+    judgment_commitment_v04_dict: dict[str, Any],
+) -> JudgmentCommitment:
+    return JudgmentCommitment.model_validate(judgment_commitment_v04_dict)
+
+
+@pytest.fixture
+def action_binding_manifest_v04_dict(
+    binding_private_key_v04: Ed25519PrivateKey,
+    judgment_commitment_v04: JudgmentCommitment,
+) -> dict[str, Any]:
+    return sign_payload(
+        "action-binding-manifest",
+        {
+            "schema_version": "openworkproof-action-binding-manifest/0.4",
+            "binding_manifest_id": "6" * 64,
+            "work_order_digest": SHA256_A,
+            "judgment_commitment_id": judgment_commitment_v04.commitment_id,
+            "judgment_commitment_digest": judgment_commitment_v04.digest,
+            "evaluation_scope_id": "7" * 64,
+            "evaluation_scope_digest": "8" * 64,
+            "adapter_id": judgment_commitment_v04.adapter_id,
+            "adapter_version": judgment_commitment_v04.adapter_version,
+            "adapter_profile_digest": judgment_commitment_v04.adapter_profile_digest,
+            "allowed_tool_names": ["owp.apply_patch", "owp.run_tests"],
+            "allowed_action_kinds": ["patch", "test"],
+            "allowed_path_roots": ["src", "tests"],
+            "required_test_profile_digests": ["9" * 64],
+            "source_revision": SOURCE_COMMIT,
+            "supersedes_binding_manifest_id": None,
+            "supersedes_binding_manifest_digest": None,
+            "causal_parent_manifest_ids": [],
+            "created_at": "2026-01-01T00:00:02Z",
+            "expires_at": "2026-01-01T23:59:59Z",
+            "nonce": "0" * 64,
+        },
+        binding_private_key_v04,
+        version="0.4",
+    )
+
+
+@pytest.fixture
+def action_binding_manifest_v04(
+    action_binding_manifest_v04_dict: dict[str, Any],
+) -> ActionBindingManifest:
+    return ActionBindingManifest.model_validate(action_binding_manifest_v04_dict)
+
+
+@pytest.fixture
+def authority_checkpoint_v04_dict(
+    binding_private_key_v04: Ed25519PrivateKey,
+    judgment_commitment_v04: JudgmentCommitment,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": "openworkproof-authority-checkpoint/0.4",
+        "checkpoint_id": "1" * 64,
+        "authority_namespace": judgment_commitment_v04.authority_namespace,
+        "subject_id": judgment_commitment_v04.subject_id,
+        "monotonic_revision": 1,
+        "current_judgment_commitment_digest": judgment_commitment_v04.digest,
+        "predecessor_checkpoint_digest": None,
+        "effective_at": "2026-01-01T00:00:02Z",
+        "expires_at": "2026-01-02T00:00:00Z",
+        "authority_key_id": key_id(binding_private_key_v04.public_key()),
+        "signature_alg": "Ed25519",
+    }
+    encoded = canonical_bytes("authority-checkpoint", payload, version="0.4")
+    return {
+        **payload,
+        "signature": base64.urlsafe_b64encode(
+            binding_private_key_v04.sign(encoded)
+        ).decode("ascii").rstrip("="),
+        "digest": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+@pytest.fixture
+def authority_checkpoint_v04(
+    authority_checkpoint_v04_dict: dict[str, Any],
+) -> AuthorityCheckpoint:
+    return AuthorityCheckpoint.model_validate(authority_checkpoint_v04_dict)
+
+
+@pytest.fixture
+def binding_decision_v04_dict(
+    binding_private_key_v04: Ed25519PrivateKey,
+    action_binding_manifest_v04: ActionBindingManifest,
+    authority_checkpoint_v04: AuthorityCheckpoint,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": "openworkproof-binding-decision/0.4",
+        "binding_decision_id": "2" * 64,
+        "work_order_digest": action_binding_manifest_v04.work_order_digest,
+        "judgment_commitment_digest": (
+            action_binding_manifest_v04.judgment_commitment_digest
+        ),
+        "action_binding_manifest_digest": action_binding_manifest_v04.digest,
+        "verification_decision_id": "3" * 64,
+        "verification_decision_digest": "4" * 64,
+        "action_receipt_ids": ["5" * 64, "6" * 64],
+        "action_receipt_digests": ["7" * 64, "8" * 64],
+        "adapter_replay_digest": "9" * 64,
+        "authority_checkpoint_digest": authority_checkpoint_v04.digest,
+        "decision": "BOUND",
+        "reason_codes": [],
+        "authority_status": "current",
+        "causal_parent_decision_ids": [],
+        "supersedes_binding_decision_id": None,
+        "supersedes_binding_decision_digest": None,
+        "decided_at": "2026-01-01T00:00:04Z",
+        "nonce": "a" * 64,
+    }
+    encoded = canonical_bytes("binding-decision", payload, version="0.4")
+    return {
+        **payload,
+        "verifier_signatures": [
+            {
+                "verifier_subject_id": "verifier",
+                "verifier_key_id": key_id(binding_private_key_v04.public_key()),
+                "signature_alg": "Ed25519",
+                "signature": base64.urlsafe_b64encode(
+                    binding_private_key_v04.sign(encoded)
+                ).decode("ascii").rstrip("="),
+            }
+        ],
+        "digest": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+@pytest.fixture
+def binding_decision_v04(
+    binding_decision_v04_dict: dict[str, Any],
+) -> BindingDecision:
+    return BindingDecision.model_validate(binding_decision_v04_dict)
+
+
+@pytest.fixture
+def agent_request_v04_dict(
+    binding_private_key_v04: Ed25519PrivateKey,
+    action_binding_manifest_v04: ActionBindingManifest,
+) -> dict[str, Any]:
+    actor_key_id = key_id(binding_private_key_v04.public_key())
+    return sign_payload(
+        "agent-request",
+        {
+            "schema_version": "openworkproof-agent-request/0.4",
+            "claim_type": "agent-request",
+            "work_order_digest": action_binding_manifest_v04.work_order_digest,
+            "grant_id": SHA256_A,
+            "actor_id": "developer",
+            "actor_key_id": actor_key_id,
+            "tool_name": "owp.apply_patch",
+            "arguments_digest": SHA256_B,
+            "nonce": SHA256_C,
+            "requested_at": "2026-01-01T00:00:03Z",
+            "authentication_method": "agent_signature",
+            "model_id": "model",
+            "model_version": "1",
+            "prompt_template_digest": SHA256_D,
+            "context_source_digest": SHA256_E,
+            "judgment_commitment_id": (
+                action_binding_manifest_v04.judgment_commitment_id
+            ),
+            "judgment_commitment_digest": (
+                action_binding_manifest_v04.judgment_commitment_digest
+            ),
+            "action_binding_manifest_id": (
+                action_binding_manifest_v04.binding_manifest_id
+            ),
+            "action_binding_manifest_digest": action_binding_manifest_v04.digest,
+        },
+        binding_private_key_v04,
+        version="0.4",
+    )
+
+
+@pytest.fixture
+def agent_request_v04(
+    agent_request_v04_dict: dict[str, Any],
+) -> AgentRequestV04:
+    return AgentRequestV04.model_validate(agent_request_v04_dict)
 
 
 def _scope_member_v03(
