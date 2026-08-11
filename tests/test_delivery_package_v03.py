@@ -107,6 +107,7 @@ def test_public_v03_package_is_aggregate_only_and_does_not_leak_locators(
         (output / "scope-coverage-report.json").read_text(encoding="utf-8")
     )
     assert report["full_offline_replay"] is False
+    assert "not a complete offline replay package" in report["boundary"]
     assert "statement" not in report["claim"]
     result = verify_delivery_package(output)
     assert result.current_decision == "VERIFIED"

@@ -813,7 +813,12 @@ def _scope_coverage_report_v03(
             else None
         ),
         "boundary": (
-            "This report does not prove payment, automatic settlement, absolute "
+            (
+                "This is not a complete offline replay package. "
+                if privacy_view != "customer_private"
+                else ""
+            )
+            + "This report does not prove payment, automatic settlement, absolute "
             "correctness, regulatory compliance, customer adoption, or deployment."
         ),
     }
