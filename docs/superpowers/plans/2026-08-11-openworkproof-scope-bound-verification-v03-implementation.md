@@ -1005,7 +1005,7 @@ Before committing, verify `git diff --cached --name-only` contains no unrelated 
 - Modify: `tests/test_export_evidence_bundles.py`
 - Modify: `tests/evidence-bundles/verify_evidence_bundle.py`
 
-- [ ] **Step 1: Freeze the provenance and non-adoption boundary**
+- [x] **Step 1: Freeze the provenance and non-adoption boundary**
 
 In the demo README record the real source issue URL, captured facts, OpenWorkProof-owned task construction, and exact statements:
 
@@ -1018,15 +1018,15 @@ customer_case: not_evidenced
 
 Do not copy or overwrite the existing v0.2 Rich bundle.
 
-- [ ] **Step 2: Write RED old-green/new-UNKNOWN test**
+- [x] **Step 2: Write RED old-green/new-UNKNOWN test**
 
 Construct a fixed check that returns green while omitting `required-test.py`. Assert the same evidence under v0.3 yields `UNKNOWN` plus `SCOPE_REQUIRED_TARGET_MISSING`.
 
-- [ ] **Step 3: Add repaired range and negative-control paths**
+- [x] **Step 3: Add repaired range and negative-control paths**
 
 After adding the required test to the selected population, assert the positive arm passes, the registered mutant is caught, all arms share the same population digest, and the decision is VERIFIED with bounded language.
 
-- [ ] **Step 4: Export and independently replay the immutable bundle**
+- [x] **Step 4: Export and independently replay the immutable bundle**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_scope_demo_v03.py -q
@@ -1037,7 +1037,7 @@ env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
 
 Expected: `VERIFICATION PASSED`, v0.3 scope satisfied, and no network/ledger dependency. Tampering one member or scope-evidence byte must fail.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tests/scope-demo/rich-4196 tests/test_scope_demo_v03.py \

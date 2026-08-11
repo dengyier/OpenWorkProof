@@ -268,6 +268,94 @@ def _verify_v02_envelope(bundle_path: str) -> bool:
     return True
 
 
+def _verify_v03_envelope(bundle_path: str) -> bool:
+    """Materialize and verify one closed scope-bound v0.3 package."""
+    from openworkproof.delivery_package import (
+        DeliveryPackageError,
+        verify_delivery_package,
+    )
+
+    envelope = json.loads(Path(bundle_path).read_text(encoding="utf-8"))
+    if set(envelope) != {"schema_version", "metadata", "files"}:
+        raise DeliveryPackageError("delivery envelope fields are not closed")
+    metadata = envelope["metadata"]
+    expected_metadata = {
+        "issue_source",
+        "demo_owner",
+        "upstream_adoption",
+        "customer_case",
+        "old_green_scope_status",
+        "repaired_scope_status",
+        "bounded_conclusion",
+        "current_decision",
+        "current_readiness",
+        "full_offline_replay",
+    }
+    if type(metadata) is not dict or set(metadata) != expected_metadata:
+        raise DeliveryPackageError("v0.3 envelope metadata is not closed")
+    if (
+        metadata["demo_owner"] != "OpenWorkProof"
+        or metadata["upstream_adoption"] != "not_evidenced"
+        or metadata["customer_case"] != "not_evidenced"
+        or metadata["old_green_scope_status"] != "indeterminate"
+        or metadata["repaired_scope_status"] != "satisfied"
+        or metadata["full_offline_replay"] is not True
+    ):
+        raise DeliveryPackageError("v0.3 envelope boundary metadata is invalid")
+    if type(envelope["files"]) is not list:
+        raise DeliveryPackageError("v0.3 envelope files are invalid")
+    paths = tuple(
+        item.get("path") for item in envelope["files"] if type(item) is dict
+    )
+    if (
+        len(paths) != len(envelope["files"])
+        or any(type(path) is not str for path in paths)
+        or paths != tuple(sorted(set(paths), key=lambda value: value.encode("utf-8")))
+        or "manifest.json" not in paths
+    ):
+        raise DeliveryPackageError("v0.3 envelope paths are not closed")
+    with tempfile.TemporaryDirectory(prefix="openworkproof-v03-") as temporary:
+        root = Path(temporary)
+        for item in envelope["files"]:
+            if set(item) != {"path", "sha256", "payload_b64"}:
+                raise DeliveryPackageError(
+                    "v0.3 envelope file fields are invalid"
+                )
+            relative = item["path"]
+            if (
+                type(relative) is not str
+                or relative.startswith("/")
+                or any(part in {"", ".", ".."} for part in relative.split("/"))
+            ):
+                raise DeliveryPackageError("v0.3 envelope path is unsafe")
+            try:
+                payload = base64.b64decode(item["payload_b64"], validate=True)
+            except (TypeError, ValueError) as error:
+                raise DeliveryPackageError(
+                    "v0.3 envelope payload is invalid"
+                ) from error
+            if hashlib.sha256(payload).hexdigest() != item["sha256"]:
+                raise DeliveryPackageError("v0.3 envelope file hash mismatch")
+            target = root.joinpath(*relative.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+        result = verify_delivery_package(root)
+    if (
+        result.current_decision != "VERIFIED"
+        or result.full_offline_replay is not True
+    ):
+        raise DeliveryPackageError("v0.3 replay conclusion is invalid")
+    print(f"\n{'=' * 60}")
+    print("✅ VERIFICATION PASSED")
+    print(f"   Case: {metadata['issue_source']}")
+    print("   v0.3 scope: satisfied")
+    print(f"   Current decision: {result.current_decision}")
+    print(f"   Current readiness: {result.settlement_readiness}")
+    print(f"   Manifest digest: {result.manifest_digest}")
+    print(f"{'=' * 60}\n")
+    return True
+
+
 def verify_bundle(bundle_path: str) -> bool:
     """Dispatch to the exact offline verifier selected by schema_version."""
     schema = bundle_schema(bundle_path)
@@ -275,6 +363,8 @@ def verify_bundle(bundle_path: str) -> bool:
         return _verify_v01_bundle(bundle_path)
     if schema == "openworkproof/delivery-package-envelope/0.2":
         return _verify_v02_envelope(bundle_path)
+    if schema == "openworkproof/delivery-package-envelope/0.3":
+        return _verify_v03_envelope(bundle_path)
     raise ValueError(f"unsupported bundle schema: {schema}")
 
 
