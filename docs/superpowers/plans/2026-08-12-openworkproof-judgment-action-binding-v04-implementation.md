@@ -463,7 +463,7 @@ git commit -m "feat: freeze judgment binding v0.4 schemas"
 - Create: `src/openworkproof/binding_transactions.py`
 - Create: `tests/test_judgment_transactions_v04.py`
 
-- [ ] **Step 1: Add transaction RED tests**
+- [x] **Step 1: Add transaction RED tests**
 
 Cover valid commit, wrong role/key, invalid signature, expired window, duplicate nonce, same-id/different-payload conflict, identical idempotent replay, pre-COMMIT zero write, ACK loss exact readback, and cleanup failure.
 
@@ -483,15 +483,15 @@ Run:
 
 Expected RED: table/function imports fail.
 
-- [ ] **Step 2: Add the append-only table**
+- [x] **Step 2: Add the append-only table**
 
 Add `judgment_commitments_v04` with unique id, digest, nonce, signer key, canonical JSON, committed timestamp, and no update/delete API. Add only indexes required by WorkOrder-independent commitment lookup and signer/nonce uniqueness.
 
-- [ ] **Step 3: Implement the existing transaction pattern**
+- [x] **Step 3: Implement the existing transaction pattern**
 
 Implement `commit_judgment_commitment()` using the same target-lock, `BEGIN IMMEDIATE`, fault injection, commit/readback exception taxonomy, and exact canonical row comparison as v0.3 verification transactions.
 
-- [ ] **Step 4: Run focused and ledger regressions**
+- [x] **Step 4: Run focused and ledger regressions**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -501,7 +501,7 @@ Implement `commit_judgment_commitment()` using the same target-lock, `BEGIN IMME
   tests/test_replay.py -q
 ```
 
-- [ ] **Step 5: Commit the transaction**
+- [x] **Step 5: Commit the transaction**
 
 ```bash
 git add src/openworkproof/evidence.py src/openworkproof/binding_transactions.py \
