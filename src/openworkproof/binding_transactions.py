@@ -137,7 +137,7 @@ def _commit_with_readback(
         raise BindingTransactionError("binding ledger is unavailable")
     lock_descriptor: int | None = None
     connection: sqlite3.Connection | None = None
-    committed = False
+    commit_attempted = False
     result: _T | None = None
     try:
         lock_descriptor, _ = evidence._borrow_or_acquire_target_lock(path, None)
@@ -150,8 +150,8 @@ def _commit_with_readback(
             raise BindingTransactionError(
                 f"injected fault: {fault.replace('_', ' ')}"
             )
+        commit_attempted = True
         connection.execute("COMMIT")
-        committed = True
         if fault == "commit_ack_loss":
             raise OSError("injected commit acknowledgement loss")
         if fault == "readback_failure":
@@ -167,7 +167,7 @@ def _commit_with_readback(
         cleanup_errors = _cleanup_transaction(connection, lock_descriptor)
         if isinstance(error, (BindingCommittedError, BindingCommitIndeterminateError)):
             raise error
-        if committed and result is not None:
+        if commit_attempted and result is not None:
             try:
                 confirmed = readback(result)
             except Exception as readback_error:
@@ -278,14 +278,6 @@ def commit_judgment_commitment(
             (parsed.signer_key_id, parsed.nonce),
         ).fetchone() is not None:
             raise BindingTransactionError("judgment commitment nonce is already used")
-        if connection.execute(
-            """
-            SELECT 1 FROM judgment_commitments_v04
-            WHERE commitment_digest = ? OR commitment_json = ?
-            """,
-            (parsed.digest, canonical),
-        ).fetchone() is not None:
-            raise BindingTransactionError("judgment commitment bytes are already used")
         connection.execute(
             """
             INSERT INTO judgment_commitments_v04 (

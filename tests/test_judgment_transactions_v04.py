@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +23,31 @@ from openworkproof.binding_transactions import (
 )
 from openworkproof.models import JudgmentCommitment, KeyBinding
 from openworkproof.signing import key_id, sign_payload
+
+
+class _CommitThenRaiseConnection:
+    """Proxy a real SQLite COMMIT, then lose its acknowledgement."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+
+    def execute(self, sql: str, parameters: object = ()):
+        cursor = self._connection.execute(sql, parameters)
+        if sql == "COMMIT":
+            raise OSError("real COMMIT completed but acknowledgement was lost")
+        return cursor
+
+    def __getattr__(self, name: str):
+        return getattr(self._connection, name)
+
+
+class _RaiseBeforeCommitConnection(_CommitThenRaiseConnection):
+    """Reject COMMIT before the wrapped SQLite connection executes it."""
+
+    def execute(self, sql: str, parameters: object = ()):
+        if sql == "COMMIT":
+            raise OSError("real COMMIT did not execute")
+        return self._connection.execute(sql, parameters)
 
 
 def _snapshot_all_tables(path: Path) -> dict[str, tuple[tuple[object, ...], ...]]:
@@ -154,6 +181,47 @@ def test_judgment_commitment_table_is_initialized_and_commit_is_canonical(
         ).encode(),
         "2026-01-01T00:00:05Z",
     )
+
+
+def test_judgment_commitment_table_has_only_required_indexes(
+    judgment_ledger: Path,
+) -> None:
+    connection = evidence.connect_ledger(judgment_ledger)
+    try:
+        indexes = tuple(
+            connection.execute("PRAGMA index_list(judgment_commitments_v04)")
+        )
+        observed = {
+            (
+                row[2],
+                row[3],
+                tuple(
+                    info[2]
+                    for info in connection.execute(
+                        f'PRAGMA index_info("{row[1]}")'
+                    )
+                ),
+            )
+            for row in indexes
+        }
+    finally:
+        connection.close()
+
+    assert len(indexes) == 3
+    assert observed == {
+        (1, "pk", ("commitment_id",)),
+        (1, "u", ("signer_key_id", "nonce")),
+        (
+            0,
+            "c",
+            (
+                "authority_namespace",
+                "subject_id",
+                "committed_at",
+                "commitment_id",
+            ),
+        ),
+    }
 
 
 @pytest.mark.parametrize("wrong_authority", ("role", "key"))
@@ -394,6 +462,185 @@ def test_judgment_postcommit_fault_preserves_exact_truth(
                 judgment_commitment_v04.model_dump(mode="json")
             ).encode(),
         )
+    finally:
+        connection.close()
+
+
+def test_real_commit_ack_loss_is_recovered_by_exact_readback(
+    judgment_ledger: Path,
+    judgment_commitment_v04: JudgmentCommitment,
+    authority_context: JudgmentAuthorityContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_connect = evidence.connect_ledger
+    connection_count = 0
+
+    def connect_with_lost_first_ack(path: Path):
+        nonlocal connection_count
+        connection_count += 1
+        connection = real_connect(path)
+        if connection_count == 1:
+            return _CommitThenRaiseConnection(connection)
+        return connection
+
+    monkeypatch.setattr(evidence, "connect_ledger", connect_with_lost_first_ack)
+
+    with pytest.raises(BindingCommittedError) as raised:
+        commit_judgment_commitment(
+            judgment_ledger, judgment_commitment_v04, authority_context
+        )
+
+    assert raised.value.committed == judgment_commitment_v04
+    connection = real_connect(judgment_ledger)
+    try:
+        assert connection.execute(
+            "SELECT commitment_digest FROM judgment_commitments_v04"
+        ).fetchone() == (judgment_commitment_v04.digest,)
+    finally:
+        connection.close()
+
+
+def test_real_commit_failure_with_absent_row_is_indeterminate_and_zero_write(
+    judgment_ledger: Path,
+    judgment_commitment_v04: JudgmentCommitment,
+    authority_context: JudgmentAuthorityContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_connect = evidence.connect_ledger
+    connection_count = 0
+
+    def connect_with_rejected_first_commit(path: Path):
+        nonlocal connection_count
+        connection_count += 1
+        connection = real_connect(path)
+        if connection_count == 1:
+            return _RaiseBeforeCommitConnection(connection)
+        return connection
+
+    monkeypatch.setattr(
+        evidence, "connect_ledger", connect_with_rejected_first_commit
+    )
+
+    with pytest.raises(BindingCommitIndeterminateError):
+        commit_judgment_commitment(
+            judgment_ledger, judgment_commitment_v04, authority_context
+        )
+
+    connection = real_connect(judgment_ledger)
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM judgment_commitments_v04"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+def test_real_commit_ack_loss_with_unavailable_readback_is_indeterminate(
+    judgment_ledger: Path,
+    judgment_commitment_v04: JudgmentCommitment,
+    authority_context: JudgmentAuthorityContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_connect = evidence.connect_ledger
+    connection_count = 0
+
+    def connect_with_lost_ack_and_readback(path: Path):
+        nonlocal connection_count
+        connection_count += 1
+        if connection_count == 1:
+            return _CommitThenRaiseConnection(real_connect(path))
+        raise OSError("exact readback is unavailable")
+
+    monkeypatch.setattr(
+        evidence, "connect_ledger", connect_with_lost_ack_and_readback
+    )
+
+    with pytest.raises(BindingCommitIndeterminateError):
+        commit_judgment_commitment(
+            judgment_ledger, judgment_commitment_v04, authority_context
+        )
+
+    connection = real_connect(judgment_ledger)
+    try:
+        assert connection.execute(
+            "SELECT commitment_digest FROM judgment_commitments_v04"
+        ).fetchone() == (judgment_commitment_v04.digest,)
+    finally:
+        connection.close()
+
+
+def test_identical_concurrent_judgment_commits_share_one_exact_truth(
+    judgment_ledger: Path,
+    judgment_commitment_v04: JudgmentCommitment,
+    authority_context: JudgmentAuthorityContext,
+) -> None:
+    barrier = threading.Barrier(2)
+
+    def commit_once(_: int) -> JudgmentCommitment:
+        barrier.wait()
+        try:
+            return commit_judgment_commitment(
+                judgment_ledger, judgment_commitment_v04, authority_context
+            )
+        except BindingCommittedError as error:
+            assert isinstance(error.committed, JudgmentCommitment)
+            return error.committed
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = tuple(pool.map(commit_once, range(2)))
+
+    assert outcomes == (judgment_commitment_v04, judgment_commitment_v04)
+    connection = evidence.connect_ledger(judgment_ledger)
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM judgment_commitments_v04"
+        ).fetchone() == (1,)
+    finally:
+        connection.close()
+
+
+def test_same_id_concurrent_judgments_have_one_winner_and_one_conflict(
+    judgment_ledger: Path,
+    judgment_commitment_v04: JudgmentCommitment,
+    authority_context: JudgmentAuthorityContext,
+    binding_acceptor_private_key_v04: Ed25519PrivateKey,
+) -> None:
+    conflicting = _resign(
+        judgment_commitment_v04,
+        binding_acceptor_private_key_v04,
+        judgment_artifact_digest="7" * 64,
+        nonce="8" * 64,
+    )
+    barrier = threading.Barrier(2)
+
+    def attempt(commitment: JudgmentCommitment):
+        barrier.wait()
+        try:
+            committed = commit_judgment_commitment(
+                judgment_ledger, commitment, authority_context
+            )
+        except BindingTransactionError as error:
+            return "conflict", str(error)
+        return "committed", committed.digest
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = tuple(
+            pool.map(attempt, (judgment_commitment_v04, conflicting))
+        )
+
+    assert sorted(status for status, _ in outcomes) == ["committed", "conflict"]
+    committed_digest = next(
+        value for status, value in outcomes if status == "committed"
+    )
+    conflict_message = next(
+        value for status, value in outcomes if status == "conflict"
+    )
+    assert "id" in conflict_message
+    connection = evidence.connect_ledger(judgment_ledger)
+    try:
+        assert connection.execute(
+            "SELECT commitment_digest FROM judgment_commitments_v04"
+        ).fetchall() == [(committed_digest,)]
     finally:
         connection.close()
 

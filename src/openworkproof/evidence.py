@@ -726,12 +726,12 @@ _SCHEMA = (
     """
     CREATE TABLE judgment_commitments_v04 (
         commitment_id TEXT PRIMARY KEY,
-        commitment_digest TEXT NOT NULL UNIQUE,
+        commitment_digest TEXT NOT NULL,
         authority_namespace TEXT NOT NULL,
         subject_id TEXT NOT NULL,
         nonce TEXT NOT NULL,
         signer_key_id TEXT NOT NULL,
-        commitment_json BLOB NOT NULL UNIQUE,
+        commitment_json BLOB NOT NULL,
         committed_at TEXT NOT NULL,
         UNIQUE (signer_key_id, nonce)
     )
