@@ -63,7 +63,7 @@ Add to `.cursor/mcp.json` or VS Code MCP settings:
 After adding the server, verify it's running:
 
 ```bash
-# Quick smoke test — should list 19 tools
+# Quick smoke test — should list 21 tools
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | owp-mcp
 ```
@@ -83,22 +83,30 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 | `owp_status` | Replay a ledger and return its state |
 | `owp_run_tests` | Forward a run-tests execution |
 | `owp_repo_read` | Forward a repo-read execution |
-| `owp_validate_profile` | Validate a signed Evidence Lifecycle v0.2 profile |
-| `owp_run_verification` | Commit one arm result, prepare a decision, or commit a decision |
-| `owp_get_decision` | Prepare an unsigned v0.2 verification decision draft |
-| `owp_build_delivery_package` | Export a public or customer-private offline delivery package |
+| `owp_validate_profile` | Validate a signed Evidence Lifecycle v0.2 or v0.3 profile |
+| `owp_scope_validate` | Intrinsically validate a v0.3 scope without asserting signer authority |
+| `owp_scope_compare` | Compare a signed v0.3 scope with observed coverage |
+| `owp_run_verification` | Dispatch a v0.2/v0.3 arm or decision operation by closed schema version |
+| `owp_get_decision` | Prepare an unsigned v0.2/v0.3 verification decision draft from the ledger family |
+| `owp_build_delivery_package` | Export a public, diagnostic, or customer-private offline delivery package |
 | `owp_get_settlement_readiness` | Derive the current acceptance and settlement-readiness snapshot |
 | `owp_get_schema` | Get an authoritative JSON Schema |
 | `owp_get_schema_digest` | Get the frozen digest of a schema |
 | `owp_analyze_repo` | Analyse a repository structure |
 
-## Evidence Lifecycle v0.2 Boundary
+## Evidence Lifecycle v0.2/v0.3 Boundary
 
-The five v0.2 tools are thin transports over the shared application service.
+The lifecycle tools are thin transports over the shared application service.
 `owp_run_verification` requires an explicit operation:
 `commit_arm`, `prepare_decision`, or `commit_decision`. It never blindly retries
 an indeterminate commit. `owp_build_delivery_package` likewise requires an
-explicit `privacy_view` of `public` or `customer_private`.
+explicit `privacy_view` of `public`, `diagnostic`, or `customer_private`.
+
+`owp_scope_validate` and `owp_scope_compare` are read-only. Intrinsic scope
+validation returns `authority: not_checked`: it proves canonical structure and
+digest closure, not that the signer was authorized. Neither tool accepts a
+ledger, private key, signature override, Acceptance decision, or commit
+instruction. Manager signing and scope commitment remain external to MCP.
 
 These tools never accept or store an Acceptor private key. Signing and custody
 remain external operations. Settlement readiness is an evidence-derived state;
@@ -108,6 +116,10 @@ Equivalent CLI commands are available through `owp`:
 
 ```bash
 owp profile-validate profile.json
+owp scope-build --claim claim.json --source-revision COMMIT_SHA --rules rules.json
+owp scope-validate scope.json
+owp scope-commit pilot.sqlite3 signed-scope-envelope.json
+owp scope-compare scope.json observed-scope.json
 owp verify-positive ledger.sqlite3 positive-result.json
 owp verify-negative ledger.sqlite3 negative-result.json
 owp verify-compose ledger.sqlite3 request-or-decision.json --mode prepare
@@ -118,3 +130,12 @@ owp audit-explain delivery-package
 owp audit-compare old-package new-package
 owp settlement-status ledger.sqlite3
 ```
+
+`scope-build` emits an unsigned draft. Its closed rules file contains the
+candidate/workspace identity, selector rules, explicit members, requirement
+bindings, repository root, and validity window. `scope-commit` accepts a JSON
+envelope with exactly two keys, `claim` and `scope`; the scope must already be
+Manager-signed. CLI comparison exits `0` when satisfied, `3` when
+indeterminate, `4` when contradicted, and `1` for invalid input or another
+failed operation. Non-zero comparison output retains the status and reason
+codes.

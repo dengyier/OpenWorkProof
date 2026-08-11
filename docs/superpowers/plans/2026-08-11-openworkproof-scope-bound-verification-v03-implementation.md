@@ -878,13 +878,13 @@ git commit -m 'feat: export scope coverage delivery packages'
 - Create: `tests/test_scope_interfaces_v03.py`
 - Modify: `MCP_SERVER.md`
 
-- [ ] **Step 1: Write RED service/CLI/MCP parity tests**
+- [x] **Step 1: Write RED service/CLI/MCP parity tests**
 
 Cover `scope-build`, `scope-validate`, `scope-commit`, and `scope-compare`; schema-version dispatch for profile/arm/decision; diagnostic delivery; JSON/text output; invalid/unknown/contradicted exit codes; and MCP read-only tools.
 
 Assert no MCP tool accepts private key bytes, signs a Manifest, commits a Scope, or accepts an Acceptance decision.
 
-- [ ] **Step 2: Extend the service facade first**
+- [x] **Step 2: Extend the service facade first**
 
 Add type/version dispatch based on closed `schema_version`, never trial-parse multiple signed types. Add service methods:
 
@@ -897,7 +897,7 @@ compare_scope(...)
 
 CLI and MCP must call these methods; do not duplicate scope semantics.
 
-- [ ] **Step 3: Add exact CLI commands and exit semantics**
+- [x] **Step 3: Add exact CLI commands and exit semantics**
 
 Implement:
 
@@ -910,11 +910,11 @@ owp scope-compare scope.json observed-scope.json
 
 Use exit `0` for satisfied/valid, `1` for invalid input or failed operation, `3` for indeterminate/UNKNOWN, and `4` for contradicted. Include the status and reason codes in JSON on every non-zero comparison.
 
-- [ ] **Step 4: Add only two MCP validation tools**
+- [x] **Step 4: Add only two MCP validation tools**
 
 Register `owp_scope_validate` and `owp_scope_compare`. Update `owp_validate_profile` and `owp_run_verification` docs/dispatch for v0.2/v0.3 without adding signing authority.
 
-- [ ] **Step 5: Run interface and registration gates**
+- [x] **Step 5: Run interface and registration gates**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -930,7 +930,7 @@ for _, value in vars(module).items():
 PY
 ```
 
-- [ ] **Step 6: Commit and checkpoint**
+- [x] **Step 6: Commit and checkpoint**
 
 ```bash
 git add src/openworkproof/services.py src/openworkproof/cli.py \

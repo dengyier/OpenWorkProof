@@ -15,6 +15,7 @@ Commands:
 - ``owp delivery-build``         — export an offline delivery package
 - ``owp audit-replay|audit-explain|audit-compare`` — inspect packages offline
 - ``owp settlement-status``      — derive readiness without claiming payment
+- ``owp scope-build|scope-validate|scope-commit|scope-compare`` — v0.3 scope
 
 Payload files carry the signed AgentRequest plus the typed arguments, the
 execution facts, and the replay checkpoint; see the transport tests for the
@@ -107,6 +108,45 @@ def _service_result(callable_, *args) -> dict:
 
 def cli_profile_validate(payload: dict[str, object]) -> dict:
     return _service_result(OpenWorkProofServices().validate_profile, payload)
+
+
+def cli_scope_build(
+    claim: dict[str, object],
+    source_revision: str,
+    rules: dict[str, object],
+) -> dict:
+    return _service_result(
+        OpenWorkProofServices().build_scope,
+        claim,
+        source_revision,
+        rules,
+    )
+
+
+def cli_scope_validate(payload: dict[str, object]) -> dict:
+    return _service_result(OpenWorkProofServices().validate_scope, payload)
+
+
+def cli_scope_commit(
+    ledger_path: str | Path,
+    payload: dict[str, object],
+) -> dict:
+    return _service_result(
+        OpenWorkProofServices().commit_scope,
+        Path(ledger_path),
+        payload,
+    )
+
+
+def cli_scope_compare(
+    manifest: dict[str, object],
+    observed: dict[str, object],
+) -> dict:
+    return _service_result(
+        OpenWorkProofServices().compare_scope,
+        manifest,
+        observed,
+    )
 
 
 def cli_verify_arm(
@@ -248,7 +288,7 @@ def build_parser() -> argparse.ArgumentParser:
     repo_read.add_argument("payload", help="path to the repo-read payload JSON")
 
     profile_validate = sub.add_parser(
-        "profile-validate", help="validate a signed v0.2 verification profile"
+        "profile-validate", help="validate a signed v0.2/v0.3 verification profile"
     )
     profile_validate.add_argument("payload", help="path to profile JSON")
 
@@ -261,7 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("payload", help="path to signed arm result JSON")
 
     verify_compose = sub.add_parser(
-        "verify-compose", help="prepare or commit a v0.2 verification decision"
+        "verify-compose", help="prepare or commit a versioned verification decision"
     )
     verify_compose.add_argument("ledger", help="path to the SQLite ledger file")
     verify_compose.add_argument("payload", help="path to request or decision JSON")
@@ -276,9 +316,39 @@ def build_parser() -> argparse.ArgumentParser:
     delivery_build.add_argument("output_path", help="new delivery package directory")
     delivery_build.add_argument(
         "--privacy-view",
-        choices=("public", "customer_private"),
+        choices=("public", "diagnostic", "customer_private"),
         required=True,
     )
+
+    scope_build = sub.add_parser(
+        "scope-build", help="build an unsigned v0.3 Evaluation Scope draft"
+    )
+    scope_build.add_argument("--claim", required=True, help="SubjectClaim JSON")
+    scope_build.add_argument(
+        "--source-revision", required=True, help="full source commit SHA"
+    )
+    scope_build.add_argument(
+        "--rules", required=True, help="closed scope-build input JSON"
+    )
+
+    scope_validate = sub.add_parser(
+        "scope-validate", help="intrinsically validate a v0.3 scope"
+    )
+    scope_validate.add_argument("scope", help="scope draft or manifest JSON")
+
+    scope_commit = sub.add_parser(
+        "scope-commit", help="commit a Manager-signed scope and claim"
+    )
+    scope_commit.add_argument("ledger", help="path to SQLite ledger")
+    scope_commit.add_argument(
+        "signed_scope", help="JSON object containing claim and scope"
+    )
+
+    scope_compare = sub.add_parser(
+        "scope-compare", help="compare a signed scope with observed scope"
+    )
+    scope_compare.add_argument("scope", help="signed Evaluation Scope JSON")
+    scope_compare.add_argument("observed_scope", help="ObservedScope JSON")
 
     for name, help_text in (
         ("audit-replay", "offline replay one delivery package"),
@@ -313,6 +383,23 @@ def app(argv: Sequence[str] | None = None) -> int:
             result = cli_repo_read(args.ledger, _load_payload(args.payload))
         elif args.command == "profile-validate":
             result = cli_profile_validate(_load_payload(args.payload))
+        elif args.command == "scope-build":
+            result = cli_scope_build(
+                _load_payload(args.claim),
+                args.source_revision,
+                _load_payload(args.rules),
+            )
+        elif args.command == "scope-validate":
+            result = cli_scope_validate(_load_payload(args.scope))
+        elif args.command == "scope-commit":
+            result = cli_scope_commit(
+                args.ledger, _load_payload(args.signed_scope)
+            )
+        elif args.command == "scope-compare":
+            result = cli_scope_compare(
+                _load_payload(args.scope),
+                _load_payload(args.observed_scope),
+            )
         elif args.command == "verify-positive":
             result = cli_verify_arm(
                 args.ledger,
@@ -352,10 +439,28 @@ def app(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"error": str(error)}, ensure_ascii=False), file=sys.stderr)
         return 1
     if args.output == "text" and args.command == "status":
-        print(f"state={result['current_state']} version={result['version']} "
-              f"receipts={result['receipt_count']}")
+        print(
+            f"state={result['current_state']} version={result['version']} "
+            f"receipts={result['receipt_count']}"
+        )
+    elif args.output == "text" and args.command == "scope-compare":
+        print(
+            f"scope_status={result['scope_status']} reasons="
+            f"{','.join(result['reason_codes']) or '-'}"
+        )
+    elif args.output == "text" and args.command == "scope-validate":
+        print(
+            f"valid={str(result['valid']).lower()} "
+            f"authority={result['authority']} member_count={result['member_count']}"
+        )
     else:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+    if args.command == "scope-compare":
+        return {
+            "satisfied": 0,
+            "indeterminate": 3,
+            "contradicted": 4,
+        }[result["scope_status"]]
     return 0
 
 

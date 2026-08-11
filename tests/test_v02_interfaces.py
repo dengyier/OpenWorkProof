@@ -55,7 +55,14 @@ def test_services_validate_profile_returns_closed_json_dict(
         (
             "commit_arm_result",
             "commit_verification_arm_result",
-            (Path("ledger.sqlite3"), {"payload": "arm"}),
+            (
+                Path("ledger.sqlite3"),
+                {
+                    "schema_version":
+                        "openworkproof-verification-arm-result/0.2",
+                    "payload": "arm",
+                },
+            ),
             (Path("ledger.sqlite3"), "parsed-arm"),
         ),
         (
@@ -67,7 +74,14 @@ def test_services_validate_profile_returns_closed_json_dict(
         (
             "commit_decision",
             "commit_verification_decision",
-            (Path("ledger.sqlite3"), {"payload": "decision"}),
+            (
+                Path("ledger.sqlite3"),
+                {
+                    "schema_version":
+                        "openworkproof-verification-decision/0.2",
+                    "payload": "decision",
+                },
+            ),
             (Path("ledger.sqlite3"), "parsed-decision"),
         ),
     ),
@@ -94,6 +108,28 @@ def test_services_parse_then_delegate_once(
         return _Dumpable({"result": method})
 
     monkeypatch.setattr(services, dependency, delegate)
+    if method == "prepare_decision":
+        class _Cursor:
+            def __init__(self, value):
+                self.value = value
+
+            def fetchone(self):
+                return (self.value,)
+
+        class _Connection:
+            def execute(self, statement):
+                if "verification_profiles_v02" in statement:
+                    return _Cursor(1)
+                return _Cursor(0)
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr(
+            services.evidence,
+            "connect_ledger",
+            lambda ledger: _Connection(),
+        )
     result = getattr(OpenWorkProofServices(), method)(*args)
     assert type(result) is dict
     assert result == {"result": method}

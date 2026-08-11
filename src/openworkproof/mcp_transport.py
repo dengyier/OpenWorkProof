@@ -19,14 +19,16 @@ over stdio.  The server is organised in three layers:
 - ``owp_status``                 — replay a ledger and return its state
 - ``owp_run_tests``              — forward a run-tests execution
 - ``owp_repo_read``              — forward a repo-read execution
-- ``owp_run_verification``       — prepare or commit one v0.2 verification step
-- ``owp_get_decision``           — prepare a v0.2 verification decision draft
+- ``owp_run_verification``       — prepare or commit one versioned verification step
+- ``owp_get_decision``           — prepare a versioned verification decision draft
 - ``owp_build_delivery_package`` — export a closed delivery package
 - ``owp_get_settlement_readiness`` — derive the current readiness snapshot
 
-**Standalone v0.2 validation tools:**
+**Standalone validation tools:**
 
 - ``owp_validate_profile``       — validate a signed verification profile
+- ``owp_scope_validate``         — intrinsically validate a v0.3 scope
+- ``owp_scope_compare``          — compare a v0.3 scope with an observation
 
 **Utility tools:**
 
@@ -43,7 +45,7 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Mapping
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -441,12 +443,47 @@ def owp_list_domains() -> dict[str, Any]:
 
 @mcp.tool()
 def owp_validate_profile(profile_json: str) -> dict[str, Any]:
-    """Validate a signed Evidence Lifecycle v0.2 verification profile."""
+    """Validate a signed Evidence Lifecycle v0.2 or v0.3 profile."""
     try:
         payload = _json_object(profile_json, field="profile_json")
     except ValueError as error:
         return _err(str(error))
     return _service_call(OpenWorkProofServices().validate_profile, payload)
+
+
+@mcp.tool()
+def owp_scope_validate(scope_json: str) -> dict[str, Any]:
+    """Intrinsically validate a v0.3 scope without checking authority.
+
+    This read-only tool does not accept a ledger, private key, or signature
+    instruction. Full Manager authority is checked only by the non-MCP commit
+    boundary.
+    """
+    try:
+        payload = _json_object(scope_json, field="scope_json")
+    except ValueError as error:
+        return _err(str(error))
+    return _service_call(OpenWorkProofServices().validate_scope, payload)
+
+
+@mcp.tool()
+def owp_scope_compare(
+    scope_json: str,
+    observed_scope_json: str,
+) -> dict[str, Any]:
+    """Compare a signed v0.3 scope with one verifier observation."""
+    try:
+        manifest = _json_object(scope_json, field="scope_json")
+        observed = _json_object(
+            observed_scope_json, field="observed_scope_json"
+        )
+    except ValueError as error:
+        return _err(str(error))
+    return _service_call(
+        OpenWorkProofServices().compare_scope,
+        manifest,
+        observed,
+    )
 
 
 # ── ledger coordination tools ────────────────────────────────────────
@@ -495,7 +532,7 @@ def owp_run_verification(
     payload: str,
     operation: str,
 ) -> dict[str, Any]:
-    """Run exactly one explicit v0.2 verification operation.
+    """Run exactly one explicit v0.2 or v0.3 verification operation.
 
     ``operation`` must be ``commit_arm``, ``prepare_decision``, or
     ``commit_decision``.  The tool never retries an indeterminate commit.
@@ -520,7 +557,7 @@ def owp_run_verification(
 
 @mcp.tool()
 def owp_get_decision(ledger: str, request_json: str) -> dict[str, Any]:
-    """Prepare, but do not sign or commit, a v0.2 decision draft."""
+    """Prepare, but do not sign or commit, a versioned decision draft."""
     try:
         payload = _json_object(request_json, field="request_json")
     except ValueError as error:
@@ -538,9 +575,11 @@ def owp_build_delivery_package(
     output: str,
     privacy_view: str,
 ) -> dict[str, Any]:
-    """Export a public or customer-private offline delivery package."""
-    if privacy_view not in {"public", "customer_private"}:
-        return _err("privacy_view must be public or customer_private")
+    """Export a public, diagnostic, or customer-private delivery package."""
+    if privacy_view not in {"public", "diagnostic", "customer_private"}:
+        return _err(
+            "privacy_view must be public, diagnostic, or customer_private"
+        )
     return _service_call(
         OpenWorkProofServices().build_delivery,
         Path(ledger),
