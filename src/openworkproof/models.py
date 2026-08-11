@@ -7,6 +7,7 @@ import binascii
 import hashlib
 import json
 import re
+import unicodedata
 from collections.abc import Iterator, Mapping
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
@@ -328,7 +329,11 @@ class FrozenDict(Mapping[str, Any]):
 
 
 def _freeze_json(
-    value: Any, depth: int = 1, *, freeze_mapping: bool = True
+    value: Any,
+    depth: int = 1,
+    *,
+    freeze_mapping: bool = True,
+    max_array_items: int = 64,
 ) -> Any:
     if depth > 16:
         raise ValueError("JSON nesting depth exceeds 16")
@@ -343,12 +348,17 @@ def _freeze_json(
                 raise ValueError("JSON map keys must be strings")
             if len(key.encode("utf-8")) > 4096:
                 raise ValueError("JSON map key exceeds 4096 UTF-8 bytes")
-            frozen[key] = _freeze_json(item, depth + 1)
+            frozen[key] = _freeze_json(
+                item, depth + 1, max_array_items=max_array_items
+            )
         return FrozenDict._from_frozen(frozen) if freeze_mapping else frozen
     if isinstance(value, (list, tuple)):
-        if len(value) > 64:
-            raise ValueError("JSON array exceeds 64 items")
-        return tuple(_freeze_json(item, depth + 1) for item in value)
+        if len(value) > max_array_items:
+            raise ValueError(f"JSON array exceeds {max_array_items} items")
+        return tuple(
+            _freeze_json(item, depth + 1, max_array_items=max_array_items)
+            for item in value
+        )
     if type(value) is str:
         if len(value.encode("utf-8")) > 4096:
             raise ValueError("JSON string exceeds 4096 UTF-8 bytes")
@@ -439,6 +449,32 @@ def _validate_root(value: str) -> str:
 CanonicalRoot = Annotated[str, BeforeValidator(_validate_root)]
 
 
+def _validate_scope_locator(value: Any) -> str:
+    if type(value) is not str:
+        raise ValueError("scope locator must be a strict string")
+    if not value or len(value.encode("utf-8")) > 4096:
+        raise ValueError("scope locator must contain 1..4096 UTF-8 bytes")
+    if unicodedata.normalize("NFC", value) != value:
+        raise ValueError("scope locator must be NFC-normalized")
+    if "\\" in value or "\x00" in value or any(
+        unicodedata.category(character) == "Cc" for character in value
+    ):
+        raise ValueError("scope locator contains a forbidden character")
+
+    root, separator, node_suffix = value.partition("::")
+    _validate_root(root)
+    if not separator:
+        return value
+    if not node_suffix or node_suffix.startswith(":") or node_suffix.endswith(":"):
+        raise ValueError("test-case locator requires a pytest node suffix")
+    if any(part in {"", ".", ".."} for part in node_suffix.split("::")):
+        raise ValueError("test-case locator contains a forbidden node segment")
+    return value
+
+
+ScopeLocator = Annotated[str, BeforeValidator(_validate_scope_locator)]
+
+
 def _validate_sorted_roots(values: tuple[str, ...], *, allow_empty: bool) -> None:
     if not allow_empty and not values:
         raise ValueError("at least one root is required")
@@ -490,6 +526,7 @@ class ProtocolModel(BaseModel):
 
 class SignedProtocolModel(ProtocolModel):
     _signed_domain: ClassVar[str | None] = None
+    _signed_version: ClassVar[str] = "0.1"
 
     digest: Digest64
     signature_alg: Literal["Ed25519"]
@@ -506,7 +543,10 @@ class SignedProtocolModel(ProtocolModel):
         )
         expected = _jcs_digest(
             {
-                "domain": f"openworkproof/{self._signed_domain}/v0.1",
+                "domain": (
+                    f"openworkproof/{self._signed_domain}/v"
+                    f"{self._signed_version}"
+                ),
                 "payload": payload,
             }
         )
@@ -1511,6 +1551,285 @@ class CommitmentAnchor(ProtocolModel):
     anchor_reference: Annotated[
         str, _strict_bounded_text(2048, "anchor_reference")
     ]
+
+
+ScopeMemberKind = Literal["source_file", "test_case", "delivery_artifact"]
+ScopeSelectorKind = Literal["explicit", "git_diff_closure", "pytest_collection"]
+ScopeRequirementKind = Literal["acceptance_condition", "required_artifact"]
+
+
+class ScopeMember(ProtocolModel):
+    member_id: Digest64
+    member_kind: ScopeMemberKind
+    locator: ScopeLocator
+    locator_digest: Digest64
+    content_digest: Digest64
+    source_revision: ObjectId40
+
+    @model_validator(mode="after")
+    def _closed_member(self) -> ScopeMember:
+        is_test_locator = "::" in self.locator
+        if (self.member_kind == "test_case") != is_test_locator:
+            raise ValueError("locator form does not match member_kind")
+        expected_locator_digest = hashlib.sha256(
+            self.locator.encode("utf-8")
+        ).hexdigest()
+        if self.locator_digest != expected_locator_digest:
+            raise ValueError("locator_digest does not match locator")
+        expected_member_id = _jcs_digest(
+            {
+                "domain": "openworkproof/scope-member/v0.3",
+                "payload": {
+                    "member_kind": self.member_kind,
+                    "locator": self.locator,
+                },
+            }
+        )
+        if self.member_id != expected_member_id:
+            raise ValueError("member_id does not match canonical identity")
+        return self
+
+
+class ScopeSelectorRule(ProtocolModel):
+    rule_id: Digest64
+    selector_kind: ScopeSelectorKind
+    selector_spec_digest: Digest64
+    selector_engine_digest: Digest64
+    required_evidence_paths: tuple[CanonicalRoot, ...]
+
+    @model_validator(mode="after")
+    def _closed_selector(self) -> ScopeSelectorRule:
+        if not self.required_evidence_paths or not _is_utf8_sorted_unique(
+            self.required_evidence_paths
+        ):
+            raise ValueError(
+                "required_evidence_paths must be non-empty UTF-8 sorted and unique"
+            )
+        return self
+
+
+class ScopeRequirementBinding(ProtocolModel):
+    requirement_kind: ScopeRequirementKind
+    requirement_digest: Digest64
+    member_ids: tuple[Digest64, ...]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_json_shape(cls, value: Any) -> Any:
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, Mapping):
+            raise ValueError("protocol object must be a JSON object")
+        return _freeze_json(
+            dict(value), freeze_mapping=False, max_array_items=4096
+        )
+
+    @model_validator(mode="after")
+    def _closed_binding(self) -> ScopeRequirementBinding:
+        if not self.member_ids or not _is_utf8_sorted_unique(self.member_ids):
+            raise ValueError("member_ids must be non-empty sorted and unique")
+        return self
+
+
+def _validate_evaluation_scope(value: Any) -> None:
+    if not 1 <= len(value.members) <= 4096:
+        raise ValueError("members must contain 1..4096 items")
+    if value.member_count != len(value.members):
+        raise ValueError("member_count does not match members")
+    if not value.created_at < value.expires_at:
+        raise ValueError("scope manifest times are not ordered")
+
+    member_sort_keys = tuple(
+        (member.member_kind, member.locator_digest, member.member_id)
+        for member in value.members
+    )
+    if member_sort_keys != tuple(sorted(set(member_sort_keys))):
+        raise ValueError("members must be sorted and unique")
+    if not any(
+        member.member_kind in {"source_file", "test_case"}
+        for member in value.members
+    ):
+        raise ValueError("scope requires a source_file or test_case member")
+    if any(member.source_revision != value.source_revision for member in value.members):
+        raise ValueError("member source_revision does not match manifest")
+
+    folded_locators = tuple(member.locator.casefold() for member in value.members)
+    if len(set(folded_locators)) != len(folded_locators):
+        raise ValueError("member locators contain a case-fold collision")
+
+    selector_keys = tuple(
+        (rule.selector_kind.encode("utf-8"), rule.rule_id)
+        for rule in value.selector_rules
+    )
+    if not selector_keys or selector_keys != tuple(sorted(set(selector_keys))):
+        raise ValueError("selector_rules must be non-empty sorted and unique")
+
+    population = [
+        {
+            "member_id": member.member_id,
+            "member_kind": member.member_kind,
+            "locator_digest": member.locator_digest,
+        }
+        for member in value.members
+    ]
+    expected_population_digest = _jcs_digest(
+        {
+            "domain": "openworkproof/scope-population/v0.3",
+            "payload": population,
+        }
+    )
+    if value.population_digest != expected_population_digest:
+        raise ValueError("population_digest does not match members")
+
+    binding_keys = tuple(
+        (binding.requirement_kind.encode("utf-8"), binding.requirement_digest)
+        for binding in value.requirement_bindings
+    )
+    if not binding_keys or binding_keys != tuple(sorted(set(binding_keys))):
+        raise ValueError("requirement_bindings must be non-empty sorted and unique")
+
+    members_by_id = {member.member_id: member for member in value.members}
+    population_ids = set(members_by_id)
+    bound_ids = {
+        member_id
+        for binding in value.requirement_bindings
+        for member_id in binding.member_ids
+    }
+    if not bound_ids.issubset(population_ids):
+        raise ValueError("requirement binding references a non-member")
+    if any(
+        binding.requirement_kind == "required_artifact"
+        and any(
+            members_by_id[member_id].member_kind == "test_case"
+            for member_id in binding.member_ids
+        )
+        for binding in value.requirement_bindings
+    ):
+        raise ValueError("required_artifact cannot bind a test_case")
+    if (
+        not value.required_target_ids
+        or not _is_utf8_sorted_unique(value.required_target_ids)
+        or set(value.required_target_ids) != bound_ids
+    ):
+        raise ValueError(
+            "required_target_ids must equal the sorted binding-member union"
+        )
+
+    if not _is_utf8_sorted_unique(value.excluded_locator_digests):
+        raise ValueError("excluded_locator_digests must be sorted and unique")
+    member_locator_digests = {member.locator_digest for member in value.members}
+    if member_locator_digests.intersection(value.excluded_locator_digests):
+        raise ValueError("excluded locator cannot also be a scope member")
+
+    identity = value.model_dump(
+        mode="json",
+        exclude={
+            "scope_id",
+            "digest",
+            "signature_alg",
+            "signer_key_id",
+            "signature",
+        },
+    )
+    expected_scope_id = _jcs_digest(
+        {
+            "domain": "openworkproof/evaluation-scope/v0.3",
+            "payload": identity,
+        }
+    )
+    if value.scope_id != expected_scope_id:
+        raise ValueError("scope_id does not match canonical scope payload")
+
+    canonical_size = len(
+        rfc8785.dumps(
+            {
+                "domain": "openworkproof/evaluation-scope/v0.3",
+                "payload": value.model_dump(mode="json"),
+            }
+        )
+    )
+    if canonical_size > MAX_ARTIFACT_BYTES:
+        raise ValueError("evaluation scope canonical payload exceeds 8 MiB")
+
+
+def _freeze_evaluation_scope_payload(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        raise ValueError("protocol object must be a JSON object")
+    members = value.get("members")
+    if isinstance(members, (list, tuple)) and not 1 <= len(members) <= 4096:
+        raise ValueError("members must contain 1..4096 items")
+    return _freeze_json(
+        dict(value), freeze_mapping=False, max_array_items=4096
+    )
+
+
+class EvaluationScopeDraft(ProtocolModel):
+    schema_version: Literal["openworkproof-evaluation-scope/0.3"]
+    scope_id: Digest64
+    work_order_digest: Digest64
+    subject_claim_digest: Digest64
+    source_revision: ObjectId40
+    candidate_commit: ObjectId40
+    selector_rules: tuple[ScopeSelectorRule, ...]
+    members: tuple[ScopeMember, ...]
+    member_count: SafePositiveInt
+    population_digest: Digest64
+    requirement_bindings: tuple[ScopeRequirementBinding, ...]
+    required_target_ids: tuple[Digest64, ...]
+    excluded_locator_digests: tuple[Digest64, ...]
+    workspace_manifest_digest: Digest64
+    freshness_mode: Literal["immutable_git_revision"]
+    created_at: CanonicalUTCTime
+    expires_at: CanonicalUTCTime
+    nonce: Digest64
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_json_shape(cls, value: Any) -> Any:
+        if isinstance(value, cls):
+            return value
+        return _freeze_evaluation_scope_payload(value)
+
+    @model_validator(mode="after")
+    def _closed_scope(self) -> EvaluationScopeDraft:
+        _validate_evaluation_scope(self)
+        return self
+
+
+class EvaluationScopeManifest(SignedProtocolModel):
+    _signed_domain = "evaluation-scope"
+    _signed_version = "0.3"
+
+    schema_version: Literal["openworkproof-evaluation-scope/0.3"]
+    scope_id: Digest64
+    work_order_digest: Digest64
+    subject_claim_digest: Digest64
+    source_revision: ObjectId40
+    candidate_commit: ObjectId40
+    selector_rules: tuple[ScopeSelectorRule, ...]
+    members: tuple[ScopeMember, ...]
+    member_count: SafePositiveInt
+    population_digest: Digest64
+    requirement_bindings: tuple[ScopeRequirementBinding, ...]
+    required_target_ids: tuple[Digest64, ...]
+    excluded_locator_digests: tuple[Digest64, ...]
+    workspace_manifest_digest: Digest64
+    freshness_mode: Literal["immutable_git_revision"]
+    created_at: CanonicalUTCTime
+    expires_at: CanonicalUTCTime
+    nonce: Digest64
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_json_shape(cls, value: Any) -> Any:
+        if isinstance(value, cls):
+            return value
+        return _freeze_evaluation_scope_payload(value)
+
+    @model_validator(mode="after")
+    def _closed_scope(self) -> EvaluationScopeManifest:
+        _validate_evaluation_scope(self)
+        return self
 
 
 class VerificationArm(ProtocolModel):

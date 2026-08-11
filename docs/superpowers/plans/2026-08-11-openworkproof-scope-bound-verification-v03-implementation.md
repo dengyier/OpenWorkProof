@@ -27,7 +27,7 @@
 
 ## Resolved Implementation Decisions
 
-1. `scope_id` is the SHA-256 of JCS bytes for domain `openworkproof/evaluation-scope/v0.3` over the manifest payload excluding `scope_id`, `digest`, and `signature`. `SignedProtocolModel` gains a class-only `_signed_version` defaulting to `0.1`; every v0.3 signed model sets it to `0.3`, preserving old bytes while giving new signatures the approved domain separation.
+1. `scope_id` is the SHA-256 of JCS bytes for domain `openworkproof/evaluation-scope/v0.3` over the manifest payload excluding `scope_id` and the complete signature envelope (`digest`, `signature_alg`, `signer_key_id`, `signature`). `SignedProtocolModel` gains a class-only `_signed_version` defaulting to `0.1`; every v0.3 signed model sets it to `0.3`, preserving old bytes while giving new signatures the approved domain separation.
 2. Stable `member_id` excludes `content_digest` and hashes only `member_kind` plus canonical `locator`; content integrity is checked separately.
 3. `population_digest` hashes the sorted list of `(member_id, member_kind, locator_digest)` and therefore remains stable across positive/negative mutations of the same logical members.
 4. v0.3 uses parallel tables: `evaluation_scopes_v03`, `verification_profiles_v03`, `verification_arm_results_v03`, `verification_decisions_v03`, `verification_decision_parents_v03`, `acceptance_transitions_v03`, and `acceptance_transition_parents_v03`. Existing v0.2 tables and foreign keys remain untouched.
@@ -189,7 +189,7 @@ Expected: zero failures. Record exact pass/skip counts and warnings; do not enco
 - Modify: `tests/conftest.py`
 - Create: `tests/test_scope_models_v03.py`
 
-- [ ] **Step 1: Write RED tests for canonical scope identities**
+- [x] **Step 1: Write RED tests for canonical scope identities**
 
 Add tests that import the absent helpers/models and assert exact formulas:
 
@@ -213,7 +213,7 @@ def test_manifest_rejects_empty_or_oversized_population(scope_manifest_payload):
         )
 ```
 
-Also cover unsorted/duplicate members, wrong locator digest, wrong population digest, incomplete requirement bindings, missing required targets, excluded-member overlap, wrong `scope_id`, invalid Manager signer, invalid times, and canonical payload above 8 MiB.
+Also cover unsorted/duplicate members, wrong locator digest, wrong population digest, incomplete requirement bindings, missing required targets, excluded-member overlap, wrong `scope_id`, invalid signature, invalid times, and canonical payload above 8 MiB. Manager role/grant/nonce authorization requires WorkOrder and ledger context and is therefore covered by `scope-commit` in Task 7 rather than being implied by intrinsic model validation.
 
 Run:
 
@@ -223,21 +223,22 @@ Run:
 
 Expected RED: import errors for v0.3 scope types/helpers.
 
-- [ ] **Step 2: Add the four canonical domains**
+- [x] **Step 2: Add the four canonical domains**
 
-In `signing.py`, extend canonical domains with `scope-member`, `scope-requirement`, `scope-population`, and `evaluation-scope`. Add a keyword-only `version: Literal["0.1", "0.3"] = "0.1"` to `canonical_bytes`, `digest_payload`, `sign_payload`, and `verify_payload`; include it in the canonical domain string. Existing callers therefore keep identical `/v0.1` bytes. Keep only `evaluation-scope` signable:
+In `signing.py`, extend canonical domains with `scope-member`, `scope-requirement`, `scope-population`, and `evaluation-scope`. Add a keyword-only `version: Literal["0.1", "0.3"] = "0.1"` to `canonical_bytes`, `digest_payload`, `sign_payload`, and `verify_payload`; include it in the canonical domain string. Existing callers therefore keep identical `/v0.1` bytes. Preserve the legacy flat `ALLOWED_SIGNED_DOMAINS` boundary used by MCP, and keep only `evaluation-scope` signable through the explicit v0.3 version map:
 
 ```python
 _UNSIGNED_ONLY_DOMAINS = frozenset(
     {"sidecar-event", "verification-decision", "scope-member",
-     "scope-requirement", "scope-population"}
+     "scope-requirement", "scope-population", "evaluation-scope"}
 )
 ALLOWED_SIGNED_DOMAINS = ALLOWED_CANONICAL_DOMAINS - _UNSIGNED_ONLY_DOMAINS
+_V03_SIGNED_DOMAINS = frozenset({"evaluation-scope"})
 ```
 
 Add tests proving `sign_payload("scope-member", ...)` is rejected, `sign_payload("evaluation-scope", ..., version="0.3")` succeeds, and a known v0.2 signed fixture is byte-identical before and after this change.
 
-- [ ] **Step 3: Implement strict v0.3 scope models**
+- [x] **Step 3: Implement strict v0.3 scope models**
 
 Add closed literals and models in `models.py`:
 
@@ -250,7 +251,7 @@ ScopeRequirementKind = Literal["acceptance_condition", "required_artifact"]
 class ScopeMember(ProtocolModel):
     member_id: Digest64
     member_kind: ScopeMemberKind
-    locator: CanonicalRoot
+    locator: ScopeLocator
     locator_digest: Digest64
     content_digest: Digest64
     source_revision: ObjectId40
@@ -293,9 +294,9 @@ class EvaluationScopeManifest(SignedProtocolModel):
     nonce: Digest64
 ```
 
-Add an `EvaluationScopeDraft` containing the same business fields but no `digest`, `signature_alg`, `signer_key_id`, or `signature`. Add `_signed_version: ClassVar[str] = "0.1"` to `SignedProtocolModel` and use it when validating its digest. Set `_signed_version = "0.3"` on every v0.3 signed model. Use existing strict UTF-8, safe-integer, timestamp, signature, and sorted-tuple conventions. Canonical locators must reject absolute paths, `..`, NUL, backslashes, non-NFC text, and case-fold collisions within one manifest.
+Add an `EvaluationScopeDraft` containing the same business fields but no `digest`, `signature_alg`, `signer_key_id`, or `signature`. Add `_signed_version: ClassVar[str] = "0.1"` to `SignedProtocolModel` and use it when validating its digest. Set `_signed_version = "0.3"` on every v0.3 signed model. Add a strict `ScopeLocator`: source/artifact locators use existing `CanonicalRoot`; test locators use `CanonicalRoot + "::" + bounded pytest node suffix`. Canonical locators must reject absolute paths, `..`, NUL, backslashes, non-NFC text, control characters, and case-fold collisions within one manifest.
 
-- [ ] **Step 4: Add deterministic v0.3 fixtures and run GREEN**
+- [x] **Step 4: Add deterministic v0.3 fixtures and run GREEN**
 
 Add Manager-signed `scope_members_v03`, `evaluation_scope_v03`, and tamper helpers in `tests/conftest.py`. Do not alter v0.2 fixtures.
 
@@ -308,7 +309,7 @@ Run:
 
 Expected: all pass and v0.2 model tests remain unchanged.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/openworkproof/signing.py src/openworkproof/models.py \

@@ -27,7 +27,9 @@ from openworkproof.models import (
     AcceptanceReceipt,
     CapabilityGrant,
     CommitmentAnchor,
+    EvaluationScopeManifest,
     PolicyAnchor,
+    ScopeMember,
     SubjectClaim,
     VerificationProfileV02,
     WorkOrder,
@@ -605,6 +607,166 @@ def public_keys(
 @pytest.fixture
 def fixed_now() -> datetime:
     return datetime(2026, 1, 1, 0, 0, 5, tzinfo=timezone.utc)
+
+
+def _v03_digest(domain: str, payload: Any) -> str:
+    return jcs_digest(
+        {"domain": f"openworkproof/{domain}/v0.3", "payload": payload}
+    )
+
+
+def _scope_member_v03(
+    member_kind: str,
+    locator: str,
+    content: bytes,
+) -> dict[str, Any]:
+    return {
+        "member_id": _v03_digest(
+            "scope-member",
+            {"member_kind": member_kind, "locator": locator},
+        ),
+        "member_kind": member_kind,
+        "locator": locator,
+        "locator_digest": hashlib.sha256(locator.encode("utf-8")).hexdigest(),
+        "content_digest": hashlib.sha256(content).hexdigest(),
+        "source_revision": SOURCE_COMMIT,
+    }
+
+
+@pytest.fixture
+def scope_manager_private_key_v03() -> Ed25519PrivateKey:
+    return Ed25519PrivateKey.from_private_bytes(bytes([42]) * 32)
+
+
+@pytest.fixture
+def scope_members_v03() -> tuple[ScopeMember, ...]:
+    raw = sorted(
+        (
+            _scope_member_v03("source_file", "src/widget.py", b"source"),
+            _scope_member_v03(
+                "test_case",
+                "tests/test_widget.py::test_widget[param-\u4e00]",
+                b"test",
+            ),
+        ),
+        key=lambda item: (
+            item["member_kind"],
+            item["locator_digest"],
+            item["member_id"],
+        ),
+    )
+    return tuple(ScopeMember.model_validate(item) for item in raw)
+
+
+@pytest.fixture
+def evaluation_scope_payload_v03(
+    scope_members_v03: tuple[ScopeMember, ...],
+) -> dict[str, Any]:
+    members = [member.model_dump(mode="json") for member in scope_members_v03]
+    bindings = sorted(
+        (
+            {
+                "requirement_kind": "acceptance_condition",
+                "requirement_digest": _v03_digest(
+                    "scope-requirement",
+                    {
+                        "requirement_kind": "acceptance_condition",
+                        "value": "tests_passed",
+                    },
+                ),
+                "member_ids": [members[1]["member_id"]],
+            },
+            {
+                "requirement_kind": "required_artifact",
+                "requirement_digest": _v03_digest(
+                    "scope-requirement",
+                    {
+                        "requirement_kind": "required_artifact",
+                        "value": "src/widget.py",
+                    },
+                ),
+                "member_ids": [members[0]["member_id"]],
+            },
+        ),
+        key=lambda item: (
+            item["requirement_kind"].encode("utf-8"),
+            item["requirement_digest"],
+        ),
+    )
+    payload: dict[str, Any] = {
+        "schema_version": "openworkproof-evaluation-scope/0.3",
+        "scope_id": "0" * 64,
+        "work_order_digest": SHA256_A,
+        "subject_claim_digest": SHA256_B,
+        "source_revision": SOURCE_COMMIT,
+        "candidate_commit": "2" * 40,
+        "selector_rules": [
+            {
+                "rule_id": SHA256_C,
+                "selector_kind": "explicit",
+                "selector_spec_digest": SHA256_D,
+                "selector_engine_digest": SHA256_E,
+                "required_evidence_paths": ["scope/selectors/explicit.json"],
+            }
+        ],
+        "members": members,
+        "member_count": len(members),
+        "population_digest": _v03_digest(
+            "scope-population",
+            [
+                {
+                    "member_id": member["member_id"],
+                    "member_kind": member["member_kind"],
+                    "locator_digest": member["locator_digest"],
+                }
+                for member in members
+            ],
+        ),
+        "requirement_bindings": bindings,
+        "required_target_ids": sorted(
+            {
+                member_id
+                for binding in bindings
+                for member_id in binding["member_ids"]
+            }
+        ),
+        "excluded_locator_digests": [],
+        "workspace_manifest_digest": "6" * 64,
+        "freshness_mode": "immutable_git_revision",
+        "created_at": "2026-01-01T00:00:05Z",
+        "expires_at": "2026-01-01T01:00:00Z",
+        "nonce": "7" * 64,
+    }
+    payload["scope_id"] = _v03_digest(
+        "evaluation-scope",
+        {key: value for key, value in payload.items() if key != "scope_id"},
+    )
+    return payload
+
+
+@pytest.fixture
+def evaluation_scope_v03(
+    evaluation_scope_payload_v03: dict[str, Any],
+    scope_manager_private_key_v03: Ed25519PrivateKey,
+) -> EvaluationScopeManifest:
+    return EvaluationScopeManifest.model_validate(
+        sign_payload(
+            "evaluation-scope",
+            evaluation_scope_payload_v03,
+            scope_manager_private_key_v03,
+            version="0.3",
+        )
+    )
+
+
+@pytest.fixture
+def tamper_scope_v03():
+    def tamper(payload: dict[str, Any], field: str, value: Any) -> dict[str, Any]:
+        candidate = copy.deepcopy(payload)
+        candidate[field] = value
+        return candidate
+
+    return tamper
 
 
 @pytest.fixture

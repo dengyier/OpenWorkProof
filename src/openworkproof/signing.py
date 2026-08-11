@@ -5,7 +5,7 @@ import hashlib
 import math
 import re
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 import rfc8785
 from cryptography.exceptions import InvalidSignature
@@ -41,12 +41,56 @@ ALLOWED_CANONICAL_DOMAINS = frozenset(
         "verification-profile",
         "verification-arm-result",
         "verification-decision",
+        "scope-member",
+        "scope-requirement",
+        "scope-population",
+        "evaluation-scope",
     }
 )
-ALLOWED_SIGNED_DOMAINS = ALLOWED_CANONICAL_DOMAINS - {
+_UNSIGNED_ONLY_DOMAINS = frozenset({
     "sidecar-event",
     "verification-decision",
+    "scope-member",
+    "scope-requirement",
+    "scope-population",
+    "evaluation-scope",
+})
+ALLOWED_SIGNED_DOMAINS = ALLOWED_CANONICAL_DOMAINS - _UNSIGNED_ONLY_DOMAINS
+
+_V01_CANONICAL_DOMAINS = ALLOWED_CANONICAL_DOMAINS - {
+    "scope-member",
+    "scope-requirement",
+    "scope-population",
+    "evaluation-scope",
 }
+_V03_CANONICAL_DOMAINS = frozenset(
+    {
+        "scope-member",
+        "scope-requirement",
+        "scope-population",
+        "evaluation-scope",
+        "verification-profile",
+        "verification-arm-result",
+        "verification-decision",
+    }
+)
+_V03_SIGNED_DOMAINS = frozenset({"evaluation-scope"})
+
+
+def _canonical_domains_for_version(version: str) -> frozenset[str]:
+    if version == "0.1":
+        return _V01_CANONICAL_DOMAINS
+    if version == "0.3":
+        return _V03_CANONICAL_DOMAINS
+    raise ValueError("unknown protocol version")
+
+
+def _signed_domains_for_version(version: str) -> frozenset[str]:
+    if version == "0.1":
+        return ALLOWED_SIGNED_DOMAINS
+    if version == "0.3":
+        return _V03_SIGNED_DOMAINS
+    raise ValueError("unknown protocol version")
 
 MAX_JSON_DEPTH = 128
 MAX_JSON_NODES = 10_000
@@ -234,14 +278,20 @@ def _snapshot_json(
     return holder[0]
 
 
-def canonical_bytes(object_type: str, payload: Mapping[str, Any]) -> bytes:
+def canonical_bytes(
+    object_type: str,
+    payload: Mapping[str, Any],
+    *,
+    version: Literal["0.1", "0.3"] = "0.1",
+) -> bytes:
+    allowed_domains = _canonical_domains_for_version(version)
     if (
         type(object_type) is not str
-        or object_type not in ALLOWED_CANONICAL_DOMAINS
+        or object_type not in allowed_domains
     ):
         raise ValueError("unknown canonical domain")
     canonical_input = {
-        "domain": f"openworkproof/{object_type}/v0.1",
+        "domain": f"openworkproof/{object_type}/v{version}",
         "payload": unsigned_payload(payload),
     }
     try:
@@ -250,8 +300,15 @@ def canonical_bytes(object_type: str, payload: Mapping[str, Any]) -> bytes:
         raise ValueError("payload is not canonicalizable JCS") from error
 
 
-def digest_payload(object_type: str, payload: Mapping[str, Any]) -> str:
-    return hashlib.sha256(canonical_bytes(object_type, payload)).hexdigest()
+def digest_payload(
+    object_type: str,
+    payload: Mapping[str, Any],
+    *,
+    version: Literal["0.1", "0.3"] = "0.1",
+) -> str:
+    return hashlib.sha256(
+        canonical_bytes(object_type, payload, version=version)
+    ).hexdigest()
 
 
 def key_id(public_key: Ed25519PublicKey) -> str:
@@ -288,15 +345,18 @@ def sign_payload(
     object_type: str,
     payload: Mapping[str, Any],
     private_key: Ed25519PrivateKey,
+    *,
+    version: Literal["0.1", "0.3"] = "0.1",
 ) -> dict[str, Any]:
-    if type(object_type) is not str or object_type not in ALLOWED_SIGNED_DOMAINS:
+    allowed_domains = _signed_domains_for_version(version)
+    if type(object_type) is not str or object_type not in allowed_domains:
         raise ValueError("object type cannot be signed")
     if not isinstance(private_key, Ed25519PrivateKey):
         raise ValueError("private key must be Ed25519")
     result = unsigned_payload(payload)
     result["signature_alg"] = "Ed25519"
     result["signer_key_id"] = key_id(private_key.public_key())
-    encoded = canonical_bytes(object_type, result)
+    encoded = canonical_bytes(object_type, result, version=version)
     result["digest"] = hashlib.sha256(encoded).hexdigest()
     result["signature"] = _encode_base64url(private_key.sign(encoded))
     signed_snapshot = _snapshot_json(result)
@@ -309,10 +369,16 @@ def verify_payload(
     object_type: str,
     signed: Mapping[str, Any],
     public_key: Ed25519PublicKey,
+    *,
+    version: Literal["0.1", "0.3"] = "0.1",
 ) -> bool:
+    try:
+        allowed_domains = _signed_domains_for_version(version)
+    except ValueError:
+        return False
     if (
         type(object_type) is not str
-        or object_type not in ALLOWED_SIGNED_DOMAINS
+        or object_type not in allowed_domains
         or not isinstance(signed, Mapping)
         or not isinstance(public_key, Ed25519PublicKey)
     ):
@@ -326,7 +392,7 @@ def verify_payload(
             or snapshot.get("signer_key_id") != key_id(public_key)
         ):
             return False
-        encoded = canonical_bytes(object_type, snapshot)
+        encoded = canonical_bytes(object_type, snapshot, version=version)
         if snapshot.get("digest") != hashlib.sha256(encoded).hexdigest():
             return False
         signature = _decode_base64url(snapshot.get("signature"), 64)

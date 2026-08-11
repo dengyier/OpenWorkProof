@@ -169,14 +169,25 @@ def test_canonical_domains_are_exact_and_key_order_is_irrelevant() -> None:
             "verification-profile",
             "verification-arm-result",
             "verification-decision",
+            "scope-member",
+            "scope-requirement",
+            "scope-population",
+            "evaluation-scope",
         }
     )
     assert ALLOWED_SIGNED_DOMAINS == ALLOWED_CANONICAL_DOMAINS - {
         "sidecar-event",
         "verification-decision",
+        "scope-member",
+        "scope-requirement",
+        "scope-population",
+        "evaluation-scope",
     }
     assert canonical_bytes("manifest", {"b": 2, "a": 1}) == canonical_bytes(
         "manifest", {"a": 1, "b": 2}
+    )
+    assert canonical_bytes("manifest", {"b": 2, "a": 1}) == (
+        b'{"domain":"openworkproof/manifest/v0.1","payload":{"a":1,"b":2}}'
     )
     with pytest.raises(ValueError):
         canonical_bytes("unknown", {"a": 1})
