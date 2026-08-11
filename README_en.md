@@ -165,7 +165,38 @@ owp status
 # Use the command's current output; the fresh release-candidate snapshot is below
 ```
 
-### Evidence Lifecycle v0.2 and the 21-Day Pilot
+### Scope-Bound Verification v0.3 and the 21-Day Paid Pilot
+
+v0.3 makes “which files, tests, and delivery objects were actually verified”
+part of the signed protocol. A Manager freezes an `EvaluationScopeManifest`;
+Verifiers submit Observed Scope evidence for positive and negative arms; and
+the composer can return bounded `VERIFIED` only when both populations match,
+required targets are covered, and the registered negative control is caught.
+Omission, selector drift, or missing evidence resolves to `UNKNOWN`, never a
+full-delivery claim based on a local green check.
+
+```bash
+owp scope-build --claim claim.json --source-revision COMMIT_SHA --rules rules.json
+owp scope-validate scope.json
+owp scope-commit pilot.sqlite3 signed-scope-envelope.json
+owp scope-compare scope.json observed-scope.json
+owp delivery-build --privacy-view customer_private pilot.sqlite3 delivery-package/
+owp audit-replay delivery-package/
+```
+
+v0.3 proves exact declared-versus-observed scope for a code delivery. It does
+not prove unencoded business intent, customer acceptance, payment, fund
+release, automatic settlement, universal correctness, or regulatory
+compliance. MCP and A2A continue to provide interoperability, identity,
+security, task, and messaging capabilities; OpenWorkProof complements them by
+freezing work authorization, scope evidence, and the basis for acceptance.
+
+See the [21-day scope-bound paid pilot](docs/pilot/scope-bound-verification-offer.md)
+and the buyer-facing [Scope Coverage Report example](docs/pilot/scope-coverage-report.example.md).
+External payment, customer acceptance, upstream adoption, and production
+deployment are currently `not evidenced`.
+
+### Evidence Lifecycle v0.2 Compatibility Entry Points
 
 The current release candidate exposes v0.2 profile validation, positive and
 negative evidence commits, verification decisions, Delivery Packages, offline
@@ -182,7 +213,7 @@ owp audit-replay delivery-package/
 owp settlement-status pilot.sqlite3
 ```
 
-See the [21-day verifiable-delivery pilot kit](docs/pilot/README.md) for the
+See the [v0.2 verifiable-delivery pilot kit](docs/pilot/README.md) for the
 operator sequence, assurance-level cost boundaries, and a technical/commercial
 scorecard. The examples are local integration fixtures; they do not evidence a
 real customer, customer acceptance, payment, fund release, or production
@@ -316,7 +347,7 @@ Example payload.json (run-tests):
 ### 2. MCP Server (stdio)
 
 OpenWorkProof is registered on the official MCP Registry (`io.github.dengyier/OpenWorkProof`),
-providing 14 MCP tools callable by any MCP client (Claude Desktop, Cursor, VS Code, etc.):
+providing 21 MCP tools callable by any MCP client (Claude Desktop, Cursor, VS Code, etc.):
 
 ```bash
 # Start the MCP Server (available after pip install)
@@ -326,7 +357,7 @@ owp-mcp
 python -m openworkproof.mcp_transport
 ```
 
-Provided MCP tools (14):
+Provided MCP tools (21):
 
 **Standalone verification tools (no ledger required):**
 
@@ -514,7 +545,7 @@ OpenWorkProof/
 │   ├── composition.py         # Causal replay layer + deterministic CompositionReport
 │   ├── acceptance.py          # Terminal acceptance + offline verifier (verify_acceptance_bundle)
 │   ├── mcp_server.py          # Coordinator: complete_receipt_publication / compose_proof etc.
-│   ├── mcp_transport.py       # MCP Server (existing tools + v0.2 interfaces)
+│   ├── mcp_transport.py       # MCP Server (existing tools + v0.2/v0.3 interfaces)
 │   ├── cli.py                 # CLI transport layer (owp command)
 │   ├── execution_adapter.py   # AgentTeams execution adapter
 │   ├── team_network_client.py # TCP network client
@@ -551,9 +582,9 @@ OpenWorkProof/
 - Acceptor rejection path: AcceptanceRejectionReceipt signed by the same authoritative Acceptor
 - Independent Verifier results and deterministic recomposition
 - Deny receipt entry point (`produce_deny_receipt`)
-- CLI (existing execution entry points plus v0.2 verification, package, audit,
+- CLI (existing execution entry points plus v0.2/v0.3 scope verification, package, audit,
   and settlement-readiness commands)
-- MCP Server (existing tools plus five v0.2 aggregate interfaces; registered
+- MCP Server (lifecycle aggregate interfaces plus two read-only Scope tools; registered
   on MCP Registry as `io.github.dengyier/OpenWorkProof`)
 - AgentTeams TCP network client + execution adapter
 - Docker production executor (STARTED_UNCONFIRMED recovery)

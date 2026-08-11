@@ -150,6 +150,21 @@ Scope Coverage Report 的 `VERIFIED` 结论严格限定在签名 Scope 内：声
 人口与各臂观察人口一致、必选目标已覆盖、已注册负向控制被捕获。它不表示
 绝对正确、法规合规、客户采用、付款、自动结算或部署已经发生。
 
+仓库提供一份自包含 v0.3 演示包，可在清空代理变量后独立复核，无需网络或
+原始 ledger：
+
+```bash
+env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+  ./.venv/bin/python tests/evidence-bundles/verify_evidence_bundle.py \
+  tests/evidence-bundles/rich-4196-scope-v03-delivery-package.json
+```
+
+预期输出包含 `VERIFICATION PASSED` 与 `v0.3 scope: satisfied`。该包由
+OpenWorkProof 构造，用于展示范围遗漏如何从旧绿灯变成 `UNKNOWN`，以及补齐
+必选测试后如何形成有边界的 `VERIFIED`；它不是 Rich 上游采用或客户案例。
+买方可读结构见
+[Scope Coverage Report 示例](pilot/scope-coverage-report.example.md)。
+
 ## 8. 边界与诚实声明
 
 - 离线验签**证明证据链与签名的有效性**,不证明"外部真实人类复核过"——

@@ -1059,19 +1059,19 @@ git commit -m 'test: add real-issue scope omission demo'
 - Create: `docs/pilot/scope-bound-verification-offer.md`
 - Create: `docs/pilot/scope-coverage-report.example.md`
 
-- [ ] **Step 1: Write the v0.3 capability boundary in Chinese and English**
+- [x] **Step 1: Write the v0.3 capability boundary in Chinese and English**
 
 Explain that v0.3 proves exact declared-versus-observed scope for code delivery; it does not prove unencoded business intent, customer acceptance, payment, universal correctness, or regulatory compliance. Keep MCP/A2A positioning complementary rather than dismissive.
 
-- [ ] **Step 2: Add the 21-day paid pilot offer**
+- [x] **Step 2: Add the 21-day paid pilot offer**
 
 Record User, payer hypothesis, Customer Acceptor, deliverables, formal quoted amount/retainer fields, five-target outreach limit, eight-person-day/2,000-yuan experiment cap, 21-day deadline, success/stop rules, and all external outcomes as `not evidenced`.
 
-- [ ] **Step 3: Add an example Scope Coverage Report**
+- [x] **Step 3: Add an example Scope Coverage Report**
 
 Use the self-owned Rich demo and label it as a demonstration, not a customer case. Show exactly what a buyer receives and the bounded VERIFIED sentence.
 
-- [ ] **Step 4: Scan for overclaims and stale protocol counts**
+- [x] **Step 4: Scan for overclaims and stale protocol counts**
 
 ```bash
 rg -n '客户已采用|客户已验收|已经付款|资金已释放|自动结算|上游已采用|官方采纳|100%正确' \
@@ -1081,7 +1081,7 @@ rg -n '2283|2,283|2204|2,204' README.md README_en.md docs/status.md
 
 Expected: any first scan match is an explicit negation/limitation; historical test counts are not presented as fresh current truth.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add README.md README_en.md docs/status.md docs/offline-verification.md \

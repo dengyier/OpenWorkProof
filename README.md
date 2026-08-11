@@ -163,7 +163,33 @@ owp status
 # 精确数量以当前命令输出为准；下方记录最终发布候选的 fresh 验证快照
 ```
 
-### Evidence Lifecycle v0.2 与 21 天试点
+### Scope-Bound Verification v0.3 与 21 天付费试点
+
+v0.3 把“到底验证了哪些文件、测试与交付对象”纳入签名协议。Manager 冻结
+`EvaluationScopeManifest`，Verifier 分别提交正臂和负臂的 Observed Scope，
+Decision composer 只有在两臂人口一致、必选目标完整、注册负控被捕获时，
+才会形成限定范围的 `VERIFIED`。范围遗漏、选择器漂移或证据不足只能得到
+`UNKNOWN`，不能用局部绿灯冒充完整交付。
+
+```bash
+owp scope-build --claim claim.json --source-revision COMMIT_SHA --rules rules.json
+owp scope-validate scope.json
+owp scope-commit pilot.sqlite3 signed-scope-envelope.json
+owp scope-compare scope.json observed-scope.json
+owp delivery-build --privacy-view customer_private pilot.sqlite3 delivery-package/
+owp audit-replay delivery-package/
+```
+
+v0.3 证明的是代码交付中“声明范围与观察范围精确一致”。它不证明未编码的
+业务意图、客户已经接受、已经付款、资金已释放、自动结算、普遍正确性或
+法规合规。MCP/A2A 继续负责互操作、身份、安全、任务和消息能力；
+OpenWorkProof 作为补充层，把一次工作的授权、范围证据和验收依据冻结下来。
+
+商业验证材料见 [21 天范围可验证交付试点](docs/pilot/scope-bound-verification-offer.md)，
+买方交付样例见 [Scope Coverage Report](docs/pilot/scope-coverage-report.example.md)。
+当前外部付费、客户验收、上游采用与正式部署均为 `not evidenced`。
+
+### Evidence Lifecycle v0.2 兼容入口
 
 当前发布候选提供 v0.2 的 Profile 校验、正负证据提交、验证决定、Delivery
 Package、离线审计和结算就绪度接口：
@@ -179,8 +205,8 @@ owp audit-replay delivery-package/
 owp settlement-status pilot.sqlite3
 ```
 
-完整运营步骤、信任等级成本和商业证据计分卡见
-[21 天可验证交付试点](docs/pilot/README.md)。示例对象只用于本地解析和
+既有运营步骤、信任等级成本和商业证据计分卡见
+[v0.2 可验证交付试点](docs/pilot/README.md)。示例对象只用于本地解析和
 接入演练，不代表真实客户、客户验收、付款、资金释放或正式部署。
 
 Task 16 已在 source revision
@@ -322,7 +348,7 @@ payload.json 示例（run-tests）：
 ### 2. MCP Server（stdio）
 
 OpenWorkProof 已注册到官方 MCP Registry（`io.github.dengyier/OpenWorkProof`），
-提供 14 个 MCP 工具，可被任何 MCP 客户端（Claude Desktop、Cursor、VS Code 等）直接调用：
+提供 21 个 MCP 工具，可被任何 MCP 客户端（Claude Desktop、Cursor、VS Code 等）直接调用：
 
 ```bash
 # 启动 MCP Server（pip install 后直接可用）
@@ -332,7 +358,7 @@ owp-mcp
 python -m openworkproof.mcp_transport
 ```
 
-提供的 MCP 工具（14 个）：
+提供的 MCP 工具（21 个）：
 
 **独立验证工具（无需 ledger）：**
 
@@ -516,7 +542,7 @@ OpenWorkProof/
 │   ├── composition.py         # 因果回放层 + 确定性 CompositionReport
 │   ├── acceptance.py         # 终态验收 + 离线验签器（verify_acceptance_bundle）
 │   ├── mcp_server.py         # 协调器：complete_receipt_publication / compose_proof 等
-│   ├── mcp_transport.py       # MCP Server（既有工具 + v0.2 接口）
+│   ├── mcp_transport.py       # MCP Server（既有工具 + v0.2/v0.3 接口）
 │   ├── cli.py                 # CLI 传输层（owp 命令）
 │   ├── execution_adapter.py  # AgentTeams 执行适配层
 │   ├── team_network_client.py # TCP 网络客户端
@@ -553,8 +579,8 @@ OpenWorkProof/
 - Acceptor 拒绝路径：同权威 Acceptor 签名的 AcceptanceRejectionReceipt
 - 独立 Verifier 结果与确定性 recomposition
 - deny 收据生产入口（`produce_deny_receipt`）
-- CLI（既有执行入口 + v0.2 验证、交付包、审计和结算就绪度入口）
-- MCP Server（既有工具 + 五个 v0.2 聚合接口；已注册到 MCP Registry
+- CLI（既有执行入口 + v0.2/v0.3 范围验证、交付包、审计和就绪度入口）
+- MCP Server（既有工具 + 生命周期聚合接口 + 两个只读 Scope 工具；已注册到 MCP Registry
   `io.github.dengyier/OpenWorkProof`）
 - AgentTeams TCP 网络客户端 + 执行适配层
 - Docker 生产执行器（STARTED_UNCONFIRMED 恢复）

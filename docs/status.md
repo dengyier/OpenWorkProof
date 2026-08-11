@@ -3,8 +3,29 @@
 > 本文档是项目实现状态的权威记录。README 只保留概览，
 > 「已经完成什么」和「尚未完成什么」的完整清单以本文为准。
 
-当前分发版本：1.1.1；当前支持的冻结协议 Schema：0.1 与 0.2。分发版本
+当前分发版本：1.1.1；当前开发分支支持的冻结协议 Schema：0.1、0.2 与
+0.3。分发版本
 和协议版本分别记录，不得把 Python 分发版本解释成协议版本。
+
+## Scope-Bound Verification v0.3 本地开发状态
+
+隔离分支 `codex/scope-bound-verification-v03` 已实现签名
+`EvaluationScopeManifest`、确定性 selector、必选目标映射、Observed Scope
+比较、v0.3 Profile/Arm/Decision 并行表、三种 Delivery Package 隐私视图、
+CLI/Python 接口和两个只读 MCP Scope 工具。MCP 没有新增 Scope 签名、
+Scope 提交或 Acceptance 决策权限。
+
+Rich #4196 的新增 v0.3 材料是 OpenWorkProof 自有协议演示：旧检查为绿但
+遗漏必选 NBSP 回归时结论为 `UNKNOWN / SCOPE_REQUIRED_TARGET_MISSING`；
+修复范围后，正臂通过、负控被捕获、两臂人口一致，私有包在无网络、无账本
+条件下离线重放为 `VERIFICATION PASSED / VERIFIED /
+READY_FOR_ACCEPTANCE`。这不是 Rich 上游已采用、客户案例、客户验收、付款、
+资金释放、自动结算或正式部署证据。
+
+Task 15 的最终 candidate inventory、便携全量和 required-live 门尚未执行，
+因此本节不把 focused 测试结果表述为发布完成。21 天商业试点中的 User、
+付费方和 Customer Acceptor 都是假设或待填写项；外部商业结果保持
+`not evidenced`。
 
 ## Evidence Lifecycle v0.2 本地开发状态
 
