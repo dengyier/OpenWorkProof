@@ -1,0 +1,80 @@
+{
+  "digest": "8fee011fe9862cfbc01d15bbb3eb1b4a686af2d44547779ec916b4e2184e66d5",
+  "signature_alg": "Ed25519",
+  "signer_key_id": "ed25519:10ba682c8ad13513971e8b56881aab8bd702bb807796eca81932c735a94d6e6d",
+  "signature": "PQ5BCkmvd0VA_VXbi78VETXSPcSJrXedZ-nBRBfJftMkYdZNScOM10c-0RYt6TSmnyEmMftMhDMw02c2NtaiAg",
+  "schema_version": "openworkproof-verification-profile/0.2",
+  "profile_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "work_order_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "subject_claim_digest": "84e3bd32022146c88b7a3f77b129ac86af4bae147d3bccc10ead620ca250fe4e",
+  "delivery_trust_level": 1,
+  "policy_anchor_digest": null,
+  "commitment_anchor_digest": null,
+  "subject_kind": "tests_passed",
+  "assurance_level": "standard",
+  "verifier_bindings": [
+    {
+      "binding_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "verifier_subject_id": "pilot-independent-verifier",
+      "verifier_key_id": "ed25519:6c8f8607dbe87077a62a2990ce07d94aaf749df76f87b98eb786a6d10f030765",
+      "verifier_public_key_b64url": "F8t5-ytBIPKx7GXkGY1uCLKOgT_rAeSkAIObheGAgM4",
+      "controller_factors": [
+        "independent-pilot-operator"
+      ],
+      "execution_context_factors": [
+        "isolated-container-example"
+      ],
+      "valid_from": "2026-08-11T00:00:00Z",
+      "expires_at": "2026-08-11T01:00:00Z"
+    }
+  ],
+  "positive_arm": {
+    "arm_id": "5555555555555555555555555555555555555555555555555555555555555555",
+    "arm_kind": "positive",
+    "source_commit": "3333333333333333333333333333333333333333",
+    "candidate_commit": "6666666666666666666666666666666666666666",
+    "mutant_patch_digest": null,
+    "workspace_manifest_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+    "command_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+    "container_image_digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+    "fixed_test_source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected_exit_codes": [
+      0
+    ],
+    "expected_outcome": "pass",
+    "required_evidence_purposes": [
+      "verifier_result"
+    ],
+    "result_artifact_paths": [
+      "results/positive.json"
+    ]
+  },
+  "negative_arms": [
+    {
+      "arm_id": "6666666666666666666666666666666666666666666666666666666666666666",
+      "arm_kind": "negative",
+      "source_commit": "3333333333333333333333333333333333333333",
+      "candidate_commit": "6666666666666666666666666666666666666666",
+      "mutant_patch_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "workspace_manifest_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+      "command_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+      "container_image_digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+      "fixed_test_source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_exit_codes": [
+        1
+      ],
+      "expected_outcome": "fail",
+      "required_evidence_purposes": [
+        "verifier_result"
+      ],
+      "result_artifact_paths": [
+        "results/negative.json"
+      ]
+    }
+  ],
+  "max_evidence_bytes": 1048576,
+  "max_output_bytes": 65536,
+  "created_at": "2026-08-11T00:00:00Z",
+  "expires_at": "2026-08-11T01:00:00Z",
+  "nonce": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+}

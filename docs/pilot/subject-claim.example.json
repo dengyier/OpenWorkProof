@@ -1,0 +1,27 @@
+{
+  "digest": "84e3bd32022146c88b7a3f77b129ac86af4bae147d3bccc10ead620ca250fe4e",
+  "signature_alg": "Ed25519",
+  "signer_key_id": "ed25519:10ba682c8ad13513971e8b56881aab8bd702bb807796eca81932c735a94d6e6d",
+  "signature": "_BSIMP_HPD4lzRPy7nQh1c39LWFEb6uyZjQZT5MguQbmP_d8gbxUC4smuzVfvp8NAgDkV9CsVzgcMF9HEFHGCQ",
+  "schema_version": "openworkproof-subject-claim/0.1",
+  "claim_id": "2222222222222222222222222222222222222222222222222222222222222222",
+  "work_order_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "claim_statement": "The registered pilot regression suite passes for the frozen delivery candidate.",
+  "delivery_target": "https://pilot.example.invalid/deliveries/example-001",
+  "source_revision": "3333333333333333333333333333333333333333",
+  "acceptance_conditions": [
+    "artifact_digest_matches",
+    "tests_passed"
+  ],
+  "excluded_scope": [
+    "customer_adoption",
+    "payment_status"
+  ],
+  "required_artifacts": [
+    "evidence",
+    "results"
+  ],
+  "customer_acceptor_key_id": "ed25519:1325b850c2871916eae203f0efc3c8987f64e5e3cdb27679e6d1fa97808357e6",
+  "created_at": "2026-08-11T00:00:00Z",
+  "nonce": "4444444444444444444444444444444444444444444444444444444444444444"
+}

@@ -8,7 +8,8 @@ OpenWorkProof 的证据链设计允许**第三方不接入任何一方系统**�
 - 纠纷复核:验收后,独立第三方拿证据包即可验证"这份 accepted/rejected
   结论是否由 WorkOrder 绑定的 Acceptor 真实签名、证据链是否完整";
 - 交付审计:赛事评委或监管方无需运行任何一方服务,离线重放签名历史;
-- 可复现性:证据包 + 本说明即构成可独立执行的验收证明。
+- 可复现性:证据包 + 本说明构成可独立执行的协议事实复核材料；它不证明
+  外部客户决定、付款或部署在现实中已经发生。
 
 ## 2. 核心入口
 
@@ -75,7 +76,41 @@ evidence 字节,从签名草稿取 AcceptanceReceipt。导出后:
 `test_m2_full_chain_...` 的 step 9 演示完整导出 + `verify_acceptance_bundle`
 离线验签通过;篡改测试验证任何单字节修改均被拒绝。
 
-## 6. 边界与诚实声明
+## 6. v0.2 Delivery Package
+
+Evidence Lifecycle v0.2 在旧版签名回放之上增加 SubjectClaim、正负证据臂、
+VerificationDecision、追加式验收历史、manifest 和结算就绪度快照。常用入口：
+
+```bash
+# 从权威 ledger 导出一个新目录；目标目录必须不存在
+owp delivery-build --privacy-view public pilot.sqlite3 delivery-package/
+
+# 三种纯离线读操作
+owp audit-replay delivery-package/
+owp audit-explain delivery-package/
+owp audit-compare older-package/ delivery-package/
+
+# 从 ledger 推导结算就绪度
+owp settlement-status pilot.sqlite3
+```
+
+`audit-replay` 会重新哈希 manifest 和全部文件，验证签名、正负臂、决定及
+验收历史。`VERIFIED` 表示冻结的正臂通过、至少一个真实负臂按预期失败且
+证据/独立性要求闭合；它不等于客户接受。`READY_FOR_ACCEPTANCE` 表示可以
+提交给绑定 Acceptor 决定；它不等于付款、资金释放或结算完成。
+
+仓库内两份 additive v0.2 案例可直接离线回放：
+
+```bash
+./.venv/bin/python tests/evidence-bundles/verify_evidence_bundle.py \
+  tests/evidence-bundles/rich-4196-v02-delivery-package.json
+./.venv/bin/python tests/evidence-bundles/verify_evidence_bundle.py \
+  tests/evidence-bundles/dify-33013-v02-delivery-package.json
+```
+
+它们是公开 Issue 的协议复现样本，不是客户采用、客户验收或商业收入证据。
+
+## 7. 边界与诚实声明
 
 - 离线验签**证明证据链与签名的有效性**,不证明"外部真实人类复核过"——
   外部个人签署属线下事件,不由本仓库保证;

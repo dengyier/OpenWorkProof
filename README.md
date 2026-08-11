@@ -163,6 +163,27 @@ owp status
 # 预期结果：1330+ passed, 0 failed
 ```
 
+### Evidence Lifecycle v0.2 与 21 天试点
+
+当前开发分支提供 v0.2 的 Profile 校验、正负证据提交、验证决定、Delivery
+Package、离线审计和结算就绪度接口：
+
+```bash
+owp profile-validate signed-profile.json
+owp verify-positive pilot.sqlite3 signed-positive-result.json
+owp verify-negative pilot.sqlite3 signed-negative-result.json
+owp verify-compose --mode prepare pilot.sqlite3 decision-request.json
+owp verify-compose --mode commit pilot.sqlite3 signed-decision.json
+owp delivery-build --privacy-view public pilot.sqlite3 delivery-package/
+owp audit-replay delivery-package/
+owp settlement-status pilot.sqlite3
+```
+
+完整运营步骤、信任等级成本和商业证据计分卡见
+[21 天可验证交付试点](docs/pilot/README.md)。示例对象只用于本地解析和
+接入演练，不代表真实客户、客户验收、付款、资金释放或正式部署。
+Task 16 的最终测试数量将在最终供应链与发布门完成后更新；此处不预填。
+
 ### 运行端到端演示
 
 OpenWorkProof 提供两个独立的端到端验证演示，覆盖不同的项目类型和协议场景：

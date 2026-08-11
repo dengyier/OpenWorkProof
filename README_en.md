@@ -165,6 +165,30 @@ owp status
 # Expected: 1330+ passed, 0 failed
 ```
 
+### Evidence Lifecycle v0.2 and the 21-Day Pilot
+
+The current development branch exposes v0.2 profile validation, positive and
+negative evidence commits, verification decisions, Delivery Packages, offline
+audits, and settlement-readiness derivation:
+
+```bash
+owp profile-validate signed-profile.json
+owp verify-positive pilot.sqlite3 signed-positive-result.json
+owp verify-negative pilot.sqlite3 signed-negative-result.json
+owp verify-compose --mode prepare pilot.sqlite3 decision-request.json
+owp verify-compose --mode commit pilot.sqlite3 signed-decision.json
+owp delivery-build --privacy-view public pilot.sqlite3 delivery-package/
+owp audit-replay delivery-package/
+owp settlement-status pilot.sqlite3
+```
+
+See the [21-day verifiable-delivery pilot kit](docs/pilot/README.md) for the
+operator sequence, assurance-level cost boundaries, and a technical/commercial
+scorecard. The examples are local integration fixtures; they do not evidence a
+real customer, customer acceptance, payment, fund release, or production
+deployment. Final Task 16 test counts will be added only after the final
+supply-chain and release gates run.
+
 ### End-to-End Demos
 
 OpenWorkProof provides two independent end-to-end demos, covering different project types:

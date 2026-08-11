@@ -6,6 +6,19 @@
 当前分发版本：1.1.1；当前冻结协议 Schema：0.1。两类版本分别记录，
 不得把 Python 分发版本解释成协议版本。
 
+## Evidence Lifecycle v0.2 本地开发状态
+
+隔离分支 `codex/verifiable-delivery-pilot` 已实现 v0.2 SubjectClaim、正负
+验证臂、VerificationDecision、追加式验收状态、Delivery Package、离线审计、
+结算就绪度，以及对应 CLI/MCP 接口。Rich #4196 与 Dify #33013 以新增文件
+提供 v0.2 离线复现样本，历史 v0.1 包保持不变。21 天运营工具包位于
+`docs/pilot/`。
+
+Task 16 的最终供应链、全量测试与 required-live 门尚未在当前最终 source
+revision 上执行，因此这里不填写新的测试数量。上述状态只证明本地实现和
+冻结样本存在，不证明客户接受、付费试点、资金释放、正式部署、商业采用、
+合并或远端发布。
+
 ## 当前已经实现的能力
 
 当前公开 main 分支已经实现并验证：
