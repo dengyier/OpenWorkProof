@@ -778,6 +778,7 @@ def test_trusted_helper_source_allowlist_is_the_exact_repo_read_closure() -> Non
         "src/openworkproof/__init__.py\n"
         "src/openworkproof/models.py\n"
         "src/openworkproof/repo_tools.py\n"
+        "src/openworkproof/scope.py\n"
         "src/openworkproof/trusted_helper.py\n"
     )
 

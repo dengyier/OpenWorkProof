@@ -1,4 +1,5 @@
 src/openworkproof/__init__.py
 src/openworkproof/models.py
 src/openworkproof/repo_tools.py
+src/openworkproof/scope.py
 src/openworkproof/trusted_helper.py

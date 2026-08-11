@@ -1099,7 +1099,7 @@ git commit -m 'docs: add scope-bound delivery pilot'
 - Create: `supply-chain/images/candidates/${REV}.json`
 - Modify: `docs/status.md`
 
-- [ ] **Step 1: Close and commit the trusted-helper source surface**
+- [x] **Step 1: Close and commit the trusted-helper source surface**
 
 Add only v0.3 modules imported by offline replay, expected to include `src/openworkproof/scope.py` plus already allowlisted core modules. Do not add CLI, MCP, services, pilot docs, or demo sources.
 
