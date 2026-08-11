@@ -162,7 +162,7 @@ owp status
 # Run full test suite (~5 minutes, requires local dev environment)
 ./.venv/bin/python -m pytest -q
 
-# Expected: 1330+ passed, 0 failed
+# Use the command's current output; final release-gate counts follow Task 16
 ```
 
 ### Evidence Lifecycle v0.2 and the 21-Day Pilot
@@ -201,7 +201,7 @@ A complete five-role workflow demo (~9s) based on the real open-source issue
 ```bash
 ./.venv/bin/python -m pytest tests/test_delivery_m2.py -q
 
-# Expected: 5 passed
+# Expected: exit code 0; use the command's current count
 ```
 
 Covers a 9-step evidence chain:
@@ -228,7 +228,7 @@ A complete five-role workflow demo (~6s) based on the real open-source issue
 ```bash
 ./.venv/bin/python -m pytest tests/test_delivery_m3_dify.py -q
 
-# Expected: 7 passed
+# Expected: exit code 0; use the command's current count
 ```
 
 This bug occurs in Dify's QuestionClassifierNode — when a user adds a question
@@ -499,7 +499,7 @@ OpenWorkProof/
 │   ├── composition.py         # Causal replay layer + deterministic CompositionReport
 │   ├── acceptance.py          # Terminal acceptance + offline verifier (verify_acceptance_bundle)
 │   ├── mcp_server.py          # Coordinator: complete_receipt_publication / compose_proof etc.
-│   ├── mcp_transport.py       # MCP Server (14 tools, stdio transport)
+│   ├── mcp_transport.py       # MCP Server (existing tools + v0.2 interfaces)
 │   ├── cli.py                 # CLI transport layer (owp command)
 │   ├── execution_adapter.py   # AgentTeams execution adapter
 │   ├── team_network_client.py # TCP network client
@@ -512,7 +512,7 @@ OpenWorkProof/
 │   ├── trusted_helper.py      # Trusted helper request dispatch
 │   └── schemas/v0.1/          # JSON Schema files
 ├── specs/v0.1/                # Protocol schemas (WorkOrder/Grant/Receipt/Acceptance)
-├── tests/                     # 1,330+ conformance tests
+├── tests/                     # Protocol, fault-injection, and end-to-end tests
 ├── docs/                      # Documentation (status, demo logs, offline verification guide)
 ├── supply-chain/              # Trusted build images + candidate inventory
 ├── pyproject.toml             # Packaging metadata
@@ -536,13 +536,15 @@ OpenWorkProof/
 - Acceptor rejection path: AcceptanceRejectionReceipt signed by the same authoritative Acceptor
 - Independent Verifier results and deterministic recomposition
 - Deny receipt entry point (`produce_deny_receipt`)
-- CLI (`owp status` / `owp run-tests` / `owp repo-read`)
-- MCP Server (14 tools, registered on MCP Registry as `io.github.dengyier/OpenWorkProof`)
+- CLI (existing execution entry points plus v0.2 verification, package, audit,
+  and settlement-readiness commands)
+- MCP Server (existing tools plus five v0.2 aggregate interfaces; registered
+  on MCP Registry as `io.github.dengyier/OpenWorkProof`)
 - AgentTeams TCP network client + execution adapter
 - Docker production executor (STARTED_UNCONFIRMED recovery)
 - Rich #4196 full five-role E2E demo (Acceptor TCP signing + offline verification)
 - Dify #33013 full five-role E2E demo (AI application platform, cross-project-type generality)
-- **Full test suite: 1,330+ passed / 0 failed**
+- **Final full-suite gate: pending Task 16 on the final source revision**
 
 **Not yet complete:** remaining ToolCall handler closures, event submission.
 

@@ -160,7 +160,7 @@ owp status
 # 运行全量测试（约 5 分钟，需本地开发环境）
 ./.venv/bin/python -m pytest -q
 
-# 预期结果：1330+ passed, 0 failed
+# 精确数量以当前命令输出为准；最终发布门数量将在 Task 16 后记录
 ```
 
 ### Evidence Lifecycle v0.2 与 21 天试点
@@ -196,7 +196,7 @@ OpenWorkProof 提供两个独立的端到端验证演示，覆盖不同的项目
 ```bash
 ./.venv/bin/python -m pytest tests/test_delivery_m2.py -q
 
-# 预期结果：5 passed
+# 预期：退出码 0；精确数量以当前命令输出为准
 ```
 
 该演示完整覆盖 9 步证据链：
@@ -223,7 +223,7 @@ OpenWorkProof 提供两个独立的端到端验证演示，覆盖不同的项目
 ```bash
 ./.venv/bin/python -m pytest tests/test_delivery_m3_dify.py -q
 
-# 预期结果：7 passed
+# 预期：退出码 0；精确数量以当前命令输出为准
 ```
 
 该 Bug 发生在 Dify 的 QuestionClassifierNode 节点中——用户在工作流中
@@ -503,7 +503,7 @@ OpenWorkProof/
 │   ├── composition.py         # 因果回放层 + 确定性 CompositionReport
 │   ├── acceptance.py         # 终态验收 + 离线验签器（verify_acceptance_bundle）
 │   ├── mcp_server.py         # 协调器：complete_receipt_publication / compose_proof 等
-│   ├── mcp_transport.py       # MCP Server（14 工具，stdio 传输层）
+│   ├── mcp_transport.py       # MCP Server（既有工具 + v0.2 接口）
 │   ├── cli.py                 # CLI 传输层（owp 命令）
 │   ├── execution_adapter.py  # AgentTeams 执行适配层
 │   ├── team_network_client.py # TCP 网络客户端
@@ -516,7 +516,7 @@ OpenWorkProof/
 │   ├── trusted_helper.py    # 可信助手请求分发
 │   └── schemas/v0.1/         # JSON Schema 文件
 ├── specs/v0.1/               # 协议 Schema（WorkOrder/Grant/Receipt/Acceptance）
-├── tests/                    # 1330+ 项一致性测试
+├── tests/                    # 协议、故障注入与端到端测试
 ├── docs/                     # 文档（状态、演示日志、离线验签说明）
 ├── supply-chain/             # 可信构建镜像 + 候选清单
 ├── pyproject.toml            # 打包元数据
@@ -540,13 +540,14 @@ OpenWorkProof/
 - Acceptor 拒绝路径：同权威 Acceptor 签名的 AcceptanceRejectionReceipt
 - 独立 Verifier 结果与确定性 recomposition
 - deny 收据生产入口（`produce_deny_receipt`）
-- CLI（`owp status` / `owp run-tests` / `owp repo-read`）
-- MCP Server（14 工具，已注册到 MCP Registry `io.github.dengyier/OpenWorkProof`）
+- CLI（既有执行入口 + v0.2 验证、交付包、审计和结算就绪度入口）
+- MCP Server（既有工具 + 五个 v0.2 聚合接口；已注册到 MCP Registry
+  `io.github.dengyier/OpenWorkProof`）
 - AgentTeams TCP 网络客户端 + 执行适配层
 - Docker 生产执行器（STARTED_UNCONFIRMED 恢复）
 - Rich #4196 完整五角色端到端演示（Acceptor TCP 签名 + 离线验签）
 - Dify #33013 完整五角色端到端演示（AI 应用平台类，跨项目类型通用性验证）
-- **全量测试：1330+ passed、0 failed**
+- **最终全量测试门：等待 Task 16 在最终 source revision 上运行并记录**
 
 **尚未完成：** 其他 ToolCall handler 与 evidence publication 的调用闭包、
 正式赛事提交。
