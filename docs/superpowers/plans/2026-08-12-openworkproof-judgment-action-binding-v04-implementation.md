@@ -141,7 +141,7 @@
 - Modify: `tests/test_team_network_client.py`
 - Modify: `docs/status.md`
 
-- [ ] **Step 1: Create the implementation branch from the approved plan commit**
+- [x] **Step 1: Create the implementation branch from the approved plan commit**
 
 Run in `/Users/molin/Project/openWorkProof-scope-bound-verification-v03` after the user selects an execution mode:
 
@@ -155,7 +155,7 @@ git status --short --branch
 
 Expected: a clean `codex/judgment-action-binding-v04` branch at the commit containing both approved documents. If the branch already exists, stop and inspect it; do not delete, reset, or reuse it blindly.
 
-- [ ] **Step 2: Reproduce the socket close/accept race**
+- [x] **Step 2: Reproduce the socket close/accept race**
 
 Add a test that repeatedly starts the network client, blocks in `accept()`, closes it from another thread, and records uncaught thread exceptions:
 
@@ -181,11 +181,11 @@ Run:
 
 Expected RED: the test captures `AttributeError: 'NoneType' object has no attribute 'accept'` or an equivalent uncaught close-race exception.
 
-- [ ] **Step 3: Hold a local socket reference and classify expected close errors**
+- [x] **Step 3: Hold a local socket reference and classify expected close errors**
 
 In the accept loop, copy the socket under the existing synchronization boundary and call `accept()` only on that local object. Treat `EBADF`, `EINVAL`, and the platform-specific closed-socket error as normal only after the stop event is set; re-raise otherwise. Do not swallow unrelated network errors.
 
-- [ ] **Step 4: Add deterministic cleanup-warning coverage**
+- [x] **Step 4: Add deterministic cleanup-warning coverage**
 
 Add tests that close all client/server threads and file handles before temporary directories leave scope. Run focused tests with warnings promoted:
 
@@ -197,7 +197,7 @@ Add tests that close all client/server threads and file handles before temporary
 
 Expected GREEN: no unhandled thread exception. If a macOS temporary-directory warning remains, record the exact warning and owner; do not suppress it globally.
 
-- [ ] **Step 5: Run the stability regression set**
+- [x] **Step 5: Run the stability regression set**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -209,7 +209,7 @@ git diff --check
 
 Expected: zero failures and no unclassified thread exception.
 
-- [ ] **Step 6: Commit the P0 fix**
+- [x] **Step 6: Commit the P0 fix**
 
 ```bash
 git add src/openworkproof/team_network_client.py \
