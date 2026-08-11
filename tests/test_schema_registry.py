@@ -351,14 +351,22 @@ def test_registry_routing_is_closed_and_explicit() -> None:
     assert api._OBJECT_PATHS_BY_VERSION == {
         "0.1": OBJECT_PATHS,
         "0.2": V02_OBJECT_PATHS,
+        "0.3": api.V03_OBJECT_PATHS,
     }
-    assert set(api._SCHEMA_FACTORIES_BY_VERSION) == {"0.1", "0.2"}
+    assert set(api._SCHEMA_FACTORIES_BY_VERSION) == {"0.1", "0.2", "0.3"}
     assert set(api._SCHEMA_FACTORIES_BY_VERSION["0.1"]) == set(OBJECT_PATHS)
     assert set(api._SCHEMA_FACTORIES_BY_VERSION["0.2"]) == set(
         V02_OBJECT_PATHS
     )
+    assert set(api._SCHEMA_FACTORIES_BY_VERSION["0.3"]) == set(
+        api.V03_OBJECT_PATHS
+    )
     assert set(api._generated_files(version="0.1")) == SCHEMA_FILENAMES
     assert set(api._generated_files(version="0.2")) == V02_SCHEMA_FILENAMES
+    assert set(api._generated_files(version="0.3")) == {
+        "schema-registry.json",
+        *api.V03_OBJECT_PATHS.values(),
+    }
 
 
 def test_v02_writer_emits_frozen_package_and_mirror(tmp_path: Path) -> None:
@@ -376,6 +384,32 @@ def test_v02_writer_emits_frozen_package_and_mirror(tmp_path: Path) -> None:
     assert set(_snapshot(destination)) == V02_SCHEMA_FILENAMES
     for name, expected in FROZEN_V02_DIGESTS.items():
         assert hashlib.sha256(destination.joinpath(name).read_bytes()).hexdigest() == expected
+
+
+def test_v03_three_version_registry_is_closed_and_canonical(tmp_path: Path) -> None:
+    api = _api()
+    expected_objects = {
+        "evaluation-scope",
+        "verification-profile",
+        "verification-arm-result",
+        "verification-decision",
+    }
+    assert set(api._OBJECT_PATHS_BY_VERSION) == {"0.1", "0.2", "0.3"}
+    assert set(api._OBJECT_PATHS_BY_VERSION["0.3"]) == expected_objects
+    generated = api._generated_files(version="0.3")
+    for raw in generated.values():
+        assert rfc8785.dumps(json.loads(raw)) == raw
+
+    runtime = tmp_path / "runtime"
+    public = tmp_path / "public"
+    api.write_authoritative_schemas(runtime, mirror=public, version="0.3")
+    assert _snapshot(runtime) == _snapshot(public)
+    assert _snapshot(runtime) == generated
+    assert api.authoritative_schema("evaluation-scope", version="0.3")
+    with pytest.raises(ValueError, match="unknown object type"):
+        api.authoritative_schema("work-order", version="0.3")
+    with pytest.raises(ValueError, match="unknown object type"):
+        api.authoritative_schema("evaluation-scope", version="0.2")
 
 
 def test_cli_requires_explicit_registered_version_and_destination(

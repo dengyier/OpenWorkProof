@@ -569,7 +569,7 @@ git commit -m 'feat: bind verification decisions to exact scope'
 - Create: `src/openworkproof/schemas/v0.3/*.json`
 - Create: `specs/v0.3/*.json`
 
-- [ ] **Step 1: Write RED three-version registry tests**
+- [x] **Step 1: Write RED three-version registry tests**
 
 Require `authoritative_schema(..., "0.3")`, exact runtime/public mirror equality, canonical bytes, immutable v0.1/v0.2 digests, rejected cross-version object lookup, atomic generation, and rollback on injected failure.
 
@@ -581,11 +581,11 @@ Run:
 
 Expected RED: unknown protocol version `0.3`.
 
-- [ ] **Step 2: Register the closed v0.3 object set**
+- [x] **Step 2: Register the closed v0.3 object set**
 
 Add `V03_OBJECT_PATHS`, `V03_SCHEMA_FACTORIES`, `_FROZEN_V03_DIGESTS`, and `_FROZEN_V03_REGISTRY`. Do not reorder v0.1/v0.2 registries or modify their constants.
 
-- [ ] **Step 3: Generate canonical resources atomically**
+- [x] **Step 3: Generate canonical resources atomically**
 
 Run the repository's schema writer into a temporary directory, inspect the diff, then copy only the v0.3 outputs into runtime/public directories:
 
@@ -603,7 +603,7 @@ cmp "$TMP_ROOT/runtime/schema-registry.json" \
 
 Use `apply_patch` to add the canonical files; do not write over frozen directories.
 
-- [ ] **Step 4: Run all registry and package-data tests**
+- [x] **Step 4: Run all registry and package-data tests**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_schema_registry.py tests/test_package.py -q
@@ -615,7 +615,7 @@ for version in ("0.1", "0.2", "0.3"):
 PY
 ```
 
-- [ ] **Step 5: Commit and checkpoint**
+- [x] **Step 5: Commit and checkpoint**
 
 ```bash
 git add src/openworkproof/schema_registry.py src/openworkproof/schemas/v0.3 \

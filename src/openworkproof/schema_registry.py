@@ -25,11 +25,15 @@ from openworkproof.models import (
     AcceptanceTransitionReceipt,
     CapabilityGrant,
     CommitmentAnchor,
+    EvaluationScopeManifest,
     PolicyAnchor,
     SubjectClaim,
     VerificationArmResult,
+    VerificationArmResultV03,
     VerificationDecision,
+    VerificationDecisionV03,
     VerificationProfileV02,
+    VerificationProfileV03,
     WorkOrder,
 )
 
@@ -145,21 +149,66 @@ _FROZEN_V02_REGISTRY = {
         for object_type, path in V02_OBJECT_PATHS.items()
     ],
 }
+V03_OBJECT_PATHS = {
+    "evaluation-scope": "evaluation-scope.schema.json",
+    "verification-arm-result": "verification-arm-result.schema.json",
+    "verification-decision": "verification-decision.schema.json",
+    "verification-profile": "verification-profile.schema.json",
+}
+V03_SCHEMA_FACTORIES: dict[str, Callable[[], dict[str, Any]]] = {
+    "evaluation-scope": EvaluationScopeManifest.model_json_schema,
+    "verification-arm-result": VerificationArmResultV03.model_json_schema,
+    "verification-decision": VerificationDecisionV03.model_json_schema,
+    "verification-profile": VerificationProfileV03.model_json_schema,
+}
+_FROZEN_V03_DIGESTS = {
+    "evaluation-scope.schema.json": (
+        "dd63163297871008cd18b2de54fc6d22fedf71009bfbd7c849b632a02783d330"
+    ),
+    "schema-registry.json": (
+        "e934f2295ae36901b9d8430d184549eb367dca4cecd86f30ed625502f072e1b1"
+    ),
+    "verification-arm-result.schema.json": (
+        "73d16598938c5e17d073ab75c779816d5ad4b8a4cfc14f18fed3c8370ca2309b"
+    ),
+    "verification-decision.schema.json": (
+        "e1ec873558bba467f22923d79e7b0592df4910aee32047b5037da99701c08408"
+    ),
+    "verification-profile.schema.json": (
+        "ac6cb592983cfdda7132ff7c636106e70f5e5b8ccf0f35b9689ff82ae487dd96"
+    ),
+}
+_FROZEN_V03_REGISTRY = {
+    "schema_version": _REGISTRY_SCHEMA_VERSION,
+    "protocol_version": "0.3",
+    "schemas": [
+        {
+            "object_type": object_type,
+            "path": path,
+            "sha256": _FROZEN_V03_DIGESTS[path],
+        }
+        for object_type, path in V03_OBJECT_PATHS.items()
+    ],
+}
 _OBJECT_PATHS_BY_VERSION = {
     "0.1": V01_OBJECT_PATHS,
     "0.2": V02_OBJECT_PATHS,
+    "0.3": V03_OBJECT_PATHS,
 }
 _SCHEMA_FACTORIES_BY_VERSION = {
     "0.1": V01_SCHEMA_FACTORIES,
     "0.2": V02_SCHEMA_FACTORIES,
+    "0.3": V03_SCHEMA_FACTORIES,
 }
 _FROZEN_DIGESTS_BY_VERSION = {
     "0.1": _FROZEN_V01_DIGESTS,
     "0.2": _FROZEN_V02_DIGESTS,
+    "0.3": _FROZEN_V03_DIGESTS,
 }
 _FROZEN_REGISTRIES_BY_VERSION = {
     "0.1": _FROZEN_V01_REGISTRY,
     "0.2": _FROZEN_V02_REGISTRY,
+    "0.3": _FROZEN_V03_REGISTRY,
 }
 _FILENAMES_BY_VERSION = {
     version: frozenset({_REGISTRY_FILENAME, *object_paths.values()})
