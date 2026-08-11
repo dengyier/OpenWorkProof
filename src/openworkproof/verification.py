@@ -31,6 +31,7 @@ from openworkproof.models import (
     VerificationDecision,
     VerificationDecisionDraft,
     VerificationDecisionDraftV03,
+    VerificationDecisionV03,
     VerificationIndependenceAssessment,
     VerificationProfileV02,
     VerificationProfileV03,
@@ -44,7 +45,11 @@ from openworkproof.signing import (
     verify_payload,
     verify_work_order_identity_bindings,
 )
-from openworkproof.scope import validate_evaluation_scope
+from openworkproof.scope import (
+    ObservedScope,
+    compare_observed_scope,
+    validate_evaluation_scope,
+)
 import openworkproof.evidence as evidence
 
 
@@ -91,6 +96,10 @@ def verification_decision_signing_bytes(
 ) -> bytes:
     """Return the common canonical bytes signed by every decision verifier."""
 
+    if isinstance(value, (VerificationDecisionDraftV03, VerificationDecisionV03)):
+        raise VerificationInputError(
+            "v0.3 decisions require verification_decision_signing_bytes_v03"
+        )
     if isinstance(value, VerificationDecisionDraft):
         payload = {
             "schema_version": "openworkproof-verification-decision/0.2",
@@ -103,6 +112,25 @@ def verification_decision_signing_bytes(
     else:
         raise VerificationInputError("verification decision payload type is invalid")
     return canonical_bytes("verification-decision", payload)
+
+
+def verification_decision_signing_bytes_v03(
+    value: VerificationDecisionDraftV03 | VerificationDecisionV03,
+) -> bytes:
+    """Return the canonical v0.3 bytes signed by every decision verifier."""
+
+    if isinstance(value, VerificationDecisionDraftV03):
+        payload = {
+            "schema_version": "openworkproof-verification-decision/0.3",
+            **value.model_dump(mode="json"),
+        }
+    elif isinstance(value, VerificationDecisionV03):
+        payload = value.model_dump(
+            mode="json", exclude={"digest", "verifier_signatures"}
+        )
+    else:
+        raise VerificationInputError("v0.3 verification decision payload type is invalid")
+    return canonical_bytes("verification-decision", payload, version="0.3")
 
 
 def assess_independence(
@@ -266,6 +294,57 @@ def validate_verification_decision(
         except InvalidSignature as error:
             raise VerificationInputError(
                 "verification decision signature is invalid"
+            ) from error
+    return decision
+
+
+def validate_verification_decision_v03(
+    *,
+    profile: VerificationProfileV03,
+    manifest: EvaluationScopeManifest,
+    decision: VerificationDecisionV03,
+) -> VerificationDecisionV03:
+    """Validate a v0.3 decision and its exact scope/profile signature set."""
+
+    validate_verification_profile_v03(profile, manifest)
+    if (
+        decision.work_order_digest != profile.work_order_digest
+        or decision.subject_claim_digest != profile.subject_claim_digest
+        or decision.profile_id != profile.profile_id
+        or decision.profile_digest != profile.digest
+        or decision.assurance_level != profile.assurance_level
+        or decision.scope_manifest_digest != manifest.digest
+    ):
+        raise VerificationInputError("v0.3 verification decision profile mismatch")
+    if not profile.created_at <= decision.decided_at < profile.expires_at:
+        raise VerificationInputError("v0.3 verification decision is outside profile validity")
+    binding_by_key = {
+        binding.verifier_key_id: binding for binding in profile.verifier_bindings
+    }
+    expected_keys = tuple(
+        sorted(binding_by_key, key=lambda value: value.encode("utf-8"))
+    )
+    actual_keys = tuple(
+        signature.verifier_key_id for signature in decision.verifier_signatures
+    )
+    if actual_keys != expected_keys:
+        raise VerificationInputError(
+            "v0.3 verification decision signature set is not profile-bound"
+        )
+    encoded = verification_decision_signing_bytes_v03(decision)
+    for signature in decision.verifier_signatures:
+        binding = binding_by_key[signature.verifier_key_id]
+        if signature.verifier_subject_id != binding.verifier_subject_id:
+            raise VerificationInputError(
+                "v0.3 verification decision signature subject is not profile-bound"
+            )
+        try:
+            _decode_public_key(binding.verifier_public_key_b64url).verify(
+                _decode_signature(signature.signature), encoded
+            )
+        except InvalidSignature as error:
+            raise VerificationInputError(
+                "v0.3 verification decision signature is invalid"
             ) from error
     return decision
 
@@ -463,6 +542,7 @@ def compose_verification_decision_v03(
     manifest: EvaluationScopeManifest,
     arm_results: Sequence[VerificationArmResultV03],
     request: DecisionDraftRequest,
+    previous_decision: VerificationDecisionV03 | None = None,
 ) -> VerificationDecisionDraftV03:
     if not isinstance(profile, VerificationProfileV03):
         raise VerificationInputError("profile must be a v0.3 verification profile")
@@ -477,6 +557,14 @@ def compose_verification_decision_v03(
     )
     if not profile.created_at <= request.decided_at < profile.expires_at:
         raise VerificationInputError("verification decision is outside profile validity")
+    if previous_decision is not None:
+        validate_verification_decision_v03(
+            profile=profile,
+            manifest=manifest,
+            decision=previous_decision,
+        )
+        if not previous_decision.decided_at < request.decided_at:
+            raise VerificationInputError("superseding decision time is stale")
 
     positive = tuple(result for result in results if result.arm_kind == "positive")
     negative = tuple(result for result in results if result.arm_kind == "negative")
@@ -601,8 +689,12 @@ def compose_verification_decision_v03(
         decision=decision,
         independence=independence.model_dump(mode="json"),
         reason_codes=reason_codes,
-        supersedes_decision_id=None,
-        supersedes_decision_digest=None,
+        supersedes_decision_id=(
+            None if previous_decision is None else previous_decision.decision_id
+        ),
+        supersedes_decision_digest=(
+            None if previous_decision is None else previous_decision.digest
+        ),
         causal_parent_receipt_ids=tuple(
             sorted(
                 {
@@ -612,7 +704,11 @@ def compose_verification_decision_v03(
                 }
             )
         ),
-        causal_parent_decision_ids=(),
+        causal_parent_decision_ids=(
+            ()
+            if previous_decision is None
+            else (previous_decision.decision_id,)
+        ),
         decided_at=request.model_dump(mode="json")["decided_at"],
         nonce=request.nonce,
         scope_manifest_digest=manifest.digest,
@@ -1729,5 +1825,579 @@ def commit_verification_decision(
         path,
         stage=stage,
         readback=lambda _: _exact_decision_readback(path, parsed),
+        fault=fault,
+    )
+
+
+def _load_profile_context_v03(
+    connection: sqlite3.Connection,
+    *,
+    profile_digest: str,
+) -> tuple[WorkOrder, SubjectClaim, EvaluationScopeManifest, VerificationProfileV03]:
+    matches: list[VerificationProfileV03] = []
+    for profile_id, raw in connection.execute(
+        "SELECT profile_id, profile_json FROM verification_profiles_v03 ORDER BY profile_id"
+    ):
+        profile = _load_canonical_model(
+            VerificationProfileV03, raw, "v0.3 verification profile"
+        )
+        if profile.profile_id != profile_id:
+            raise VerificationTransactionError(
+                "v0.3 profile index does not match canonical row"
+            )
+        if profile.digest == profile_digest:
+            matches.append(profile)
+    if len(matches) != 1:
+        raise VerificationTransactionError("v0.3 verification profile is unavailable")
+    profile = matches[0]
+    work_order, claim, manifest = _load_scope_profile_context(
+        connection, scope_id=profile.evaluation_scope_id
+    )
+    manager = _manager_binding(work_order)
+    if (
+        profile.signer_key_id != manager.key_id
+        or not verify_payload(
+            "verification-profile",
+            profile.model_dump(mode="json"),
+            decode_and_verify_key_binding(manager),
+            version="0.3",
+        )
+        or profile.work_order_digest != work_order.digest
+        or profile.subject_claim_digest != claim.digest
+        or profile.evaluation_scope_digest != manifest.digest
+    ):
+        raise VerificationTransactionError("v0.3 profile authority is invalid")
+    try:
+        validate_verification_profile_v03(profile, manifest)
+    except VerificationInputError as error:
+        raise VerificationTransactionError("v0.3 profile scope is invalid") from error
+    return work_order, claim, manifest, profile
+
+
+def _read_evidence_ref(path: Path, ref, *, canonical_json: bool) -> bytes:
+    root = path.parent.resolve(strict=True)
+    target = root
+    for segment in ref.path.split("/"):
+        target = target / segment
+        if target.is_symlink():
+            raise VerificationTransactionError("arm result evidence traverses a symlink")
+    try:
+        resolved = target.resolve(strict=True)
+        resolved.relative_to(root)
+    except (FileNotFoundError, ValueError) as error:
+        raise VerificationTransactionError("arm result evidence is unavailable") from error
+    if not resolved.is_file():
+        raise VerificationTransactionError("arm result evidence is unavailable")
+    raw = resolved.read_bytes()
+    if len(raw) != ref.size_bytes or hashlib.sha256(raw).hexdigest() != ref.sha256:
+        raise VerificationTransactionError("arm result evidence digest mismatch")
+    if canonical_json:
+        try:
+            value = json.loads(raw)
+        except (UnicodeDecodeError, ValueError) as error:
+            raise VerificationTransactionError("scope evidence is invalid JSON") from error
+        if rfc8785.dumps(value) != raw:
+            raise VerificationTransactionError("scope evidence is not canonical")
+    return raw
+
+
+def _validate_single_arm_result_v03(
+    *,
+    connection: sqlite3.Connection,
+    path: Path,
+    work_order: WorkOrder,
+    profile: VerificationProfileV03,
+    manifest: EvaluationScopeManifest,
+    result: VerificationArmResultV03,
+) -> None:
+    expected_arms = {
+        arm.arm_id: arm for arm in (profile.positive_arm, *profile.negative_arms)
+    }
+    arm = expected_arms.get(result.arm_id)
+    binding = next(
+        (
+            item
+            for item in profile.verifier_bindings
+            if item.verifier_key_id == result.verifier_key_id
+        ),
+        None,
+    )
+    if (
+        result.profile_digest != profile.digest
+        or result.scope_manifest_digest != manifest.digest
+        or arm is None
+        or result.arm_kind != arm.arm_kind
+    ):
+        raise VerificationTransactionError("v0.3 arm result binding mismatch")
+    if (
+        binding is None
+        or binding.verifier_subject_id != result.verifier_subject_id
+        or binding.controller_factors != result.controller_factors
+        or binding.execution_context_factors != result.execution_context_factors
+        or not (
+            binding.valid_from <= result.created_at < binding.expires_at
+            and profile.created_at <= result.created_at < profile.expires_at
+        )
+        or not verify_payload(
+            "verification-arm-result",
+            result.model_dump(mode="json"),
+            _decode_public_key(binding.verifier_public_key_b64url),
+            version="0.3",
+        )
+    ):
+        raise VerificationTransactionError("v0.3 arm result signature is invalid")
+    _validate_causal_receipts(
+        connection=connection,
+        work_order=work_order,
+        receipt_ids=result.action_receipt_ids,
+    )
+    all_refs = (*result.evidence_refs, *result.scope_evidence_refs)
+    if sum(ref.size_bytes for ref in all_refs) > profile.max_evidence_bytes:
+        raise VerificationTransactionError("v0.3 arm result evidence limit exceeded")
+    if any(ref.path not in set(arm.result_artifact_paths) for ref in result.evidence_refs):
+        raise VerificationTransactionError("v0.3 arm result evidence path is outside profile")
+    if len(result.scope_evidence_refs) != 1 or not result.scope_evidence_refs[0].path.startswith(
+        "scope/"
+    ):
+        raise VerificationTransactionError("v0.3 scope evidence binding is invalid")
+    for ref in result.evidence_refs:
+        _read_evidence_ref(path, ref, canonical_json=False)
+    raw_scope = _read_evidence_ref(
+        path, result.scope_evidence_refs[0], canonical_json=True
+    )
+    try:
+        observed = ObservedScope.model_validate_json(raw_scope)
+    except Exception as error:
+        raise VerificationTransactionError("scope evidence payload is invalid") from error
+    comparison = compare_observed_scope(manifest, observed)
+    scope_reasons = tuple(
+        code for code in result.reason_codes if code.startswith("SCOPE_")
+    )
+    if (
+        result.observed_member_count != observed.member_count
+        or result.observed_population_digest != observed.population_digest
+        or result.observed_required_target_ids != observed.required_target_ids
+        or result.scope_expectation_status != comparison.scope_status
+        or scope_reasons != tuple(sorted(comparison.reason_codes))
+    ):
+        raise VerificationTransactionError(
+            "v0.3 arm result does not match recomputed scope evidence"
+        )
+
+
+def _exact_arm_result_v03_readback(
+    path: Path, result: VerificationArmResultV03
+) -> bool:
+    connection = evidence.connect_ledger(path)
+    try:
+        row = connection.execute(
+            """
+            SELECT arm_result_digest, profile_id, arm_id, arm_result_json
+            FROM verification_arm_results_v03 WHERE arm_result_id = ?
+            """,
+            (result.arm_result_id,),
+        ).fetchone()
+        profile_row = connection.execute(
+            "SELECT profile_id FROM verification_profiles_v03 WHERE profile_digest = ?",
+            (result.profile_digest,),
+        ).fetchone()
+        return profile_row is not None and row == (
+            result.digest,
+            profile_row[0],
+            result.arm_id,
+            _canonical_model_blob(result),
+        )
+    finally:
+        connection.close()
+
+
+def commit_verification_arm_result_v03(
+    ledger_path: Path,
+    result: VerificationArmResultV03,
+    *,
+    fault: _Fault | None = None,
+) -> VerificationArmResultV03:
+    path = Path(ledger_path)
+    try:
+        parsed = VerificationArmResultV03.model_validate(
+            result.model_dump(mode="json")
+        )
+    except Exception as error:
+        raise VerificationTransactionError("v0.3 arm result input is malformed") from error
+
+    def stage(connection: sqlite3.Connection) -> VerificationArmResultV03:
+        work_order, _, manifest, profile = _load_profile_context_v03(
+            connection, profile_digest=parsed.profile_digest
+        )
+        _validate_single_arm_result_v03(
+            connection=connection,
+            path=path,
+            work_order=work_order,
+            profile=profile,
+            manifest=manifest,
+            result=parsed,
+        )
+        existing = connection.execute(
+            """
+            SELECT arm_result_digest, profile_id, arm_id, arm_result_json
+            FROM verification_arm_results_v03 WHERE arm_result_id = ?
+            """,
+            (parsed.arm_result_id,),
+        ).fetchone()
+        expected = (
+            parsed.digest,
+            profile.profile_id,
+            parsed.arm_id,
+            _canonical_model_blob(parsed),
+        )
+        if existing is not None:
+            if existing == expected:
+                raise VerificationCommittedError(
+                    "the exact v0.3 arm result is already committed", parsed
+                )
+            raise VerificationTransactionError("v0.3 arm result id is already used")
+        connection.execute(
+            """
+            INSERT INTO verification_arm_results_v03 (
+                arm_result_id, arm_result_digest, profile_id, arm_id,
+                arm_result_json
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (parsed.arm_result_id, *expected),
+        )
+        return parsed
+
+    return _commit_with_readback(
+        path,
+        stage=stage,
+        readback=lambda _: _exact_arm_result_v03_readback(path, parsed),
+        fault=fault,
+    )
+
+
+def _load_arm_results_v03(
+    connection: sqlite3.Connection,
+    *,
+    path: Path,
+    work_order: WorkOrder,
+    profile: VerificationProfileV03,
+    manifest: EvaluationScopeManifest,
+    selected_ids: tuple[str, ...] | None = None,
+) -> tuple[VerificationArmResultV03, ...]:
+    values: list[VerificationArmResultV03] = []
+    for result_id, digest, profile_id, arm_id, raw in connection.execute(
+        """
+        SELECT arm_result_id, arm_result_digest, profile_id, arm_id,
+               arm_result_json
+        FROM verification_arm_results_v03
+        WHERE profile_id = ? ORDER BY arm_result_id
+        """,
+        (profile.profile_id,),
+    ):
+        result = _load_canonical_model(
+            VerificationArmResultV03, raw, "v0.3 verification arm result"
+        )
+        if (
+            result.arm_result_id != result_id
+            or result.digest != digest
+            or result.arm_id != arm_id
+            or profile_id != profile.profile_id
+        ):
+            raise VerificationTransactionError(
+                "v0.3 arm result index does not match canonical row"
+            )
+        _validate_single_arm_result_v03(
+            connection=connection,
+            path=path,
+            work_order=work_order,
+            profile=profile,
+            manifest=manifest,
+            result=result,
+        )
+        values.append(result)
+    if selected_ids is not None:
+        selected = [item for item in values if item.arm_result_id in set(selected_ids)]
+        if len(selected) != len(selected_ids):
+            raise VerificationTransactionError("v0.3 decision arm result is unavailable")
+        return tuple(sorted(selected, key=lambda item: item.arm_result_id))
+    latest: dict[str, VerificationArmResultV03] = {}
+    for result in values:
+        current = latest.get(result.arm_id)
+        if current is None or (result.created_at, result.arm_result_id) > (
+            current.created_at,
+            current.arm_result_id,
+        ):
+            latest[result.arm_id] = result
+    return tuple(sorted(latest.values(), key=lambda item: item.arm_result_id))
+
+
+def _load_current_decision_v03(
+    connection: sqlite3.Connection,
+    *,
+    profile: VerificationProfileV03,
+    manifest: EvaluationScopeManifest,
+) -> VerificationDecisionV03 | None:
+    previous: VerificationDecisionV03 | None = None
+    for decision_id, digest, predecessor_id, raw in connection.execute(
+        """
+        SELECT decision_id, decision_digest, predecessor_id, decision_json
+        FROM verification_decisions_v03
+        WHERE profile_id = ? ORDER BY rowid
+        """,
+        (profile.profile_id,),
+    ):
+        decision = _load_canonical_model(
+            VerificationDecisionV03, raw, "v0.3 verification decision"
+        )
+        if (
+            decision.decision_id != decision_id
+            or decision.digest != digest
+            or predecessor_id != (None if previous is None else previous.decision_id)
+        ):
+            raise VerificationTransactionError("v0.3 verification decision chain is invalid")
+        try:
+            validate_verification_decision_v03(
+                profile=profile, manifest=manifest, decision=decision
+            )
+        except VerificationInputError as error:
+            raise VerificationTransactionError(str(error)) from error
+        parents = tuple(
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT arm_result_id FROM verification_decision_parents_v03
+                WHERE decision_id = ? ORDER BY ordinal
+                """,
+                (decision_id,),
+            )
+        )
+        if parents != tuple(item.arm_result_id for item in decision.arm_results):
+            raise VerificationTransactionError("v0.3 decision parents are invalid")
+        previous = decision
+    return previous
+
+
+def _load_single_profile_v03(
+    connection: sqlite3.Connection,
+) -> tuple[WorkOrder, SubjectClaim, EvaluationScopeManifest, VerificationProfileV03]:
+    rows = tuple(
+        connection.execute("SELECT profile_digest FROM verification_profiles_v03")
+    )
+    if len(rows) != 1:
+        raise VerificationTransactionError("exactly one v0.3 profile is required")
+    return _load_profile_context_v03(connection, profile_digest=rows[0][0])
+
+
+def prepare_verification_decision_v03(
+    ledger_path: Path,
+    request: DecisionDraftRequest,
+) -> VerificationDecisionDraftV03:
+    path = Path(ledger_path)
+    if not path.is_file():
+        raise VerificationTransactionError("verification ledger is unavailable")
+    lock_descriptor: int | None = None
+    connection: sqlite3.Connection | None = None
+    try:
+        parsed_request = DecisionDraftRequest.model_validate(
+            request.model_dump(mode="json")
+        )
+        lock_descriptor, _ = evidence._borrow_or_acquire_target_lock(path, None)
+        connection = evidence.connect_ledger(path)
+        connection.execute("BEGIN")
+        work_order, _, manifest, profile = _load_single_profile_v03(connection)
+        results = _load_arm_results_v03(
+            connection,
+            path=path,
+            work_order=work_order,
+            profile=profile,
+            manifest=manifest,
+        )
+        previous = _load_current_decision_v03(
+            connection, profile=profile, manifest=manifest
+        )
+        draft = compose_verification_decision_v03(
+            profile=profile,
+            manifest=manifest,
+            arm_results=results,
+            request=parsed_request,
+            previous_decision=previous,
+        )
+        connection.execute("ROLLBACK")
+        return draft
+    except VerificationTransactionError:
+        evidence._best_effort_rollback(connection)
+        raise
+    except Exception as error:
+        evidence._best_effort_rollback(connection)
+        raise VerificationTransactionError(
+            "v0.3 verification decision preparation failed"
+        ) from error
+    finally:
+        cleanup = _cleanup_transaction(connection, lock_descriptor)
+        if cleanup:
+            raise VerificationCommitIndeterminateError(
+                "v0.3 decision preparation cleanup failed"
+            ) from cleanup[0]
+
+
+def _exact_decision_v03_readback(
+    path: Path, decision: VerificationDecisionV03
+) -> bool:
+    connection = evidence.connect_ledger(path)
+    try:
+        row = connection.execute(
+            """
+            SELECT decision_digest, profile_id, scope_id, predecessor_id,
+                   decision_json
+            FROM verification_decisions_v03 WHERE decision_id = ?
+            """,
+            (decision.decision_id,),
+        ).fetchone()
+        profile = connection.execute(
+            "SELECT profile_id, scope_id FROM verification_profiles_v03 WHERE profile_digest = ?",
+            (decision.profile_digest,),
+        ).fetchone()
+        if profile is None or row != (
+            decision.digest,
+            profile[0],
+            profile[1],
+            decision.supersedes_decision_id,
+            _canonical_model_blob(decision),
+        ):
+            return False
+        parents = tuple(
+            connection.execute(
+                """
+                SELECT ordinal, arm_result_id
+                FROM verification_decision_parents_v03
+                WHERE decision_id = ? ORDER BY ordinal
+                """,
+                (decision.decision_id,),
+            )
+        )
+        return parents == tuple(
+            (ordinal, reference.arm_result_id)
+            for ordinal, reference in enumerate(decision.arm_results)
+        )
+    finally:
+        connection.close()
+
+
+def commit_verification_decision_v03(
+    ledger_path: Path,
+    decision: VerificationDecisionV03,
+    *,
+    fault: _Fault | None = None,
+) -> VerificationDecisionV03:
+    path = Path(ledger_path)
+    try:
+        parsed = VerificationDecisionV03.model_validate(
+            decision.model_dump(mode="json")
+        )
+    except Exception as error:
+        raise VerificationTransactionError("v0.3 decision is malformed") from error
+
+    def stage(connection: sqlite3.Connection) -> VerificationDecisionV03:
+        work_order, _, manifest, profile = _load_profile_context_v03(
+            connection, profile_digest=parsed.profile_digest
+        )
+        current = _load_current_decision_v03(
+            connection, profile=profile, manifest=manifest
+        )
+        if current is not None and current.decision_id == parsed.decision_id:
+            if current == parsed and _exact_decision_v03_readback(path, parsed):
+                raise VerificationCommittedError(
+                    "the exact v0.3 verification decision is already committed",
+                    parsed,
+                )
+            raise VerificationTransactionError("v0.3 decision id is already used")
+        _assert_nonce_unused(connection, parsed.nonce)
+        selected_ids = tuple(item.arm_result_id for item in parsed.arm_results)
+        results = _load_arm_results_v03(
+            connection,
+            path=path,
+            work_order=work_order,
+            profile=profile,
+            manifest=manifest,
+            selected_ids=selected_ids,
+        )
+        latest = _load_arm_results_v03(
+            connection,
+            path=path,
+            work_order=work_order,
+            profile=profile,
+            manifest=manifest,
+        )
+        if tuple(item.arm_result_id for item in results) != tuple(
+            item.arm_result_id for item in latest
+        ):
+            raise VerificationTransactionError("v0.3 decision uses stale arm results")
+        try:
+            draft = compose_verification_decision_v03(
+                profile=profile,
+                manifest=manifest,
+                arm_results=results,
+                request=DecisionDraftRequest(
+                    decision_id=parsed.decision_id,
+                    decided_at=parsed.model_dump(mode="json")["decided_at"],
+                    nonce=parsed.nonce,
+                ),
+                previous_decision=current,
+            )
+            validate_verification_decision_v03(
+                profile=profile, manifest=manifest, decision=parsed
+            )
+        except VerificationInputError as error:
+            raise VerificationTransactionError(str(error)) from error
+        if verification_decision_signing_bytes_v03(
+            draft
+        ) != verification_decision_signing_bytes_v03(parsed):
+            raise VerificationTransactionError("v0.3 decision draft mismatch")
+        existing = connection.execute(
+            """
+            SELECT decision_digest, profile_id, scope_id, predecessor_id,
+                   decision_json
+            FROM verification_decisions_v03 WHERE decision_id = ?
+            """,
+            (parsed.decision_id,),
+        ).fetchone()
+        expected = (
+            parsed.digest,
+            profile.profile_id,
+            manifest.scope_id,
+            parsed.supersedes_decision_id,
+            _canonical_model_blob(parsed),
+        )
+        if existing is not None:
+            if existing == expected and _exact_decision_v03_readback(path, parsed):
+                raise VerificationCommittedError(
+                    "the exact v0.3 verification decision is already committed",
+                    parsed,
+                )
+            raise VerificationTransactionError("v0.3 decision id is already used")
+        connection.execute(
+            """
+            INSERT INTO verification_decisions_v03 (
+                decision_id, decision_digest, profile_id, scope_id,
+                predecessor_id, decision_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (parsed.decision_id, *expected),
+        )
+        for ordinal, reference in enumerate(parsed.arm_results):
+            connection.execute(
+                """
+                INSERT INTO verification_decision_parents_v03 (
+                    decision_id, ordinal, arm_result_id
+                ) VALUES (?, ?, ?)
+                """,
+                (parsed.decision_id, ordinal, reference.arm_result_id),
+            )
+        return parsed
+
+    return _commit_with_readback(
+        path,
+        stage=stage,
+        readback=lambda _: _exact_decision_v03_readback(path, parsed),
         fault=fault,
     )

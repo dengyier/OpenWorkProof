@@ -708,11 +708,11 @@ git commit -m 'feat: commit scope-bound profiles atomically'
 - Modify: `src/openworkproof/evidence.py`
 - Modify: `tests/test_verification_transactions_v03.py`
 
-- [ ] **Step 1: Write RED arm and decision transaction tests**
+- [x] **Step 1: Write RED arm and decision transaction tests**
 
 Cover a valid positive/negative chain, missing scope evidence, N versus N-1, different negative-arm population, wrong manifest digest, wrong revision, evidence digest tamper, result signature tamper, decision signature tamper, superseding decision, stale parent, and all transaction failure points.
 
-- [ ] **Step 2: Implement v0.3 arm commit**
+- [x] **Step 2: Implement v0.3 arm commit**
 
 ```python
 def commit_verification_arm_result_v03(
@@ -723,7 +723,7 @@ def commit_verification_arm_result_v03(
 
 Load Profile, Manifest, receipts, key bindings, and evidence. Recompute the observed scope; never trust caller-supplied count/status alone.
 
-- [ ] **Step 3: Implement prepare and commit for v0.3 decisions**
+- [x] **Step 3: Implement prepare and commit for v0.3 decisions**
 
 ```python
 def prepare_verification_decision_v03(
@@ -740,11 +740,11 @@ def commit_verification_decision_v03(
 
 Require exact canonical readback after commit, and preserve committed truth if cleanup fails.
 
-- [ ] **Step 4: Prove concurrent composition has one truth**
+- [x] **Step 4: Prove concurrent composition has one truth**
 
 Use two threads with the same decision ID. Exact bytes must be idempotent; different signed bytes must yield one committed truth and one conflict/committed result, never two rows.
 
-- [ ] **Step 5: Run focused and complete verification regressions**
+- [x] **Step 5: Run focused and complete verification regressions**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -756,7 +756,7 @@ Use two threads with the same decision ID. Exact bytes must be idempotent; diffe
   tests/test_v02_adversarial.py -q
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/openworkproof/verification.py src/openworkproof/evidence.py \
