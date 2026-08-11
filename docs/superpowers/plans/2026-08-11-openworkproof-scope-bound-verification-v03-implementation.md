@@ -1113,7 +1113,7 @@ git commit -m 'build: include scope replay source'
 
 Expected: the new committed HEAD contains the exact allowlist used by `prepare_context.py`; never build a candidate from uncommitted allowlist bytes.
 
-- [ ] **Step 2: Run portable gates before the immutable build**
+- [x] **Step 2: Run portable gates before the immutable build**
 
 ```bash
 ./.venv/bin/python -m pip check
@@ -1136,7 +1136,7 @@ git diff --check
 
 Expected: zero failures in the portable suite. The two candidate files are deferred—not waived—to Step 6 because no inventory can bind the new revision before it is built. Record exact counts, skips, warnings, and durations.
 
-- [ ] **Step 3: Build revision-specific contexts**
+- [x] **Step 3: Build revision-specific contexts**
 
 ```bash
 REV="$(git rev-parse HEAD)"
@@ -1151,7 +1151,7 @@ ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-delivery
 
 Expected: new atomic revision-specific execution/helper contexts. Do not overwrite an existing directory.
 
-- [ ] **Step 4: Build two OCI and two Docker archives**
+- [x] **Step 4: Build two OCI and two Docker archives**
 
 ```bash
 REV="$(git rev-parse HEAD)"
@@ -1192,7 +1192,7 @@ docker load --input \
 
 Expected: four archives derived from the same immutable revision. Do not hand-edit tar members.
 
-- [ ] **Step 5: Create a new measured candidate inventory**
+- [x] **Step 5: Create a new measured candidate inventory**
 
 Use the newest valid `openworkproof-image-candidate-inventory/0.2` file as a structural template only. Recompute every revision, input digest, archive digest, manifest digest, image ID, RepoDigest, label, entrypoint, command, byte size, and path. Write only `supply-chain/images/candidates/$REV.json`.
 
@@ -1210,7 +1210,7 @@ Generate sums:
 )
 ```
 
-- [ ] **Step 6: Run required-live gates**
+- [x] **Step 6: Run required-live gates**
 
 ```bash
 REV="$(git rev-parse HEAD)"
@@ -1229,7 +1229,7 @@ docker image inspect "$OPENWORKPROOF_DOCKER_TEST_IMAGE" >/dev/null
 
 Expected: every command exits 0 with zero failures and no unapproved required-live skip.
 
-- [ ] **Step 7: Replay v0.1, v0.2, and v0.3 bundles offline**
+- [x] **Step 7: Replay v0.1, v0.2, and v0.3 bundles offline**
 
 ```bash
 env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
@@ -1245,7 +1245,7 @@ env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
 
 Expected: all three report `VERIFICATION PASSED` without network or live ledger access.
 
-- [ ] **Step 8: Record exact release truth, commit, and checkpoint**
+- [x] **Step 8: Record exact release truth, commit, and checkpoint**
 
 Update `docs/status.md` with exact source revision, package version, protocol versions, environment, pass/fail/skip counts, candidate path, bundle results, timestamps, and boundary `commercial_validation: not_evidenced`.
 

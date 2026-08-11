@@ -1816,6 +1816,7 @@ def test_candidate_inventory_selector_covers_every_tracked_definition() -> None:
         "src/openworkproof/__init__.py",
         "src/openworkproof/models.py",
         "src/openworkproof/repo_tools.py",
+        "src/openworkproof/scope.py",
         "src/openworkproof/trusted_helper.py",
     )
     assert CURRENT_DEFINITION_PATHS == ALL_TRACKED_DEFINITION_PATHS + allowlist

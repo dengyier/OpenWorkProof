@@ -22,10 +22,33 @@ Rich #4196 的新增 v0.3 材料是 OpenWorkProof 自有协议演示：旧检查
 READY_FOR_ACCEPTANCE`。这不是 Rich 上游已采用、客户案例、客户验收、付款、
 资金释放、自动结算或正式部署证据。
 
-Task 15 的最终 candidate inventory、便携全量和 required-live 门尚未执行，
-因此本节不把 focused 测试结果表述为发布完成。21 天商业试点中的 User、
-付费方和 Customer Acceptor 都是假设或待填写项；外部商业结果保持
-`not evidenced`。
+Task 15 已在 source revision
+`3e8f7b863f7936ded99c76d02b84d8e641e80640` 上完成最终供应链、便携全量、
+required-live 和三代离线包复核。对应不可变 inventory 为
+`supply-chain/images/candidates/3e8f7b863f7936ded99c76d02b84d8e641e80640.json`，
+SHA-256 为 `151b982482a8f155f165aaf45acae895469ffcc5b45f6d81cae5abae5c4e71fb`；
+历史 inventory 未覆盖。归档位于
+`/Users/molin/Project/openWorkProof-delivery/oci/3e8f7b863f7936ded99c76d02b84d8e641e80640/`，
+本轮发布门记录于 `2026-08-11 23:19 CST`。
+
+本轮 fresh 发布门：v0.3 focused 套件 `160 passed`；修复兼容测试探针后，
+focused 联合门 `161 passed`；便携全量 `2497 passed、0 failed、6 skipped、
+8 warnings`（199.06 秒）；image supply-chain 静态契约 `67 passed`；
+candidate artifact chain `1 passed、83 deselected`；required-live 全量
+`2654 passed、0 failed、0 skipped、7 warnings`（338.25 秒）。Python
+3.12.13、OpenWorkProof module/distribution 1.1.1、Docker client/server
+29.5.2、执行平台 `linux/arm64`。warnings 为 pytest 在 macOS 临时目录中
+清理已结束子进程测试残留时报告的 `Directory not empty`，未隐藏或改写为
+零警告。
+
+Rich #4196 的 v0.1、v0.2、v0.3 三份冻结包均在清空代理变量的独立进程中
+离线复核为 `VERIFICATION PASSED`；v0.2 与 v0.3 还分别报告
+`VERIFIED / READY_FOR_ACCEPTANCE`，v0.3 Scope 状态为 `satisfied`。这些结果
+只证明冻结演示材料的协议重放，不证明 Rich 上游采用或客户验收。
+
+21 天商业试点中的 User、付费方和 Customer Acceptor 都是假设或待填写项；
+`commercial_validation: not_evidenced`。本地 release candidate 完成也不等于
+远端推送、分支合并、部署、客户接受、付款、资金释放或赛事提交。
 
 ## Evidence Lifecycle v0.2 本地开发状态
 
