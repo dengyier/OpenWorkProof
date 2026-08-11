@@ -3,8 +3,8 @@
 > 本文档是项目实现状态的权威记录。README 只保留概览，
 > 「已经完成什么」和「尚未完成什么」的完整清单以本文为准。
 
-当前分发版本：1.1.1；当前冻结协议 Schema：0.1。两类版本分别记录，
-不得把 Python 分发版本解释成协议版本。
+当前分发版本：1.1.1；当前支持的冻结协议 Schema：0.1 与 0.2。分发版本
+和协议版本分别记录，不得把 Python 分发版本解释成协议版本。
 
 ## Evidence Lifecycle v0.2 本地开发状态
 
@@ -14,10 +14,28 @@
 提供 v0.2 离线复现样本，历史 v0.1 包保持不变。21 天运营工具包位于
 `docs/pilot/`。
 
-Task 16 的最终供应链、全量测试与 required-live 门尚未在当前最终 source
-revision 上执行，因此这里不填写新的测试数量。上述状态只证明本地实现和
-冻结样本存在，不证明客户接受、付费试点、资金释放、正式部署、商业采用、
-合并或远端发布。
+Task 16 已在 source revision
+`64f6ba65a26e0038e6ce8be7925913a4cc7726a3` 上完成最终供应链、便携全量、
+required-live 和离线包复核。对应不可变 inventory 为
+`supply-chain/images/candidates/64f6ba65a26e0038e6ce8be7925913a4cc7726a3.json`，
+SHA-256 为 `3dbaff42728c71bd1194f3a2b9fa0844ecf7190a32aee4b937ad1a83d017c268`；
+历史 inventory 未覆盖。可复现 OCI descriptor 的 created 值绑定 source
+revision 时间 `2026-08-11T04:35:13Z`，本轮发布门验证记录于
+`2026-08-11 15:55 CST`。
+
+本轮 fresh 发布门：focused v0.2 套件 `173 passed`；便携全量
+`2484 passed、0 failed、7 skipped、1 warning`（278.54 秒）；image
+supply-chain 静态契约 `66 passed`；candidate artifact chain
+`1 passed、82 deselected`；required-live 全量
+`2491 passed、0 failed、0 skipped、1 warning`（296.89 秒）。两份 v0.2
+包在清空代理变量的独立进程中均离线复核为
+`VERIFIED / READY_FOR_ACCEPTANCE`。warning 为既有
+`team_network_client` 服务重启测试的关闭期线程竞态，未隐藏，也未改写为
+零警告。Docker owner 标签下的容器和卷残留为 0。
+
+上述状态只证明本地分支实现、候选工件和冻结样本通过本轮技术门，不证明
+客户接受、付费试点、资金释放、正式部署、商业采用、分支合并、远端发布、
+赛事提交或融资结果。
 
 ## 当前已经实现的能力
 
@@ -121,6 +139,21 @@ revision 上执行，因此这里不填写新的测试数量。上述状态只�
 
 ## 当前验证快照
 
+- v0.2 最终 source revision：
+  `64f6ba65a26e0038e6ce8be7925913a4cc7726a3`；Python 3.12.13，
+  OpenWorkProof module/distribution 均为 `1.1.1`，Docker 29.5.2
+  `linux/arm64`；
+- v0.2 focused 发布门：173 passed；
+- v0.2 便携全量：2484 passed、0 failed、7 skipped、1 warning，
+  退出码 0，耗时 278.54 秒；7 项 skip 均为便携模式下明确要求 artifact
+  root、Linux Landlock 或 immutable Docker image 的 live 路径；
+- v0.2 image supply-chain：66 passed；candidate artifact chain：
+  1 passed、82 deselected；
+- v0.2 required-live 全量：2491 passed、0 failed、0 skipped、1 warning，
+  退出码 0，耗时 296.89 秒；
+- Rich #4196 与 Dify #33013 v0.2 包在清空代理变量的独立进程中均为
+  `VERIFICATION PASSED / VERIFIED / READY_FOR_ACCEPTANCE`；这不是客户
+  AcceptanceReceipt；
 - Acceptance 事务专项：40 passed；
 - Acceptance、Contract、Signing、State、Composition、Policy、
   Receipt-chain、MCP 与 Schema focused 门：1058 passed；
