@@ -518,7 +518,7 @@ git commit -m "feat: commit customer judgments append only"
 - Create: `src/openworkproof/binding.py`
 - Create: `tests/test_binding_manifest_transactions_v04.py`
 
-- [ ] **Step 1: Write pure manifest validation tests**
+- [x] **Step 1: Write pure manifest validation tests**
 
 Test full digest-chain presence, Customer Acceptor signer authority, Manager manifest authority, validity intersection, WorkOrder/Judgment/Scope constraint intersection, sorted parents, and no path/tool/action expansion.
 
@@ -530,19 +530,19 @@ def test_manifest_cannot_expand_work_order_judgment_intersection(case, field) ->
         validate_action_binding_manifest(case.context, manifest)
 ```
 
-- [ ] **Step 2: Write active/supersession transaction tests**
+- [x] **Step 2: Write active/supersession transaction tests**
 
 Cover first active manifest, stale supersedes id/digest, missing parent, concurrent double winner, exact idempotent replay, and two different payloads for one id.
 
-- [ ] **Step 3: Add manifest tables and pure validator**
+- [x] **Step 3: Add manifest tables and pure validator**
 
 Add current/append-only relationships without a mutable `active` flag. Derive current as a committed manifest not superseded by a valid child. Reject forks and ambiguous current state.
 
-- [ ] **Step 4: Implement commit/readback**
+- [x] **Step 4: Implement commit/readback**
 
 Implement `commit_action_binding_manifest()` with authority verification against the WorkOrder key bindings and committed Judgment/Scope rows. It must not accept a merely well-formed, uncommitted object.
 
-- [ ] **Step 5: Run the focused transaction suite**
+- [x] **Step 5: Run the focused transaction suite**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -551,7 +551,7 @@ Implement `commit_action_binding_manifest()` with authority verification against
   tests/test_scope_transactions_v03.py -q
 ```
 
-- [ ] **Step 6: Record checkpoint and commit**
+- [x] **Step 6: Record checkpoint and commit**
 
 ```bash
 git add src/openworkproof/evidence.py src/openworkproof/binding.py \
