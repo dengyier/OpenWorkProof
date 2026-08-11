@@ -724,6 +724,39 @@ _SCHEMA = (
     )
     """,
     """
+    CREATE TABLE judgment_commitments_v04 (
+        commitment_id TEXT PRIMARY KEY,
+        commitment_digest TEXT NOT NULL UNIQUE,
+        authority_namespace TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        nonce TEXT NOT NULL,
+        signer_key_id TEXT NOT NULL,
+        commitment_json BLOB NOT NULL UNIQUE,
+        committed_at TEXT NOT NULL,
+        UNIQUE (signer_key_id, nonce)
+    )
+    """,
+    """
+    CREATE INDEX judgment_commitments_v04_authority_subject
+    ON judgment_commitments_v04 (
+        authority_namespace, subject_id, committed_at, commitment_id
+    )
+    """,
+    """
+    CREATE TRIGGER judgment_commitments_v04_are_immutable_update
+    BEFORE UPDATE ON judgment_commitments_v04
+    BEGIN
+        SELECT RAISE(ABORT, 'judgment commitment is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER judgment_commitments_v04_are_immutable_delete
+    BEFORE DELETE ON judgment_commitments_v04
+    BEGIN
+        SELECT RAISE(ABORT, 'judgment commitment is immutable');
+    END
+    """,
+    """
     CREATE TRIGGER work_orders_single_authority
     BEFORE INSERT ON work_orders
     WHEN EXISTS (SELECT 1 FROM work_orders)
