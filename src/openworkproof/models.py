@@ -2919,6 +2919,12 @@ class BindingDecision(ProtocolModel):
         )
         if not _is_utf8_sorted_unique(signature_keys):
             raise ValueError("decision signatures must be key-sorted and unique")
+        signature_subjects = tuple(
+            signature.verifier_subject_id
+            for signature in self.verifier_signatures
+        )
+        if len(set(signature_subjects)) != len(signature_subjects):
+            raise ValueError("decision signature subjects must be unique")
         payload = self.model_dump(
             mode="json", exclude={"digest", "verifier_signatures"}
         )

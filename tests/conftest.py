@@ -627,13 +627,38 @@ def _v04_digest(domain: str, payload: Any) -> str:
 
 
 @pytest.fixture
-def binding_private_key_v04() -> Ed25519PrivateKey:
+def binding_acceptor_private_key_v04() -> Ed25519PrivateKey:
     return Ed25519PrivateKey.from_private_bytes(bytes([43]) * 32)
 
 
 @pytest.fixture
+def binding_manager_private_key_v04() -> Ed25519PrivateKey:
+    return Ed25519PrivateKey.from_private_bytes(bytes([44]) * 32)
+
+
+@pytest.fixture
+def binding_developer_private_key_v04() -> Ed25519PrivateKey:
+    return Ed25519PrivateKey.from_private_bytes(bytes([45]) * 32)
+
+
+@pytest.fixture
+def binding_verifier_private_key_v04() -> Ed25519PrivateKey:
+    return Ed25519PrivateKey.from_private_bytes(bytes([46]) * 32)
+
+
+@pytest.fixture
+def binding_authority_private_key_v04() -> Ed25519PrivateKey:
+    return Ed25519PrivateKey.from_private_bytes(bytes([47]) * 32)
+
+
+@pytest.fixture
+def binding_secondary_verifier_private_key_v04() -> Ed25519PrivateKey:
+    return Ed25519PrivateKey.from_private_bytes(bytes([48]) * 32)
+
+
+@pytest.fixture
 def judgment_commitment_v04_dict(
-    binding_private_key_v04: Ed25519PrivateKey,
+    binding_acceptor_private_key_v04: Ed25519PrivateKey,
 ) -> dict[str, Any]:
     return sign_payload(
         "judgment-commitment",
@@ -662,7 +687,7 @@ def judgment_commitment_v04_dict(
             "created_at": "2026-01-01T00:00:00Z",
             "nonce": "5" * 64,
         },
-        binding_private_key_v04,
+        binding_acceptor_private_key_v04,
         version="0.4",
     )
 
@@ -676,7 +701,7 @@ def judgment_commitment_v04(
 
 @pytest.fixture
 def action_binding_manifest_v04_dict(
-    binding_private_key_v04: Ed25519PrivateKey,
+    binding_manager_private_key_v04: Ed25519PrivateKey,
     judgment_commitment_v04: JudgmentCommitment,
 ) -> dict[str, Any]:
     return sign_payload(
@@ -704,7 +729,7 @@ def action_binding_manifest_v04_dict(
             "expires_at": "2026-01-01T23:59:59Z",
             "nonce": "0" * 64,
         },
-        binding_private_key_v04,
+        binding_manager_private_key_v04,
         version="0.4",
     )
 
@@ -718,7 +743,7 @@ def action_binding_manifest_v04(
 
 @pytest.fixture
 def authority_checkpoint_v04_dict(
-    binding_private_key_v04: Ed25519PrivateKey,
+    binding_authority_private_key_v04: Ed25519PrivateKey,
     judgment_commitment_v04: JudgmentCommitment,
 ) -> dict[str, Any]:
     payload = {
@@ -731,14 +756,14 @@ def authority_checkpoint_v04_dict(
         "predecessor_checkpoint_digest": None,
         "effective_at": "2026-01-01T00:00:02Z",
         "expires_at": "2026-01-02T00:00:00Z",
-        "authority_key_id": key_id(binding_private_key_v04.public_key()),
+        "authority_key_id": key_id(binding_authority_private_key_v04.public_key()),
         "signature_alg": "Ed25519",
     }
     encoded = canonical_bytes("authority-checkpoint", payload, version="0.4")
     return {
         **payload,
         "signature": base64.urlsafe_b64encode(
-            binding_private_key_v04.sign(encoded)
+            binding_authority_private_key_v04.sign(encoded)
         ).decode("ascii").rstrip("="),
         "digest": hashlib.sha256(encoded).hexdigest(),
     }
@@ -753,7 +778,7 @@ def authority_checkpoint_v04(
 
 @pytest.fixture
 def binding_decision_v04_dict(
-    binding_private_key_v04: Ed25519PrivateKey,
+    binding_verifier_private_key_v04: Ed25519PrivateKey,
     action_binding_manifest_v04: ActionBindingManifest,
     authority_checkpoint_v04: AuthorityCheckpoint,
 ) -> dict[str, Any]:
@@ -786,10 +811,12 @@ def binding_decision_v04_dict(
         "verifier_signatures": [
             {
                 "verifier_subject_id": "verifier",
-                "verifier_key_id": key_id(binding_private_key_v04.public_key()),
+                "verifier_key_id": key_id(
+                    binding_verifier_private_key_v04.public_key()
+                ),
                 "signature_alg": "Ed25519",
                 "signature": base64.urlsafe_b64encode(
-                    binding_private_key_v04.sign(encoded)
+                    binding_verifier_private_key_v04.sign(encoded)
                 ).decode("ascii").rstrip("="),
             }
         ],
@@ -806,10 +833,10 @@ def binding_decision_v04(
 
 @pytest.fixture
 def agent_request_v04_dict(
-    binding_private_key_v04: Ed25519PrivateKey,
+    binding_developer_private_key_v04: Ed25519PrivateKey,
     action_binding_manifest_v04: ActionBindingManifest,
 ) -> dict[str, Any]:
-    actor_key_id = key_id(binding_private_key_v04.public_key())
+    actor_key_id = key_id(binding_developer_private_key_v04.public_key())
     return sign_payload(
         "agent-request",
         {
@@ -839,7 +866,7 @@ def agent_request_v04_dict(
             ),
             "action_binding_manifest_digest": action_binding_manifest_v04.digest,
         },
-        binding_private_key_v04,
+        binding_developer_private_key_v04,
         version="0.4",
     )
 

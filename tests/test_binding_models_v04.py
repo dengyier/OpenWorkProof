@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 from typing import get_args
 
 import pytest
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 
 from openworkproof.models import (
     ActionBindingManifest,
+    AgentRequest,
     AgentRequestV04,
     AuthorityCheckpoint,
     AuthorityStatus,
@@ -17,11 +20,15 @@ from openworkproof.models import (
     BindingDecisionDraft,
     BindingOutcome,
     BindingReasonCode,
+    EvaluationScopeManifest,
     JudgmentCommitment,
+    VerificationProfileV02,
 )
 from openworkproof.signing import (
     authority_checkpoint_signing_bytes,
     canonical_bytes,
+    key_id,
+    sign_authority_checkpoint,
     sign_payload,
     verify_authority_checkpoint,
     verify_payload,
@@ -56,6 +63,27 @@ def _rebuild_binding_shape(candidate: dict, model_kind: str) -> object:
     return BindingDecision.model_validate(rebuilt)
 
 
+def _public_key_b64url(private_key: Ed25519PrivateKey) -> str:
+    raw = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _rebuild_authority_checkpoint(candidate: dict) -> AuthorityCheckpoint:
+    rebuilt = copy.deepcopy(candidate)
+    payload = {
+        key: value
+        for key, value in rebuilt.items()
+        if key not in {"digest", "signature"}
+    }
+    rebuilt["digest"] = hashlib.sha256(
+        canonical_bytes("authority-checkpoint", payload, version="0.4")
+    ).hexdigest()
+    return AuthorityCheckpoint.model_validate(rebuilt)
+
+
 def test_valid_v04_models_construct(
     judgment_commitment_v04: JudgmentCommitment,
     action_binding_manifest_v04: ActionBindingManifest,
@@ -68,6 +96,40 @@ def test_valid_v04_models_construct(
     assert authority_checkpoint_v04.schema_version.endswith("/0.4")
     assert binding_decision_v04.decision == "BOUND"
     assert agent_request_v04.schema_version.endswith("/0.4")
+
+
+def test_v04_fixtures_separate_internal_and_external_trust_domains(
+    judgment_commitment_v04: JudgmentCommitment,
+    action_binding_manifest_v04: ActionBindingManifest,
+    authority_checkpoint_v04: AuthorityCheckpoint,
+    binding_decision_v04: BindingDecision,
+    agent_request_v04: AgentRequestV04,
+    binding_acceptor_private_key_v04: Ed25519PrivateKey,
+    binding_manager_private_key_v04: Ed25519PrivateKey,
+    binding_developer_private_key_v04: Ed25519PrivateKey,
+    binding_verifier_private_key_v04: Ed25519PrivateKey,
+    binding_authority_private_key_v04: Ed25519PrivateKey,
+    binding_secondary_verifier_private_key_v04: Ed25519PrivateKey,
+) -> None:
+    internal_key_ids = {
+        judgment_commitment_v04.signer_key_id,
+        action_binding_manifest_v04.signer_key_id,
+        agent_request_v04.signer_key_id,
+        binding_decision_v04.verifier_signatures[0].verifier_key_id,
+    }
+    assert internal_key_ids == {
+        key_id(binding_acceptor_private_key_v04.public_key()),
+        key_id(binding_manager_private_key_v04.public_key()),
+        key_id(binding_developer_private_key_v04.public_key()),
+        key_id(binding_verifier_private_key_v04.public_key()),
+    }
+    assert authority_checkpoint_v04.authority_key_id == key_id(
+        binding_authority_private_key_v04.public_key()
+    )
+    assert authority_checkpoint_v04.authority_key_id not in internal_key_ids
+    assert key_id(
+        binding_secondary_verifier_private_key_v04.public_key()
+    ) not in internal_key_ids | {authority_checkpoint_v04.authority_key_id}
 
 
 def test_v04_outcomes_statuses_and_reason_codes_are_exactly_closed() -> None:
@@ -120,14 +182,14 @@ def test_v04_outcomes_statuses_and_reason_codes_are_exactly_closed() -> None:
 )
 def test_judgment_commitment_requires_nonempty_sorted_unique_customer_intent(
     judgment_commitment_v04_dict: dict,
-    binding_private_key_v04: Ed25519PrivateKey,
+    binding_acceptor_private_key_v04: Ed25519PrivateKey,
     field_name: str,
 ) -> None:
     for invalid in ([], ["b" * 64, "a" * 64], ["a" * 64, "a" * 64]):
         candidate = copy.deepcopy(judgment_commitment_v04_dict)
         candidate[field_name] = invalid
         candidate = _resign_v04(
-            "judgment-commitment", candidate, binding_private_key_v04
+            "judgment-commitment", candidate, binding_acceptor_private_key_v04
         )
         with pytest.raises(ValidationError, match=field_name):
             JudgmentCommitment.model_validate(candidate)
@@ -158,14 +220,14 @@ def test_judgment_commitment_enforces_collection_and_string_bounds(
 )
 def test_judgment_commitment_requires_ordered_times(
     judgment_commitment_v04_dict: dict,
-    binding_private_key_v04: Ed25519PrivateKey,
+    binding_acceptor_private_key_v04: Ed25519PrivateKey,
     field_name: str,
     value: str,
 ) -> None:
     candidate = copy.deepcopy(judgment_commitment_v04_dict)
     candidate[field_name] = value
     candidate = _resign_v04(
-        "judgment-commitment", candidate, binding_private_key_v04
+        "judgment-commitment", candidate, binding_acceptor_private_key_v04
     )
     with pytest.raises(ValidationError, match="time|created|valid"):
         JudgmentCommitment.model_validate(candidate)
@@ -191,7 +253,7 @@ def test_judgment_commitment_rejects_digest_mismatch(
 )
 def test_action_binding_manifest_requires_nonempty_sorted_unique_collections(
     action_binding_manifest_v04_dict: dict,
-    binding_private_key_v04: Ed25519PrivateKey,
+    binding_manager_private_key_v04: Ed25519PrivateKey,
     field_name: str,
 ) -> None:
     valid_item = action_binding_manifest_v04_dict[field_name][0]
@@ -199,7 +261,7 @@ def test_action_binding_manifest_requires_nonempty_sorted_unique_collections(
         candidate = copy.deepcopy(action_binding_manifest_v04_dict)
         candidate[field_name] = invalid
         candidate = _resign_v04(
-            "action-binding-manifest", candidate, binding_private_key_v04
+            "action-binding-manifest", candidate, binding_manager_private_key_v04
         )
         with pytest.raises(ValidationError, match=field_name):
             ActionBindingManifest.model_validate(candidate)
@@ -207,12 +269,12 @@ def test_action_binding_manifest_requires_nonempty_sorted_unique_collections(
 
 def test_action_binding_manifest_rejects_unsorted_and_overlong_collections(
     action_binding_manifest_v04_dict: dict,
-    binding_private_key_v04: Ed25519PrivateKey,
+    binding_manager_private_key_v04: Ed25519PrivateKey,
 ) -> None:
     unsorted = copy.deepcopy(action_binding_manifest_v04_dict)
     unsorted["allowed_action_kinds"] = ["test", "patch"]
     unsorted = _resign_v04(
-        "action-binding-manifest", unsorted, binding_private_key_v04
+        "action-binding-manifest", unsorted, binding_manager_private_key_v04
     )
     with pytest.raises(ValidationError, match="allowed_action_kinds"):
         ActionBindingManifest.model_validate(unsorted)
@@ -227,12 +289,12 @@ def test_action_binding_manifest_rejects_unsorted_and_overlong_collections(
 
 def test_action_binding_manifest_requires_supersedes_pair_and_matching_parent(
     action_binding_manifest_v04_dict: dict,
-    binding_private_key_v04: Ed25519PrivateKey,
+    binding_manager_private_key_v04: Ed25519PrivateKey,
 ) -> None:
     unpaired = copy.deepcopy(action_binding_manifest_v04_dict)
     unpaired["supersedes_binding_manifest_id"] = "a" * 64
     unpaired = _resign_v04(
-        "action-binding-manifest", unpaired, binding_private_key_v04
+        "action-binding-manifest", unpaired, binding_manager_private_key_v04
     )
     with pytest.raises(ValidationError, match="supersedes"):
         ActionBindingManifest.model_validate(unpaired)
@@ -241,7 +303,7 @@ def test_action_binding_manifest_requires_supersedes_pair_and_matching_parent(
     wrong_parent["supersedes_binding_manifest_id"] = "a" * 64
     wrong_parent["supersedes_binding_manifest_digest"] = "b" * 64
     wrong_parent = _resign_v04(
-        "action-binding-manifest", wrong_parent, binding_private_key_v04
+        "action-binding-manifest", wrong_parent, binding_manager_private_key_v04
     )
     with pytest.raises(ValidationError, match="causal"):
         ActionBindingManifest.model_validate(wrong_parent)
@@ -249,12 +311,12 @@ def test_action_binding_manifest_requires_supersedes_pair_and_matching_parent(
 
 def test_action_binding_manifest_requires_created_before_expiry(
     action_binding_manifest_v04_dict: dict,
-    binding_private_key_v04: Ed25519PrivateKey,
+    binding_manager_private_key_v04: Ed25519PrivateKey,
 ) -> None:
     candidate = copy.deepcopy(action_binding_manifest_v04_dict)
     candidate["expires_at"] = candidate["created_at"]
     candidate = _resign_v04(
-        "action-binding-manifest", candidate, binding_private_key_v04
+        "action-binding-manifest", candidate, binding_manager_private_key_v04
     )
     with pytest.raises(ValidationError, match="time|expires"):
         ActionBindingManifest.model_validate(candidate)
@@ -300,13 +362,91 @@ def test_authority_checkpoint_rejects_digest_or_signature_shape_mismatch(
 
 def test_authority_checkpoint_detached_signing_uses_authority_key_id(
     authority_checkpoint_v04_dict: dict,
-    binding_private_key_v04: Ed25519PrivateKey,
+    binding_authority_private_key_v04: Ed25519PrivateKey,
 ) -> None:
     checkpoint = AuthorityCheckpoint.model_validate(authority_checkpoint_v04_dict)
     encoded = authority_checkpoint_signing_bytes(checkpoint)
     assert b'"authority_key_id"' in encoded
     assert b'"signer_key_id"' not in encoded
-    assert verify_authority_checkpoint(checkpoint, binding_private_key_v04.public_key())
+    assert verify_authority_checkpoint(
+        checkpoint, binding_authority_private_key_v04.public_key()
+    )
+
+
+def test_sign_authority_checkpoint_builds_valid_detached_envelope(
+    authority_checkpoint_v04_dict: dict,
+    binding_authority_private_key_v04: Ed25519PrivateKey,
+) -> None:
+    payload = {
+        key: value
+        for key, value in authority_checkpoint_v04_dict.items()
+        if key not in {"digest", "signature"}
+    }
+    signed = sign_authority_checkpoint(
+        payload, binding_authority_private_key_v04
+    )
+    checkpoint = AuthorityCheckpoint.model_validate(signed)
+    assert checkpoint.authority_key_id == key_id(
+        binding_authority_private_key_v04.public_key()
+    )
+    assert verify_authority_checkpoint(
+        checkpoint, binding_authority_private_key_v04.public_key()
+    )
+
+
+def test_authority_checkpoint_crypto_negative_matrix_uses_valid_models(
+    authority_checkpoint_v04_dict: dict,
+    binding_authority_private_key_v04: Ed25519PrivateKey,
+    binding_manager_private_key_v04: Ed25519PrivateKey,
+) -> None:
+    original = AuthorityCheckpoint.model_validate(authority_checkpoint_v04_dict)
+    assert not verify_authority_checkpoint(
+        original, binding_manager_private_key_v04.public_key()
+    )
+
+    stale_signature = copy.deepcopy(authority_checkpoint_v04_dict)
+    stale_signature["expires_at"] = "2026-01-03T00:00:00Z"
+    stale_model = _rebuild_authority_checkpoint(stale_signature)
+    assert not verify_authority_checkpoint(
+        stale_model, binding_authority_private_key_v04.public_key()
+    )
+
+    conflicting_key = copy.deepcopy(authority_checkpoint_v04_dict)
+    conflicting_key["authority_key_id"] = key_id(
+        binding_manager_private_key_v04.public_key()
+    )
+    conflicting_payload = {
+        key: value
+        for key, value in conflicting_key.items()
+        if key not in {"digest", "signature"}
+    }
+    conflicting_encoded = canonical_bytes(
+        "authority-checkpoint", conflicting_payload, version="0.4"
+    )
+    conflicting_key["signature"] = base64.urlsafe_b64encode(
+        binding_authority_private_key_v04.sign(conflicting_encoded)
+    ).decode("ascii").rstrip("=")
+    conflicting_model = _rebuild_authority_checkpoint(conflicting_key)
+    assert not verify_authority_checkpoint(
+        conflicting_model, binding_manager_private_key_v04.public_key()
+    )
+
+    cross_domain = copy.deepcopy(authority_checkpoint_v04_dict)
+    cross_payload = {
+        key: value
+        for key, value in cross_domain.items()
+        if key not in {"digest", "signature"}
+    }
+    cross_encoded = canonical_bytes(
+        "evaluation-scope", cross_payload, version="0.3"
+    )
+    cross_domain["signature"] = base64.urlsafe_b64encode(
+        binding_authority_private_key_v04.sign(cross_encoded)
+    ).decode("ascii").rstrip("=")
+    cross_model = _rebuild_authority_checkpoint(cross_domain)
+    assert not verify_authority_checkpoint(
+        cross_model, binding_authority_private_key_v04.public_key()
+    )
 
 
 def test_agent_request_v04_requires_exact_commitment_and_manifest_fields(
@@ -326,7 +466,7 @@ def test_agent_request_v04_requires_exact_commitment_and_manifest_fields(
 
 def test_agent_request_v04_rejects_digest_and_signature_mismatch(
     agent_request_v04_dict: dict,
-    binding_private_key_v04: Ed25519PrivateKey,
+    binding_developer_private_key_v04: Ed25519PrivateKey,
 ) -> None:
     bad_digest = copy.deepcopy(agent_request_v04_dict)
     bad_digest["digest"] = "f" * 64
@@ -336,7 +476,7 @@ def test_agent_request_v04_rejects_digest_and_signature_mismatch(
     unpaired_signer = copy.deepcopy(agent_request_v04_dict)
     unpaired_signer["actor_key_id"] = "ed25519:" + "f" * 64
     unpaired_signer = _resign_v04(
-        "agent-request", unpaired_signer, binding_private_key_v04
+        "agent-request", unpaired_signer, binding_developer_private_key_v04
     )
     with pytest.raises(ValidationError, match="signer|actor"):
         AgentRequestV04.model_validate(unpaired_signer)
@@ -640,6 +780,76 @@ def test_binding_decision_enforces_detached_signature_structure_and_digest(
         BindingDecision.model_validate(bad_digest)
 
 
+def test_binding_decision_rejects_duplicate_verifier_subjects(
+    binding_decision_v04_dict: dict,
+    binding_verifier_private_key_v04: Ed25519PrivateKey,
+    binding_secondary_verifier_private_key_v04: Ed25519PrivateKey,
+) -> None:
+    candidate = copy.deepcopy(binding_decision_v04_dict)
+    payload = {
+        key: value
+        for key, value in candidate.items()
+        if key not in {"digest", "verifier_signatures"}
+    }
+    encoded = canonical_bytes("binding-decision", payload, version="0.4")
+    verifier_keys = (
+        binding_verifier_private_key_v04,
+        binding_secondary_verifier_private_key_v04,
+    )
+    candidate["verifier_signatures"] = sorted(
+        (
+            {
+                "verifier_subject_id": "same-verifier-subject",
+                "verifier_key_id": key_id(private_key.public_key()),
+                "signature_alg": "Ed25519",
+                "signature": base64.urlsafe_b64encode(
+                    private_key.sign(encoded)
+                ).decode("ascii").rstrip("="),
+            }
+            for private_key in verifier_keys
+        ),
+        key=lambda item: item["verifier_key_id"].encode("utf-8"),
+    )
+    with pytest.raises(ValidationError, match="subject"):
+        BindingDecision.model_validate(candidate)
+
+
+def test_binding_decision_accepts_two_distinct_verifier_subjects_and_keys(
+    binding_decision_v04_dict: dict,
+    binding_verifier_private_key_v04: Ed25519PrivateKey,
+    binding_secondary_verifier_private_key_v04: Ed25519PrivateKey,
+) -> None:
+    candidate = copy.deepcopy(binding_decision_v04_dict)
+    payload = {
+        key: value
+        for key, value in candidate.items()
+        if key not in {"digest", "verifier_signatures"}
+    }
+    encoded = canonical_bytes("binding-decision", payload, version="0.4")
+    candidate["verifier_signatures"] = sorted(
+        (
+            {
+                "verifier_subject_id": subject,
+                "verifier_key_id": key_id(private_key.public_key()),
+                "signature_alg": "Ed25519",
+                "signature": base64.urlsafe_b64encode(
+                    private_key.sign(encoded)
+                ).decode("ascii").rstrip("="),
+            }
+            for subject, private_key in (
+                ("verifier-primary", binding_verifier_private_key_v04),
+                (
+                    "verifier-secondary",
+                    binding_secondary_verifier_private_key_v04,
+                ),
+            )
+        ),
+        key=lambda item: item["verifier_key_id"].encode("utf-8"),
+    )
+    decision = BindingDecision.model_validate(candidate)
+    assert len(decision.verifier_signatures) == 2
+
+
 def test_binding_decision_draft_has_exact_unsigned_shape(
     binding_decision_v04_dict: dict,
 ) -> None:
@@ -652,7 +862,7 @@ def test_binding_decision_draft_has_exact_unsigned_shape(
 
 
 def test_v04_domains_are_version_scoped_and_old_bytes_are_frozen(
-    binding_private_key_v04: Ed25519PrivateKey,
+    binding_verifier_private_key_v04: Ed25519PrivateKey,
 ) -> None:
     assert canonical_bytes("manifest", {"b": 2, "a": 1}) == (
         b'{"domain":"openworkproof/manifest/v0.1","payload":{"a":1,"b":2}}'
@@ -660,37 +870,133 @@ def test_v04_domains_are_version_scoped_and_old_bytes_are_frozen(
     assert canonical_bytes("scope-member", {"b": 2, "a": 1}, version="0.3") == (
         b'{"domain":"openworkproof/scope-member/v0.3","payload":{"a":1,"b":2}}'
     )
-    signed_v01 = sign_payload(
-        "agent-request", {"value": 1}, binding_private_key_v04, version="0.1"
-    )
-    assert canonical_bytes("agent-request", signed_v01, version="0.1") == (
-        b'{"domain":"openworkproof/agent-request/v0.1","payload":'
-        b'{"signature_alg":"Ed25519","signer_key_id":"ed25519:'
-        b'26f3cfc4e47f703666721413ce07c50f3565672f4aecc104a59835e7fc70b52e",'
-        b'"value":1}}'
-    )
-    signed_v03 = sign_payload(
-        "evaluation-scope", {"value": 1}, binding_private_key_v04, version="0.3"
-    )
-    assert canonical_bytes("evaluation-scope", signed_v03, version="0.3") == (
-        b'{"domain":"openworkproof/evaluation-scope/v0.3","payload":'
-        b'{"signature_alg":"Ed25519","signer_key_id":"ed25519:'
-        b'26f3cfc4e47f703666721413ce07c50f3565672f4aecc104a59835e7fc70b52e",'
-        b'"value":1}}'
-    )
     signed = sign_payload(
-        "judgment-commitment", {"value": 1}, binding_private_key_v04, version="0.4"
+        "judgment-commitment",
+        {"value": 1},
+        binding_verifier_private_key_v04,
+        version="0.4",
     )
     assert verify_payload(
-        "judgment-commitment", signed, binding_private_key_v04.public_key(), version="0.4"
+        "judgment-commitment",
+        signed,
+        binding_verifier_private_key_v04.public_key(),
+        version="0.4",
     )
     assert not verify_payload(
-        "action-binding-manifest", signed, binding_private_key_v04.public_key(), version="0.4"
+        "action-binding-manifest",
+        signed,
+        binding_verifier_private_key_v04.public_key(),
+        version="0.4",
     )
     assert not verify_payload(
-        "judgment-commitment", signed, binding_private_key_v04.public_key(), version="0.3"
+        "judgment-commitment",
+        signed,
+        binding_verifier_private_key_v04.public_key(),
+        version="0.3",
     )
     with pytest.raises(ValueError, match="domain"):
         canonical_bytes("judgment-commitment", {}, version="0.3")
     with pytest.raises(ValueError, match="domain"):
         canonical_bytes("manifest", {}, version="0.4")
+
+
+def test_complete_legacy_signed_object_goldens(
+    agent_request_v04_dict: dict,
+    binding_developer_private_key_v04: Ed25519PrivateKey,
+    verification_profile_dict: dict,
+    binding_manager_private_key_v04: Ed25519PrivateKey,
+    binding_verifier_private_key_v04: Ed25519PrivateKey,
+    evaluation_scope_payload_v03: dict,
+    scope_manager_private_key_v03: Ed25519PrivateKey,
+) -> None:
+    agent_payload = {
+        key: value
+        for key, value in agent_request_v04_dict.items()
+        if key
+        not in {
+            "digest",
+            "signature_alg",
+            "signer_key_id",
+            "signature",
+            "schema_version",
+            "judgment_commitment_id",
+            "judgment_commitment_digest",
+            "action_binding_manifest_id",
+            "action_binding_manifest_digest",
+        }
+    }
+    agent = AgentRequest.model_validate(
+        sign_payload(
+            "agent-request",
+            agent_payload,
+            binding_developer_private_key_v04,
+        )
+    )
+
+    profile_payload = copy.deepcopy(verification_profile_dict)
+    profile_payload["work_order_digest"] = "a" * 64
+    profile_payload["subject_claim_digest"] = "b" * 64
+    profile_payload["verifier_bindings"][0].update(
+        {
+            "verifier_subject_id": "verifier-v02-golden",
+            "verifier_key_id": key_id(
+                binding_verifier_private_key_v04.public_key()
+            ),
+            "verifier_public_key_b64url": _public_key_b64url(
+                binding_verifier_private_key_v04
+            ),
+        }
+    )
+    profile = VerificationProfileV02.model_validate(
+        sign_payload(
+            "verification-profile",
+            profile_payload,
+            binding_manager_private_key_v04,
+        )
+    )
+
+    scope = EvaluationScopeManifest.model_validate(
+        sign_payload(
+            "evaluation-scope",
+            evaluation_scope_payload_v03,
+            scope_manager_private_key_v03,
+            version="0.3",
+        )
+    )
+    objects = (
+        ("v0.1-agent-request", "agent-request", "0.1", agent),
+        ("v0.2-verification-profile", "verification-profile", "0.1", profile),
+        ("v0.3-evaluation-scope", "evaluation-scope", "0.3", scope),
+    )
+    observed = {
+        label: (
+            hashlib.sha256(
+                canonical_bytes(
+                    domain, value.model_dump(mode="json"), version=version
+                )
+            ).hexdigest(),
+            value.digest,
+            value.signature,
+        )
+        for label, domain, version, value in objects
+    }
+    assert observed == {
+        "v0.1-agent-request": (
+            "29ed53245f98f295aeccc1c544eb90d4bccf6dbd8b4a50997ed81d66169ba228",
+            "29ed53245f98f295aeccc1c544eb90d4bccf6dbd8b4a50997ed81d66169ba228",
+            "89EnUtW690Ms2iBslrQjcobQZawl7sTi73O3zK9nF8D40rMouhjgKxb0"
+            "W8YIiWY8xUAXhIeuBvTCsD7lvcJBBg",
+        ),
+        "v0.2-verification-profile": (
+            "7e94bd79667c504acb0b2626d206769e2e21d3055b9e7d13a5ed957190cd7bd3",
+            "7e94bd79667c504acb0b2626d206769e2e21d3055b9e7d13a5ed957190cd7bd3",
+            "n8DJHN79XLGHSl1DUup5G_SCEGqfKbptdHaO8YbndQko1Qu8dC3KhMe_"
+            "EtuAnW6Li74hJ5nawqV_-GfF6g5tDQ",
+        ),
+        "v0.3-evaluation-scope": (
+            "13365cbb1a2af3a4951fc838ab07e58f63387e0cd79ca61c8635981626fa1f83",
+            "13365cbb1a2af3a4951fc838ab07e58f63387e0cd79ca61c8635981626fa1f83",
+            "ktEnletSX2ROHAiOeYUlX2XCg6U1b7xKEkf07TV2_zBhlhRHTg27Opr"
+            "AqhFrCFVyarCJ5S6oCQtxcIQpG_htAA",
+        ),
+    }
