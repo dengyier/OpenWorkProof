@@ -17,6 +17,7 @@ from openworkproof.models import (
     Digest64,
     ProtocolModel,
     VerificationDecision,
+    VerificationDecisionV03,
 )
 import openworkproof.evidence as evidence
 from openworkproof.signing import decode_and_verify_key_binding, verify_payload
@@ -48,7 +49,7 @@ class AcceptanceHistory(ProtocolModel):
     rejection: AcceptanceRejectionReceipt | None
     withdrawal: AcceptanceTransitionReceipt | None
     supersession: AcceptanceTransitionReceipt | None
-    current_decision: VerificationDecision | None
+    current_decision: VerificationDecision | VerificationDecisionV03 | None
 
     @model_validator(mode="after")
     def _closed_history(self) -> AcceptanceHistory:
@@ -100,7 +101,7 @@ def effective_acceptance(
 
 def settlement_readiness(
     *,
-    decision: VerificationDecision | None,
+    decision: VerificationDecision | VerificationDecisionV03 | None,
     acceptance: EffectiveAcceptance,
     rejection: AcceptanceRejectionReceipt | None,
 ) -> SettlementReadiness:
@@ -123,23 +124,43 @@ def _load_transition(
     *,
     work_order,
     acceptance: AcceptanceReceipt | None,
+    protocol_version: str | None,
+    decision: VerificationDecision | VerificationDecisionV03 | None,
 ) -> AcceptanceTransitionReceipt | None:
-    rows = tuple(
+    v02_rows = tuple(
         connection.execute(
             """
             SELECT transition_id, target_acceptance_id,
                    verification_decision_id, transition_json
-            FROM acceptance_transitions
-            ORDER BY transition_id
+            FROM acceptance_transitions ORDER BY transition_id
             """
         )
     )
-    if len(rows) > 1:
+    v03_rows = tuple(
+        connection.execute(
+            """
+            SELECT transition_id, target_acceptance_id,
+                   verification_decision_id, transition_json
+            FROM acceptance_transitions_v03 ORDER BY transition_id
+            """
+        )
+    )
+    if len(v02_rows) + len(v03_rows) > 1:
         raise SettlementReadError("multiple acceptance transitions are invalid")
-    if not rows:
+    if not v02_rows and not v03_rows:
         return None
-    if acceptance is None:
+    if acceptance is None or decision is None or protocol_version is None:
         raise SettlementReadError("acceptance transition has no acceptance")
+    if (v02_rows and protocol_version != "0.2") or (
+        v03_rows and protocol_version != "0.3"
+    ):
+        raise SettlementReadError("acceptance transition protocol is mismatched")
+    rows = v02_rows if protocol_version == "0.2" else v03_rows
+    parent_table = (
+        "acceptance_transition_parents"
+        if protocol_version == "0.2"
+        else "acceptance_transition_parents_v03"
+    )
     transition_id, target_id, decision_id, raw = rows[0]
     try:
         transition = AcceptanceTransitionReceipt.model_validate_json(raw)
@@ -154,21 +175,11 @@ def _load_transition(
         if binding.role == "Acceptor"
     )
     acceptor_key = decode_and_verify_key_binding(acceptor)
-    decision_row = connection.execute(
-        "SELECT decision_json FROM verification_decisions WHERE decision_id = ?",
-        (transition.verification_decision_id,),
-    ).fetchone()
-    if decision_row is None:
-        raise SettlementReadError("transition decision is unavailable")
-    try:
-        decision = VerificationDecision.model_validate_json(decision_row[0])
-    except Exception as error:
-        raise SettlementReadError("transition decision row is invalid") from error
     parents = tuple(
         connection.execute(
-            """
+            f"""
             SELECT ordinal, parent_id
-            FROM acceptance_transition_parents
+            FROM {parent_table}
             WHERE transition_id = ?
             ORDER BY ordinal
             """,
@@ -200,7 +211,7 @@ def _load_transition(
 
 def read_settlement_snapshot(ledger: Path) -> SettlementSnapshot:
     """Validate one ledger snapshot and derive its settlement readiness."""
-    from openworkproof import verification  # noqa: PLC0415
+    from openworkproof import acceptance as acceptance_module  # noqa: PLC0415
 
     path = Path(ledger)
     if not path.is_file():
@@ -224,25 +235,27 @@ def read_settlement_snapshot(ledger: Path) -> SettlementSnapshot:
             acceptances and rejections
         ):
             raise SettlementReadError("acceptance terminal history is invalid")
-        profile_count = connection.execute(
-            "SELECT COUNT(*) FROM verification_profiles_v02"
-        ).fetchone()
-        if profile_count == (0,):
-            current_decision = None
-        elif profile_count == (1,):
-            _, _, profile = verification._load_single_profile(connection)
-            current_decision = verification._load_current_decision(
-                connection,
-                profile=profile,
+        try:
+            current = acceptance_module._load_current_verification_decision(
+                connection
             )
+        except acceptance_module.AcceptanceTransactionError as error:
+            raise SettlementReadError(
+                "verification profile history is invalid"
+            ) from error
+        if current is None:
+            protocol_version = None
+            current_decision = None
         else:
-            raise SettlementReadError("verification profile history is invalid")
+            protocol_version, current_decision = current
         acceptance = acceptances[0] if acceptances else None
         rejection = rejections[0] if rejections else None
         transition = _load_transition(
             connection,
             work_order=work_order,
             acceptance=acceptance,
+            protocol_version=protocol_version,
+            decision=current_decision,
         )
         history = AcceptanceHistory.model_validate(
             {

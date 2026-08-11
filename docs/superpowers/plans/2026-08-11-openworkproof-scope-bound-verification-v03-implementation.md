@@ -774,11 +774,11 @@ git commit -m 'feat: commit scope-bound verification outcomes'
 - Modify: `tests/test_acceptance.py`
 - Create: `tests/test_acceptance_v03.py`
 
-- [ ] **Step 1: Write RED version-router tests**
+- [x] **Step 1: Write RED version-router tests**
 
 Test active v0.3 VERIFIED acceptance, v0.3 UNKNOWN/REFUTED rejection, v0.2 unchanged behavior, missing decision, fabricated cross-version digest, ambiguous dual-table row, withdraw, supersede, and settlement readiness.
 
-- [ ] **Step 2: Add a closed decision lookup result**
+- [x] **Step 2: Add a closed decision lookup result**
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -791,15 +791,15 @@ class CurrentVerificationRecord:
 
 Implement one internal resolver that requires exactly one table match. Keep `_require_current_verified_decision_if_v02` behavior as a compatibility wrapper until all current callers use the resolver.
 
-- [ ] **Step 3: Route acceptance writes to the matching table family**
+- [x] **Step 3: Route acceptance writes to the matching table family**
 
 The same `AcceptanceTransitionReceipt` model may be used, but v0.3 rows and parent rows must go only to v0.3 tables. Never rebind a v0.2 Acceptance to a v0.3 Decision.
 
-- [ ] **Step 4: Route settlement reads without changing business states**
+- [x] **Step 4: Route settlement reads without changing business states**
 
 `NOT_READY`, `READY_FOR_ACCEPTANCE`, `ACCEPTED_FOR_SETTLEMENT`, `SUSPENDED`, `WITHDRAWN`, and `SUPERSEDED` remain unchanged. Add `protocol_version` to internal snapshots only if required; do not rename public states.
 
-- [ ] **Step 5: Run GREEN and compatibility regressions**
+- [x] **Step 5: Run GREEN and compatibility regressions**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -807,7 +807,7 @@ The same `AcceptanceTransitionReceipt` model may be used, but v0.3 rows and pare
   tests/test_acceptor_rejection.py tests/test_settlement_readiness.py -q
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/openworkproof/acceptance.py src/openworkproof/settlement.py \

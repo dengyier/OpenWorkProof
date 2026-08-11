@@ -1381,27 +1381,107 @@ def _latest_proof_composed_trigger(
     return matches[0]
 
 
-def _require_current_verified_decision_if_v02(
+@dataclass(frozen=True, slots=True)
+class CurrentVerificationRecord:
+    protocol_version: Literal["0.2", "0.3"]
+    decision_id: str
+    decision_digest: str
+    decision: Literal["VERIFIED", "REFUTED", "UNKNOWN"]
+
+
+def _load_current_verification_decision(
     connection: sqlite3.Connection,
 ):
-    """Require the current v0.2 decision when a v0.2 profile is present."""
     from openworkproof import verification  # noqa: PLC0415
 
-    count = connection.execute(
+    v02_count = connection.execute(
         "SELECT COUNT(*) FROM verification_profiles_v02"
     ).fetchone()
-    if count == (0,):
+    v03_count = connection.execute(
+        "SELECT COUNT(*) FROM verification_profiles_v03"
+    ).fetchone()
+    if v02_count == (0,) and v03_count == (0,):
         return None
-    if count != (1,):
+    if v02_count not in {(0,), (1,)} or v03_count not in {(0,), (1,)}:
         raise AcceptanceTransactionError(
             "acceptance requires exactly one verification profile"
         )
-    _, _, profile = verification._load_single_profile(connection)
-    current = verification._load_current_decision(
-        connection,
-        profile=profile,
+    if v02_count == (1,) and v03_count == (1,):
+        raise AcceptanceTransactionError(
+            "acceptance verification protocol is ambiguous"
+        )
+    if v02_count == (1,):
+        _, _, profile = verification._load_single_profile(connection)
+        decision = verification._load_current_decision(
+            connection, profile=profile
+        )
+        version: Literal["0.2", "0.3"] = "0.2"
+    else:
+        _, _, manifest, profile = verification._load_single_profile_v03(
+            connection
+        )
+        decision = verification._load_current_decision_v03(
+            connection, profile=profile, manifest=manifest
+        )
+        version = "0.3"
+    if decision is None:
+        raise AcceptanceTransactionError(
+            "acceptance requires a current verification decision"
+        )
+    return version, decision
+
+
+def _resolve_current_verification_record(
+    connection: sqlite3.Connection,
+) -> CurrentVerificationRecord:
+    current = _load_current_verification_decision(connection)
+    if current is None:
+        raise AcceptanceTransactionError(
+            "acceptance requires a current verification decision"
+        )
+    version, decision = current
+    matches = 0
+    for table in ("verification_decisions", "verification_decisions_v03"):
+        matches += connection.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE decision_id = ?",
+            (decision.decision_id,),
+        ).fetchone()[0]
+    if matches != 1:
+        raise AcceptanceTransactionError(
+            "acceptance verification decision is ambiguous"
+        )
+    return CurrentVerificationRecord(
+        protocol_version=version,
+        decision_id=decision.decision_id,
+        decision_digest=decision.digest,
+        decision=decision.decision,
     )
-    if current is None or current.decision != "VERIFIED":
+
+
+def _require_current_verified_decision_if_v02(
+    connection: sqlite3.Connection,
+):
+    """Compatibility gate for no-profile, v0.2, and v0.3 ledgers."""
+
+    counts = (
+        connection.execute(
+            "SELECT COUNT(*) FROM verification_profiles_v02"
+        ).fetchone(),
+        connection.execute(
+            "SELECT COUNT(*) FROM verification_profiles_v03"
+        ).fetchone(),
+    )
+    if counts == ((0,), (0,)):
+        return None
+    try:
+        current = _resolve_current_verification_record(connection)
+    except AcceptanceTransactionError as error:
+        if "current verification decision" not in str(error):
+            raise
+        raise AcceptanceTransactionError(
+            "acceptance requires the current VERIFIED decision"
+        ) from error
+    if current.decision != "VERIFIED":
         raise AcceptanceTransactionError(
             "acceptance requires the current VERIFIED decision"
         )
@@ -3048,20 +3128,53 @@ def _exact_acceptance_transition_readback(
     try:
         connection = evidence.connect_ledger(ledger_path)
         try:
-            row = connection.execute(
-                """
-                SELECT target_acceptance_id, verification_decision_id,
-                       transition_json
-                FROM acceptance_transitions
-                WHERE transition_id = ?
-                """,
-                (transition.transition_id,),
-            ).fetchone()
+            current = _resolve_current_verification_record(connection)
+            if (
+                current.decision_id != transition.verification_decision_id
+                or current.decision_digest
+                != transition.verification_decision_digest
+            ):
+                return False
+            if current.protocol_version == "0.2":
+                transition_table = "acceptance_transitions"
+                parent_table = "acceptance_transition_parents"
+                row = connection.execute(
+                    f"""
+                    SELECT target_acceptance_id, verification_decision_id,
+                           transition_json
+                    FROM {transition_table}
+                    WHERE transition_id = ?
+                    """,
+                    (transition.transition_id,),
+                ).fetchone()
+                expected_row = (
+                    transition.target_acceptance_id,
+                    transition.verification_decision_id,
+                    rfc8785.dumps(transition.model_dump(mode="json")),
+                )
+            else:
+                transition_table = "acceptance_transitions_v03"
+                parent_table = "acceptance_transition_parents_v03"
+                row = connection.execute(
+                    f"""
+                    SELECT transition_digest, target_acceptance_id,
+                           verification_decision_id, transition_json
+                    FROM {transition_table}
+                    WHERE transition_id = ?
+                    """,
+                    (transition.transition_id,),
+                ).fetchone()
+                expected_row = (
+                    transition.digest,
+                    transition.target_acceptance_id,
+                    transition.verification_decision_id,
+                    rfc8785.dumps(transition.model_dump(mode="json")),
+                )
             parents = tuple(
                 connection.execute(
-                    """
+                    f"""
                     SELECT ordinal, parent_id
-                    FROM acceptance_transition_parents
+                    FROM {parent_table}
                     WHERE transition_id = ?
                     ORDER BY ordinal
                     """,
@@ -3072,11 +3185,7 @@ def _exact_acceptance_transition_readback(
             connection.close()
     except Exception:
         return False
-    return row == (
-        transition.target_acceptance_id,
-        transition.verification_decision_id,
-        rfc8785.dumps(transition.model_dump(mode="json")),
-    ) and parents == tuple(
+    return row == expected_row and parents == tuple(
         (ordinal, parent_id)
         for ordinal, parent_id in enumerate(transition.causal_parent_ids)
     )
@@ -3163,11 +3272,12 @@ def commit_acceptance_transition(
             raise AcceptanceTransactionError(
                 "transition target acceptance is not current"
             )
-        _, _, profile = verification._load_single_profile(connection)
-        decision = verification._load_current_decision(
-            connection,
-            profile=profile,
-        )
+        current = _load_current_verification_decision(connection)
+        if current is None:
+            raise AcceptanceTransactionError(
+                "transition verification decision is unavailable"
+            )
+        protocol_version, decision = current
         if (
             decision is None
             or parsed.verification_decision_id != decision.decision_id
@@ -3193,20 +3303,41 @@ def commit_acceptance_transition(
             raise AcceptanceTransactionError(
                 "transition reason does not match the current decision"
             )
-        existing = connection.execute(
-            """
-            SELECT target_acceptance_id, verification_decision_id,
-                   transition_json
-            FROM acceptance_transitions
-            WHERE transition_id = ?
-            """,
-            (parsed.transition_id,),
-        ).fetchone()
-        expected = (
-            parsed.target_acceptance_id,
-            parsed.verification_decision_id,
-            rfc8785.dumps(parsed.model_dump(mode="json")),
-        )
+        if protocol_version == "0.2":
+            transition_table = "acceptance_transitions"
+            parent_table = "acceptance_transition_parents"
+            existing = connection.execute(
+                f"""
+                SELECT target_acceptance_id, verification_decision_id,
+                       transition_json
+                FROM {transition_table}
+                WHERE transition_id = ?
+                """,
+                (parsed.transition_id,),
+            ).fetchone()
+            expected = (
+                parsed.target_acceptance_id,
+                parsed.verification_decision_id,
+                rfc8785.dumps(parsed.model_dump(mode="json")),
+            )
+        else:
+            transition_table = "acceptance_transitions_v03"
+            parent_table = "acceptance_transition_parents_v03"
+            existing = connection.execute(
+                f"""
+                SELECT transition_digest, target_acceptance_id,
+                       verification_decision_id, transition_json
+                FROM {transition_table}
+                WHERE transition_id = ?
+                """,
+                (parsed.transition_id,),
+            ).fetchone()
+            expected = (
+                parsed.digest,
+                parsed.target_acceptance_id,
+                parsed.verification_decision_id,
+                rfc8785.dumps(parsed.model_dump(mode="json")),
+            )
         if existing is not None:
             if existing == expected and _exact_acceptance_transition_readback(
                 path,
@@ -3220,29 +3351,40 @@ def commit_acceptance_transition(
                 "acceptance transition id is already used"
             )
         if connection.execute(
-            "SELECT 1 FROM acceptance_transitions WHERE target_acceptance_id = ?",
+            f"SELECT 1 FROM {transition_table} WHERE target_acceptance_id = ?",
             (parsed.target_acceptance_id,),
         ).fetchone() is not None:
             raise AcceptanceTransactionError(
                 "acceptance already has a terminal transition"
             )
         verification._assert_nonce_unused(connection, parsed.nonce)
-        connection.execute(
-            """
-            INSERT INTO acceptance_transitions (
-                transition_id, target_acceptance_id,
-                verification_decision_id, transition_json
-            ) VALUES (?, ?, ?, ?)
-            """,
-            (parsed.transition_id, *expected),
-        )
+        if protocol_version == "0.2":
+            connection.execute(
+                f"""
+                INSERT INTO {transition_table} (
+                    transition_id, target_acceptance_id,
+                    verification_decision_id, transition_json
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (parsed.transition_id, *expected),
+            )
+        else:
+            connection.execute(
+                f"""
+                INSERT INTO {transition_table} (
+                    transition_id, transition_digest, target_acceptance_id,
+                    verification_decision_id, transition_json
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (parsed.transition_id, *expected),
+            )
         for ordinal, parent_id in enumerate(parsed.causal_parent_ids):
             connection.execute(
                 """
-                INSERT INTO acceptance_transition_parents (
+                INSERT INTO {parent_table} (
                     transition_id, ordinal, parent_id
                 ) VALUES (?, ?, ?)
-                """,
+                """.format(parent_table=parent_table),
                 (parsed.transition_id, ordinal, parent_id),
             )
         if fault == "before_commit":

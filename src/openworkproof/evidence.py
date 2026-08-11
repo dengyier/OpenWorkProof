@@ -707,10 +707,9 @@ _SCHEMA = (
     CREATE TABLE acceptance_transitions_v03 (
         transition_id TEXT PRIMARY KEY,
         transition_digest TEXT NOT NULL UNIQUE,
-        decision_id TEXT NOT NULL
+        target_acceptance_id TEXT NOT NULL UNIQUE,
+        verification_decision_id TEXT NOT NULL
             REFERENCES verification_decisions_v03(decision_id),
-        predecessor_id TEXT UNIQUE
-            REFERENCES acceptance_transitions_v03(transition_id),
         transition_json BLOB NOT NULL UNIQUE
     )
     """,
