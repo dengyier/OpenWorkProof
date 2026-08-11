@@ -1803,7 +1803,7 @@ Expected: old v0.1 bundle files are absent from the commit diff.
 - Modify: `docs/offline-verification.md`
 - Modify: `docs/status.md`
 
-- [ ] **Step 1: Write the operator guide**
+- [x] **Step 1: Write the operator guide**
 
 Document day 1–3 claim freeze, day 4–7 integration, day 8–14 real execution,
 day 15–18 customer decision, and day 19–21 commercial review. State that the
@@ -1813,25 +1813,25 @@ Evidence Bundle but no customer package; Level 2 adds a customer-controlled
 CommitmentAnchor, customer acceptance, and Delivery Package; Level 3 adds a
 second independent Verifier and stricter retention limits.
 
-- [ ] **Step 2: Add byte-valid example objects**
+- [x] **Step 2: Add byte-valid example objects**
 
 Generate the example SubjectClaim and VerificationProfile from model fixtures,
 validate them with the installed v0.2 schemas, and use non-customer identifiers
 only. The examples must not contain private keys or imply external acceptance.
 
-- [ ] **Step 3: Add the technical/commercial scorecard**
+- [x] **Step 3: Add the technical/commercial scorecard**
 
 The scorecard must separately capture test counts, registered adversarial
 cases, open-source replay cases, paid pilots, customer acceptance decisions,
 cycle time, supplement rounds, replay execution, payment evidence, and repeat
 project evidence. Default every external outcome to `not evidenced`.
 
-- [ ] **Step 4: Update public documentation from fresh behavior**
+- [x] **Step 4: Update public documentation from fresh behavior**
 
 Document supported v0.2 commands and exact boundaries. Do not reuse historical
 test counts; insert only counts from the final gates in Task 16.
 
-- [ ] **Step 5: Validate docs and commit**
+- [x] **Step 5: Validate docs and commit**
 
 Run:
 
