@@ -226,7 +226,7 @@ git commit -m "fix: close team network client without accept race"
 - Modify: `tests/conftest.py`
 - Create: `tests/test_binding_models_v04.py`
 
-- [ ] **Step 1: Add model tests before implementation**
+- [x] **Step 1: Add model tests before implementation**
 
 Cover valid construction plus empty/sorted/unique/bounds/digest/signature-pairing failures for all four objects and `AgentRequestV04`:
 
@@ -256,7 +256,7 @@ Run:
 
 Expected RED: imports for the new types fail.
 
-- [ ] **Step 2: Add exact enums and reason codes**
+- [x] **Step 2: Add exact enums and reason codes**
 
 Add literals/enums for:
 
@@ -269,7 +269,7 @@ AuthorityStatus = Literal[
 
 Add the fixed design-spec reason codes with validators enforcing sorted unique tuples and a closed allowed-code set per outcome.
 
-- [ ] **Step 3: Add signed v0.4 sibling models**
+- [x] **Step 3: Add signed v0.4 sibling models**
 
 Implement:
 
@@ -353,11 +353,11 @@ class AgentRequestV04(AgentRequest):
 
 Implement `BindingDecisionDraft`, `BindingDecisionSignature`, and `BindingDecision` with the exact fields in design section 6.4: decision/work-order/judgment/manifest/verification ids and digests, ordered receipt id/digest pairs, replay digest, optional checkpoint digest, outcome, closed reason codes, authority status, causal/supersession links, decision time, nonce, detached verifier signatures, and canonical digest. Do not change the old `AgentRequest` or verification decision classes.
 
-- [ ] **Step 4: Add canonical/signing domains**
+- [x] **Step 4: Add canonical/signing domains**
 
 Extend `signing.py` with version-scoped v0.4 canonical and signed domain sets. `AuthorityCheckpoint` uses explicit `authority_key_id` and detached authority signature bytes under `openworkproof/authority-checkpoint/v0.4`, avoiding a second inherited key-id field. Add tests that v0.1–v0.3 signing bytes are unchanged and that cross-domain/cross-version signatures fail.
 
-- [ ] **Step 5: Run focused and compatibility tests**
+- [x] **Step 5: Run focused and compatibility tests**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -369,7 +369,7 @@ Extend `signing.py` with version-scoped v0.4 canonical and signed domain sets. `
 
 Expected: all green; frozen-model schema snapshots remain unchanged.
 
-- [ ] **Step 6: Commit the models**
+- [x] **Step 6: Commit the models**
 
 ```bash
 git add src/openworkproof/models.py src/openworkproof/signing.py \
