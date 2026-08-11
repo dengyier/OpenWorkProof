@@ -9,12 +9,22 @@ from pathlib import Path
 from typing import Callable, Literal, TypeVar
 
 from openworkproof import evidence
-from openworkproof.models import JudgmentCommitment, KeyBinding
+from openworkproof.binding import (
+    BindingInputError,
+    CanonicalAdapterProfile,
+    projection_from_adapter_profile,
+    validate_action_binding_manifest,
+)
+from openworkproof.models import (
+    ActionBindingManifest,
+    EvaluationScopeManifest,
+    JudgmentCommitment,
+    KeyBinding,
+    SubjectClaim,
+    WorkOrder,
+)
+from openworkproof.scope import validate_evaluation_scope
 from openworkproof.signing import decode_and_verify_key_binding, verify_payload
-
-
-class BindingInputError(ValueError):
-    """A v0.4 binding input is invalid and must not be committed."""
 
 
 class BindingTransactionError(RuntimeError):
@@ -57,7 +67,9 @@ _Fault = Literal[
 _T = TypeVar("_T")
 
 
-def _canonical_model_blob(value: JudgmentCommitment) -> bytes:
+def _canonical_model_blob(value: object) -> bytes:
+    if not hasattr(value, "model_dump"):
+        raise BindingInputError("binding protocol object is malformed")
     return evidence._canonical_json(value.model_dump(mode="json")).encode("utf-8")
 
 
@@ -304,3 +316,522 @@ def commit_judgment_commitment(
         readback=lambda _: _exact_judgment_readback(path, parsed, committed_at),
         fault=fault,
     )
+
+
+def _load_canonical_row(model_type, raw: object, label: str):
+    if not isinstance(raw, (bytes, str)):
+        raise BindingTransactionError(f"committed {label} row has the wrong type")
+    try:
+        parsed = model_type.model_validate_json(raw)
+    except Exception as error:
+        raise BindingTransactionError(f"committed {label} row is invalid") from error
+    encoded = raw.encode("utf-8") if isinstance(raw, str) else raw
+    if _canonical_model_blob(parsed) != encoded:
+        raise BindingTransactionError(f"committed {label} row is not canonical")
+    return parsed
+
+
+def _load_committed_judgment(
+    connection: sqlite3.Connection,
+    manifest: ActionBindingManifest,
+) -> tuple[JudgmentCommitment, datetime]:
+    row = connection.execute(
+        """
+        SELECT commitment_digest, authority_namespace, subject_id, nonce,
+               signer_key_id, commitment_json, committed_at
+        FROM judgment_commitments_v04 WHERE commitment_id = ?
+        """,
+        (manifest.judgment_commitment_id,),
+    ).fetchone()
+    if row is None:
+        raise BindingInputError("committed Judgment is unavailable")
+    judgment = _load_canonical_row(
+        JudgmentCommitment, row[5], "Judgment"
+    )
+    if row[:5] != (
+        judgment.digest,
+        judgment.authority_namespace,
+        judgment.subject_id,
+        judgment.nonce,
+        judgment.signer_key_id,
+    ):
+        raise BindingTransactionError(
+            "committed Judgment index does not match canonical row"
+        )
+    if (
+        judgment.commitment_id != manifest.judgment_commitment_id
+        or judgment.digest != manifest.judgment_commitment_digest
+    ):
+        raise BindingInputError("committed Judgment digest chain does not match")
+    committed_at = _validate_committed_at(row[6])
+    if not judgment.valid_from <= committed_at < judgment.expires_at:
+        raise BindingTransactionError(
+            "committed Judgment validity timestamp is invalid"
+        )
+    return judgment, committed_at
+
+
+def _load_committed_scope(
+    connection: sqlite3.Connection,
+    manifest: ActionBindingManifest,
+    work_order: WorkOrder,
+) -> EvaluationScopeManifest:
+    row = connection.execute(
+        """
+        SELECT scope_digest, work_order_digest, claim_id,
+               subject_claim_digest, scope_json
+        FROM evaluation_scopes_v03 WHERE scope_id = ?
+        """,
+        (manifest.evaluation_scope_id,),
+    ).fetchone()
+    if row is None:
+        raise BindingInputError("committed Scope is unavailable")
+    scope = _load_canonical_row(EvaluationScopeManifest, row[4], "Scope")
+    if row[:2] != (scope.digest, scope.work_order_digest) or row[3] != (
+        scope.subject_claim_digest
+    ):
+        raise BindingTransactionError(
+            "committed Scope index does not match canonical row"
+        )
+    if (
+        scope.scope_id != manifest.evaluation_scope_id
+        or scope.digest != manifest.evaluation_scope_digest
+    ):
+        raise BindingInputError("committed Scope digest chain does not match")
+    claim_row = connection.execute(
+        "SELECT claim_json FROM subject_claims WHERE claim_id = ?", (row[2],)
+    ).fetchone()
+    if claim_row is None:
+        raise BindingTransactionError("committed Scope claim row is unavailable")
+    claim = _load_canonical_row(SubjectClaim, claim_row[0], "Scope claim")
+    manager = next(
+        (binding for binding in work_order.key_bindings if binding.role == "Manager"),
+        None,
+    )
+    if manager is None:
+        raise BindingTransactionError("committed Scope Manager is unavailable")
+    try:
+        manager_key = decode_and_verify_key_binding(manager)
+        grant = work_order.root_grant_template
+        valid_authority = (
+            grant.subject_agent_id == manager.subject_id
+            and grant.subject_key_id == manager.key_id
+            and "owp.compose_proof" in grant.allowed_tools
+            and grant.quota.tool_calls > 0
+            and claim.claim_id == row[2]
+            and claim.digest == scope.subject_claim_digest
+            and claim.work_order_digest == work_order.digest
+            and claim.customer_acceptor_key_id in work_order.acceptor_key_ids
+            and claim.signer_key_id == manager.key_id
+            and verify_payload(
+                "subject-claim", claim.model_dump(mode="json"), manager_key
+            )
+            and scope.signer_key_id == manager.key_id
+            and verify_payload(
+                "evaluation-scope",
+                scope.model_dump(mode="json"),
+                manager_key,
+                version="0.3",
+            )
+            and grant.valid_from <= claim.created_at <= scope.created_at
+            and scope.created_at < scope.expires_at
+            and scope.expires_at <= min(grant.expires_at, work_order.deadline)
+        )
+        validate_evaluation_scope(scope, claim=claim)
+    except Exception as error:
+        raise BindingTransactionError(
+            "committed Scope Manager grant, claim authority, or linkage is invalid"
+        ) from error
+    if not valid_authority:
+        raise BindingTransactionError(
+            "committed Scope Manager grant, claim authority, or linkage is invalid"
+        )
+    return scope
+
+
+def _validate_committed_at(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise BindingTransactionError("manifest committed_at is not canonical")
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as error:
+        raise BindingTransactionError(
+            "manifest committed_at is not canonical"
+        ) from error
+    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value or parsed.year < 1970:
+        raise BindingTransactionError("manifest committed_at is not canonical")
+    return parsed
+
+
+def _load_adapter_profile(
+    digest: object,
+    raw: object,
+) -> CanonicalAdapterProfile:
+    if not isinstance(raw, bytes) or not isinstance(digest, str):
+        raise BindingTransactionError("stored adapter profile row is malformed")
+    profile = CanonicalAdapterProfile(
+        canonical_json=raw,
+        adapter_profile_digest=digest,
+    )
+    try:
+        projection_from_adapter_profile(profile)
+    except BindingInputError as error:
+        raise BindingTransactionError(
+            "stored adapter profile row is invalid"
+        ) from error
+    return profile
+
+
+def _validated_manifest_history(
+    connection: sqlite3.Connection,
+    work_order: WorkOrder,
+) -> tuple[
+    dict[str, tuple[ActionBindingManifest, CanonicalAdapterProfile, datetime]],
+    ActionBindingManifest | None,
+]:
+    rows = tuple(
+        connection.execute(
+            """
+            SELECT binding_manifest_id, manifest_digest, work_order_digest,
+                   judgment_commitment_id, judgment_commitment_digest,
+                   evaluation_scope_id, evaluation_scope_digest,
+                   adapter_profile_digest, adapter_profile_json, nonce,
+                   signer_key_id, manifest_json, committed_at
+            FROM action_binding_manifests_v04
+            WHERE work_order_digest = ?
+            ORDER BY binding_manifest_id
+            """,
+            (work_order.digest,),
+        )
+    )
+    validated: dict[
+        str, tuple[ActionBindingManifest, CanonicalAdapterProfile, datetime]
+    ] = {}
+    for row in rows:
+        manifest = _load_canonical_row(
+            ActionBindingManifest, row[11], "ActionBindingManifest history"
+        )
+        profile = _load_adapter_profile(row[7], row[8])
+        committed_at = _validate_committed_at(row[12])
+        if row[:7] != (
+            manifest.binding_manifest_id,
+            manifest.digest,
+            manifest.work_order_digest,
+            manifest.judgment_commitment_id,
+            manifest.judgment_commitment_digest,
+            manifest.evaluation_scope_id,
+            manifest.evaluation_scope_digest,
+        ) or row[9:11] != (manifest.nonce, manifest.signer_key_id):
+            raise BindingTransactionError(
+                "binding manifest history index does not match canonical row"
+            )
+        judgment, judgment_committed_at = _load_committed_judgment(
+            connection, manifest
+        )
+        scope = _load_committed_scope(connection, manifest, work_order)
+        if judgment_committed_at > committed_at:
+            raise BindingTransactionError(
+                "Judgment committed after its binding Manifest"
+            )
+        try:
+            validate_action_binding_manifest(
+                work_order=work_order,
+                judgment=judgment,
+                scope=scope,
+                adapter_profile=profile,
+                manifest=manifest,
+                transaction_time=committed_at,
+            )
+        except BindingInputError as error:
+            raise BindingTransactionError(
+                "binding manifest history signature or authority is invalid"
+            ) from error
+        validated[manifest.binding_manifest_id] = (
+            manifest,
+            profile,
+            committed_at,
+        )
+
+    relation_rows = tuple(
+        connection.execute(
+            """
+            SELECT child_manifest_id, parent_manifest_id,
+                   parent_manifest_digest
+            FROM action_binding_manifest_supersessions_v04
+            ORDER BY child_manifest_id
+            """
+        )
+    )
+    if not validated:
+        if relation_rows:
+            raise BindingTransactionError(
+                "binding manifest history has relations without objects"
+            )
+        return validated, None
+    if len(relation_rows) != len(validated) - 1:
+        raise BindingTransactionError(
+            "binding manifest history relation count is invalid"
+        )
+    relations_by_child: dict[str, tuple[str, str]] = {}
+    children_by_parent: dict[str, str] = {}
+    for child_id, parent_id, parent_digest in relation_rows:
+        if (
+            child_id not in validated
+            or parent_id not in validated
+            or child_id in relations_by_child
+            or parent_id in children_by_parent
+        ):
+            raise BindingTransactionError(
+                "binding manifest history contains a fork or dangling relation"
+            )
+        parent = validated[parent_id][0]
+        child = validated[child_id][0]
+        if (
+            parent.digest != parent_digest
+            or child.supersedes_binding_manifest_id != parent_id
+            or child.supersedes_binding_manifest_digest != parent_digest
+            or child.causal_parent_manifest_ids != (parent_id,)
+            or child.created_at <= parent.created_at
+            or validated[parent_id][2] > validated[child_id][2]
+        ):
+            raise BindingTransactionError(
+                "binding manifest history relation does not match signed child"
+            )
+        relations_by_child[child_id] = (parent_id, parent_digest)
+        children_by_parent[parent_id] = child_id
+
+    roots = tuple(
+        manifest
+        for manifest, _, _ in validated.values()
+        if manifest.supersedes_binding_manifest_id is None
+    )
+    if len(roots) != 1 or roots[0].binding_manifest_id in relations_by_child:
+        raise BindingTransactionError(
+            "binding manifest history must contain exactly one signed root"
+        )
+    current = roots[0]
+    visited: set[str] = set()
+    while True:
+        identifier = current.binding_manifest_id
+        if identifier in visited:
+            raise BindingTransactionError("binding manifest history contains a cycle")
+        visited.add(identifier)
+        child_id = children_by_parent.get(identifier)
+        if child_id is None:
+            break
+        current = validated[child_id][0]
+    if len(visited) != len(validated):
+        raise BindingTransactionError(
+            "binding manifest history is disconnected or cyclic"
+        )
+    return validated, current
+
+
+def _exact_manifest_readback(
+    path: Path,
+    manifest: ActionBindingManifest,
+    adapter_profile: CanonicalAdapterProfile,
+    committed_at: str,
+) -> bool:
+    connection = evidence.connect_ledger(path)
+    try:
+        work_order = evidence.load_authoritative_work_order(connection)
+        history, _ = _validated_manifest_history(connection, work_order)
+        existing = history.get(manifest.binding_manifest_id)
+        return (
+            existing is not None
+            and existing
+            == (
+                manifest,
+                adapter_profile,
+                _validate_committed_at(committed_at),
+            )
+        )
+    finally:
+        connection.close()
+
+
+def load_current_action_binding_manifest(
+    ledger_path: Path,
+    work_order_digest: str,
+) -> ActionBindingManifest:
+    """Load the sole graph-derived current manifest for one WorkOrder."""
+
+    path = Path(ledger_path)
+    if not path.is_file():
+        raise BindingTransactionError("binding ledger is unavailable")
+    connection = evidence.connect_ledger(path)
+    try:
+        work_order = evidence.load_authoritative_work_order(connection)
+        if work_order.digest != work_order_digest:
+            raise BindingTransactionError(
+                "requested WorkOrder is not the authoritative ledger WorkOrder"
+            )
+        _, current = _validated_manifest_history(connection, work_order)
+        if current is None:
+            raise BindingTransactionError("current binding manifest is unavailable")
+        return current
+    finally:
+        connection.close()
+
+
+def commit_action_binding_manifest(
+    ledger_path: Path,
+    manifest: ActionBindingManifest,
+    adapter_profile: CanonicalAdapterProfile,
+    *,
+    transaction_time: datetime,
+    fault: _Fault | None = None,
+) -> ActionBindingManifest:
+    """Commit one Manager manifest after loading every signed authority row."""
+
+    path = Path(ledger_path)
+    try:
+        parsed = ActionBindingManifest.model_validate(
+            manifest.model_dump(mode="json")
+        )
+    except Exception as error:
+        raise BindingInputError("action binding manifest is malformed") from error
+    projection_from_adapter_profile(adapter_profile)
+    committed_at = _canonical_utc_second(transaction_time)
+    committed_datetime = _validate_committed_at(committed_at)
+    canonical = _canonical_model_blob(parsed)
+
+    def stage(connection: sqlite3.Connection) -> ActionBindingManifest:
+        work_order = evidence.load_authoritative_work_order(connection)
+        history, current = _validated_manifest_history(connection, work_order)
+        existing = history.get(parsed.binding_manifest_id)
+        if existing is not None:
+            existing_manifest, existing_profile, _ = existing
+            if (
+                existing_manifest != parsed
+                or _canonical_model_blob(existing_manifest) != canonical
+                or existing_profile != adapter_profile
+            ):
+                raise BindingTransactionError("binding manifest id is already used")
+            raise BindingCommittedError(
+                "the exact action binding manifest is already committed", parsed
+            )
+        if connection.execute(
+            "SELECT 1 FROM action_binding_manifests_v04 "
+            "WHERE binding_manifest_id = ?",
+            (parsed.binding_manifest_id,),
+        ).fetchone() is not None:
+            raise BindingTransactionError("binding manifest id is already used")
+
+        judgment, judgment_committed_at = _load_committed_judgment(
+            connection, parsed
+        )
+        scope = _load_committed_scope(connection, parsed, work_order)
+        if judgment_committed_at > committed_datetime:
+            raise BindingTransactionError(
+                "Judgment committed after its binding Manifest"
+            )
+        validate_action_binding_manifest(
+            work_order=work_order,
+            judgment=judgment,
+            scope=scope,
+            adapter_profile=adapter_profile,
+            manifest=parsed,
+            transaction_time=transaction_time,
+        )
+        if connection.execute(
+            """
+            SELECT 1 FROM action_binding_manifests_v04
+            WHERE signer_key_id = ? AND nonce = ?
+            """,
+            (parsed.signer_key_id, parsed.nonce),
+        ).fetchone() is not None:
+            raise BindingTransactionError("binding manifest nonce is already used")
+
+        if not history:
+            if parsed.supersedes_binding_manifest_id is not None:
+                raise BindingTransactionError(
+                    "binding manifest supersession parent is unavailable"
+                )
+        else:
+            if current is None:
+                raise BindingTransactionError(
+                    "binding manifest history has no unique current object"
+                )
+            if (
+                parsed.supersedes_binding_manifest_id
+                != current.binding_manifest_id
+                or parsed.supersedes_binding_manifest_digest != current.digest
+            ):
+                raise BindingTransactionError(
+                    "manifest does not supersede the exact current manifest"
+                )
+            if parsed.created_at <= current.created_at:
+                raise BindingInputError(
+                    "superseding manifest must be created after its parent"
+                )
+            if history[current.binding_manifest_id][2] > committed_datetime:
+                raise BindingTransactionError(
+                    "parent Manifest committed after its child"
+                )
+
+        connection.execute(
+            """
+            INSERT INTO action_binding_manifests_v04 (
+                binding_manifest_id, manifest_digest, work_order_digest,
+                judgment_commitment_id, judgment_commitment_digest,
+                evaluation_scope_id, evaluation_scope_digest,
+                adapter_profile_digest, adapter_profile_json, nonce,
+                signer_key_id, manifest_json, committed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                parsed.binding_manifest_id,
+                parsed.digest,
+                parsed.work_order_digest,
+                parsed.judgment_commitment_id,
+                parsed.judgment_commitment_digest,
+                parsed.evaluation_scope_id,
+                parsed.evaluation_scope_digest,
+                adapter_profile.adapter_profile_digest,
+                adapter_profile.canonical_json,
+                parsed.nonce,
+                parsed.signer_key_id,
+                canonical,
+                committed_at,
+            ),
+        )
+        if parsed.supersedes_binding_manifest_id is not None:
+            connection.execute(
+                """
+                INSERT INTO action_binding_manifest_supersessions_v04 (
+                    child_manifest_id, parent_manifest_id,
+                    parent_manifest_digest
+                ) VALUES (?, ?, ?)
+                """,
+                (
+                    parsed.binding_manifest_id,
+                    parsed.supersedes_binding_manifest_id,
+                    parsed.supersedes_binding_manifest_digest,
+                ),
+            )
+        return parsed
+
+    return _commit_with_readback(
+        path,
+        stage=stage,
+        readback=lambda _: _exact_manifest_readback(
+            path, parsed, adapter_profile, committed_at
+        ),
+        fault=fault,
+    )
+
+
+__all__ = [
+    "BindingCommitIndeterminateError",
+    "BindingCommittedError",
+    "BindingInputError",
+    "BindingTransactionError",
+    "JudgmentAuthorityContext",
+    "commit_action_binding_manifest",
+    "commit_judgment_commitment",
+    "load_current_action_binding_manifest",
+]

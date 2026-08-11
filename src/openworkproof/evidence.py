@@ -757,6 +757,70 @@ _SCHEMA = (
     END
     """,
     """
+    CREATE TABLE action_binding_manifests_v04 (
+        binding_manifest_id TEXT PRIMARY KEY,
+        manifest_digest TEXT NOT NULL,
+        work_order_digest TEXT NOT NULL
+            REFERENCES work_orders(work_order_digest),
+        judgment_commitment_id TEXT NOT NULL
+            REFERENCES judgment_commitments_v04(commitment_id),
+        judgment_commitment_digest TEXT NOT NULL,
+        evaluation_scope_id TEXT NOT NULL
+            REFERENCES evaluation_scopes_v03(scope_id),
+        evaluation_scope_digest TEXT NOT NULL,
+        adapter_profile_digest TEXT NOT NULL,
+        adapter_profile_json BLOB NOT NULL,
+        nonce TEXT NOT NULL,
+        signer_key_id TEXT NOT NULL,
+        manifest_json BLOB NOT NULL,
+        committed_at TEXT NOT NULL,
+        UNIQUE (signer_key_id, nonce)
+    )
+    """,
+    """
+    CREATE INDEX action_binding_manifests_v04_work_order
+    ON action_binding_manifests_v04 (
+        work_order_digest, committed_at, binding_manifest_id
+    )
+    """,
+    """
+    CREATE TABLE action_binding_manifest_supersessions_v04 (
+        child_manifest_id TEXT PRIMARY KEY
+            REFERENCES action_binding_manifests_v04(binding_manifest_id),
+        parent_manifest_id TEXT NOT NULL UNIQUE
+            REFERENCES action_binding_manifests_v04(binding_manifest_id),
+        parent_manifest_digest TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TRIGGER action_binding_manifests_v04_are_immutable_update
+    BEFORE UPDATE ON action_binding_manifests_v04
+    BEGIN
+        SELECT RAISE(ABORT, 'action binding manifest is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER action_binding_manifests_v04_are_immutable_delete
+    BEFORE DELETE ON action_binding_manifests_v04
+    BEGIN
+        SELECT RAISE(ABORT, 'action binding manifest is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER action_binding_supersessions_v04_are_immutable_update
+    BEFORE UPDATE ON action_binding_manifest_supersessions_v04
+    BEGIN
+        SELECT RAISE(ABORT, 'action binding supersession is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER action_binding_supersessions_v04_are_immutable_delete
+    BEFORE DELETE ON action_binding_manifest_supersessions_v04
+    BEGIN
+        SELECT RAISE(ABORT, 'action binding supersession is immutable');
+    END
+    """,
+    """
     CREATE TRIGGER work_orders_single_authority
     BEFORE INSERT ON work_orders
     WHEN EXISTS (SELECT 1 FROM work_orders)
