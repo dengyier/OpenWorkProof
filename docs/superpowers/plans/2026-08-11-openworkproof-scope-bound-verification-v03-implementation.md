@@ -1263,7 +1263,7 @@ Checkpoint must distinguish local release-candidate completion from push, merge,
 
 **Files:** none unless review identifies a scoped defect
 
-- [ ] **Step 1: Run final static and focused checks from a clean tree**
+- [x] **Step 1: Run final static and focused checks from a clean tree**
 
 ```bash
 test -z "$(git status --porcelain)"
@@ -1275,15 +1275,15 @@ git diff --check
 
 Expected: clean tree and zero failures.
 
-- [ ] **Step 2: Review every approved invariant against evidence**
+- [x] **Step 2: Review every approved invariant against evidence**
 
 Produce a table mapping each Section 21 acceptance criterion and each Task 12 attack to test names and fresh output. Confirm v0.2 frozen registry digests and historical bundles are byte-identical to the plan base.
 
-- [ ] **Step 3: Inspect the three privacy packages manually**
+- [x] **Step 3: Inspect the three privacy packages manually**
 
 Open customer-private, diagnostic, and public report outputs. Confirm the public view contains no locator/test-name/source-byte leakage and states it is not a complete offline replay package.
 
-- [ ] **Step 4: Stop at the integration choice**
+- [x] **Step 4: Stop at the integration choice**
 
 Report branch name, HEAD, commits, tests, inventory, evidence bundle, unresolved risks, and commercial state. Offer exactly:
 
