@@ -1866,13 +1866,13 @@ git commit -m 'docs: add verifiable delivery pilot kit'
 - Create: `supply-chain/images/candidates/<final-source-revision>.json`
 - Modify: `docs/status.md`
 
-- [ ] **Step 1: Close the trusted-helper source surface**
+- [x] **Step 1: Close the trusted-helper source surface**
 
 Add only `verification.py`, `settlement.py`, and `delivery_package.py` if the
 trusted offline verifier imports them. Do not add CLI, MCP, CSS, services, or
 pilot documentation to the helper image.
 
-- [ ] **Step 2: Run focused and portable gates before building images**
+- [x] **Step 2: Run focused and portable gates before building images**
 
 Run:
 
@@ -1893,13 +1893,13 @@ git diff --check
 
 Expected: zero failures. Record exact counts; do not prefill them.
 
-- [ ] **Step 3: Build a final immutable candidate inventory**
+- [x] **Step 3: Build a final immutable candidate inventory**
 
 Repeat Task 2 Steps 3–5 against the exact final source revision. Create a new
 inventory and final archive directory. Do not edit the M0 or historical
 inventories.
 
-- [ ] **Step 4: Run required-live gates**
+- [x] **Step 4: Run required-live gates**
 
 Run:
 
@@ -1913,12 +1913,12 @@ export OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1
 
 Expected: every command exits 0 with zero failures and zero unapproved skips.
 
-- [ ] **Step 5: Verify both v0.2 packages in a fresh offline process**
+- [x] **Step 5: Verify both v0.2 packages in a fresh offline process**
 
 Run the two exact verifier commands from Task 14 after clearing network proxy
 variables. Expected: both pass without a live ledger or network.
 
-- [ ] **Step 6: Record release truth and commit**
+- [x] **Step 6: Record release truth and commit**
 
 Update `docs/status.md` with source revision, package version, protocol schema
 versions, environment, exact pass/fail/skip counts, candidate inventory path,
@@ -1942,13 +1942,13 @@ Expected: the final inventory is additive and status claims match fresh output.
 
 - Modify only after a real event: `docs/pilot/pilot-scorecard.md`
 
-- [ ] **Step 1: Prepare but do not invent outreach evidence**
+- [x] **Step 1: Prepare but do not invent outreach evidence**
 
 Provide the operator with the validated example package, pilot guide, scorecard,
 and exact technical gate report. Leave payer, customer, deposit, acceptance,
 payment, repeat project, and deployment fields as `not evidenced`.
 
-- [ ] **Step 2: Define the external 21-day gate**
+- [x] **Step 2: Define the external 21-day gate**
 
 The human operator must obtain a real project, real acceptance criteria, a
 Customer Acceptor, and paid deposit. WorkBuddy may record supplied evidence but
@@ -1981,27 +1981,27 @@ Do not merge, push, publish, or open a PR until the user selects one.
 
 ## Final Review Checklist
 
-- [ ] Every signed v0.1 fixture and schema remains byte-identical.
-- [ ] Invalid protocol input is rejected before a signed UNKNOWN exists.
-- [ ] VERIFIED requires a real, applied, caught negative control.
-- [ ] `MUTATION_NOT_APPLIED`, `MUTATION_SURVIVED`, and verifier crash are
+- [x] Every signed v0.1 fixture and schema remains byte-identical.
+- [x] Invalid protocol input is rejected before a signed UNKNOWN exists.
+- [x] VERIFIED requires a real, applied, caught negative control.
+- [x] `MUTATION_NOT_APPLIED`, `MUTATION_SURVIVED`, and verifier crash are
   distinct.
-- [ ] High-risk verification enforces identity, key, controller, and execution
+- [x] High-risk verification enforces identity, key, controller, and execution
   context independence.
-- [ ] VerificationDecision and acceptance histories are append-only.
-- [ ] Acceptance is bound to the exact current VERIFIED decision.
-- [ ] SettlementReadiness follows the approved priority mapping everywhere.
-- [ ] Delivery Package replay requires no network, live ledger, report HTML, or
+- [x] VerificationDecision and acceptance histories are append-only.
+- [x] Acceptance is bound to the exact current VERIFIED decision.
+- [x] SettlementReadiness follows the approved priority mapping everywhere.
+- [x] Delivery Package replay requires no network, live ledger, report HTML, or
   OWP-hosted service.
-- [ ] Delivery Room never holds an Acceptor private key.
-- [ ] Provider, Verifier, Acceptor, and Auditor authorities remain separate.
-- [ ] Public/private evidence policy rejects secrets and path escape.
-- [ ] CLI, MCP, offline replay, and Delivery Room produce the same current
+- [x] Delivery Room never holds an Acceptor private key.
+- [x] Provider, Verifier, Acceptor, and Auditor authorities remain separate.
+- [x] Public/private evidence policy rejects secrets and path escape.
+- [x] CLI, MCP, offline replay, and Delivery Room produce the same current
   decision and readiness.
-- [ ] Rich and Dify v0.2 packages are additive; v0.1 files are unchanged.
-- [ ] Full, candidate, required-live, and offline gates have fresh zero-failure
+- [x] Rich and Dify v0.2 packages are additive; v0.1 files are unchanged.
+- [x] Full, candidate, required-live, and offline gates have fresh zero-failure
   evidence.
-- [ ] Test counts, adversarial cases, open-source demos, paid pilots, customer
+- [x] Test counts, adversarial cases, open-source demos, paid pilots, customer
   acceptances, and revenue are disclosed as separate metrics.
-- [ ] No custody, payment, settlement-completed, customer-adoption, deployment,
+- [x] No custody, payment, settlement-completed, customer-adoption, deployment,
   or external-acceptance claim exists without external proof.
