@@ -950,19 +950,19 @@ Checkpoint must explicitly confirm MCP has no new signing or commit authority.
 - Create: `tests/test_scope_adversarial_v03.py`
 - Modify only for discovered defects: v0.3 implementation files from Tasks 2–11
 
-- [ ] **Step 1: Add the full omission and drift matrix**
+- [x] **Step 1: Add the full omission and drift matrix**
 
 Test empty population, required file missing, required test missing, N declared/N-1 observed, positive full/negative reduced, source revision drift, candidate drift, workspace drift, selector engine drift, validly re-signed wrong count, and cross-arm population mismatch.
 
-- [ ] **Step 2: Add byte and ledger-row tamper matrix**
+- [x] **Step 2: Add byte and ledger-row tamper matrix**
 
 For every case, rebuild with `model_dump -> modify -> model_validate`; if testing semantic rejection, re-sign with an authorized test key. Tamper Manifest, selector spec, member evidence, scope evidence, profile row, arm row, decision row, decision-parent row, acceptance row, and package manifest. Every case must fail closed or produce the approved UNKNOWN outcome; bad signatures must not be mislabeled as semantic-scope failures.
 
-- [ ] **Step 3: Add transaction fault injection**
+- [x] **Step 3: Add transaction fault injection**
 
 Inject PREPARE, insert, state update, COMMIT, COMMIT-ACK, readback, and cleanup faults for Scope/Profile/Arm/Decision. Assert full-table snapshots and committed-truth behavior.
 
-- [ ] **Step 4: Run the focused adversarial set three times**
+- [x] **Step 4: Run the focused adversarial set three times**
 
 ```bash
 for run in 1 2 3; do
@@ -979,7 +979,7 @@ done
   tests/test_scope_adversarial_v03.py -q
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tests/test_scope_adversarial_v03.py \

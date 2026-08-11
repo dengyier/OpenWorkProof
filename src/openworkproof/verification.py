@@ -1901,6 +1901,48 @@ def _read_evidence_ref(path: Path, ref, *, canonical_json: bool) -> bytes:
     return raw
 
 
+def _validate_selector_spec_evidence(
+    path: Path,
+    manifest: EvaluationScopeManifest,
+) -> None:
+    root = path.parent.resolve(strict=True)
+    seen: set[str] = set()
+    for rule in manifest.selector_rules:
+        matched = False
+        for relative in rule.required_evidence_paths:
+            if relative in seen:
+                raise VerificationTransactionError(
+                    "v0.3 selector evidence path is ambiguous"
+                )
+            seen.add(relative)
+            target = root
+            for segment in relative.split("/"):
+                target = target / segment
+                if target.is_symlink():
+                    raise VerificationTransactionError(
+                        "v0.3 selector evidence traverses a symlink"
+                    )
+            try:
+                resolved = target.resolve(strict=True)
+                resolved.relative_to(root)
+            except (FileNotFoundError, ValueError) as error:
+                raise VerificationTransactionError(
+                    "v0.3 selector evidence is unavailable"
+                ) from error
+            if not resolved.is_file():
+                raise VerificationTransactionError(
+                    "v0.3 selector evidence is unavailable"
+                )
+            if hashlib.sha256(resolved.read_bytes()).hexdigest() == (
+                rule.selector_spec_digest
+            ):
+                matched = True
+        if not matched:
+            raise VerificationTransactionError(
+                "v0.3 selector specification evidence is unavailable"
+            )
+
+
 def _validate_single_arm_result_v03(
     *,
     connection: sqlite3.Connection,
@@ -1946,6 +1988,7 @@ def _validate_single_arm_result_v03(
         )
     ):
         raise VerificationTransactionError("v0.3 arm result signature is invalid")
+    _validate_selector_spec_evidence(path, manifest)
     _validate_causal_receipts(
         connection=connection,
         work_order=work_order,
