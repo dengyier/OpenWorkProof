@@ -494,7 +494,7 @@ git commit -m 'feat: add frozen code scope selectors'
 - Modify: `tests/conftest.py`
 - Create: `tests/test_verification_transactions_v03.py`
 
-- [ ] **Step 1: Write RED model and pure-composition tests**
+- [x] **Step 1: Write RED model and pure-composition tests**
 
 Test exact-match Profile binding; scope fields on every Arm Result; recomputed `ScopeAssessment`; and the decision table:
 
@@ -513,13 +513,13 @@ def test_v03_decision_table(...): ...
 
 Add cross-arm mismatch, missing required target, caller-forged assessment, v0.2 profile offered to v0.3 composer, and validly re-signed but semantically wrong observed-count cases.
 
-- [ ] **Step 2: Add v0.3 models without changing v0.2 schemas**
+- [x] **Step 2: Add v0.3 models without changing v0.2 schemas**
 
 Add `VerificationProfileV03`, `VerificationArmResultV03`, `ScopeAssessment`, `VerificationDecisionDraftV03`, and `VerificationDecisionV03`, reusing the Task 3 `ObservedScope` type. Copy v0.2 fields verbatim, then add only approved fields. Use closed schema literals ending in `/0.3` and a decision digest domain ending in `/v0.3`.
 
 Extend `VerificationReasonCode` with the ten approved scope codes. Do not remove or rename any v0.2 reason.
 
-- [ ] **Step 3: Implement pure v0.3 validation/composition beside v0.2**
+- [x] **Step 3: Implement pure v0.3 validation/composition beside v0.2**
 
 Add:
 
@@ -541,7 +541,7 @@ def compose_verification_decision_v03(
 
 Compute `ScopeAssessment` internally. Scope failure always adds scope reason codes and yields `UNKNOWN` before ordinary VERIFIED logic; a genuine caught/survived mutation remains governed by v0.2 semantics.
 
-- [ ] **Step 4: Run GREEN plus frozen-schema guard**
+- [x] **Step 4: Run GREEN plus frozen-schema guard**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_verification_transactions_v03.py -q -k 'model or compose'
@@ -550,7 +550,7 @@ Compute `ScopeAssessment` internally. Scope failure always adds scope reason cod
 
 Expected: v0.3 tests pass and every frozen v0.2 digest still matches.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/openworkproof/models.py src/openworkproof/verification.py \

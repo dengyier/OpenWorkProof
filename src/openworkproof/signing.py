@@ -74,7 +74,9 @@ _V03_CANONICAL_DOMAINS = frozenset(
         "verification-decision",
     }
 )
-_V03_SIGNED_DOMAINS = frozenset({"evaluation-scope"})
+_V03_SIGNED_DOMAINS = frozenset(
+    {"evaluation-scope", "verification-profile", "verification-arm-result"}
+)
 
 
 def _canonical_domains_for_version(version: str) -> frozenset[str]:

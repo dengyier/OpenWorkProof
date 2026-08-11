@@ -1972,6 +1972,15 @@ class VerificationProfileV02(SignedProtocolModel):
         return self
 
 
+class VerificationProfileV03(VerificationProfileV02):
+    _signed_version = "0.3"
+
+    schema_version: Literal["openworkproof-verification-profile/0.3"]
+    evaluation_scope_id: Digest64
+    evaluation_scope_digest: Digest64
+    scope_requirement: Literal["exact_match"]
+
+
 class EvidenceRef(ProtocolModel):
     path: CanonicalRoot
     sha256: Digest64
@@ -2027,6 +2036,19 @@ VerificationReasonCode = Literal[
     "ACCEPTANCE_WITHDRAWN",
     "ACCEPTANCE_SUPERSEDED",
     "ACCEPTANCE_TRANSITION_INVALID",
+]
+
+VerificationReasonCodeV03 = VerificationReasonCode | Literal[
+    "SCOPE_MANIFEST_INVALID",
+    "SCOPE_MANIFEST_UNAVAILABLE",
+    "SCOPE_EMPTY",
+    "SCOPE_SELECTOR_MISMATCH",
+    "SCOPE_REQUIRED_TARGET_MISSING",
+    "SCOPE_WORKSPACE_DRIFT",
+    "SCOPE_POPULATION_DRIFT",
+    "SCOPE_EVIDENCE_MISSING",
+    "SCOPE_CROSS_ARM_MISMATCH",
+    "SCOPE_UNPROVEN",
 ]
 
 
@@ -2128,6 +2150,38 @@ class VerificationArmResult(SignedProtocolModel):
             and required_execution_reason not in reasons
         ):
             raise ValueError("execution status reason is missing")
+        return self
+
+
+class VerificationArmResultV03(VerificationArmResult):
+    _signed_version = "0.3"
+
+    schema_version: Literal["openworkproof-verification-arm-result/0.3"]
+    reason_codes: tuple[VerificationReasonCodeV03, ...]
+    scope_manifest_digest: Digest64
+    observed_member_count: SafeNonNegativeInt
+    observed_population_digest: Digest64
+    observed_required_target_ids: tuple[Digest64, ...]
+    scope_expectation_status: Literal[
+        "satisfied", "contradicted", "indeterminate"
+    ]
+    scope_evidence_refs: tuple[EvidenceRef, ...]
+
+    @model_validator(mode="after")
+    def _closed_scope_result(self) -> VerificationArmResultV03:
+        if self.observed_required_target_ids != tuple(
+            sorted(set(self.observed_required_target_ids))
+        ):
+            raise ValueError(
+                "observed_required_target_ids must be sorted and unique"
+            )
+        paths = tuple(ref.path for ref in self.scope_evidence_refs)
+        if paths != tuple(sorted(set(paths))):
+            raise ValueError("scope evidence refs must be path sorted and unique")
+        if self.scope_expectation_status in {"satisfied", "contradicted"} and (
+            not self.scope_evidence_refs
+        ):
+            raise ValueError("conclusive scope result requires scope evidence")
         return self
 
 
@@ -2246,6 +2300,49 @@ class VerificationDecisionDraft(ProtocolModel):
         return self
 
 
+class ScopeAssessment(ProtocolModel):
+    declared_member_count: SafePositiveInt
+    observed_member_counts: tuple[SafeNonNegativeInt, ...]
+    population_digest: Digest64
+    required_target_count: SafePositiveInt
+    missing_required_target_ids: tuple[Digest64, ...]
+    scope_status: Literal["satisfied", "contradicted", "indeterminate"]
+
+    @model_validator(mode="after")
+    def _closed_scope_assessment(self) -> ScopeAssessment:
+        if not self.observed_member_counts:
+            raise ValueError("observed_member_counts must be non-empty")
+        if self.missing_required_target_ids != tuple(
+            sorted(set(self.missing_required_target_ids))
+        ):
+            raise ValueError(
+                "missing_required_target_ids must be sorted and unique"
+            )
+        if self.scope_status == "satisfied" and (
+            self.missing_required_target_ids
+            or any(
+                count != self.declared_member_count
+                for count in self.observed_member_counts
+            )
+        ):
+            raise ValueError("satisfied scope assessment is internally inconsistent")
+        return self
+
+
+class VerificationDecisionDraftV03(VerificationDecisionDraft):
+    reason_codes: tuple[VerificationReasonCodeV03, ...]
+    scope_manifest_digest: Digest64
+    scope_assessment: ScopeAssessment
+
+    @model_validator(mode="after")
+    def _closed_scope_decision(self) -> VerificationDecisionDraftV03:
+        if self.scope_assessment.scope_status != "satisfied" and (
+            self.decision != "UNKNOWN"
+        ):
+            raise ValueError("non-satisfied scope requires UNKNOWN")
+        return self
+
+
 class DecisionDraftRequest(ProtocolModel):
     decision_id: Digest64
     decided_at: CanonicalUTCTime
@@ -2299,6 +2396,50 @@ class VerificationDecision(ProtocolModel):
         expected_digest = _jcs_digest(
             {
                 "domain": "openworkproof/verification-decision/v0.1",
+                "payload": payload,
+            }
+        )
+        if self.digest != expected_digest:
+            raise ValueError("digest does not match verification decision payload")
+        return self
+
+
+class VerificationDecisionV03(VerificationDecision):
+    schema_version: Literal["openworkproof-verification-decision/0.3"]
+    reason_codes: tuple[VerificationReasonCodeV03, ...]
+    scope_manifest_digest: Digest64
+    scope_assessment: ScopeAssessment
+
+    @model_validator(mode="after")
+    def _closed_decision(self) -> VerificationDecisionV03:
+        _validate_verification_decision_content(
+            arm_results=self.arm_results,
+            reason_codes=self.reason_codes,
+            supersedes_decision_id=self.supersedes_decision_id,
+            supersedes_decision_digest=self.supersedes_decision_digest,
+            causal_parent_receipt_ids=self.causal_parent_receipt_ids,
+            causal_parent_decision_ids=self.causal_parent_decision_ids,
+        )
+        if self.scope_assessment.scope_status != "satisfied" and (
+            self.decision != "UNKNOWN"
+        ):
+            raise ValueError("non-satisfied scope requires UNKNOWN")
+        expected_signatures = 2 if self.assurance_level == "high_risk" else 1
+        if len(self.verifier_signatures) != expected_signatures:
+            raise ValueError("decision signature set has the wrong size")
+        signature_keys = tuple(
+            signature.verifier_key_id for signature in self.verifier_signatures
+        )
+        if signature_keys != tuple(
+            sorted(set(signature_keys), key=lambda value: value.encode("utf-8"))
+        ):
+            raise ValueError("decision signatures must be key-sorted and unique")
+        payload = self.model_dump(
+            mode="json", exclude={"digest", "verifier_signatures"}
+        )
+        expected_digest = _jcs_digest(
+            {
+                "domain": "openworkproof/verification-decision/v0.3",
                 "payload": payload,
             }
         )

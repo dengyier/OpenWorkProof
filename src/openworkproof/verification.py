@@ -8,6 +8,7 @@ import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Callable, Literal, TypeVar
 
 import rfc8785
@@ -21,15 +22,20 @@ from openworkproof.acceptance import (
 from openworkproof.models import (
     CommitmentAnchor,
     DecisionDraftRequest,
+    EvaluationScopeManifest,
     PolicyAnchor,
     SubjectClaim,
     VerificationArmResult,
+    VerificationArmResultV03,
     VerificationArmResultReference,
     VerificationDecision,
     VerificationDecisionDraft,
+    VerificationDecisionDraftV03,
     VerificationIndependenceAssessment,
     VerificationProfileV02,
+    VerificationProfileV03,
     VerificationReasonCode,
+    ScopeAssessment,
     WorkOrder,
 )
 from openworkproof.signing import (
@@ -372,6 +378,244 @@ def compose_verification_decision(
         ),
         decided_at=request.model_dump(mode="json")["decided_at"],
         nonce=request.nonce,
+    )
+
+
+def validate_verification_profile_v03(
+    profile: VerificationProfileV03,
+    manifest: EvaluationScopeManifest,
+) -> None:
+    if not isinstance(profile, VerificationProfileV03):
+        raise VerificationInputError("profile must be a v0.3 verification profile")
+    if not isinstance(manifest, EvaluationScopeManifest):
+        raise VerificationInputError("manifest must be a v0.3 evaluation scope")
+    if (
+        profile.evaluation_scope_id != manifest.scope_id
+        or profile.evaluation_scope_digest != manifest.digest
+        or profile.work_order_digest != manifest.work_order_digest
+        or profile.subject_claim_digest != manifest.subject_claim_digest
+    ):
+        raise VerificationInputError("profile scope binding mismatch")
+    for arm in (profile.positive_arm, *profile.negative_arms):
+        if (
+            arm.source_commit != manifest.source_revision
+            or arm.candidate_commit != manifest.candidate_commit
+            or arm.workspace_manifest_digest != manifest.workspace_manifest_digest
+        ):
+            raise VerificationInputError("profile arm scope binding mismatch")
+
+
+def _validate_arm_results_v03(
+    *,
+    profile: VerificationProfileV03,
+    manifest: EvaluationScopeManifest,
+    arm_results: tuple[VerificationArmResultV03, ...],
+) -> None:
+    ordered_ids = tuple(result.arm_result_id for result in arm_results)
+    if ordered_ids != tuple(sorted(set(ordered_ids))):
+        raise VerificationInputError("arm results must be sorted and unique")
+    expected_arms = {
+        arm.arm_id: arm for arm in (profile.positive_arm, *profile.negative_arms)
+    }
+    if (
+        len(arm_results) != len(expected_arms)
+        or {result.arm_id for result in arm_results} != set(expected_arms)
+    ):
+        raise VerificationInputError("arm result set is incomplete")
+    bindings = {
+        binding.verifier_key_id: binding for binding in profile.verifier_bindings
+    }
+    for result in arm_results:
+        if result.profile_digest != profile.digest:
+            raise VerificationInputError("arm result profile mismatch")
+        if result.scope_manifest_digest != manifest.digest:
+            raise VerificationInputError("arm result scope manifest mismatch")
+        arm = expected_arms[result.arm_id]
+        if result.arm_kind != arm.arm_kind:
+            raise VerificationInputError("arm result kind or id mismatch")
+        binding = bindings.get(result.verifier_key_id)
+        if (
+            binding is None
+            or binding.verifier_subject_id != result.verifier_subject_id
+            or binding.controller_factors != result.controller_factors
+            or binding.execution_context_factors
+            != result.execution_context_factors
+        ):
+            raise VerificationInputError("arm result verifier is not profile-bound")
+        if not (
+            binding.valid_from <= result.created_at < binding.expires_at
+            and profile.created_at <= result.created_at < profile.expires_at
+        ):
+            raise VerificationInputError("arm result verifier binding is not current")
+        if not verify_payload(
+            "verification-arm-result",
+            result.model_dump(mode="json"),
+            _decode_public_key(binding.verifier_public_key_b64url),
+            version="0.3",
+        ):
+            raise VerificationInputError("arm result signature is invalid")
+
+
+def compose_verification_decision_v03(
+    *,
+    profile: VerificationProfileV03,
+    manifest: EvaluationScopeManifest,
+    arm_results: Sequence[VerificationArmResultV03],
+    request: DecisionDraftRequest,
+) -> VerificationDecisionDraftV03:
+    if not isinstance(profile, VerificationProfileV03):
+        raise VerificationInputError("profile must be a v0.3 verification profile")
+    if not isinstance(request, DecisionDraftRequest):
+        raise VerificationInputError("request must be a DecisionDraftRequest")
+    validate_verification_profile_v03(profile, manifest)
+    results = tuple(arm_results)
+    _validate_arm_results_v03(
+        profile=profile,
+        manifest=manifest,
+        arm_results=results,
+    )
+    if not profile.created_at <= request.decided_at < profile.expires_at:
+        raise VerificationInputError("verification decision is outside profile validity")
+
+    positive = tuple(result for result in results if result.arm_kind == "positive")
+    negative = tuple(result for result in results if result.arm_kind == "negative")
+    if len(positive) != 1 or len(negative) != len(profile.negative_arms):
+        raise VerificationInputError("arm result set is incomplete")
+
+    missing_required = tuple(
+        sorted(
+            {
+                target
+                for result in results
+                for target in (
+                    set(manifest.required_target_ids)
+                    - set(result.observed_required_target_ids)
+                )
+            }
+        )
+    )
+    counts = tuple(result.observed_member_count for result in results)
+    population_digests = {
+        result.observed_population_digest for result in results
+    }
+    scope_reasons = {
+        code
+        for result in results
+        for code in result.reason_codes
+        if code.startswith("SCOPE_")
+    }
+    cross_arm_mismatch = len(set(counts)) != 1 or len(population_digests) != 1
+    if cross_arm_mismatch:
+        scope_reasons.add("SCOPE_CROSS_ARM_MISMATCH")
+    if missing_required:
+        scope_reasons.add("SCOPE_REQUIRED_TARGET_MISSING")
+    population_mismatch = any(
+        result.observed_member_count != manifest.member_count
+        or result.observed_population_digest != manifest.population_digest
+        for result in results
+    )
+    if population_mismatch:
+        scope_reasons.add("SCOPE_POPULATION_DRIFT")
+    if any(not result.scope_evidence_refs for result in results):
+        scope_reasons.add("SCOPE_EVIDENCE_MISSING")
+
+    reported_statuses = {result.scope_expectation_status for result in results}
+    if (
+        cross_arm_mismatch
+        or missing_required
+        or "indeterminate" in reported_statuses
+        or "SCOPE_EVIDENCE_MISSING" in scope_reasons
+    ):
+        scope_status = "indeterminate"
+    elif population_mismatch or "contradicted" in reported_statuses:
+        scope_status = "contradicted"
+    else:
+        scope_status = "satisfied"
+
+    independence = assess_independence(profile, results)
+    if scope_status != "satisfied":
+        decision = "UNKNOWN"
+    elif positive[0].expectation_status == "contradicted" or any(
+        result.expectation_status == "contradicted" for result in negative
+    ):
+        decision = "REFUTED"
+    elif positive[0].expectation_status != "satisfied" or any(
+        result.expectation_status != "satisfied" for result in negative
+    ) or not independence.is_sufficient:
+        decision = "UNKNOWN"
+    else:
+        decision = "VERIFIED"
+
+    references: list[VerificationArmResultReference] = []
+    for result in results:
+        try:
+            snapshot = evidence_snapshot_digest(
+                tuple(
+                    sorted(
+                        (*result.evidence_refs, *result.scope_evidence_refs),
+                        key=lambda ref: ref.path,
+                    )
+                )
+            )
+        except AcceptanceTransactionError as error:
+            raise VerificationInputError(
+                "arm result evidence is not canonical"
+            ) from error
+        references.append(
+            VerificationArmResultReference(
+                arm_id=result.arm_id,
+                arm_result_id=result.arm_result_id,
+                arm_result_digest=result.digest,
+                evidence_snapshot_digest=snapshot,
+            )
+        )
+
+    reason_codes = tuple(
+        sorted(
+            {
+                *scope_reasons,
+                *independence.reason_codes,
+                *(code for result in results for code in result.reason_codes),
+            }
+        )
+    )
+    assessment = ScopeAssessment(
+        declared_member_count=manifest.member_count,
+        observed_member_counts=counts,
+        population_digest=manifest.population_digest,
+        required_target_count=len(manifest.required_target_ids),
+        missing_required_target_ids=missing_required,
+        scope_status=scope_status,
+    )
+    return VerificationDecisionDraftV03(
+        decision_id=request.decision_id,
+        work_order_digest=profile.work_order_digest,
+        subject_claim_digest=profile.subject_claim_digest,
+        profile_id=profile.profile_id,
+        profile_digest=profile.digest,
+        arm_results=tuple(
+            reference.model_dump(mode="json") for reference in references
+        ),
+        assurance_level=profile.assurance_level,
+        decision=decision,
+        independence=independence.model_dump(mode="json"),
+        reason_codes=reason_codes,
+        supersedes_decision_id=None,
+        supersedes_decision_digest=None,
+        causal_parent_receipt_ids=tuple(
+            sorted(
+                {
+                    receipt_id
+                    for result in results
+                    for receipt_id in result.action_receipt_ids
+                }
+            )
+        ),
+        causal_parent_decision_ids=(),
+        decided_at=request.model_dump(mode="json")["decided_at"],
+        nonce=request.nonce,
+        scope_manifest_digest=manifest.digest,
+        scope_assessment=assessment.model_dump(mode="json"),
     )
 
 
