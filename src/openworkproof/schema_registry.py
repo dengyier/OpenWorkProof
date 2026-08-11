@@ -20,12 +20,16 @@ import rfc8785
 
 from openworkproof.models import (
     ACTION_RECEIPT_ADAPTER,
+    ActionBindingManifest,
     AcceptanceReceipt,
     AcceptanceRejectionReceipt,
     AcceptanceTransitionReceipt,
+    AuthorityCheckpoint,
+    BindingDecision,
     CapabilityGrant,
     CommitmentAnchor,
     EvaluationScopeManifest,
+    JudgmentCommitment,
     PolicyAnchor,
     SubjectClaim,
     VerificationArmResult,
@@ -190,25 +194,70 @@ _FROZEN_V03_REGISTRY = {
         for object_type, path in V03_OBJECT_PATHS.items()
     ],
 }
+V04_OBJECT_PATHS = {
+    "action-binding-manifest": "action-binding-manifest.schema.json",
+    "authority-checkpoint": "authority-checkpoint.schema.json",
+    "binding-decision": "binding-decision.schema.json",
+    "judgment-commitment": "judgment-commitment.schema.json",
+}
+V04_SCHEMA_FACTORIES: dict[str, Callable[[], dict[str, Any]]] = {
+    "action-binding-manifest": ActionBindingManifest.model_json_schema,
+    "authority-checkpoint": AuthorityCheckpoint.model_json_schema,
+    "binding-decision": BindingDecision.model_json_schema,
+    "judgment-commitment": JudgmentCommitment.model_json_schema,
+}
+_FROZEN_V04_DIGESTS = {
+    "action-binding-manifest.schema.json": (
+        "6e4dc37a733345ea2e74188a38cea4527e2fcfb5bf1cd487bcfc2bbc6f2f59b2"
+    ),
+    "authority-checkpoint.schema.json": (
+        "deb518fb233088e69ba203df98c896d60a4e902e1484b1e05673cc55a60ead55"
+    ),
+    "binding-decision.schema.json": (
+        "4a120533fdd611bf1f1f4aa292289e70658e5f59eecefc07c9bc513abce8acbe"
+    ),
+    "judgment-commitment.schema.json": (
+        "29a2fbca6bdd5dc6aaf2c023e6a0fd0361531a30ae7486cdc5f1023e2542ecd2"
+    ),
+    "schema-registry.json": (
+        "b347c54f523d2994142770191a467bd6e796dc4094fda1ac7da07d78729f8f30"
+    ),
+}
+_FROZEN_V04_REGISTRY = {
+    "schema_version": _REGISTRY_SCHEMA_VERSION,
+    "protocol_version": "0.4",
+    "schemas": [
+        {
+            "object_type": object_type,
+            "path": path,
+            "sha256": _FROZEN_V04_DIGESTS[path],
+        }
+        for object_type, path in V04_OBJECT_PATHS.items()
+    ],
+}
 _OBJECT_PATHS_BY_VERSION = {
     "0.1": V01_OBJECT_PATHS,
     "0.2": V02_OBJECT_PATHS,
     "0.3": V03_OBJECT_PATHS,
+    "0.4": V04_OBJECT_PATHS,
 }
 _SCHEMA_FACTORIES_BY_VERSION = {
     "0.1": V01_SCHEMA_FACTORIES,
     "0.2": V02_SCHEMA_FACTORIES,
     "0.3": V03_SCHEMA_FACTORIES,
+    "0.4": V04_SCHEMA_FACTORIES,
 }
 _FROZEN_DIGESTS_BY_VERSION = {
     "0.1": _FROZEN_V01_DIGESTS,
     "0.2": _FROZEN_V02_DIGESTS,
     "0.3": _FROZEN_V03_DIGESTS,
+    "0.4": _FROZEN_V04_DIGESTS,
 }
 _FROZEN_REGISTRIES_BY_VERSION = {
     "0.1": _FROZEN_V01_REGISTRY,
     "0.2": _FROZEN_V02_REGISTRY,
     "0.3": _FROZEN_V03_REGISTRY,
+    "0.4": _FROZEN_V04_REGISTRY,
 }
 _FILENAMES_BY_VERSION = {
     version: frozenset({_REGISTRY_FILENAME, *object_paths.values()})
@@ -781,7 +830,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         required=True,
         choices=tuple(_OBJECT_PATHS_BY_VERSION),
     )
-    parser.add_argument("--destination", required=True, type=Path)
+    parser.add_argument(
+        "--destination",
+        "--output",
+        dest="destination",
+        required=True,
+        type=Path,
+    )
     parser.add_argument("--mirror", type=Path)
     arguments = parser.parse_args(argv)
     write_authoritative_schemas(

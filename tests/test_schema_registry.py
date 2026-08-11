@@ -345,15 +345,21 @@ def test_unknown_version_and_object_type_fail_closed(tmp_path: Path) -> None:
     assert result.error_code == "UNKNOWN_PROTOCOL_VERSION"
 
 
-def test_registry_routing_is_closed_and_explicit() -> None:
+def test_v04_registry_routing_is_closed_and_explicit() -> None:
     api = _api()
 
     assert api._OBJECT_PATHS_BY_VERSION == {
         "0.1": OBJECT_PATHS,
         "0.2": V02_OBJECT_PATHS,
         "0.3": api.V03_OBJECT_PATHS,
+        "0.4": api.V04_OBJECT_PATHS,
     }
-    assert set(api._SCHEMA_FACTORIES_BY_VERSION) == {"0.1", "0.2", "0.3"}
+    assert set(api._SCHEMA_FACTORIES_BY_VERSION) == {
+        "0.1",
+        "0.2",
+        "0.3",
+        "0.4",
+    }
     assert set(api._SCHEMA_FACTORIES_BY_VERSION["0.1"]) == set(OBJECT_PATHS)
     assert set(api._SCHEMA_FACTORIES_BY_VERSION["0.2"]) == set(
         V02_OBJECT_PATHS
@@ -361,11 +367,18 @@ def test_registry_routing_is_closed_and_explicit() -> None:
     assert set(api._SCHEMA_FACTORIES_BY_VERSION["0.3"]) == set(
         api.V03_OBJECT_PATHS
     )
+    assert set(api._SCHEMA_FACTORIES_BY_VERSION["0.4"]) == set(
+        api.V04_OBJECT_PATHS
+    )
     assert set(api._generated_files(version="0.1")) == SCHEMA_FILENAMES
     assert set(api._generated_files(version="0.2")) == V02_SCHEMA_FILENAMES
     assert set(api._generated_files(version="0.3")) == {
         "schema-registry.json",
         *api.V03_OBJECT_PATHS.values(),
+    }
+    assert set(api._generated_files(version="0.4")) == {
+        "schema-registry.json",
+        *api.V04_OBJECT_PATHS.values(),
     }
 
 
@@ -386,7 +399,9 @@ def test_v02_writer_emits_frozen_package_and_mirror(tmp_path: Path) -> None:
         assert hashlib.sha256(destination.joinpath(name).read_bytes()).hexdigest() == expected
 
 
-def test_v03_three_version_registry_is_closed_and_canonical(tmp_path: Path) -> None:
+def test_v03_schema_remains_closed_and_canonical_in_v04_registry(
+    tmp_path: Path,
+) -> None:
     api = _api()
     expected_objects = {
         "evaluation-scope",
@@ -394,7 +409,12 @@ def test_v03_three_version_registry_is_closed_and_canonical(tmp_path: Path) -> N
         "verification-arm-result",
         "verification-decision",
     }
-    assert set(api._OBJECT_PATHS_BY_VERSION) == {"0.1", "0.2", "0.3"}
+    assert set(api._OBJECT_PATHS_BY_VERSION) == {
+        "0.1",
+        "0.2",
+        "0.3",
+        "0.4",
+    }
     assert set(api._OBJECT_PATHS_BY_VERSION["0.3"]) == expected_objects
     generated = api._generated_files(version="0.3")
     for raw in generated.values():
@@ -444,6 +464,20 @@ def test_cli_requires_explicit_registered_version_and_destination(
             ]
         )
     assert unknown_version.exists() is False
+
+    v04_output = tmp_path / "v04-output"
+    assert api.main(
+        [
+            "--version",
+            "0.4",
+            "--output",
+            str(v04_output),
+        ]
+    ) == 0
+    assert set(_snapshot(v04_output)) == {
+        "schema-registry.json",
+        *api.V04_OBJECT_PATHS.values(),
+    }
 
 
 def test_runtime_authority_is_independent_of_current_working_directory(
@@ -959,6 +993,16 @@ def test_built_wheel_contains_all_authoritative_schema_resources(
         for name, expected_digest in FROZEN_V02_DIGESTS.items():
             content = archive.read(f"openworkproof/schemas/v0.2/{name}")
             assert hashlib.sha256(content).hexdigest() == expected_digest
+        v04_members = {
+            name.removeprefix("openworkproof/schemas/v0.4/")
+            for name in archive.namelist()
+            if name.startswith("openworkproof/schemas/v0.4/")
+            and not name.endswith("/")
+        }
+        assert v04_members == {
+            "schema-registry.json",
+            *_api().V04_OBJECT_PATHS.values(),
+        }
 
 
 def test_registry_loads_from_an_installed_wheel_outside_project_cwd(
