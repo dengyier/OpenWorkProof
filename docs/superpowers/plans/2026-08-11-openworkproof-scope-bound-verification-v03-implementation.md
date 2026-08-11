@@ -325,7 +325,7 @@ git commit -m 'feat: add scope-bound protocol models'
 - Create: `src/openworkproof/scope.py`
 - Create: `tests/test_scope_building_v03.py`
 
-- [ ] **Step 1: Write RED tests for build/validate/compare**
+- [x] **Step 1: Write RED tests for build/validate/compare**
 
 Cover the public functions and a typed comparison result:
 
@@ -356,7 +356,7 @@ Run and expect imports to fail:
 ./.venv/bin/python -m pytest tests/test_scope_building_v03.py -q
 ```
 
-- [ ] **Step 2: Implement pure digest and validation helpers**
+- [x] **Step 2: Implement pure digest and validation helpers**
 
 Create these exact single-responsibility functions in `scope.py`:
 
@@ -376,9 +376,9 @@ def compare_observed_scope(
 ) -> ScopeComparisonResult: ...
 ```
 
-Return `satisfied`, `contradicted`, or `indeterminate`; do not map these to final Verification Decisions here.
+Define the unsigned, immutable `ObservedScope` comparison input and `ScopeComparisonResult` beside these pure helpers so Task 3 has a closed N-versus-N-1 comparison boundary. Task 5 reuses these types in arm results rather than redefining them. Return `satisfied`, `contradicted`, or `indeterminate`; do not map these to final Verification Decisions here.
 
-- [ ] **Step 3: Implement only the explicit selector and draft builder**
+- [x] **Step 3: Implement only the explicit selector and draft builder**
 
 ```python
 def build_evaluation_scope(
@@ -392,15 +392,16 @@ def build_evaluation_scope(
     explicit_members: Sequence[ScopeMember],
     requirement_bindings: Sequence[ScopeRequirementBinding],
     excluded_locator_digests: Sequence[str],
+    repository_root: Path,
     created_at: datetime,
     expires_at: datetime,
     nonce: str,
 ) -> EvaluationScopeDraft: ...
 ```
 
-The builder returns `EvaluationScopeDraft`; it must not load a private key, invent blank signature fields, or write a ledger. Tests then sign `draft.model_dump(mode="json")` with `sign_payload("evaluation-scope", ..., version="0.3")` and validate the resulting `EvaluationScopeManifest`.
+The builder returns `EvaluationScopeDraft`; it must not load a private key, invent blank signature fields, or write a ledger. `repository_root` is required because symlink and path-escape safety cannot be proven from a locator string alone. Tests then sign `draft.model_dump(mode="json")` with `sign_payload("evaluation-scope", ..., version="0.3")` and validate the resulting `EvaluationScopeManifest`.
 
-- [ ] **Step 4: Prove symlink and path escape fail closed**
+- [x] **Step 4: Prove symlink and path escape fail closed**
 
 Use a temporary Git repository containing a normal file, a symlink, an absolute locator, and a `../` locator. Expected: only the normal repository-relative POSIX locator validates.
 
@@ -411,7 +412,7 @@ Run:
 ./.venv/bin/python -m pytest tests/test_scope_models_v03.py -q
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/openworkproof/scope.py tests/test_scope_building_v03.py
@@ -514,7 +515,7 @@ Add cross-arm mismatch, missing required target, caller-forged assessment, v0.2 
 
 - [ ] **Step 2: Add v0.3 models without changing v0.2 schemas**
 
-Add `VerificationProfileV03`, `ObservedScope`, `VerificationArmResultV03`, `ScopeAssessment`, `VerificationDecisionDraftV03`, and `VerificationDecisionV03`. Copy v0.2 fields verbatim, then add only approved fields. Use closed schema literals ending in `/0.3` and a decision digest domain ending in `/v0.3`.
+Add `VerificationProfileV03`, `VerificationArmResultV03`, `ScopeAssessment`, `VerificationDecisionDraftV03`, and `VerificationDecisionV03`, reusing the Task 3 `ObservedScope` type. Copy v0.2 fields verbatim, then add only approved fields. Use closed schema literals ending in `/0.3` and a decision digest domain ending in `/v0.3`.
 
 Extend `VerificationReasonCode` with the ten approved scope codes. Do not remove or rename any v0.2 reason.
 
