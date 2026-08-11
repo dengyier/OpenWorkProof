@@ -44,6 +44,7 @@ from openworkproof.signing import (
     verify_payload,
     verify_work_order_identity_bindings,
 )
+from openworkproof.scope import validate_evaluation_scope
 import openworkproof.evidence as evidence
 
 
@@ -621,7 +622,9 @@ def compose_verification_decision_v03(
 
 _T = TypeVar("_T")
 _Fault = Literal[
+    "insert_failure",
     "before_commit",
+    "commit_failure",
     "commit_ack_loss",
     "readback_failure",
     "cleanup_failure",
@@ -721,7 +724,15 @@ def _commit_with_readback(
     readback: Callable[[_T], bool],
     fault: _Fault | None,
 ) -> _T:
-    if fault not in {None, "before_commit", "commit_ack_loss", "readback_failure", "cleanup_failure"}:
+    if fault not in {
+        None,
+        "insert_failure",
+        "before_commit",
+        "commit_failure",
+        "commit_ack_loss",
+        "readback_failure",
+        "cleanup_failure",
+    }:
         raise VerificationTransactionError("unknown transaction fault")
     if not path.is_file():
         raise VerificationTransactionError("verification ledger is unavailable")
@@ -736,6 +747,10 @@ def _commit_with_readback(
         result = stage(connection)
         if fault == "before_commit":
             raise VerificationTransactionError("injected fault before commit")
+        if fault in {"insert_failure", "commit_failure"}:
+            raise VerificationTransactionError(
+                f"injected fault: {fault.replace('_', ' ')}"
+            )
         connection.execute("COMMIT")
         committed = True
         if fault == "commit_ack_loss":
@@ -832,6 +847,10 @@ def _assert_nonce_unused(
         ("verification_profiles_v02", "profile_id", "profile_json"),
         ("verification_decisions", "decision_id", "decision_json"),
         ("acceptance_transitions", "transition_id", "transition_json"),
+        ("evaluation_scopes_v03", "scope_id", "scope_json"),
+        ("verification_profiles_v03", "profile_id", "profile_json"),
+        ("verification_decisions_v03", "decision_id", "decision_json"),
+        ("acceptance_transitions_v03", "transition_id", "transition_json"),
     ):
         for identifier, raw in connection.execute(
             f"SELECT {identifier_column}, {json_column} FROM {table}"
@@ -844,6 +863,382 @@ def _assert_nonce_unused(
                 ) from error
             if payload.get("nonce") == nonce and (table, identifier) not in allowed_set:
                 raise VerificationTransactionError("protocol nonce is already used")
+
+
+def _validate_scope_authority(
+    *,
+    work_order: WorkOrder,
+    claim: SubjectClaim,
+    manifest: EvaluationScopeManifest,
+) -> None:
+    manager = _manager_binding(work_order)
+    manager_key = decode_and_verify_key_binding(manager)
+    grant = work_order.root_grant_template
+    if (
+        grant.subject_agent_id != manager.subject_id
+        or grant.subject_key_id != manager.key_id
+        or "owp.compose_proof" not in grant.allowed_tools
+        or grant.quota.tool_calls <= 0
+    ):
+        raise VerificationTransactionError("scope Manager grant is invalid")
+    if (
+        claim.work_order_digest != work_order.digest
+        or manifest.work_order_digest != work_order.digest
+        or manifest.subject_claim_digest != claim.digest
+        or manifest.source_revision != claim.source_revision
+    ):
+        raise VerificationTransactionError("scope authority digests do not match")
+    if claim.customer_acceptor_key_id not in work_order.acceptor_key_ids:
+        raise VerificationTransactionError("claim Acceptor is not WorkOrder-bound")
+    if claim.signer_key_id != manager.key_id or not verify_payload(
+        "subject-claim", claim.model_dump(mode="json"), manager_key
+    ):
+        raise VerificationTransactionError("subject claim Manager signature is invalid")
+    if manifest.signer_key_id != manager.key_id or not verify_payload(
+        "evaluation-scope",
+        manifest.model_dump(mode="json"),
+        manager_key,
+        version="0.3",
+    ):
+        raise VerificationTransactionError("scope Manager signature is invalid")
+    if not (
+        grant.valid_from <= claim.created_at <= manifest.created_at
+        and manifest.created_at < manifest.expires_at
+        and manifest.expires_at <= min(grant.expires_at, work_order.deadline)
+    ):
+        raise VerificationTransactionError("scope validity is outside the Manager grant")
+    try:
+        validate_evaluation_scope(manifest, claim=claim)
+    except ValueError as error:
+        raise VerificationTransactionError("scope does not match SubjectClaim") from error
+
+
+def _exact_scope_readback(
+    path: Path,
+    *,
+    claim: SubjectClaim,
+    manifest: EvaluationScopeManifest,
+) -> bool:
+    connection = evidence.connect_ledger(path)
+    try:
+        claim_row = connection.execute(
+            "SELECT claim_json FROM subject_claims WHERE claim_id = ?",
+            (claim.claim_id,),
+        ).fetchone()
+        scope_row = connection.execute(
+            """
+            SELECT scope_digest, work_order_digest, claim_id,
+                   subject_claim_digest, scope_json
+            FROM evaluation_scopes_v03 WHERE scope_id = ?
+            """,
+            (manifest.scope_id,),
+        ).fetchone()
+        return claim_row == (_canonical_model_blob(claim),) and scope_row == (
+            manifest.digest,
+            manifest.work_order_digest,
+            claim.claim_id,
+            manifest.subject_claim_digest,
+            _canonical_model_blob(manifest),
+        )
+    finally:
+        connection.close()
+
+
+def commit_evaluation_scope(
+    ledger_path: Path,
+    claim: SubjectClaim,
+    manifest: EvaluationScopeManifest,
+    *,
+    fault: _Fault | None = None,
+) -> EvaluationScopeManifest:
+    path = Path(ledger_path)
+    try:
+        parsed_claim = SubjectClaim.model_validate(claim.model_dump(mode="json"))
+        parsed_manifest = EvaluationScopeManifest.model_validate(
+            manifest.model_dump(mode="json")
+        )
+    except Exception as error:
+        raise VerificationTransactionError("scope inputs are malformed") from error
+
+    def stage(connection: sqlite3.Connection) -> EvaluationScopeManifest:
+        work_order = evidence.load_authoritative_work_order(connection)
+        _validate_scope_authority(
+            work_order=work_order,
+            claim=parsed_claim,
+            manifest=parsed_manifest,
+        )
+        existing = connection.execute(
+            """
+            SELECT scope_digest, work_order_digest, claim_id,
+                   subject_claim_digest, scope_json
+            FROM evaluation_scopes_v03 WHERE scope_id = ?
+            """,
+            (parsed_manifest.scope_id,),
+        ).fetchone()
+        exact = (
+            parsed_manifest.digest,
+            parsed_manifest.work_order_digest,
+            parsed_claim.claim_id,
+            parsed_manifest.subject_claim_digest,
+            _canonical_model_blob(parsed_manifest),
+        )
+        if existing is not None:
+            if existing == exact:
+                raise VerificationCommittedError(
+                    "the exact evaluation scope is already committed",
+                    parsed_manifest,
+                )
+            raise VerificationTransactionError("evaluation scope id is already used")
+        claim_row = connection.execute(
+            "SELECT claim_json FROM subject_claims WHERE claim_id = ?",
+            (parsed_claim.claim_id,),
+        ).fetchone()
+        if claim_row is not None and claim_row != (_canonical_model_blob(parsed_claim),):
+            raise VerificationTransactionError("subject claim id is already used")
+        if parsed_claim.nonce == parsed_manifest.nonce:
+            raise VerificationTransactionError(
+                "claim and scope must use distinct protocol nonces"
+            )
+        _assert_nonce_unused(
+            connection,
+            parsed_claim.nonce,
+            allowed=(
+                ()
+                if claim_row is None
+                else (("subject_claims", parsed_claim.claim_id),)
+            ),
+        )
+        _assert_nonce_unused(connection, parsed_manifest.nonce)
+        if claim_row is None:
+            connection.execute(
+                "INSERT INTO subject_claims (claim_id, claim_json) VALUES (?, ?)",
+                (parsed_claim.claim_id, _canonical_model_blob(parsed_claim)),
+            )
+        connection.execute(
+            """
+            INSERT INTO evaluation_scopes_v03 (
+                scope_id, scope_digest, work_order_digest, claim_id,
+                subject_claim_digest, scope_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                parsed_manifest.scope_id,
+                parsed_manifest.digest,
+                parsed_manifest.work_order_digest,
+                parsed_claim.claim_id,
+                parsed_manifest.subject_claim_digest,
+                _canonical_model_blob(parsed_manifest),
+            ),
+        )
+        return parsed_manifest
+
+    return _commit_with_readback(
+        path,
+        stage=stage,
+        readback=lambda _: _exact_scope_readback(
+            path, claim=parsed_claim, manifest=parsed_manifest
+        ),
+        fault=fault,
+    )
+
+
+def load_evaluation_scope(
+    ledger_path: Path,
+    scope_id: str,
+) -> EvaluationScopeManifest:
+    path = Path(ledger_path)
+    if not path.is_file():
+        raise VerificationTransactionError("verification ledger is unavailable")
+    connection = evidence.connect_ledger(path)
+    try:
+        row = connection.execute(
+            "SELECT scope_digest, scope_json FROM evaluation_scopes_v03 WHERE scope_id = ?",
+            (scope_id,),
+        ).fetchone()
+        if row is None:
+            raise VerificationTransactionError("evaluation scope is unavailable")
+        manifest = _load_canonical_model(
+            EvaluationScopeManifest, row[1], "evaluation scope"
+        )
+        if manifest.scope_id != scope_id or manifest.digest != row[0]:
+            raise VerificationTransactionError(
+                "evaluation scope index does not match canonical row"
+            )
+        return manifest
+    finally:
+        connection.close()
+
+
+def _load_scope_profile_context(
+    connection: sqlite3.Connection,
+    *,
+    scope_id: str,
+) -> tuple[WorkOrder, SubjectClaim, EvaluationScopeManifest]:
+    work_order = evidence.load_authoritative_work_order(connection)
+    row = connection.execute(
+        """
+        SELECT scope_digest, claim_id, scope_json
+        FROM evaluation_scopes_v03 WHERE scope_id = ?
+        """,
+        (scope_id,),
+    ).fetchone()
+    if row is None:
+        raise VerificationTransactionError("committed evaluation scope is unavailable")
+    manifest = _load_canonical_model(
+        EvaluationScopeManifest, row[2], "evaluation scope"
+    )
+    if manifest.scope_id != scope_id or manifest.digest != row[0]:
+        raise VerificationTransactionError(
+            "evaluation scope index does not match canonical row"
+        )
+    claim_row = connection.execute(
+        "SELECT claim_json FROM subject_claims WHERE claim_id = ?", (row[1],)
+    ).fetchone()
+    if claim_row is None:
+        raise VerificationTransactionError("scope SubjectClaim is unavailable")
+    claim = _load_canonical_model(SubjectClaim, claim_row[0], "subject claim")
+    _validate_scope_authority(
+        work_order=work_order,
+        claim=claim,
+        manifest=manifest,
+    )
+    return work_order, claim, manifest
+
+
+def _exact_profile_v03_readback(
+    path: Path,
+    *,
+    profile: VerificationProfileV03,
+) -> bool:
+    connection = evidence.connect_ledger(path)
+    try:
+        row = connection.execute(
+            """
+            SELECT p.profile_digest, p.scope_id, p.scope_digest,
+                   p.subject_claim_id, s.claim_id, p.profile_json
+            FROM verification_profiles_v03 AS p
+            JOIN evaluation_scopes_v03 AS s ON s.scope_id = p.scope_id
+            WHERE p.profile_id = ?
+            """,
+            (profile.profile_id,),
+        ).fetchone()
+        return (
+            row is not None
+            and row[0:3]
+            == (
+                profile.digest,
+                profile.evaluation_scope_id,
+                profile.evaluation_scope_digest,
+            )
+            and row[3] == row[4]
+            and row[5] == _canonical_model_blob(profile)
+        )
+    finally:
+        connection.close()
+
+
+def commit_verification_profile_v03(
+    ledger_path: Path,
+    profile: VerificationProfileV03,
+    *,
+    fault: _Fault | None = None,
+) -> VerificationProfileV03:
+    path = Path(ledger_path)
+    try:
+        parsed_profile = VerificationProfileV03.model_validate(
+            profile.model_dump(mode="json")
+        )
+    except Exception as error:
+        raise VerificationTransactionError("v0.3 profile input is malformed") from error
+
+    def stage(connection: sqlite3.Connection) -> VerificationProfileV03:
+        work_order, claim, manifest = _load_scope_profile_context(
+            connection, scope_id=parsed_profile.evaluation_scope_id
+        )
+        manager = _manager_binding(work_order)
+        manager_key = decode_and_verify_key_binding(manager)
+        if (
+            parsed_profile.signer_key_id != manager.key_id
+            or not verify_payload(
+                "verification-profile",
+                parsed_profile.model_dump(mode="json"),
+                manager_key,
+                version="0.3",
+            )
+        ):
+            raise VerificationTransactionError("v0.3 profile Manager signature is invalid")
+        if (
+            parsed_profile.work_order_digest != work_order.digest
+            or parsed_profile.subject_claim_digest != claim.digest
+            or parsed_profile.evaluation_scope_digest != manifest.digest
+        ):
+            raise VerificationTransactionError("v0.3 profile authority digests do not match")
+        if not (
+            manifest.created_at <= parsed_profile.created_at
+            < parsed_profile.expires_at
+            <= min(manifest.expires_at, work_order.deadline)
+        ):
+            raise VerificationTransactionError("v0.3 profile validity is outside scope")
+        try:
+            validate_verification_profile_v03(parsed_profile, manifest)
+        except VerificationInputError as error:
+            raise VerificationTransactionError("v0.3 profile scope is invalid") from error
+        if (
+            parsed_profile.policy_anchor_digest is not None
+            or parsed_profile.commitment_anchor_digest is not None
+        ):
+            raise VerificationTransactionError(
+                "v0.3 external anchors require an explicit transaction input"
+            )
+        existing = connection.execute(
+            """
+            SELECT profile_digest, scope_id, scope_digest,
+                   subject_claim_id, profile_json
+            FROM verification_profiles_v03 WHERE profile_id = ?
+            """,
+            (parsed_profile.profile_id,),
+        ).fetchone()
+        exact = (
+            parsed_profile.digest,
+            parsed_profile.evaluation_scope_id,
+            parsed_profile.evaluation_scope_digest,
+            claim.claim_id,
+            _canonical_model_blob(parsed_profile),
+        )
+        if existing is not None:
+            if existing == exact:
+                raise VerificationCommittedError(
+                    "the exact v0.3 verification profile is already committed",
+                    parsed_profile,
+                )
+            raise VerificationTransactionError("v0.3 verification profile id is already used")
+        _assert_nonce_unused(connection, parsed_profile.nonce)
+        connection.execute(
+            """
+            INSERT INTO verification_profiles_v03 (
+                profile_id, profile_digest, scope_id, scope_digest,
+                subject_claim_id, profile_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                parsed_profile.profile_id,
+                parsed_profile.digest,
+                parsed_profile.evaluation_scope_id,
+                parsed_profile.evaluation_scope_digest,
+                claim.claim_id,
+                _canonical_model_blob(parsed_profile),
+            ),
+        )
+        return parsed_profile
+
+    return _commit_with_readback(
+        path,
+        stage=stage,
+        readback=lambda _: _exact_profile_v03_readback(
+            path, profile=parsed_profile
+        ),
+        fault=fault,
+    )
 
 
 def commit_verification_profile(

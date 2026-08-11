@@ -635,13 +635,13 @@ Checkpoint must confirm v0.1/v0.2 schema hashes did not change.
 - Modify: `src/openworkproof/verification.py`
 - Create: `tests/test_scope_transactions_v03.py`
 
-- [ ] **Step 1: Write RED DDL and transaction tests**
+- [x] **Step 1: Write RED DDL and transaction tests**
 
 Cover canonical commit/load, Manager signature/role/grant/nonce/expiry checks, SubjectClaim and WorkOrder bindings, exact-byte idempotency, conflicting bytes, PREPARE zero-write, insert failure, COMMIT failure, COMMIT-ACK readback, readback indeterminate, cleanup failure, and two-thread same-scope concurrency.
 
 Snapshot all authoritative tables before each injected failure and assert equality after failure.
 
-- [ ] **Step 2: Add parallel v0.3 tables**
+- [x] **Step 2: Add parallel v0.3 tables**
 
 In the existing schema initialization transaction, create:
 
@@ -657,11 +657,12 @@ CREATE TABLE acceptance_transition_parents_v03 (...);
 
 Use foreign keys only within the v0.3 table family. Do not alter existing v0.2 DDL.
 
-- [ ] **Step 3: Implement scope commit/load with existing readback semantics**
+- [x] **Step 3: Implement scope commit/load with existing readback semantics**
 
 ```python
 def commit_evaluation_scope(
     ledger: Path,
+    claim: SubjectClaim,
     manifest: EvaluationScopeManifest,
 ) -> EvaluationScopeManifest: ...
 
@@ -672,13 +673,16 @@ def load_evaluation_scope(
 ) -> EvaluationScopeManifest: ...
 ```
 
-Reuse `_commit_with_readback`, nonce checks, bounded canonical loaders, and target lock patterns. Do not retry an indeterminate COMMIT.
+Commit the `SubjectClaim` and Manifest atomically when the claim is not already
+present; an already committed claim is accepted only on exact canonical-byte
+equality. Reuse `_commit_with_readback`, nonce checks, bounded canonical loaders,
+and target lock patterns. Do not retry an indeterminate COMMIT.
 
-- [ ] **Step 4: Add v0.3 Profile transaction**
+- [x] **Step 4: Add v0.3 Profile transaction**
 
 Implement `commit_verification_profile_v03`; it must load the committed scope and claim, recompute static invariants, and reject digest-only or missing scope state.
 
-- [ ] **Step 5: Run focused and DDL regressions**
+- [x] **Step 5: Run focused and DDL regressions**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_scope_transactions_v03.py -q
@@ -687,7 +691,7 @@ Implement `commit_verification_profile_v03`; it must load the committed scope an
   tests/test_replay.py tests/test_state.py -q
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/openworkproof/evidence.py src/openworkproof/verification.py \

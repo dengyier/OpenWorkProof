@@ -648,6 +648,83 @@ _SCHEMA = (
     )
     """,
     """
+    CREATE TABLE evaluation_scopes_v03 (
+        scope_id TEXT PRIMARY KEY,
+        scope_digest TEXT NOT NULL UNIQUE,
+        work_order_digest TEXT NOT NULL,
+        claim_id TEXT NOT NULL,
+        subject_claim_digest TEXT NOT NULL,
+        scope_json BLOB NOT NULL UNIQUE
+    )
+    """,
+    """
+    CREATE TABLE verification_profiles_v03 (
+        profile_id TEXT PRIMARY KEY,
+        profile_digest TEXT NOT NULL UNIQUE,
+        scope_id TEXT NOT NULL UNIQUE
+            REFERENCES evaluation_scopes_v03(scope_id),
+        scope_digest TEXT NOT NULL,
+        subject_claim_id TEXT NOT NULL UNIQUE,
+        profile_json BLOB NOT NULL UNIQUE
+    )
+    """,
+    """
+    CREATE TABLE verification_arm_results_v03 (
+        arm_result_id TEXT PRIMARY KEY,
+        arm_result_digest TEXT NOT NULL UNIQUE,
+        profile_id TEXT NOT NULL
+            REFERENCES verification_profiles_v03(profile_id),
+        arm_id TEXT NOT NULL,
+        arm_result_json BLOB NOT NULL UNIQUE,
+        UNIQUE(profile_id, arm_id, arm_result_id)
+    )
+    """,
+    """
+    CREATE TABLE verification_decisions_v03 (
+        decision_id TEXT PRIMARY KEY,
+        decision_digest TEXT NOT NULL UNIQUE,
+        profile_id TEXT NOT NULL
+            REFERENCES verification_profiles_v03(profile_id),
+        scope_id TEXT NOT NULL
+            REFERENCES evaluation_scopes_v03(scope_id),
+        predecessor_id TEXT UNIQUE
+            REFERENCES verification_decisions_v03(decision_id),
+        decision_json BLOB NOT NULL UNIQUE
+    )
+    """,
+    """
+    CREATE TABLE verification_decision_parents_v03 (
+        decision_id TEXT NOT NULL
+            REFERENCES verification_decisions_v03(decision_id),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        arm_result_id TEXT NOT NULL
+            REFERENCES verification_arm_results_v03(arm_result_id),
+        PRIMARY KEY(decision_id, ordinal),
+        UNIQUE(decision_id, arm_result_id)
+    )
+    """,
+    """
+    CREATE TABLE acceptance_transitions_v03 (
+        transition_id TEXT PRIMARY KEY,
+        transition_digest TEXT NOT NULL UNIQUE,
+        decision_id TEXT NOT NULL
+            REFERENCES verification_decisions_v03(decision_id),
+        predecessor_id TEXT UNIQUE
+            REFERENCES acceptance_transitions_v03(transition_id),
+        transition_json BLOB NOT NULL UNIQUE
+    )
+    """,
+    """
+    CREATE TABLE acceptance_transition_parents_v03 (
+        transition_id TEXT NOT NULL
+            REFERENCES acceptance_transitions_v03(transition_id),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        parent_id TEXT NOT NULL,
+        PRIMARY KEY(transition_id, ordinal),
+        UNIQUE(transition_id, parent_id)
+    )
+    """,
+    """
     CREATE TRIGGER work_orders_single_authority
     BEFORE INSERT ON work_orders
     WHEN EXISTS (SELECT 1 FROM work_orders)
