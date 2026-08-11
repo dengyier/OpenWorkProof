@@ -1955,7 +1955,7 @@ Customer Acceptor, and paid deposit. WorkBuddy may record supplied evidence but
 must not contact parties, sign for them, or mark the gate complete without
 explicit authority and artifacts.
 
-- [ ] **Step 3: Stop at the branch integration choice**
+- [x] **Step 3: Stop at the branch integration choice**
 
 Run:
 
