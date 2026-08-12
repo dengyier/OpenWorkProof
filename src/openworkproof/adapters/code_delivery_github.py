@@ -107,6 +107,7 @@ class ObservedAction:
     artifact_digests: tuple[str, ...]
     covered_condition_digests: tuple[str, ...]
     undeclared_side_effects: tuple[str, ...]
+    issue_snapshot_digest: str | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -356,6 +357,14 @@ def replay_code_delivery_binding(
     )
     if len({item is None for item in chain}) != 1:
         return _unbound("REPLAY_DIVERGED")
+
+    # 3b. the observed work must reference the judged issue snapshot when the
+    # observer supplies one (artifact substitution defence, A3/A4/A8).
+    if (
+        observed.issue_snapshot_digest is not None
+        and observed.issue_snapshot_digest != judgment.issue_snapshot_digest
+    ):
+        return _unbound("ACTION_ARGUMENTS_MISMATCH")
 
     # 4. every required artifact exists and matches.
     if not set(judgment.required_artifact_digests).issubset(

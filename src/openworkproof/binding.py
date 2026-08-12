@@ -697,10 +697,17 @@ def compose_binding_decision(
         )
 
     # Verification must be current, VERIFIED and bound to this manifest.
-    if (
-        verification.decision != "VERIFIED"
-        or verification.work_order_digest != manifest.work_order_digest
-    ):
+    if verification.decision != "VERIFIED":
+        return draft("INDETERMINATE", ("VERIFICATION_NOT_CURRENT",))
+    if verification.work_order_digest != manifest.work_order_digest:
+        # An alternative self-consistent WorkOrder is an explicit counter-
+        # example for high-risk profiles (external authority can adjudicate
+        # it, design A13); without an external adjudicator it stays
+        # indeterminate (A14).
+        if verification.assurance_level == "high_risk":
+            return draft(
+                "UNBOUND", ("ALTERNATIVE_WORK_ORDER_DETECTED",)
+            )
         return draft("INDETERMINATE", ("VERIFICATION_NOT_CURRENT",))
     if verification.profile_digest != manifest.adapter_profile_digest:
         return draft("UNBOUND", ("ADAPTER_PROFILE_DIGEST_MISMATCH",))

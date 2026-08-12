@@ -356,6 +356,60 @@ def _verify_v03_envelope(bundle_path: str) -> bool:
     return True
 
 
+def _verify_v04_envelope(bundle_path: str) -> bool:
+    """Verify a v0.4 delivery-package envelope offline.
+
+    The envelope carries the same base64 file set as a customer-private
+    delivery package; the files are materialized in a temporary directory and
+    verified with ``verify_delivery_package`` (Layer 1 structure first, then
+    the binding replay). Metadata must declare the honest not-evidenced
+    markers for adoption, customer use and payment.
+    """
+    import base64
+    import tempfile
+
+    from openworkproof.delivery_package import (
+        DeliveryPackageError,
+        verify_delivery_package,
+    )
+
+    bundle = json.loads(Path(bundle_path).read_text(encoding="utf-8"))
+    envelope = bundle.get("schema_version")
+    if envelope != "openworkproof-evidence-bundle/0.4":
+        raise ValueError("v0.4 bundle schema_version is unsupported")
+    if set(bundle) != {"schema_version", "metadata", "files"}:
+        raise ValueError("v0.4 bundle envelope shape is not closed")
+    files = bundle["files"]
+    if not isinstance(files, dict) or not files:
+        raise ValueError("v0.4 bundle files are missing")
+    metadata = bundle["metadata"]
+    for marker in ("upstream_adoption", "customer_use", "payment"):
+        if metadata.get(marker) != "not_evidenced":
+            raise ValueError(
+                f"v0.4 bundle metadata {marker} must be not_evidenced"
+            )
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        for path, encoded in files.items():
+            if not isinstance(encoded, str):
+                raise ValueError("v0.4 bundle file payload is malformed")
+            target = root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(base64.b64decode(encoded))
+        try:
+            result = verify_delivery_package(root)
+        except DeliveryPackageError as error:
+            print(f"\nFAILED: {error}")
+            return False
+    print(f"\n{'=' * 60}")
+    print(f"v0.4 Evidence Bundle: {metadata.get('bug_id')}")
+    print(f"binding_replay: {result.binding_replay}")
+    print(f"binding_reason_codes: {result.binding_reason_codes}")
+    print(f"manifest_digest: {result.manifest_digest}")
+    print(f"{'=' * 60}")
+    return True
+
+
 def verify_bundle(bundle_path: str) -> bool:
     """Dispatch to the exact offline verifier selected by schema_version."""
     schema = bundle_schema(bundle_path)
@@ -365,6 +419,8 @@ def verify_bundle(bundle_path: str) -> bool:
         return _verify_v02_envelope(bundle_path)
     if schema == "openworkproof/delivery-package-envelope/0.3":
         return _verify_v03_envelope(bundle_path)
+    if schema == "openworkproof-evidence-bundle/0.4":
+        return _verify_v04_envelope(bundle_path)
     raise ValueError(f"unsupported bundle schema: {schema}")
 
 

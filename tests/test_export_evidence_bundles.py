@@ -904,3 +904,23 @@ def test_export_dify_33013_v02_delivery_package(
             "arm restores the incompatible keyword arguments."
         ),
     )
+
+
+def test_v04_binding_bundle_is_exported_and_verifies() -> None:
+    """The v0.4 binding evidence bundle must exist and verify offline."""
+    bundle_path = BUNDLE_DIR / "rich-4196-binding-v04-delivery-package.json"
+    assert bundle_path.is_file(), "v0.4 binding bundle was not exported"
+    import subprocess
+    import sys
+
+    script = Path(__file__).parent / "evidence-bundles" / (
+        "verify_evidence_bundle.py"
+    )
+    completed = subprocess.run(
+        [sys.executable, str(script), str(bundle_path)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "binding_replay: BOUND" in completed.stdout
