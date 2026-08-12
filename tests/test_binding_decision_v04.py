@@ -192,172 +192,28 @@ def _bound_replay(judgment: JudgmentCommitment, projection) -> "object":
     )
 
 
-@pytest.fixture
-def binding_decision_case(
-    tmp_path,
-    signed_work_order,
-    signed_subject_claim,
-    evaluation_scope_payload_v03,
-    ephemeral_role_keys,
-    sidecar_receipt_factory,
-    fixed_now,
-    monkeypatch,
-):
-    now = fixed_now + timedelta(seconds=5)
-    case = _run_tests_case(
-        tmp_path=tmp_path,
-        signed_work_order=signed_work_order,
-        role_keys=ephemeral_role_keys,
-        sidecar_receipt_factory=sidecar_receipt_factory,
-        now=fixed_now,
-    )
-    work_order = case["work_order"]
-    claim_payload = signed_subject_claim.model_dump(
-        mode="json",
-        exclude={"digest", "signature_alg", "signer_key_id", "signature"},
-    )
-    claim_payload["work_order_digest"] = work_order.digest
-    from openworkproof.models import SubjectClaim
-    from openworkproof.signing import sign_payload
-
-    claim = SubjectClaim.model_validate(
-        sign_payload(
-            "subject-claim",
-            claim_payload,
-            ephemeral_role_keys["Manager"][0],
-        )
-    )
-    scope = _signed_scope(
-        payload=evaluation_scope_payload_v03,
-        manager_key=ephemeral_role_keys["Manager"][0],
-        work_order=work_order,
-        claim=claim,
-    )
-    from openworkproof.binding import canonical_test_profile_digest
-
-    test_digests = tuple(
-        sorted(
-            canonical_test_profile_digest(profile)
-            for profile in work_order.test_profiles
-        )
-    )
-    profile, projection = _profile_from_axes(
-        allowed_tool_names=(
-            "owp.apply_patch",
-            "owp.create_pr_proposal",
-            "owp.repo_read",
-            "owp.rollback_patch",
-            "owp.run_tests",
-        ),
-        allowed_action_kinds=("proposal", "read", "rollback", "test"),
-        allowed_path_roots=("src",),
-        required_test_profile_digests=test_digests,
-    )
-    judgment = _signed_judgment(
-        work_order=work_order,
-        scope=scope,
-        acceptor_key=ephemeral_role_keys["Acceptor"][0],
-        projection=projection,
-    )
-    manifest = _signed_manifest(
-        work_order=work_order,
-        scope=scope,
-        judgment=judgment,
-        projection=projection,
-        manager_key=ephemeral_role_keys["Manager"][0],
-    )
-    from openworkproof.binding_transactions import (
-        JudgmentAuthorityContext,
-        commit_action_binding_manifest,
-        commit_judgment_commitment,
-    )
-    from openworkproof.verification import commit_evaluation_scope
-
-    commit_evaluation_scope(case["ledger_path"], claim, scope)
-    commit_judgment_commitment(
-        case["ledger_path"],
-        judgment,
-        JudgmentAuthorityContext(
-            authority_namespace=judgment.authority_namespace,
-            authority_binding=next(
-                item
-                for item in work_order.key_bindings
-                if item.role == "Acceptor"
-            ),
-            transaction_time=fixed_now + timedelta(seconds=2),
-        ),
-    )
-    commit_action_binding_manifest(
-        case["ledger_path"],
-        manifest,
-        profile,
-        transaction_time=fixed_now + timedelta(seconds=4),
-    )
-    from test_binding_gateway_v04 import _resign_v04_request
-
-    request_v04 = _resign_v04_request(
-        case["request"],
-        ephemeral_role_keys["Verifier"][0],
-        judgment_id=judgment.commitment_id,
-        judgment_digest=judgment.digest,
-        manifest_id=manifest.binding_manifest_id,
-        manifest_digest=manifest.digest,
-        requested_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-    )
-    monkeypatch.setattr(
-        repo_tools,
-        "prepare_candidate_execution_snapshot",
-        lambda candidate_request: _run_tests_snapshot(case),
-    )
-    driver = _FakeRunTestsExecutionDriver()
-    receipt = mcp_server.execute_run_tests(
-        case["ledger_path"],
-        evidence_root=case["evidence_root"],
-        context=_current_run_tests_context(case, now),
-        request=request_v04,
-        request_arguments=case["arguments"],
-        execution_facts=case["facts"],
-        candidate_snapshot_request=_run_tests_snapshot_request(
-            case, case["evidence_root"]
-        ),
-        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
-        execution_driver=driver,
-        clock=lambda: now,
-    )
-    verification = _verified_decision(
-        work_order=work_order,
-        claim=claim,
-        scope=scope,
-        manifest=manifest,
-        keys=ephemeral_role_keys,
-    )
-    replay = _bound_replay(judgment, projection)
-    case.update(
-        {
-            "now": now,
-            "claim": claim,
-            "scope": scope,
-            "profile": profile,
-            "projection": projection,
-            "judgment": judgment,
-            "manifest": manifest,
-            "request_v04": request_v04,
-            "receipt": receipt,
-            "verification": verification,
-            "replay": replay,
-            "role_keys": ephemeral_role_keys,
-        }
-    )
-    return case
 
 
 def _compose(case, **changes) -> BindingDecisionDraft:
+    verification = changes.get(
+        "verification",
+        _verified_decision(
+            work_order=case["work_order"],
+            claim=case["claim"],
+            scope=case["scope"],
+            manifest=case["manifest"],
+            keys=case["role_keys"],
+        ),
+    )
+    replay = changes.get(
+        "replay", _bound_replay(case["judgment"], case["projection"])
+    )
     return compose_binding_decision(
         judgment=changes.get("judgment", case["judgment"]),
         manifest=changes.get("manifest", case["manifest"]),
-        verification=changes.get("verification", case["verification"]),
+        verification=verification,
         receipts=changes.get("receipts", (case["receipt"],)),
-        replay=changes.get("replay", case["replay"]),
+        replay=replay,
         checkpoint=changes.get("checkpoint"),
         request=changes.get(
             "request",
@@ -376,20 +232,25 @@ def _compose(case, **changes) -> BindingDecisionDraft:
 
 def test_complete_chain_composes_bound(binding_decision_case) -> None:
     draft = _compose(binding_decision_case)
+    verification = _verified_decision(
+        work_order=binding_decision_case["work_order"],
+        claim=binding_decision_case["claim"],
+        scope=binding_decision_case["scope"],
+        manifest=binding_decision_case["manifest"],
+        keys=binding_decision_case["role_keys"],
+    )
+    replay = _bound_replay(
+        binding_decision_case["judgment"],
+        binding_decision_case["projection"],
+    )
     assert draft.decision == "BOUND"
     assert draft.reason_codes == ()
-    assert draft.verification_decision_id == (
-        binding_decision_case["verification"].decision_id
-    )
-    assert draft.verification_decision_digest == (
-        binding_decision_case["verification"].digest
-    )
+    assert draft.verification_decision_id == verification.decision_id
+    assert draft.verification_decision_digest == verification.digest
     assert draft.action_receipt_ids == (
         binding_decision_case["receipt"].receipt_id,
     )
-    assert draft.adapter_replay_digest == (
-        binding_decision_case["replay"].replay_digest
-    )
+    assert draft.adapter_replay_digest == replay.replay_digest
     assert draft.authority_status == "not_required"
     assert draft.authority_checkpoint_digest is None
 
@@ -426,7 +287,7 @@ def test_refuted_verification_never_bounds(binding_decision_case) -> None:
 
 def test_replay_unbound_propagates_unbound(binding_decision_case) -> None:
     case = binding_decision_case
-    attacked = copy.deepcopy(case["replay"])
+    attacked = _bound_replay(case["judgment"], case["projection"])
     unbound_replay = type(attacked)(
         outcome="UNBOUND",
         reason_codes=("ACTION_OUTSIDE_APPROVED_SCOPE",),
@@ -439,7 +300,7 @@ def test_replay_unbound_propagates_unbound(binding_decision_case) -> None:
 
 def test_replay_indeterminate_propagates(binding_decision_case) -> None:
     case = binding_decision_case
-    attacked = copy.deepcopy(case["replay"])
+    attacked = _bound_replay(case["judgment"], case["projection"])
     indeterminate_replay = type(attacked)(
         outcome="INDETERMINATE",
         reason_codes=("EVALUATOR_VERSION_DRIFT",),
@@ -518,7 +379,7 @@ def test_high_risk_without_checkpoint_is_indeterminate(
 def test_reason_codes_match_outcome(binding_decision_case) -> None:
     # The model rejects any reason code incompatible with its outcome.
     case = binding_decision_case
-    replay = copy.deepcopy(case["replay"])
+    replay = _bound_replay(case["judgment"], case["projection"])
     invalid = type(replay)(
         outcome="UNBOUND",
         reason_codes=("EVIDENCE_INCOMPLETE",),
@@ -632,7 +493,7 @@ def test_wrong_signature_count_fails(binding_decision_case) -> None:
 def test_changed_replay_digest_changes_decision(binding_decision_case) -> None:
     case = binding_decision_case
     first = _compose(case)
-    replay = copy.deepcopy(case["replay"])
+    replay = _bound_replay(case["judgment"], case["projection"])
     changed = type(replay)(
         outcome=replay.outcome,
         reason_codes=replay.reason_codes,

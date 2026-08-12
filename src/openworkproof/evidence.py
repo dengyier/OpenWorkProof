@@ -845,6 +845,67 @@ _SCHEMA = (
         SELECT RAISE(ABORT, 'the authoritative WorkOrder is immutable');
     END
     """,
+    """
+    CREATE TABLE binding_decisions_v04 (
+        binding_decision_id TEXT PRIMARY KEY,
+        decision_digest TEXT NOT NULL,
+        work_order_digest TEXT NOT NULL,
+        judgment_commitment_digest TEXT NOT NULL,
+        action_binding_manifest_digest TEXT NOT NULL,
+        verification_decision_id TEXT NOT NULL,
+        verification_decision_digest TEXT NOT NULL,
+        adapter_replay_digest TEXT NOT NULL,
+        authority_checkpoint_digest TEXT,
+        decision TEXT NOT NULL,
+        reason_codes_json TEXT NOT NULL,
+        authority_status TEXT NOT NULL,
+        nonce TEXT NOT NULL,
+        decision_json BLOB NOT NULL UNIQUE,
+        committed_at TEXT NOT NULL,
+        UNIQUE (nonce)
+    )
+    """,
+    """
+    CREATE INDEX binding_decisions_v04_work_order
+    ON binding_decisions_v04 (work_order_digest)
+    """,
+    """
+    CREATE TRIGGER binding_decisions_v04_are_immutable_update
+    BEFORE UPDATE ON binding_decisions_v04
+    BEGIN
+        SELECT RAISE(ABORT, 'binding decisions are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER binding_decisions_v04_are_immutable_delete
+    BEFORE DELETE ON binding_decisions_v04
+    BEGIN
+        SELECT RAISE(ABORT, 'binding decisions are immutable');
+    END
+    """,
+    """
+    CREATE TABLE binding_decision_supersessions_v04 (
+        child_decision_id TEXT PRIMARY KEY
+            REFERENCES binding_decisions_v04(binding_decision_id),
+        parent_decision_id TEXT NOT NULL UNIQUE
+            REFERENCES binding_decisions_v04(binding_decision_id),
+        parent_decision_digest TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TRIGGER binding_decision_supersessions_v04_are_immutable_update
+    BEFORE UPDATE ON binding_decision_supersessions_v04
+    BEGIN
+        SELECT RAISE(ABORT, 'binding decision supersessions are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER binding_decision_supersessions_v04_are_immutable_delete
+    BEFORE DELETE ON binding_decision_supersessions_v04
+    BEGIN
+        SELECT RAISE(ABORT, 'binding decision supersessions are immutable');
+    END
+    """,
 )
 
 

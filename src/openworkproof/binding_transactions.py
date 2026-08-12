@@ -17,10 +17,14 @@ from openworkproof.binding import (
 )
 from openworkproof.models import (
     ActionBindingManifest,
+    parse_action_receipt_json as models_parse_action_receipt_json,
+    ActionReceiptEnvelope,
+    BindingDecision,
     EvaluationScopeManifest,
     JudgmentCommitment,
     KeyBinding,
     SubjectClaim,
+    VerificationDecisionV03,
     WorkOrder,
 )
 from openworkproof.scope import validate_evaluation_scope
@@ -71,6 +75,10 @@ def _canonical_model_blob(value: object) -> bytes:
     if not hasattr(value, "model_dump"):
         raise BindingInputError("binding protocol object is malformed")
     return evidence._canonical_json(value.model_dump(mode="json")).encode("utf-8")
+
+
+def _canonical_json_blob(value: object) -> bytes:
+    return evidence._canonical_json(value).encode("utf-8")
 
 
 def _canonical_utc_second(value: datetime) -> str:
@@ -896,6 +904,371 @@ def commit_action_binding_manifest(
     )
 
 
+
+
+
+# --- Task 9: commit BindingDecisions with exact recovery -------------------
+
+
+def _load_committed_judgment_by_digest(
+    connection: sqlite3.Connection,
+    judgment_digest: str,
+) -> JudgmentCommitment:
+    row = connection.execute(
+        """
+        SELECT commitment_json FROM judgment_commitments_v04
+        WHERE commitment_digest = ?
+        """,
+        (judgment_digest,),
+    ).fetchone()
+    if row is None:
+        raise BindingInputError("committed Judgment is unavailable")
+    return _load_canonical_row(JudgmentCommitment, row[0], "Judgment")
+
+
+def _load_committed_manifest_by_digest(
+    connection: sqlite3.Connection,
+    manifest_digest: str,
+) -> ActionBindingManifest:
+    row = connection.execute(
+        """
+        SELECT manifest_json FROM action_binding_manifests_v04
+        WHERE manifest_digest = ?
+        """,
+        (manifest_digest,),
+    ).fetchone()
+    if row is None:
+        raise BindingInputError("committed ActionBindingManifest is unavailable")
+    return _load_canonical_row(
+        ActionBindingManifest, row[0], "ActionBindingManifest"
+    )
+
+
+def _load_committed_verification(
+    connection: sqlite3.Connection,
+    decision_digest: str,
+) -> VerificationDecisionV03:
+    row = connection.execute(
+        """
+        SELECT decision_json FROM verification_decisions_v03
+        WHERE decision_digest = ?
+        """,
+        (decision_digest,),
+    ).fetchone()
+    if row is None:
+        raise BindingInputError("committed VerificationDecision is unavailable")
+    return _load_canonical_row(
+        VerificationDecisionV03, row[0], "VerificationDecisionV03"
+    )
+
+
+def _load_committed_receipt_digest(
+    connection: sqlite3.Connection,
+    receipt_id: str,
+) -> str | None:
+    row = connection.execute(
+        "SELECT receipt_json FROM receipts WHERE receipt_id = ?",
+        (receipt_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        parsed = models_parse_action_receipt_json(row[0])
+    except (ValueError, TypeError):
+        raise BindingTransactionError(
+            "committed ActionReceipt is malformed"
+        ) from None
+    return parsed.digest
+
+
+def _exact_decision_readback(
+    path: Path,
+    decision: BindingDecision,
+    committed_at: str,
+) -> bool:
+    connection = evidence.connect_ledger(path)
+    try:
+        row = connection.execute(
+            """
+            SELECT decision_digest, work_order_digest,
+                   judgment_commitment_digest,
+                   action_binding_manifest_digest,
+                   verification_decision_digest, adapter_replay_digest,
+                   decision, reason_codes_json, authority_status, nonce,
+                   decision_json, committed_at
+            FROM binding_decisions_v04
+            WHERE binding_decision_id = ?
+            """,
+            (decision.binding_decision_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        canonical = _canonical_model_blob(decision)
+        if row[:11] != (
+            decision.digest,
+            decision.work_order_digest,
+            decision.judgment_commitment_digest,
+            decision.action_binding_manifest_digest,
+            decision.verification_decision_digest,
+            decision.adapter_replay_digest,
+            decision.decision,
+            _canonical_json_blob(list(decision.reason_codes)),
+            decision.authority_status,
+            decision.nonce,
+            canonical,
+        ):
+            return False
+        return row[11] == committed_at
+    finally:
+        connection.close()
+
+
+def commit_binding_decision(
+    ledger_path: Path,
+    decision: BindingDecision,
+    *,
+    transaction_time: datetime,
+    fault: _Fault | None = None,
+) -> BindingDecision:
+    """Commit one independently signed BindingDecision after loading every
+    referenced authority row and rerunning the pure consistency checks."""
+
+    path = Path(ledger_path)
+    try:
+        parsed = BindingDecision.model_validate(
+            decision.model_dump(mode="json")
+        )
+    except Exception as error:
+        raise BindingInputError("binding decision is malformed") from error
+    committed_at = _canonical_utc_second(transaction_time)
+    committed_datetime = _validate_committed_at(committed_at)
+    canonical = _canonical_model_blob(parsed)
+    reason_codes_json = _canonical_json_blob(list(parsed.reason_codes))
+
+    def stage(connection: sqlite3.Connection) -> BindingDecision:
+        work_order = evidence.load_authoritative_work_order(connection)
+        if work_order.digest != parsed.work_order_digest:
+            raise BindingTransactionError(
+                "binding decision WorkOrder is not the authoritative ledger"
+            )
+        existing = connection.execute(
+            "SELECT decision_json FROM binding_decisions_v04 "
+            "WHERE binding_decision_id = ?",
+            (parsed.binding_decision_id,),
+        ).fetchone()
+        if existing is not None:
+            if existing[0] != canonical:
+                raise BindingTransactionError(
+                    "binding decision id is already used"
+                )
+            raise BindingCommittedError(
+                "the exact binding decision is already committed", parsed
+            )
+        if connection.execute(
+            "SELECT 1 FROM binding_decisions_v04 WHERE nonce = ?",
+            (parsed.nonce,),
+        ).fetchone() is not None:
+            raise BindingTransactionError(
+                "binding decision nonce is already used"
+            )
+
+        judgment = _load_committed_judgment_by_digest(
+            connection, parsed.judgment_commitment_digest
+        )
+        manifest = _load_committed_manifest_by_digest(
+            connection, parsed.action_binding_manifest_digest
+        )
+        verification = _load_committed_verification(
+            connection, parsed.verification_decision_digest
+        )
+        if (
+            manifest.judgment_commitment_id != judgment.commitment_id
+            or manifest.judgment_commitment_digest != judgment.digest
+        ):
+            raise BindingTransactionError(
+                "binding decision judgment/manifest digest chain is invalid"
+            )
+        if verification.work_order_digest != work_order.digest:
+            raise BindingTransactionError(
+                "binding decision verification is for another WorkOrder"
+            )
+        if verification.profile_digest != manifest.adapter_profile_digest:
+            raise BindingTransactionError(
+                "binding decision verification profile does not match manifest"
+            )
+        if verification.decision != "VERIFIED":
+            raise BindingTransactionError(
+                "binding decision verification is not currently VERIFIED"
+            )
+        if (
+            parsed.verification_decision_id != verification.decision_id
+            or parsed.verification_decision_digest != verification.digest
+        ):
+            raise BindingTransactionError(
+                "binding decision verification reference does not match"
+            )
+        decided_at = parsed.decided_at
+        if not judgment.valid_from <= decided_at < judgment.expires_at:
+            raise BindingTransactionError(
+                "binding decision is outside the Judgment window"
+            )
+        if not manifest.created_at <= decided_at < manifest.expires_at:
+            raise BindingTransactionError(
+                "binding decision is outside the Manifest window"
+            )
+        if verification.decided_at > decided_at:
+            raise BindingTransactionError(
+                "binding decision predates its VerificationDecision"
+            )
+        by_receipt_id = dict(
+            zip(parsed.action_receipt_ids, parsed.action_receipt_digests)
+        )
+        for receipt_id in parsed.action_receipt_ids:
+            committed_digest = _load_committed_receipt_digest(
+                connection, receipt_id
+            )
+            if committed_digest is None:
+                raise BindingTransactionError(
+                    "binding decision references an uncommitted receipt"
+                )
+            if committed_digest != by_receipt_id[receipt_id]:
+                raise BindingTransactionError(
+                    "binding decision receipt digest does not match ledger"
+                )
+
+        if parsed.supersedes_binding_decision_id is not None:
+            parent_row = connection.execute(
+                "SELECT decision_json, committed_at "
+                "FROM binding_decisions_v04 "
+                "WHERE binding_decision_id = ?",
+                (parsed.supersedes_binding_decision_id,),
+            ).fetchone()
+            if parent_row is None:
+                raise BindingTransactionError(
+                    "binding decision supersession parent is unavailable"
+                )
+            parent = _load_canonical_row(
+                BindingDecision, parent_row[0], "BindingDecision"
+            )
+            if parent.digest != parsed.supersedes_binding_decision_digest:
+                raise BindingTransactionError(
+                    "binding decision does not supersede the exact parent"
+                )
+            parent_committed_at = _validate_committed_at(parent_row[1])
+            if parent_committed_at > committed_datetime:
+                raise BindingTransactionError(
+                    "parent BindingDecision committed after its child"
+                )
+            superseded = connection.execute(
+                "SELECT 1 FROM binding_decision_supersessions_v04 "
+                "WHERE parent_decision_id = ?",
+                (parent.binding_decision_id,),
+            ).fetchone()
+            if superseded is not None:
+                raise BindingTransactionError(
+                    "binding decision parent is already superseded"
+                )
+
+        connection.execute(
+            """
+            INSERT INTO binding_decisions_v04 (
+                binding_decision_id, decision_digest, work_order_digest,
+                judgment_commitment_digest, action_binding_manifest_digest,
+                verification_decision_id, verification_decision_digest,
+                adapter_replay_digest, authority_checkpoint_digest,
+                decision, reason_codes_json, authority_status, nonce,
+                decision_json, committed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                parsed.binding_decision_id,
+                parsed.digest,
+                parsed.work_order_digest,
+                parsed.judgment_commitment_digest,
+                parsed.action_binding_manifest_digest,
+                parsed.verification_decision_id,
+                parsed.verification_decision_digest,
+                parsed.adapter_replay_digest,
+                parsed.authority_checkpoint_digest,
+                parsed.decision,
+                reason_codes_json,
+                parsed.authority_status,
+                parsed.nonce,
+                canonical,
+                committed_at,
+            ),
+        )
+        if parsed.supersedes_binding_decision_id is not None:
+            connection.execute(
+                """
+                INSERT INTO binding_decision_supersessions_v04 (
+                    child_decision_id, parent_decision_id,
+                    parent_decision_digest
+                ) VALUES (?, ?, ?)
+                """,
+                (
+                    parsed.binding_decision_id,
+                    parsed.supersedes_binding_decision_id,
+                    parsed.supersedes_binding_decision_digest,
+                ),
+            )
+        return parsed
+
+    return _commit_with_readback(
+        path,
+        stage=stage,
+        readback=lambda _: _exact_decision_readback(path, parsed, committed_at),
+        fault=fault,
+    )
+
+
+def load_current_binding_decision(
+    ledger_path: Path,
+    work_order_digest: str,
+) -> BindingDecision | None:
+    """Load the sole non-superseded valid head for one WorkOrder."""
+
+    path = Path(ledger_path)
+    if not path.is_file():
+        raise BindingTransactionError("binding ledger is unavailable")
+    connection = evidence.connect_ledger(path)
+    try:
+        work_order = evidence.load_authoritative_work_order(connection)
+        if work_order.digest != work_order_digest:
+            raise BindingTransactionError(
+                "requested WorkOrder is not the authoritative ledger WorkOrder"
+            )
+        rows = tuple(
+            connection.execute(
+                """
+                SELECT d.binding_decision_id
+                FROM binding_decisions_v04 d
+                LEFT JOIN binding_decision_supersessions_v04 s
+                    ON s.parent_decision_id = d.binding_decision_id
+                WHERE d.work_order_digest = ? AND s.child_decision_id IS NULL
+                ORDER BY d.committed_at
+                """,
+                (work_order_digest,),
+            ).fetchall()
+        )
+        if len(rows) != 1:
+            raise BindingTransactionError(
+                "binding decision history has no unique current object"
+            )
+        row = connection.execute(
+            "SELECT decision_json FROM binding_decisions_v04 "
+            "WHERE binding_decision_id = ?",
+            (rows[0][0],),
+        ).fetchone()
+        if row is None:
+            raise BindingTransactionError(
+                "binding decision current row is unavailable"
+            )
+        return _load_canonical_row(BindingDecision, row[0], "BindingDecision")
+    finally:
+        connection.close()
+
+
 __all__ = [
     "BindingCommitIndeterminateError",
     "BindingCommittedError",
@@ -905,4 +1278,6 @@ __all__ = [
     "commit_action_binding_manifest",
     "commit_judgment_commitment",
     "load_current_action_binding_manifest",
+    "commit_binding_decision",
+    "load_current_binding_decision",
 ]

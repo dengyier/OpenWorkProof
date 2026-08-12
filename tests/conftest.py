@@ -1575,3 +1575,167 @@ def signed_acceptance_receipt(
             ephemeral_role_keys["Acceptor"][0],
         )
     )
+
+
+@pytest.fixture
+def binding_decision_case(
+    tmp_path,
+    signed_work_order,
+    signed_subject_claim,
+    evaluation_scope_payload_v03,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+):
+    from datetime import timedelta
+
+    from openworkproof.binding import canonical_test_profile_digest
+    from openworkproof.binding_transactions import (
+        JudgmentAuthorityContext,
+        commit_action_binding_manifest,
+        commit_judgment_commitment,
+    )
+    from openworkproof.models import SubjectClaim
+    from openworkproof.signing import sign_payload
+    from openworkproof.verification import commit_evaluation_scope
+
+    import openworkproof.mcp_server as mcp_server
+    import openworkproof.repo_tools as repo_tools
+    from test_binding_gateway_v04 import _resign_v04_request
+    from test_binding_manifest_transactions_v04 import (
+        _profile_from_axes,
+        _signed_judgment,
+        _signed_manifest,
+        _signed_scope,
+    )
+    from test_mcp_server import (
+        _FakeRunTestsExecutionDriver,
+        _current_run_tests_context,
+        _run_tests_case,
+        _run_tests_snapshot,
+        _run_tests_snapshot_request,
+    )
+
+    now = fixed_now + timedelta(seconds=5)
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    work_order = case["work_order"]
+    claim_payload = signed_subject_claim.model_dump(
+        mode="json",
+        exclude={"digest", "signature_alg", "signer_key_id", "signature"},
+    )
+    claim_payload["work_order_digest"] = work_order.digest
+    claim = SubjectClaim.model_validate(
+        sign_payload(
+            "subject-claim",
+            claim_payload,
+            ephemeral_role_keys["Manager"][0],
+        )
+    )
+    scope = _signed_scope(
+        payload=evaluation_scope_payload_v03,
+        manager_key=ephemeral_role_keys["Manager"][0],
+        work_order=work_order,
+        claim=claim,
+    )
+    test_digests = tuple(
+        sorted(
+            canonical_test_profile_digest(profile)
+            for profile in work_order.test_profiles
+        )
+    )
+    profile, projection = _profile_from_axes(
+        allowed_tool_names=(
+            "owp.apply_patch",
+            "owp.create_pr_proposal",
+            "owp.repo_read",
+            "owp.rollback_patch",
+            "owp.run_tests",
+        ),
+        allowed_action_kinds=("proposal", "read", "rollback", "test"),
+        allowed_path_roots=("src",),
+        required_test_profile_digests=test_digests,
+    )
+    judgment = _signed_judgment(
+        work_order=work_order,
+        scope=scope,
+        acceptor_key=ephemeral_role_keys["Acceptor"][0],
+        projection=projection,
+    )
+    manifest = _signed_manifest(
+        work_order=work_order,
+        scope=scope,
+        judgment=judgment,
+        projection=projection,
+        manager_key=ephemeral_role_keys["Manager"][0],
+    )
+    commit_evaluation_scope(case["ledger_path"], claim, scope)
+    commit_judgment_commitment(
+        case["ledger_path"],
+        judgment,
+        JudgmentAuthorityContext(
+            authority_namespace=judgment.authority_namespace,
+            authority_binding=next(
+                item
+                for item in work_order.key_bindings
+                if item.role == "Acceptor"
+            ),
+            transaction_time=fixed_now + timedelta(seconds=2),
+        ),
+    )
+    commit_action_binding_manifest(
+        case["ledger_path"],
+        manifest,
+        profile,
+        transaction_time=fixed_now + timedelta(seconds=4),
+    )
+    request_v04 = _resign_v04_request(
+        case["request"],
+        ephemeral_role_keys["Verifier"][0],
+        judgment_id=judgment.commitment_id,
+        judgment_digest=judgment.digest,
+        manifest_id=manifest.binding_manifest_id,
+        manifest_digest=manifest.digest,
+        requested_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    monkeypatch.setattr(
+        repo_tools,
+        "prepare_candidate_execution_snapshot",
+        lambda candidate_request: _run_tests_snapshot(case),
+    )
+    driver = _FakeRunTestsExecutionDriver()
+    receipt = mcp_server.execute_run_tests(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=_current_run_tests_context(case, now),
+        request=request_v04,
+        request_arguments=case["arguments"],
+        execution_facts=case["facts"],
+        candidate_snapshot_request=_run_tests_snapshot_request(
+            case, case["evidence_root"]
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        execution_driver=driver,
+        clock=lambda: now,
+    )
+    case.update(
+        {
+            "now": now,
+            "claim": claim,
+            "scope": scope,
+            "profile": profile,
+            "projection": projection,
+            "judgment": judgment,
+            "manifest": manifest,
+            "request_v04": request_v04,
+            "receipt": receipt,
+            "role_keys": ephemeral_role_keys,
+        }
+    )
+    return case
