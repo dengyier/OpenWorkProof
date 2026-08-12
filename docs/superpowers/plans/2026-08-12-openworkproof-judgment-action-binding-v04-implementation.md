@@ -636,11 +636,11 @@ git commit -m "feat: deny unbound v0.4 actions before execution"
 - Create: `src/openworkproof/adapters/code_delivery_github.py`
 - Create: `tests/test_code_delivery_binding_v04.py`
 
-- [ ] **Step 1: Freeze canonical adapter fixtures**
+- [x] **Step 1: Freeze canonical adapter fixtures**
 
 Add canonical fixtures for Issue snapshot, repository identity, source revision, target branch, acceptance conditions, allowed/excluded paths, required artifacts, test profiles, and action kinds. Add byte-order and Unicode/path normalization tests.
 
-- [ ] **Step 2: Add mapping RED tests**
+- [x] **Step 2: Add mapping RED tests**
 
 Cover exact clean mapping and explicit mismatches for action parameters, Issue snapshot, normalized facts, acceptance conditions, paths, artifact digests, candidate commit/workspace chain, scope targets, and undeclared side effects.
 
@@ -652,17 +652,17 @@ def test_coherently_resigned_action_outside_judgment_is_unbound(case) -> None:
     assert replay.reason_codes == ("ACTION_OUTSIDE_APPROVED_SCOPE",)
 ```
 
-- [ ] **Step 3: Implement pure canonicalization**
+- [x] **Step 3: Implement pure canonicalization**
 
 Expose only these pure typed operations: `normalize_code_delivery_judgment(CodeDeliveryJudgmentInput) -> NormalizedJudgment`, `action_constraint_digest(CodeDeliveryAdapterProfile) -> str`, and `replay_code_delivery_binding(CodeDeliveryReplayInput) -> BindingReplayResult`.
 
 No filesystem/network access occurs inside the mapping function. Callers supply immutable observations and digests.
 
-- [ ] **Step 4: Make adapter version drift explicit**
+- [x] **Step 4: Make adapter version drift explicit**
 
 Unknown/mismatched `adapter_id`, `adapter_version`, or `adapter_profile_digest` returns `INDETERMINATE` with the exact drift reason; it never falls back to the latest adapter.
 
-- [ ] **Step 5: Run deterministic replay tests**
+- [x] **Step 5: Run deterministic replay tests**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_code_delivery_binding_v04.py -q
@@ -672,7 +672,7 @@ PYTHONHASHSEED=777 ./.venv/bin/python -m pytest tests/test_code_delivery_binding
 
 Expected: identical serialized replay digests in both seeded runs.
 
-- [ ] **Step 6: Commit the adapter**
+- [x] **Step 6: Commit the adapter**
 
 ```bash
 git add src/openworkproof/adapters tests/test_code_delivery_binding_v04.py
