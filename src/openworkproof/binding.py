@@ -31,6 +31,7 @@ from openworkproof.models import (
     _INDETERMINATE_BINDING_REASONS,
     _UNBOUND_BINDING_REASONS,
 )
+from openworkproof.authority import evaluate_authority_status
 from openworkproof.signing import (
     canonical_bytes,
     decode_and_verify_key_binding,
@@ -629,6 +630,9 @@ def compose_binding_decision(
     replay: BindingReplayView,
     checkpoint: AuthorityCheckpoint | None,
     request: BindingDecisionDraftRequest,
+    checkpoint_chain: tuple[AuthorityCheckpoint, ...] = (),
+    authority_key: Ed25519PublicKey | None = None,
+    resolver_unavailable: bool = False,
 ) -> BindingDecisionDraft:
     """Compose one BindingDecision draft, recomputing every reference.
 
@@ -747,20 +751,70 @@ def compose_binding_decision(
     if replay.outcome != "BOUND" or replay.reason_codes:
         return draft("INDETERMINATE", ("REPLAY_UNAVAILABLE",))
 
-    # Authority: high-risk requires a current checkpoint (Task 10 expands
-    # the chain validation; here we fail closed when it is absent).
+    # Authority: high-risk requires a current external checkpoint at the
+    # action's as-of time. Missing/unavailable fails closed to
+    # INDETERMINATE; stale/fork/rollback with otherwise valid evidence is
+    # the approved UNBOUND classification (design §6.5).
     if verification.assurance_level == "high_risk":
-        if checkpoint is None:
+        if not checkpoint_chain:
             return draft(
                 "INDETERMINATE",
                 ("AUTHORITY_CHECKPOINT_MISSING",),
                 authority_status="missing",
             )
+        if authority_key is None:
+            return draft(
+                "INDETERMINATE",
+                ("REPLAY_UNAVAILABLE",),
+                authority_status="unavailable",
+            )
+        status, checkpoint_digest = evaluate_authority_status(
+            checkpoint_chain,
+            authority_namespace=judgment.authority_namespace,
+            subject_id=judgment.subject_id,
+            authority_key=authority_key,
+            occurred_at=decided_at,
+            resolver_unavailable=resolver_unavailable,
+        )
+        if status == "current":
+            assert checkpoint_digest is not None
+            return draft(
+                "BOUND",
+                (),
+                authority_status="current",
+                authority_checkpoint_digest=checkpoint_digest,
+            )
+        if status == "stale":
+            return draft(
+                "UNBOUND",
+                ("AUTHORITY_CHECKPOINT_STALE",),
+                authority_status="stale",
+                authority_checkpoint_digest=checkpoint_digest,
+            )
+        if status == "rollback":
+            return draft(
+                "UNBOUND",
+                ("AUTHORITY_ROLLBACK_DETECTED",),
+                authority_status="stale",
+                authority_checkpoint_digest=checkpoint_digest,
+            )
+        if status == "forked":
+            return draft(
+                "UNBOUND",
+                ("AUTHORITY_FORK_DETECTED",),
+                authority_status="forked",
+                authority_checkpoint_digest=checkpoint_digest,
+            )
+        if status == "unavailable":
+            return draft(
+                "INDETERMINATE",
+                ("REPLAY_UNAVAILABLE",),
+                authority_status="unavailable",
+            )
         return draft(
-            "BOUND",
-            (),
-            authority_status="current",
-            authority_checkpoint_digest=checkpoint.digest,
+            "INDETERMINATE",
+            ("AUTHORITY_CHECKPOINT_MISSING",),
+            authority_status="missing",
         )
     if checkpoint is not None:
         return draft(

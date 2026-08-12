@@ -906,6 +906,37 @@ _SCHEMA = (
         SELECT RAISE(ABORT, 'binding decision supersessions are immutable');
     END
     """,
+    """
+    CREATE TABLE authority_checkpoints_v04 (
+        checkpoint_id TEXT PRIMARY KEY,
+        checkpoint_digest TEXT NOT NULL,
+        authority_namespace TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        monotonic_revision INTEGER NOT NULL,
+        predecessor_checkpoint_digest TEXT,
+        checkpoint_json BLOB NOT NULL UNIQUE,
+        committed_at TEXT NOT NULL,
+        UNIQUE (authority_namespace, subject_id, monotonic_revision)
+    )
+    """,
+    """
+    CREATE INDEX authority_checkpoints_v04_subject
+    ON authority_checkpoints_v04 (authority_namespace, subject_id)
+    """,
+    """
+    CREATE TRIGGER authority_checkpoints_v04_are_immutable_update
+    BEFORE UPDATE ON authority_checkpoints_v04
+    BEGIN
+        SELECT RAISE(ABORT, 'authority checkpoints are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER authority_checkpoints_v04_are_immutable_delete
+    BEFORE DELETE ON authority_checkpoints_v04
+    BEGIN
+        SELECT RAISE(ABORT, 'authority checkpoints are immutable');
+    END
+    """,
 )
 
 

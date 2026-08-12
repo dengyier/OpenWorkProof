@@ -19,6 +19,7 @@ from openworkproof.models import (
     ActionBindingManifest,
     parse_action_receipt_json as models_parse_action_receipt_json,
     ActionReceiptEnvelope,
+    AuthorityCheckpoint,
     BindingDecision,
     EvaluationScopeManifest,
     JudgmentCommitment,
@@ -1269,6 +1270,196 @@ def load_current_binding_decision(
         connection.close()
 
 
+
+
+
+# --- Task 10: commit AuthorityCheckpoints append-only ----------------------
+
+
+def _exact_checkpoint_readback(
+    path: Path,
+    checkpoint: AuthorityCheckpoint,
+    committed_at: str,
+) -> bool:
+    connection = evidence.connect_ledger(path)
+    try:
+        row = connection.execute(
+            """
+            SELECT checkpoint_digest, authority_namespace, subject_id,
+                   monotonic_revision, predecessor_checkpoint_digest,
+                   checkpoint_json, committed_at
+            FROM authority_checkpoints_v04
+            WHERE checkpoint_id = ?
+            """,
+            (checkpoint.checkpoint_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        canonical = _canonical_model_blob(checkpoint)
+        return row[:6] == (
+            checkpoint.digest,
+            checkpoint.authority_namespace,
+            checkpoint.subject_id,
+            checkpoint.monotonic_revision,
+            checkpoint.predecessor_checkpoint_digest,
+            canonical,
+        ) and row[6] == committed_at
+    finally:
+        connection.close()
+
+
+def commit_authority_checkpoint(
+    ledger_path: Path,
+    checkpoint: AuthorityCheckpoint,
+    *,
+    transaction_time: datetime,
+    fault: _Fault | None = None,
+) -> AuthorityCheckpoint:
+    """Commit one external checkpoint, rejecting forks before writing."""
+
+    path = Path(ledger_path)
+    try:
+        parsed = AuthorityCheckpoint.model_validate(
+            checkpoint.model_dump(mode="json")
+        )
+    except Exception as error:
+        raise BindingInputError("authority checkpoint is malformed") from error
+    committed_at = _canonical_utc_second(transaction_time)
+    committed_datetime = _validate_committed_at(committed_at)
+    canonical = _canonical_model_blob(parsed)
+
+    def stage(connection: sqlite3.Connection) -> AuthorityCheckpoint:
+        existing = connection.execute(
+            "SELECT checkpoint_json FROM authority_checkpoints_v04 "
+            "WHERE checkpoint_id = ?",
+            (parsed.checkpoint_id,),
+        ).fetchone()
+        if existing is not None:
+            if existing[0] != canonical:
+                raise BindingTransactionError(
+                    "authority checkpoint id is already used"
+                )
+            raise BindingCommittedError(
+                "the exact authority checkpoint is already committed", parsed
+            )
+        fork = connection.execute(
+            "SELECT checkpoint_json FROM authority_checkpoints_v04 "
+            "WHERE authority_namespace = ? AND subject_id = ? "
+            "AND monotonic_revision = ?",
+            (
+                parsed.authority_namespace,
+                parsed.subject_id,
+                parsed.monotonic_revision,
+            ),
+        ).fetchone()
+        if fork is not None and fork[0] != canonical:
+            raise BindingTransactionError(
+                "authority checkpoint revision fork is rejected"
+            )
+        if parsed.monotonic_revision == 1:
+            if parsed.predecessor_checkpoint_digest is not None:
+                raise BindingTransactionError(
+                    "genesis checkpoint must not carry a predecessor"
+                )
+        else:
+            predecessor = connection.execute(
+                "SELECT checkpoint_json, committed_at "
+                "FROM authority_checkpoints_v04 "
+                "WHERE authority_namespace = ? AND subject_id = ? "
+                "AND monotonic_revision = ?",
+                (
+                    parsed.authority_namespace,
+                    parsed.subject_id,
+                    parsed.monotonic_revision - 1,
+                ),
+            ).fetchone()
+            if predecessor is None:
+                raise BindingTransactionError(
+                    "authority checkpoint predecessor is unavailable"
+                )
+            predecessor_cp = _load_canonical_row(
+                AuthorityCheckpoint,
+                predecessor[0],
+                "AuthorityCheckpoint",
+            )
+            if (
+                parsed.predecessor_checkpoint_digest
+                != predecessor_cp.digest
+            ):
+                raise BindingTransactionError(
+                    "authority checkpoint predecessor digest does not match"
+                )
+            predecessor_committed_at = _validate_committed_at(
+                predecessor[1]
+            )
+            if predecessor_committed_at > committed_datetime:
+                raise BindingTransactionError(
+                    "predecessor checkpoint committed after its successor"
+                )
+        connection.execute(
+            """
+            INSERT INTO authority_checkpoints_v04 (
+                checkpoint_id, checkpoint_digest, authority_namespace,
+                subject_id, monotonic_revision,
+                predecessor_checkpoint_digest, checkpoint_json, committed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                parsed.checkpoint_id,
+                parsed.digest,
+                parsed.authority_namespace,
+                parsed.subject_id,
+                parsed.monotonic_revision,
+                parsed.predecessor_checkpoint_digest,
+                canonical,
+                committed_at,
+            ),
+        )
+        return parsed
+
+    return _commit_with_readback(
+        path,
+        stage=stage,
+        readback=lambda _: _exact_checkpoint_readback(
+            path, parsed, committed_at
+        ),
+        fault=fault,
+    )
+
+
+def load_authority_chain(
+    ledger_path: Path,
+    *,
+    authority_namespace: str,
+    subject_id: str,
+) -> tuple[AuthorityCheckpoint, ...]:
+    """Load the committed checkpoint chain for one authority subject."""
+
+    path = Path(ledger_path)
+    if not path.is_file():
+        raise BindingTransactionError("binding ledger is unavailable")
+    connection = evidence.connect_ledger(path)
+    try:
+        rows = tuple(
+            connection.execute(
+                """
+                SELECT checkpoint_json FROM authority_checkpoints_v04
+                WHERE authority_namespace = ? AND subject_id = ?
+                ORDER BY monotonic_revision
+                """,
+                (authority_namespace, subject_id),
+            ).fetchall()
+        )
+        return tuple(
+            _load_canonical_row(
+                AuthorityCheckpoint, row[0], "AuthorityCheckpoint"
+            )
+            for row in rows
+        )
+    finally:
+        connection.close()
+
+
 __all__ = [
     "BindingCommitIndeterminateError",
     "BindingCommittedError",
@@ -1278,6 +1469,8 @@ __all__ = [
     "commit_action_binding_manifest",
     "commit_judgment_commitment",
     "load_current_action_binding_manifest",
+    "commit_authority_checkpoint",
     "commit_binding_decision",
+    "load_authority_chain",
     "load_current_binding_decision",
 ]
