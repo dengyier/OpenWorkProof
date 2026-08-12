@@ -95,6 +95,7 @@ _V04_SIGNED_DOMAINS = frozenset(
         "action-binding-manifest",
         "action-receipt",
         "agent-request",
+        "binding-decision",
         "judgment-commitment",
     }
 )

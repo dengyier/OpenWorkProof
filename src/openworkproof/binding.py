@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
 from dataclasses import dataclass
+from typing import Mapping, Protocol, runtime_checkable
 from datetime import datetime, timezone
 
 import rfc8785
@@ -13,14 +15,26 @@ from pydantic import TypeAdapter
 
 from openworkproof.models import (
     ActionBindingManifest,
+    ActionReceiptEnvelope,
+    AgentRequestV04,
+    AuthorityCheckpoint,
+    BindingDecision,
+    BindingDecisionDraft,
     CanonicalRoot,
     EvaluationScopeManifest,
     JudgmentCommitment,
+    RollbackReceiptV04,
     TestProfile,
+    ToolCallReceiptV04,
+    VerificationDecisionV03,
     WorkOrder,
+    _INDETERMINATE_BINDING_REASONS,
+    _UNBOUND_BINDING_REASONS,
 )
 from openworkproof.signing import (
+    canonical_bytes,
     decode_and_verify_key_binding,
+    key_id,
     verify_payload,
     verify_work_order_identity_bindings,
 )
@@ -501,6 +515,323 @@ def validate_action_binding_manifest(
     return parsed_manifest
 
 
+
+
+# --- Task 8: pure BindingDecision composition and verification -------------
+
+_BINDING_DECISION_ID_DOMAIN = "openworkproof/binding-decision-id/v0.4"
+_BINDING_DECISION_SCHEMA = "openworkproof-binding-decision/0.4"
+
+
+@runtime_checkable
+class BindingReplayView(Protocol):
+    """Duck-typed replay result to avoid an adapters import cycle."""
+
+    outcome: str
+    reason_codes: tuple[str, ...]
+    replay_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class BindingDecisionDraftRequest:
+    """One pure composer request; never carries outcome or reason codes."""
+
+    decided_at: str
+    nonce: str
+    causal_parent_decision_ids: tuple[str, ...] = ()
+    supersedes_binding_decision_id: str | None = None
+    supersedes_binding_decision_digest: str | None = None
+
+
+def _parse_canonical_utc(value: str) -> datetime:
+    if not isinstance(value, str):
+        raise BindingInputError("canonical UTC time is malformed")
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as error:
+        raise BindingInputError(
+            "canonical UTC time is malformed"
+        ) from error
+    return parsed.replace(tzinfo=timezone.utc)
+
+
+def binding_decision_signing_bytes(
+    value: BindingDecisionDraft | BindingDecision,
+) -> bytes:
+    """Return the canonical v0.4 bytes signed by every decision verifier.
+
+    The payload excludes digest and verifier signatures, matching the
+    ``BindingDecision`` digest computation byte-for-byte.
+    """
+
+    if isinstance(value, BindingDecision):
+        payload = value.model_dump(
+            mode="json", exclude={"digest", "verifier_signatures"}
+        )
+    elif isinstance(value, BindingDecisionDraft):
+        payload = {
+            "schema_version": _BINDING_DECISION_SCHEMA,
+            **value.model_dump(mode="json"),
+        }
+    else:
+        raise BindingInputError("binding decision payload type is invalid")
+    return canonical_bytes("binding-decision", payload, version="0.4")
+
+
+def _binding_decision_id(
+    *,
+    work_order_digest: str,
+    judgment_commitment_digest: str,
+    action_binding_manifest_digest: str,
+    verification_decision_digest: str,
+    action_receipt_ids: tuple[str, ...],
+    adapter_replay_digest: str,
+    decided_at: str,
+    nonce: str,
+) -> str:
+    return hashlib.sha256(
+        rfc8785.dumps(
+            {
+                "domain": _BINDING_DECISION_ID_DOMAIN,
+                "work_order_digest": work_order_digest,
+                "judgment_commitment_digest": judgment_commitment_digest,
+                "action_binding_manifest_digest": (
+                    action_binding_manifest_digest
+                ),
+                "verification_decision_digest": verification_decision_digest,
+                "action_receipt_ids": list(action_receipt_ids),
+                "adapter_replay_digest": adapter_replay_digest,
+                "decided_at": decided_at,
+                "nonce": nonce,
+            }
+        )
+    ).hexdigest()
+
+
+def _verify_replay_reason_codes(
+    outcome: str,
+    reason_codes: tuple[str, ...],
+) -> bool:
+    allowed = (
+        _UNBOUND_BINDING_REASONS
+        if outcome == "UNBOUND"
+        else _INDETERMINATE_BINDING_REASONS
+    )
+    return all(code in allowed for code in reason_codes)
+
+
+def compose_binding_decision(
+    *,
+    judgment: JudgmentCommitment,
+    manifest: ActionBindingManifest,
+    verification: VerificationDecisionV03,
+    receipts: tuple[ActionReceiptEnvelope, ...],
+    replay: BindingReplayView,
+    checkpoint: AuthorityCheckpoint | None,
+    request: BindingDecisionDraftRequest,
+) -> BindingDecisionDraft:
+    """Compose one BindingDecision draft, recomputing every reference.
+
+    The composer never trusts caller-provided reason codes or digests; it
+    derives the outcome from the signed inputs and fails closed toward
+    INDETERMINATE when evidence classification is inconsistent.
+    """
+
+    if not isinstance(request, BindingDecisionDraftRequest):
+        raise BindingInputError("binding decision request is required")
+    if not isinstance(replay, BindingReplayView) or not isinstance(
+        replay.reason_codes, tuple
+    ):
+        raise BindingInputError("binding replay view is required")
+
+    def draft(
+        decision: str,
+        reason_codes: tuple[str, ...],
+        *,
+        authority_status: str = "not_required",
+        authority_checkpoint_digest: str | None = None,
+    ) -> BindingDecisionDraft:
+        action_receipt_ids = tuple(
+            sorted(receipt.receipt_id for receipt in receipts)
+        )
+        by_id = {receipt.receipt_id: receipt.digest for receipt in receipts}
+        action_receipt_digests = tuple(
+            by_id[receipt_id] for receipt_id in action_receipt_ids
+        )
+        return BindingDecisionDraft(
+            binding_decision_id=_binding_decision_id(
+                work_order_digest=manifest.work_order_digest,
+                judgment_commitment_digest=judgment.digest,
+                action_binding_manifest_digest=manifest.digest,
+                verification_decision_digest=verification.digest,
+                action_receipt_ids=action_receipt_ids,
+                adapter_replay_digest=replay.replay_digest,
+                decided_at=request.decided_at,
+                nonce=request.nonce,
+            ),
+            work_order_digest=manifest.work_order_digest,
+            judgment_commitment_digest=judgment.digest,
+            action_binding_manifest_digest=manifest.digest,
+            verification_decision_id=verification.decision_id,
+            verification_decision_digest=verification.digest,
+            action_receipt_ids=action_receipt_ids,
+            action_receipt_digests=action_receipt_digests,
+            adapter_replay_digest=replay.replay_digest,
+            authority_checkpoint_digest=authority_checkpoint_digest,
+            decision=decision,
+            reason_codes=reason_codes,
+            authority_status=authority_status,
+            causal_parent_decision_ids=request.causal_parent_decision_ids,
+            supersedes_binding_decision_id=(
+                request.supersedes_binding_decision_id
+            ),
+            supersedes_binding_decision_digest=(
+                request.supersedes_binding_decision_digest
+            ),
+            decided_at=request.decided_at,
+            nonce=request.nonce,
+        )
+
+    # Verification must be current, VERIFIED and bound to this manifest.
+    if (
+        verification.decision != "VERIFIED"
+        or verification.work_order_digest != manifest.work_order_digest
+    ):
+        return draft("INDETERMINATE", ("VERIFICATION_NOT_CURRENT",))
+    if verification.profile_digest != manifest.adapter_profile_digest:
+        return draft("UNBOUND", ("ADAPTER_PROFILE_DIGEST_MISMATCH",))
+
+    # Judgment must be the exact one bound by the manifest.
+    if (
+        manifest.judgment_commitment_id != judgment.commitment_id
+        or manifest.judgment_commitment_digest != judgment.digest
+    ):
+        return draft("UNBOUND", ("JUDGMENT_DIGEST_MISMATCH",))
+    decided_at = _parse_canonical_utc(request.decided_at)
+    if not judgment.valid_from <= decided_at < judgment.expires_at:
+        return draft("INDETERMINATE", ("VERIFICATION_NOT_CURRENT",))
+    if not manifest.created_at <= decided_at < manifest.expires_at:
+        return draft("INDETERMINATE", ("VERIFICATION_NOT_CURRENT",))
+
+    # Receipts must exist and every one must be a v0.4 bound execution.
+    if not receipts:
+        # The frozen BindingDecision model requires non-empty action receipt
+        # references; an empty receipt set cannot form a decision object at
+        # all, so fail closed instead of fabricating evidence.
+        raise BindingInputError(
+            "binding decision requires at least one execution receipt"
+        )
+    for receipt in receipts:
+        if not isinstance(receipt, (ToolCallReceiptV04, RollbackReceiptV04)):
+            return draft("INDETERMINATE", ("UNSIGNED_METADATA_REFERENCE",))
+        claim = receipt.nested_claim
+        if not isinstance(claim, AgentRequestV04):
+            return draft("INDETERMINATE", ("UNSIGNED_METADATA_REFERENCE",))
+        if (
+            claim.action_binding_manifest_id != manifest.binding_manifest_id
+            or claim.action_binding_manifest_digest != manifest.digest
+        ):
+            return draft("UNBOUND", ("ACTION_DIGEST_MISMATCH",))
+
+    # Replay verdict, with closed-code consistency enforced.
+    if replay.outcome == "UNBOUND":
+        if _verify_replay_reason_codes("UNBOUND", replay.reason_codes):
+            return draft("UNBOUND", replay.reason_codes)
+        return draft("INDETERMINATE", ("EVIDENCE_INCOMPLETE",))
+    if replay.outcome == "INDETERMINATE":
+        if _verify_replay_reason_codes(
+            "INDETERMINATE", replay.reason_codes
+        ):
+            return draft("INDETERMINATE", replay.reason_codes)
+        return draft("INDETERMINATE", ("EVIDENCE_INCOMPLETE",))
+    if replay.outcome != "BOUND" or replay.reason_codes:
+        return draft("INDETERMINATE", ("REPLAY_UNAVAILABLE",))
+
+    # Authority: high-risk requires a current checkpoint (Task 10 expands
+    # the chain validation; here we fail closed when it is absent).
+    if verification.assurance_level == "high_risk":
+        if checkpoint is None:
+            return draft(
+                "INDETERMINATE",
+                ("AUTHORITY_CHECKPOINT_MISSING",),
+                authority_status="missing",
+            )
+        return draft(
+            "BOUND",
+            (),
+            authority_status="current",
+            authority_checkpoint_digest=checkpoint.digest,
+        )
+    if checkpoint is not None:
+        return draft(
+            "BOUND",
+            (),
+            authority_status="current",
+            authority_checkpoint_digest=checkpoint.digest,
+        )
+    return draft("BOUND", (), authority_status="not_required")
+
+
+def verify_binding_decision(
+    decision: BindingDecision,
+    *,
+    work_order: WorkOrder,
+    public_keys: Mapping[str, Ed25519PublicKey],
+    expected_signatures: int,
+) -> bool:
+    """Verify a BindingDecision against the external verifier trust map.
+
+    Receipts never carry their own public keys; every verifier key must
+    exist in the external trust map and match a Verifier-role key binding.
+    Standard decisions require one signature; high-risk require two
+    independent verifier signatures.
+    """
+
+    if not isinstance(decision, BindingDecision):
+        return False
+    if expected_signatures not in {1, 2}:
+        return False
+    if len(decision.verifier_signatures) != expected_signatures:
+        return False
+    if not verify_work_order_identity_bindings(work_order):
+        return False
+    verifier_bindings = [
+        binding
+        for binding in work_order.key_bindings
+        if binding.role == "Verifier"
+    ]
+    if not verifier_bindings:
+        return False
+    try:
+        encoded = binding_decision_signing_bytes(decision)
+    except BindingInputError:
+        return False
+    for signature in decision.verifier_signatures:
+        if signature.signature_alg != "Ed25519":
+            return False
+        public_key = public_keys.get(signature.verifier_key_id)
+        if public_key is None:
+            return False
+        matched_binding = None
+        for binding in verifier_bindings:
+            try:
+                if decode_and_verify_key_binding(binding) == public_key:
+                    matched_binding = binding
+                    break
+            except (ValueError, TypeError):
+                continue
+        if matched_binding is None:
+            return False
+        try:
+            raw_signature = base64.urlsafe_b64decode(
+                signature.signature + "=" * (-len(signature.signature) % 4)
+            )
+            public_key.verify(raw_signature, encoded)
+        except Exception:
+            return False
+    return True
+
+
 __all__ = [
     "BindingInputError",
     "BindingValidationError",
@@ -509,5 +840,9 @@ __all__ = [
     "canonical_test_profile_digest",
     "constraint_projection_digest",
     "projection_from_adapter_profile",
+    "BindingDecisionDraftRequest",
+    "binding_decision_signing_bytes",
+    "compose_binding_decision",
     "validate_action_binding_manifest",
+    "verify_binding_decision",
 ]
