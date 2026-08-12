@@ -720,7 +720,7 @@ Use full rebuilds. Include bad signature, extra/missing verifier, duplicaty dige
   tests/test_verification_transactions_v03.py -q
 ```
 
-- [ ] **Step 6: Commit pure decisions**
+- [x] **Step 6: Commit pure decisions**
 
 ```bash
 git add src/openworkproof/binding.py tests/test_binding_decision_v04.py
