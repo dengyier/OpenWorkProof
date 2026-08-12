@@ -735,23 +735,23 @@ git commit -m "feat: compose independently signed binding decisions"
 - Modify: `src/openworkproof/binding_transactions.py`
 - Create: `tests/test_binding_transactions_v04.py`
 
-- [ ] **Step 1: Add stage/commit/readback RED tests**
+- [x] **Step 1: Add stage/commit/readback RED tests**
 
 Cover incomplete input, current-manifest mismatch, stale verification, stale parent, pre-COMMIT fault, commit ACK loss, readback uncertainty, exact idempotency, same-id conflict, and cleanup fault.
 
-- [ ] **Step 2: Add append-only decision tables**
+- [x] **Step 2: Add append-only decision tables**
 
 Store canonical decision JSON and explicit parent/supersession rows. Currentness is derived from one non-superseded valid head. No mutable current flag.
 
-- [ ] **Step 3: Implement transaction validation and exact readback**
+- [x] **Step 3: Implement transaction validation and exact readback**
 
 Load every referenced object from committed tables, compare exact id/digest, rerun pure validation, insert atomically, commit, and read back the exact canonical row plus parents.
 
-- [ ] **Step 4: Prove one concurrent current winner**
+- [x] **Step 4: Prove one concurrent current winner**
 
 Use two real SQLite connections and a barrier. Both transactions start from the same current parent; exactly one may commit a superseding current decision. The loser must report conflict/committed truth and must not create a fork.
 
-- [ ] **Step 5: Run transaction regressions**
+- [x] **Step 5: Run transaction regressions**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -760,7 +760,7 @@ Use two real SQLite connections and a barrier. Both transactions start from the 
   tests/test_verification_transactions_v03.py -q
 ```
 
-- [ ] **Step 6: Commit the decision ledger**
+- [x] **Step 6: Commit the decision ledger**
 
 ```bash
 git add src/openworkproof/evidence.py src/openworkproof/binding_transactions.py \
