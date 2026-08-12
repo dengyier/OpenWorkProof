@@ -456,3 +456,37 @@ Task 6–14。全部为本地/分支状态：**未发布、未推送、未合并
 `BOUND`（绑定决定）只表示「行动与记录判断一致」，**不等于**判断正确、
 代码无缺陷、客户验收、付款或结算。本协议不产生付款凭证；付款状态必须
 来自外部商业证据，未取得前一律 `not_evidenced`。
+
+## Task 16 发布门真值（2026-08-13 fresh）
+
+### 已通过
+
+- 聚焦 v0.4 套件（12 文件）：**334 passed，0 failed**
+- 冻结兼容套件（v0.2/v0.3）：**161 passed，0 failed**
+- 便携全量：**3032 passed，2 failed，7 skipped**（6 分 52 秒）
+  - 2 failed 为预期：`test_current_candidate_inventory_binds_execution_runner` /
+    `test_current_candidate_inventory_binds_fixed_test_source`（candidate 尚未重建绑定）
+  - 7 skipped：真实 Landlock（仅 Linux）、live Docker 未启用
+- 独立只读双审：B1（A17 攻击缺口）、B2（非高风险 checkpoint 虚称 current）已修复并复审 **READY**；修复后相关回归 86 + 277 passed
+- 非测试检查：pip check / compileall / git diff --check / Docker 残留：PASS
+
+### 未通过/未执行（如实记录）
+
+- **candidate inventory 未重建**：`OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT`
+  （wheelhouse + deb 闭包）在本环境未配置，无法执行 prepare_context.py +
+  Buildx + docker load 的完整供应链流程
+- **required-live 未执行**：真实 Landlock 仅 Linux；本机 macOS 无法满足
+  零 skip
+- 分支未推送、未合并、未开 PR（等待 Owner 授权）
+
+### Warning 分类（便携全量）
+
+- macOS pytest `rm_rf` 清理只读/symlink 临时目录告警（既有已知类别）
+- 未统计到未处理线程异常（live 门未跑，不声称零）
+
+### 双审发现修复记录
+
+- B1：`validate_v04_acceptance_chain` 增加 manifest↔scope 配对检查；
+  A17 重写为 selector 篡改的伪造 scope 真实攻击（SCOPE_CHAIN_MISMATCH）
+- B2：非高风险 composer 对 checkpoint 证据 fail-closed（INDETERMINATE missing），
+  不再虚称 current

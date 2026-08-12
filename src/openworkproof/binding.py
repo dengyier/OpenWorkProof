@@ -823,12 +823,14 @@ def compose_binding_decision(
             ("AUTHORITY_CHECKPOINT_MISSING",),
             authority_status="missing",
         )
-    if checkpoint is not None:
+    if checkpoint is not None or checkpoint_chain:
+        # Checkpoint evidence is meaningful only under the validated
+        # high-risk path. A non-high-risk composer must never claim a
+        # "current" authority from an unvalidated checkpoint.
         return draft(
-            "BOUND",
-            (),
-            authority_status="current",
-            authority_checkpoint_digest=checkpoint.digest,
+            "INDETERMINATE",
+            ("AUTHORITY_CHECKPOINT_MISSING",),
+            authority_status="missing",
         )
     return draft("BOUND", (), authority_status="not_required")
 

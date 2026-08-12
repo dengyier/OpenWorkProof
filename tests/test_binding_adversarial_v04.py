@@ -512,14 +512,29 @@ def test_a16_empty_acceptance_conditions_fails_closed(
 def test_a17_required_scope_omission_is_indeterminate(
     binding_decision_case,
 ) -> None:
+    # A17: a manifest that binds a different scope than the one supplied is
+    # an explicit scope-omission attack; the acceptance chain must reject it.
     from openworkproof.acceptance import validate_v04_acceptance_chain
+    from test_binding_manifest_transactions_v04 import _signed_scope
 
     case = binding_decision_case
+    payload = copy.deepcopy(evaluation_scope_payload(case))
+    payload["selector_rules"] = [
+        {**rule, "selector_engine_digest": "f" * 64}
+        for rule in payload["selector_rules"]
+    ]
+    forged_scope = _signed_scope(
+        payload=payload,
+        manager_key=case["role_keys"]["Manager"][0],
+        work_order=case["work_order"],
+        claim=case["claim"],
+    )
+    assert forged_scope.digest != case["scope"].digest
     decision = _sign_decision(case, _compose(case))
     ok, failures = validate_v04_acceptance_chain(
         work_order=case["work_order"],
         subject_claim=case["claim"],
-        scope=case["scope"],
+        scope=forged_scope,
         judgment=case["judgment"],
         manifest=case["manifest"],
         verification=_verified_decision(
@@ -531,7 +546,17 @@ def test_a17_required_scope_omission_is_indeterminate(
         ),
         binding_decision=decision,
     )
-    assert ok is True
+    assert ok is False
+    assert "SCOPE_CHAIN_MISMATCH" in failures
+
+
+def evaluation_scope_payload(case) -> dict:
+    return copy.deepcopy(
+        case["scope"].model_dump(
+            mode="json",
+            exclude={"digest", "signature_alg", "signer_key_id", "signature"},
+        )
+    )
 
 
 def test_a18_manager_resign_without_acceptor_is_rejected(

@@ -3501,6 +3501,11 @@ def validate_v04_acceptance_chain(
         failures.append("SUBJECT_CLAIM_CHAIN_MISMATCH")
     if scope.work_order_digest != digest:
         failures.append("SCOPE_CHAIN_MISMATCH")
+    if (
+        manifest.evaluation_scope_id != scope.scope_id
+        or manifest.evaluation_scope_digest != scope.digest
+    ):
+        failures.append("SCOPE_CHAIN_MISMATCH")
     if manifest.work_order_digest != digest:
         failures.append("MANIFEST_CHAIN_MISMATCH")
     if verification.work_order_digest != digest:

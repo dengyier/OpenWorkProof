@@ -711,7 +711,7 @@ The composer must recompute all references rather than trust caller-provided rea
 
 Use full rebuilds. Include bad signature, extra/missing verifier, duplicaty digest, changed judgment, changed manifest, and validly re-signed but semantically inconsistent action.
 
-- [ ] **Step 5: Run focused regressions**
+- [x] **Step 5: Run focused regressions**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -984,24 +984,27 @@ git commit -m "feat: expose read only judgment binding interfaces"
 - Create: `tests/binding-demo/rich-4196/*`
 - Create: `tests/evidence-bundles/rich-4196-binding-v04-delivery-package.json`
 - Modify: `tests/test_export_evidence_bundles.py`
+- Modify: `tests/evidence-bundles/verify_evidence_bundle.py`
+- Modify: `src/openworkproof/adapters/code_delivery_github.py`
+- Modify: `src/openworkproof/binding.py`
 
-- [ ] **Step 1: Freeze C0 and A1–A18 expectations before execution**
+- [x] **Step 1: Freeze C0 and A1–A18 expectations before execution**
 
 Represent every registered case as immutable test data with case id, attacker keys, changed inputs, responsibility layer, and expected result. At least 16 attacks must be runnable; implement all A1–A18 unless one is explicitly documented as pipeline-invalid before first execution.
 
-- [ ] **Step 2: Implement the coherent re-sign equivalent of `250 -> 2500`**
+- [x] **Step 2: Implement the coherent re-sign equivalent of `250 -> 2500`**
 
 Use a code-delivery analogue where Manager/Agent/Sidecar re-sign a complete internally valid chain for an action outside the Customer Acceplivery analogue where Manager/Agent/Sidecar re-sign a complete internally valid chain for an action outside the Customer Acceptor's signed constraint. Assert Layer 1 passes and the adapter returns `UNBOUND`.
 
-- [ ] **Step 3: Add required negative-control categories**
+- [x] **Step 3: Add required negative-control categories**
 
 Include: chain-only tamper, internally coherent binding mismatch, replay-only mismatch, authority-only boundary, scope omission, metadata-only judgment, missing Acceptor signature, and a clean positive control.
 
-- [ ] **Step 4: Pre-register four independent holdouts**
+- [x] **Step 4: Pre-register four independent holdouts**
 
 Before running them, commit four fixtures and expectations in `tests/test_binding_holdout_v04.py`. The runner reports `adjudicated`, `divergent`, or `pipeline-invalid`; it must not rewrite expected outcomes after execution.
 
-- [ ] **Step 5: Build the self-owned Rich #4196 v0.4 demo**
+- [x] **Step 5: Build the self-owned Rich #4196 v0.4 demo**
 
 Use the real Issue context but an OpenWorkProof-owned task, judgment, clean action, coherent-resign attack, and delivery package. The README and package metadata must say:
 
@@ -1011,7 +1014,7 @@ customer_use: not_evidenced
 payment: not_evidenced
 ```
 
-- [ ] **Step 6: Run attack, holdout, and offline tamper gates**
+- [x] **Step 6: Run attack, holdout, and offline tamper gates**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -1024,7 +1027,7 @@ payment: not_evidenced
 
 Expected: C0 is `BOUND`; each registered attack matches its frozen responsibility-layer result; all four holdouts are reported without post-hoc expectation edits; one-byte tamper fails.
 
-- [ ] **Step 7: Record checkpoint and commit**
+- [x] **Step 7: Record checkpoint and commit**
 
 ```bash
 git add tests/test_binding_adversarial_v04.py \
@@ -1045,11 +1048,11 @@ git commit -m "test: challenge judgment binding with registered attacks"
 - Modify: `docs/offline-verification.md`
 - Modify: `docs/status.md`
 - Create: `docs/pilot/judgment-action-binding-21-day-offer.md`
-- Create: `docs/pilot/judgment-action-binding-sow-template.md`
 - Create: `docs/pilot/judgment-action-binding-acceptor-checklist.md`
 - Create: `docs/pilot/judgment-action-binding-result-template.md`
+- Create: `tests/test_documentation_boundaries.py`
 
-- [ ] **Step 1: Add documentation truth-boundary tests/checks**
+- [x] **Step 1: Add documentation truth-boundary tests/checks**
 
 Use literal scans to require the exact distinctions and forbid unsupported claims:
 
@@ -1060,19 +1063,19 @@ rg -n 'BOUND.*(不等于|does not mean).*(真理|付款|payment|settlement)' \
   README.md README_en.md docs/pilot
 ```
 
-- [ ] **Step 2: Document the protocol in business-first language**
+- [x] **Step 2: Document the protocol in business-first language**
 
 Explain: OWP provides verifiable execution credentials for Agent delivery; it does not become a payment institution, truth oracle, legal adjudicator, or customer acceptance substitute. Include the v0.4 state/gate diagram and external authority boundary.
 
-- [ ] **Step 3: Create falsifiable pilot materials**
+- [x] **Step 3: Create falsifiable pilot materials**
 
 The offer/SOW/checklist/result template must identify User, Payer hypothesis, independent Customer Acceptor, one real Issue/repository/baseline/change, RMB 30,000–50,000 price hypothesis, 50% deposit trigger, eight-person-day/RMB 2,000 experiment cap, success evidence, and stop rules.
 
-- [ ] **Step 4: Keep commercial evidence fields external**
+- [x] **Step 4: Keep commercial evidence fields external**
 
 Templates may reference SOW/deposit evidence ids, but protocol status must not manufacture them. Mark every unfilled external state `not_evidenced`.
 
-- [ ] **Step 5: Run documentation and packaging regressions**
+- [x] **Step 5: Run documentation and packaging regressions**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -1083,7 +1086,7 @@ Templates may reference SOW/deposit evidence ids, but protocol status must not m
 git diff --check
 ```
 
-- [ ] **Step 6: Commit documentation**
+- [x] **Step 6: Commit documentation**
 
 ```bash
 git add README.md README_en.md MCP_SERVER.md docs/offline-verification.md \
@@ -1100,13 +1103,7 @@ git commit -m "docs: publish judgment binding pilot boundaries"
 - Create: immutable candidate archives/build-contexts under the existing supply-chain layout
 - Modify: `docs/status.md`
 
-- [ ] **Step 1: Run the focused v0.4 suite**
-
-```bash
-./.venv/bin/python -m pytest \
-  tests/test_binding_models_v04.py \
-  tests/test_binding_schema_v04.py \
-  tests/test_judgment_transactions_v04.py \
+- [ ] **Step 1: Run the focused v0.4 ons_v04.py \
   tests/test_binding_manifest_transactions_v04.py \
   tests/test_binding_gateway_v04.py \
   tests/test_code_delivery_binding_v04.py \
