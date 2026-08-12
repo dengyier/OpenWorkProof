@@ -264,6 +264,38 @@ def cli_repo_read(ledger_path: str | Path, payload: dict[str, object]) -> dict:
     }
 
 
+def cli_judgment_validate(payload: dict[str, object]) -> dict:
+    return _service_result(
+        OpenWorkProofServices().validate_judgment_commitment, payload
+    )
+
+
+def cli_binding_manifest_validate(payload: dict[str, object]) -> dict:
+    return _service_result(
+        OpenWorkProofServices().validate_action_binding_manifest, payload
+    )
+
+
+def cli_binding_compose(payload: dict[str, object]) -> dict:
+    return _service_result(OpenWorkProofServices().compose_binding, payload)
+
+
+def cli_binding_verify(payload: dict[str, object]) -> dict:
+    return _service_result(OpenWorkProofServices().verify_binding, payload)
+
+
+def cli_binding_history(ledger_path: str | Path) -> dict:
+    return _service_result(
+        OpenWorkProofServices().binding_history, str(ledger_path)
+    )
+
+
+def cli_package_replay(package: str | Path) -> dict:
+    return _service_result(
+        OpenWorkProofServices().replay_binding_package, str(package)
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="owp")
     parser.add_argument(
@@ -367,6 +399,55 @@ def build_parser() -> argparse.ArgumentParser:
         "settlement-status", help="derive settlement readiness from the ledger"
     )
     settlement_status.add_argument("ledger", help="path to the SQLite ledger file")
+
+    judgment = sub.add_parser(
+        "judgment", help="validate one signed JudgmentCommitment"
+    )
+    judgment_sub = judgment.add_subparsers(dest="binding_action", required=True)
+    judgment_validate = judgment_sub.add_parser(
+        "validate", help="validate a signed judgment commitment payload"
+    )
+    judgment_validate.add_argument("payload", help="path to judgment JSON")
+
+    binding_manifest = sub.add_parser(
+        "binding-manifest", help="validate one signed ActionBindingManifest"
+    )
+    bm_sub = binding_manifest.add_subparsers(
+        dest="binding_action", required=True
+    )
+    bm_validate = bm_sub.add_parser(
+        "validate", help="validate a signed action binding manifest payload"
+    )
+    bm_validate.add_argument("payload", help="path to manifest JSON")
+
+    binding = sub.add_parser(
+        "binding", help="compose, verify or inspect binding decisions"
+    )
+    binding_sub = binding.add_subparsers(dest="binding_action", required=True)
+    binding_compose = binding_sub.add_parser(
+        "compose", help="compose a BindingDecision draft from signed inputs"
+    )
+    binding_compose.add_argument("payload", help="path to compose inputs JSON")
+    binding_verify = binding_sub.add_parser(
+        "verify", help="verify a signed BindingDecision against a trust map"
+    )
+    binding_verify.add_argument("payload", help="path to verify inputs JSON")
+    binding_history = binding_sub.add_parser(
+        "history", help="read the current binding decision head (read-only)"
+    )
+    binding_history.add_argument("ledger", help="path to SQLite ledger")
+
+    package = sub.add_parser(
+        "package", help="offline delivery package operations"
+    )
+    package_sub = package.add_subparsers(dest="binding_action", required=True)
+    package_replay = package_sub.add_parser(
+        "replay", help="offline replay one delivery package"
+    )
+    package_replay.add_argument("package", help="path to delivery package")
+    package_replay.add_argument(
+        "--binding", action="store_true", help="binding replay view"
+    )
     return parser
 
 
@@ -418,6 +499,21 @@ def app(argv: Sequence[str] | None = None) -> int:
                 _load_payload(args.payload),
                 mode=args.mode,
             )
+        elif args.command == "judgment":
+            result = cli_judgment_validate(_load_payload(args.payload))
+        elif args.command == "binding-manifest":
+            result = cli_binding_manifest_validate(
+                _load_payload(args.payload)
+            )
+        elif args.command == "binding":
+            if args.binding_action == "compose":
+                result = cli_binding_compose(_load_payload(args.payload))
+            elif args.binding_action == "verify":
+                result = cli_binding_verify(_load_payload(args.payload))
+            else:
+                result = cli_binding_history(args.ledger)
+        elif args.command == "package":
+            result = cli_package_replay(args.package)
         elif args.command == "delivery-build":
             result = cli_delivery_build(
                 args.ledger,

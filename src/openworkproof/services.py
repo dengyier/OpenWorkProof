@@ -13,6 +13,7 @@ from openworkproof.delivery_package import (
     verify_delivery_package,
 )
 from openworkproof.models import (
+    WorkOrder,
     DecisionDraftRequest,
     EvaluationScopeDraft,
     EvaluationScopeManifest,
@@ -26,6 +27,28 @@ from openworkproof.models import (
     VerificationDecisionV03,
     VerificationProfileV02,
     VerificationProfileV03,
+)
+import openworkproof.evidence as evidence
+from openworkproof.binding import (
+    BindingDecisionDraftRequest,
+    compose_binding_decision,
+    verify_binding_decision,
+)
+from openworkproof.binding_transactions import (
+    BindingTransactionError,
+    load_current_binding_decision,
+)
+from openworkproof.delivery_package import (
+    DeliveryPackageError,
+    verify_delivery_package,
+)
+from openworkproof.models import (
+    ActionBindingManifest,
+    AuthorityCheckpoint,
+    BindingDecision,
+    JudgmentCommitment,
+    ToolCallReceiptV04,
+    RollbackReceiptV04,
 )
 from openworkproof.scope import (
     ObservedScope,
@@ -42,6 +65,31 @@ from openworkproof.verification import (
     prepare_verification_decision,
     prepare_verification_decision_v03,
 )
+
+
+
+
+class _ReplayView:
+    """Minimal replay view for the service facade (Task 13)."""
+
+    def __init__(self, *, outcome: str, reason_codes: tuple[str, ...], replay_digest: str) -> None:
+        self.outcome = outcome
+        self.reason_codes = reason_codes
+        self.replay_digest = replay_digest
+
+
+def _decode_public_key(value: object):
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("authority_key must be a base64url string")
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PublicKey,
+    )
+    import base64 as _b64
+
+    raw = _b64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    return Ed25519PublicKey.from_public_bytes(raw)
 
 
 class OpenWorkProofServices:
@@ -237,6 +285,133 @@ class OpenWorkProofServices:
 
     def get_settlement_readiness(self, ledger: Path) -> dict:
         return read_settlement_snapshot(ledger).model_dump(mode="json")
+
+
+
+    # ------------------------------------------------------------------
+    # v0.4 judgment-to-action binding interfaces (Task 13)
+    # ------------------------------------------------------------------
+
+    def validate_judgment_commitment(
+        self, payload: Mapping[str, object]
+    ) -> dict:
+        """Validate one signed JudgmentCommitment without any authority.
+
+        Without a ledger or trusted key context the authority is reported
+        as ``not_checked``, never as validly authorized.
+        """
+        judgment = JudgmentCommitment.model_validate(dict(payload))
+        return {
+            "valid": True,
+            "object_type": "judgment_commitment",
+            "schema_version": judgment.schema_version,
+            "digest": judgment.digest,
+            "authority": "not_checked",
+        }
+
+    def validate_action_binding_manifest(
+        self, payload: Mapping[str, object]
+    ) -> dict:
+        """Validate one signed ActionBindingManifest without any authority."""
+        manifest = ActionBindingManifest.model_validate(dict(payload))
+        return {
+            "valid": True,
+            "object_type": "action_binding_manifest",
+            "schema_version": manifest.schema_version,
+            "digest": manifest.digest,
+            "authority": "not_checked",
+        }
+
+    def compose_binding(self, payload: Mapping[str, object]) -> dict:
+        """Compose a BindingDecision draft from signed inputs."""
+        request_payload = payload["request"]
+        draft = compose_binding_decision(
+            judgment=JudgmentCommitment.model_validate(
+                dict(payload["judgment"])
+            ),
+            manifest=ActionBindingManifest.model_validate(
+                dict(payload["manifest"])
+            ),
+            verification=VerificationDecisionV03.model_validate(
+                dict(payload["verification"])
+            ),
+            receipts=tuple(
+                ToolCallReceiptV04.model_validate(receipt)
+                if receipt.get("event_type") == "tool_call"
+                else RollbackReceiptV04.model_validate(receipt)
+                for receipt in payload["receipts"]
+            ),
+            replay=_ReplayView(
+                outcome=str(payload["replay"]["outcome"]),
+                reason_codes=tuple(payload["replay"]["reason_codes"]),
+                replay_digest=str(payload["replay"]["replay_digest"]),
+            ),
+            checkpoint=(
+                AuthorityCheckpoint.model_validate(dict(payload["checkpoint"]))
+                if payload.get("checkpoint") is not None
+                else None
+            ),
+            request=BindingDecisionDraftRequest(
+                **dict(request_payload)
+            ),
+            checkpoint_chain=tuple(
+                AuthorityCheckpoint.model_validate(checkpoint)
+                for checkpoint in payload.get("checkpoint_chain", ())
+            ),
+            authority_key=_decode_public_key(payload.get("authority_key")),
+            resolver_unavailable=bool(
+                payload.get("resolver_unavailable", False)
+            ),
+        )
+        return draft.model_dump(mode="json")
+
+    def verify_binding(self, payload: Mapping[str, object]) -> dict:
+        """Verify a signed BindingDecision against an external trust map."""
+        decision = BindingDecision.model_validate(dict(payload["decision"]))
+        work_order = WorkOrder.model_validate(dict(payload["work_order"]))
+        public_keys = {
+            str(key_id): _decode_public_key(value)
+            for key_id, value in payload["public_keys"].items()
+        }
+        ok = verify_binding_decision(
+            decision,
+            work_order=work_order,
+            public_keys=public_keys,
+            expected_signatures=int(payload["expected_signatures"]),
+        )
+        return {"valid": bool(ok)}
+
+    def binding_history(self, ledger_path: str) -> dict:
+        """Read the current binding decision head for the authoritative
+        WorkOrder (read-only; never commits)."""
+        path = Path(ledger_path)
+        connection = evidence.connect_ledger(path)
+        try:
+            work_order = evidence.load_authoritative_work_order(connection)
+        except Exception as error:
+            raise ValueError("binding ledger is unavailable") from error
+        finally:
+            connection.close()
+        try:
+            current = load_current_binding_decision(
+                path, work_order.digest
+            )
+        except BindingTransactionError as error:
+            raise ValueError("binding history is not readable") from error
+        if current is None:
+            return {"current": None}
+        return {
+            "current": current.model_dump(mode="json"),
+            "work_order_digest": work_order.digest,
+        }
+
+    def replay_binding_package(self, package_path: str) -> dict:
+        """Replay one v0.4 delivery package offline (read-only)."""
+        try:
+            result = verify_delivery_package(Path(package_path))
+        except DeliveryPackageError as error:
+            raise ValueError("binding package replay failed") from error
+        return result.model_dump(mode="json")
 
 
 __all__ = ["OpenWorkProofServices"]

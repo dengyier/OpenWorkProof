@@ -687,6 +687,103 @@ def owp_analyze_repo(
 # ── server entry point ───────────────────────────────────────────────
 
 
+
+# ── v0.4 read-only binding interfaces (Task 13) ────────────────────────
+
+_PRIVATE_KEY_FIELD_NAMES = (
+    "private_key",
+    "private_key_hex",
+    "signing_key",
+    "secret_key",
+    "acceptor_key",
+    "verifier_key",
+    "acceptor_private",
+    "verifier_private",
+)
+
+
+def _reject_private_key_fields(payload: Mapping[str, Any]) -> None:
+    """Refuse any Acceptor/Verifier private-key argument. MCP validation is
+    read-only and never signs or commits."""
+
+    for key in payload:
+        lowered = str(key).lower()
+        if any(name in lowered for name in _PRIVATE_KEY_FIELD_NAMES):
+            raise ValueError("private key arguments are forbidden")
+
+
+@mcp.tool()
+def owp_validate_judgment_commitment(payload_json: str) -> dict[str, Any]:
+    """Validate one signed JudgmentCommitment (read-only, no authority).
+
+    Without a ledger or trusted key context the authority is reported as
+    ``not_checked``; this tool never signs and never commits.
+    """
+    try:
+        payload = json.loads(payload_json)
+        if not isinstance(payload, dict):
+            return _err("payload must be a JSON object")
+        _reject_private_key_fields(payload)
+        return _ok(
+            OpenWorkProofServices().validate_judgment_commitment(payload)
+        )
+    except Exception as exc:
+        return _err(f"judgment validation failed: {exc}")
+
+
+@mcp.tool()
+def owp_validate_action_binding_manifest(payload_json: str) -> dict[str, Any]:
+    """Validate one signed ActionBindingManifest (read-only, no authority)."""
+    try:
+        payload = json.loads(payload_json)
+        if not isinstance(payload, dict):
+            return _err("payload must be a JSON object")
+        _reject_private_key_fields(payload)
+        return _ok(
+            OpenWorkProofServices().validate_action_binding_manifest(payload)
+        )
+    except Exception as exc:
+        return _err(f"binding manifest validation failed: {exc}")
+
+
+@mcp.tool()
+def owp_get_binding_status(ledger_path: str) -> dict[str, Any]:
+    """Read the current binding decision head from a ledger (read-only)."""
+    try:
+        return _ok(OpenWorkProofServices().binding_history(ledger_path))
+    except Exception as exc:
+        return _err(f"binding status unavailable: {exc}")
+
+
+@mcp.tool()
+def owp_explain_binding_decision(payload_json: str) -> dict[str, Any]:
+    """Verify and explain one BindingDecision (read-only)."""
+    try:
+        payload = json.loads(payload_json)
+        if not isinstance(payload, dict):
+            return _err("payload must be a JSON object")
+        _reject_private_key_fields(payload)
+        result = OpenWorkProofServices().verify_binding(payload)
+        decision_payload = payload.get("decision", {})
+        return _ok(
+            {
+                "valid": result["valid"],
+                "decision": (
+                    decision_payload.get("decision")
+                    if isinstance(decision_payload, dict)
+                    else None
+                ),
+                "reason_codes": (
+                    decision_payload.get("reason_codes")
+                    if isinstance(decision_payload, dict)
+                    else None
+                ),
+            }
+        )
+    except Exception as exc:
+        return _err(f"binding decision explanation failed: {exc}")
+
+
 def main() -> None:
     """Run the stdio MCP server."""
     mcp.run(transport="stdio")
