@@ -48,6 +48,8 @@ from openworkproof.models import (
     RollbackReceipt,
     RunTestsArguments,
     SidecarEvent,
+    parse_action_receipt,
+    parse_action_receipt_json,
     SystemEventReceipt,
     TestResultEvidence,
     TerminationDecisionReceipt,
@@ -78,6 +80,7 @@ from openworkproof.signing import (
     key_id,
     sign_payload,
     unsigned_payload,
+    verify_action_receipt_signature,
     verify_nested_claim,
     verify_payload,
     verify_work_order_identity_bindings,
@@ -1253,7 +1256,7 @@ def stage_pending_evidence_group(
         work_order = load_authoritative_work_order(connection)
         receipts = _validated_receipt_prefix(connection, work_order)
         try:
-            validated_receipt = ACTION_RECEIPT_ADAPTER.validate_python(
+            validated_receipt = parse_action_receipt(
                 receipt.model_dump(mode="json")
             )
             validated_receipt.validate_against_work_order(work_order)
@@ -1268,11 +1271,7 @@ def stage_pending_evidence_group(
             raise ValueError("receipt candidate is invalid") from error
         if (
             validated_receipt != receipt
-            or not verify_payload(
-                "action-receipt",
-                receipt.model_dump(mode="json"),
-                sidecar_key,
-            )
+            or not verify_action_receipt_signature(receipt, sidecar_key)
             or connection.execute(
                 """
                 SELECT COUNT(*)
@@ -1461,7 +1460,7 @@ def _validate_new_receipt_publication(
             "an existing evidence publication requires recovery"
         )
     is_started_rollback = (
-        type(receipt) is RollbackReceipt
+        isinstance(receipt, RollbackReceipt)
         and receipt.policy_decision == "allow"
         and receipt.execution_status in {"succeeded", "failed"}
     )
@@ -1472,13 +1471,13 @@ def _validate_new_receipt_publication(
         and not receipt.evidence_refs
         and (
             (
-                type(receipt) is ToolCallReceipt
+                isinstance(receipt, ToolCallReceipt)
                 and receipt.policy_decision == "allow"
                 and receipt.execution_status == "failed"
             )
             or is_started_rollback
             or (
-                type(receipt) is ToolCallReceipt
+                isinstance(receipt, ToolCallReceipt)
                 and receipt.tool_name == "owp.repo_read"
                 and receipt.policy_decision == "allow"
                 and receipt.execution_status == "succeeded"
@@ -1486,7 +1485,7 @@ def _validate_new_receipt_publication(
         )
     )
     if (
-        type(receipt) not in {ToolCallReceipt, RollbackReceipt}
+        not isinstance(receipt, (ToolCallReceipt, RollbackReceipt))
         or receipt.policy_decision != "allow"
         or type(group) is not _PublicationGroup
         or group.receipt_id != receipt.receipt_id
@@ -1499,9 +1498,7 @@ def _validate_new_receipt_publication(
             "receipt publication is outside the closed routine slice"
         )
     try:
-        parsed = ACTION_RECEIPT_ADAPTER.validate_python(
-            receipt.model_dump(mode="json")
-        )
+        parsed = parse_action_receipt(receipt.model_dump(mode="json"))
         parsed.validate_against_work_order(work_order)
         if isinstance(parsed, ToolCallReceipt):
             parsed.validate_predicates_against(work_order)
@@ -1520,11 +1517,7 @@ def _validate_new_receipt_publication(
         parsed != receipt
         or type(parsed) is not type(receipt)
         or receipt.work_order_digest != work_order.digest
-        or not verify_payload(
-            "action-receipt",
-            receipt.model_dump(mode="json"),
-            sidecar_key,
-        )
+        or not verify_action_receipt_signature(receipt, sidecar_key)
         or any(
             item.receipt_id == receipt.receipt_id
             or item.nonce == receipt.nonce
@@ -2462,7 +2455,7 @@ def commit_receipt_with_publications(
             receipt=receipt,
             group=group,
         )
-        if type(receipt) is ToolCallReceipt:
+        if isinstance(receipt, ToolCallReceipt):
             _validate_authoritative_receipt_predicates(
                 connection,
                 work_order=work_order,
@@ -2471,7 +2464,7 @@ def commit_receipt_with_publications(
                 trusted_resolution_manifest=trusted_resolution_manifest,
             )
         else:
-            assert type(receipt) is RollbackReceipt
+            assert isinstance(receipt, RollbackReceipt)
             if trusted_resolution_manifest is not None:
                 raise ValueError(
                     "trusted resolution manifest is forbidden for rollback"
@@ -5535,7 +5528,7 @@ def _validated_receipt_prefix(
             stored_json,
         ) = row
         try:
-            receipt = ACTION_RECEIPT_ADAPTER.validate_json(stored_json)
+            receipt = parse_action_receipt_json(stored_json)
             canonical = _canonical_json(
                 receipt.model_dump(mode="json")
             )
@@ -5554,11 +5547,7 @@ def _validated_receipt_prefix(
             or stored_sequence != expected_sequence
             or stored_previous != receipt.previous_receipt_digest
             or stored_previous != previous_digest
-            or not verify_payload(
-                "action-receipt",
-                receipt.model_dump(mode="json"),
-                sidecar_key,
-            )
+            or not verify_action_receipt_signature(receipt, sidecar_key)
         ):
             raise _child_issuance_error(
                 "receipt prefix row or signature integrity failed"

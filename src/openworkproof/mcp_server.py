@@ -26,27 +26,38 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 import openworkproof.evidence as evidence
 import openworkproof.repo_tools as repo_tools
 import openworkproof.runtime_context as runtime_context
+from openworkproof.binding_transactions import (
+    load_historical_action_binding_manifest,
+)
 from openworkproof.models import (
-    ACTION_RECEIPT_ADAPTER,
     ActionReceiptEnvelope,
     AgentRequest,
+    AgentRequestV04,
     EvidenceRef,
     GrantIssuedReceipt,
+    POLICY_ERROR_CODES,
+    POLICY_ERROR_CODES_V04,
     PolicyDecision,
     RepoReadArguments,
     RollbackReceipt,
+    RollbackReceiptV04,
     RunTestsArguments,
     SystemEventReceipt,
     TestResultEvidence,
     ToolCallReceipt,
+    ToolCallReceiptV04,
     ToolRequestArguments,
     WorkOrder,
+    parse_agent_request,
+    parse_action_receipt_json,
     request_arguments_digest,
 )
 from openworkproof.policy import (
     AuthorizationContext,
     AuthorizationLedgerPrefix,
     ProspectiveExecutionFacts,
+    _authorize_bound_action_with_manifest,
+    authorize_bound_action,
     authorize_tool_call,
     derive_authorization_context,
     validate_rollback,
@@ -93,6 +104,25 @@ def _require_current_context(
         )
     except runtime_context.RuntimeContextError as error:
         raise HandlerCoordinationError(str(error)) from error
+
+
+def _require_bound_action(
+    ledger_path: Path,
+    context: AuthorizationContext,
+    request: AgentRequest,
+    request_arguments: object | None,
+    execution_facts: ProspectiveExecutionFacts | None = None,
+) -> PolicyDecision:
+    decision = authorize_bound_action(
+        ledger_path,
+        context,
+        request,
+        request_arguments,
+        execution_facts,
+    )
+    if not decision.allowed:
+        raise ToolCallDenied(decision)
+    return decision
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,7 +311,7 @@ class _StoredRunTestsExecution:
 
 
 def _canonical_agent_request(request: AgentRequest) -> bytes:
-    if type(request) is not AgentRequest:
+    if type(request) not in {AgentRequest, AgentRequestV04}:
         raise ValueError("stored AgentRequest is invalid")
     encoded = rfc8785.dumps(request.model_dump(mode="json"))
     if not 1 <= len(encoded) <= _MAX_AGENT_REQUEST_BYTES:
@@ -343,7 +373,7 @@ def _decode_canonical_agent_request(raw: object) -> AgentRequest:
     )
     if rfc8785.dumps(value) != encoded:
         raise ValueError("stored AgentRequest is not canonical")
-    request = AgentRequest.model_validate(value)
+    request = parse_agent_request(value)
     if _canonical_agent_request(request) != encoded:
         raise ValueError("stored AgentRequest does not round trip")
     return request
@@ -417,7 +447,7 @@ def _receipt_matches_handler_execution(
     row: tuple[object, ...],
 ) -> bool:
     try:
-        receipt = ACTION_RECEIPT_ADAPTER.validate_json(stored_json)
+        receipt = parse_action_receipt_json(stored_json)
     except Exception:
         return False
     (
@@ -845,20 +875,73 @@ def _recovery_authorization_context(
     )
     if stored.request.work_order_digest != context.work_order.digest:
         raise HandlerCoordinationError("RECOVERY_REQUIRED")
-    if receipt_state != "ABSENT":
-        return context
-    try:
-        current_prefix_digest = _authorization_prefix_digest(
-            context.ledger_prefix
-        )
-    except (TypeError, ValueError) as error:
-        raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
-    if current_prefix_digest != stored.authorization_prefix_digest:
-        raise HandlerCoordinationError("RECOVERY_REQUIRED")
+    if receipt_state == "ABSENT":
+        try:
+            current_prefix_digest = _authorization_prefix_digest(
+                context.ledger_prefix
+            )
+        except (TypeError, ValueError) as error:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+        if current_prefix_digest != stored.authorization_prefix_digest:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        historical_prefix = context.ledger_prefix
+    else:
+        candidates: list[AuthorizationLedgerPrefix] = []
+        receipts = context.ledger_prefix.receipts
+        for count in range(len(receipts) + 1):
+            historical_receipts = receipts[:count]
+            issued_grant_ids = {
+                receipt.issued_grant_id
+                for receipt in historical_receipts
+                if isinstance(receipt, GrantIssuedReceipt)
+                and receipt.policy_decision == "allow"
+                and receipt.issued_grant_id is not None
+            }
+            denied_grant_digests = {
+                receipt.candidate_grant_digest
+                for receipt in historical_receipts
+                if isinstance(receipt, GrantIssuedReceipt)
+                and receipt.policy_decision == "deny"
+                and receipt.candidate_grant_digest is not None
+            }
+            candidate = AuthorizationLedgerPrefix(
+                effective_grants=tuple(
+                    grant
+                    for grant in context.ledger_prefix.effective_grants
+                    if grant.grant_id in issued_grant_ids
+                ),
+                grant_attempts=tuple(
+                    grant
+                    for grant in context.ledger_prefix.grant_attempts
+                    if grant.digest in denied_grant_digests
+                ),
+                receipts=historical_receipts,
+            )
+            try:
+                digest = _authorization_prefix_digest(candidate)
+            except (TypeError, ValueError) as error:
+                raise HandlerCoordinationError(
+                    "RECOVERY_REQUIRED"
+                ) from error
+            if digest == stored.authorization_prefix_digest:
+                candidates.append(candidate)
+        if len(candidates) != 1:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        historical_prefix = candidates[0]
+    historical_evidence_paths = {
+        reference.path
+        for receipt in historical_prefix.receipts
+        for reference in receipt.evidence_refs
+    }
+    historical_evidence = tuple(
+        item
+        for item in context.committed_evidence
+        if item.reference.path in historical_evidence_paths
+    )
     return derive_authorization_context(
         context.work_order,
-        context.ledger_prefix,
-        context.committed_evidence,
+        historical_prefix,
+        historical_evidence,
         context.replay_checkpoint,
         stored.reserved_at,
     )
@@ -1220,7 +1303,9 @@ def _build_run_tests_receipt(
         }
     )
     raw = {
-        "protocol_version": "0.1",
+        "protocol_version": (
+            "0.4" if type(request) is AgentRequestV04 else "0.1"
+        ),
         "receipt_id": receipt_id,
         "work_order_digest": context.work_order.digest,
         "actor_type": "agent",
@@ -1280,8 +1365,18 @@ def _build_run_tests_receipt(
             result.model_dump(mode="json") for result in results
         ],
     }
-    return ACTION_RECEIPT_ADAPTER.validate_python(
-        sign_payload("action-receipt", raw, sidecar_private_key)
+    receipt_type = (
+        ToolCallReceiptV04
+        if type(request) is AgentRequestV04
+        else ToolCallReceipt
+    )
+    return receipt_type.model_validate(
+        sign_payload(
+            "action-receipt",
+            raw,
+            sidecar_private_key,
+            version=("0.4" if type(request) is AgentRequestV04 else "0.1"),
+        )
     )
 
 
@@ -1376,6 +1471,36 @@ def _recover_run_tests_execution(
         now,
         lock_descriptor,
     )
+    if type(stored.request) is AgentRequestV04:
+        try:
+            historical_manifest = load_historical_action_binding_manifest(
+                ledger_path,
+                work_order_digest=stored.request.work_order_digest,
+                binding_manifest_id=(
+                    stored.request.action_binding_manifest_id
+                ),
+                binding_manifest_digest=(
+                    stored.request.action_binding_manifest_digest
+                ),
+                judgment_commitment_id=(
+                    stored.request.judgment_commitment_id
+                ),
+                judgment_commitment_digest=(
+                    stored.request.judgment_commitment_digest
+                ),
+                transaction_time=stored.reserved_at,
+            )
+            historical_decision = _authorize_bound_action_with_manifest(
+                old_context,
+                stored.request,
+                _run_tests_arguments_from_contract(stored.contract),
+                stored.execution_facts,
+                historical_manifest,
+            )
+        except Exception as error:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+        if not historical_decision.allowed:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
     try:
         outcome = execution_driver.reconcile(
             stored.contract,
@@ -1536,12 +1661,22 @@ def execute_run_tests(
             now,
             lock_descriptor,
         )
-        decision = authorize_tool_call(
-            context,
-            request,
-            request_arguments,
-            execution_facts,
-        )
+        if type(request) is AgentRequestV04:
+            decision = _require_bound_action(
+                path,
+                context,
+                request,
+                request_arguments,
+                execution_facts,
+            )
+        else:
+            _require_bound_action(path, context, request, request_arguments)
+            decision = authorize_tool_call(
+                context,
+                request,
+                request_arguments,
+                execution_facts,
+            )
         if not decision.allowed:
             raise ToolCallDenied(decision)
         if (
@@ -1782,7 +1917,9 @@ def _build_rollback_receipt(
     remaining_before = _remaining_tool_calls(context, request.grant_id)
     sidecar_key_id = key_id(sidecar_private_key.public_key())
     raw = {
-        "protocol_version": "0.1",
+        "protocol_version": (
+            "0.4" if type(request) is AgentRequestV04 else "0.1"
+        ),
         "receipt_id": _digest(
             {
                 "domain": "openworkproof/receipt-id/v0.1",
@@ -1838,8 +1975,18 @@ def _build_rollback_receipt(
         "after_manifest_digest": result.after_manifest_digest,
         "rollback_result": result.execution_status,
     }
-    return ACTION_RECEIPT_ADAPTER.validate_python(
-        sign_payload("action-receipt", raw, sidecar_private_key)
+    receipt_type = (
+        RollbackReceiptV04
+        if type(request) is AgentRequestV04
+        else RollbackReceipt
+    )
+    return receipt_type.model_validate(
+        sign_payload(
+            "action-receipt",
+            raw,
+            sidecar_private_key,
+            version=("0.4" if type(request) is AgentRequestV04 else "0.1"),
+        )
     )
 
 
@@ -1924,7 +2071,11 @@ def execute_rollback(
             now,
             lock_descriptor,
         )
-        decision = validate_rollback(context, request)
+        if type(request) is AgentRequestV04:
+            decision = _require_bound_action(path, context, request, None)
+        else:
+            _require_bound_action(path, context, request, None)
+            decision = validate_rollback(context, request)
         if not decision.allowed:
             raise ToolCallDenied(decision)
         _preflight_rollback_receipts(
@@ -2274,7 +2425,9 @@ def _build_repo_read_receipt(
     sidecar_key_id = key_id(sidecar_private_key.public_key())
     output_digest = _digest(result.output.model_dump(mode="json"))
     raw = {
-        "protocol_version": "0.1",
+        "protocol_version": (
+            "0.4" if type(request) is AgentRequestV04 else "0.1"
+        ),
         "receipt_id": _digest(
             {
                 "domain": "openworkproof/receipt-id/v0.1",
@@ -2347,8 +2500,18 @@ def _build_repo_read_receipt(
             )
         ),
     }
-    return ACTION_RECEIPT_ADAPTER.validate_python(
-        sign_payload("action-receipt", raw, sidecar_private_key)
+    receipt_type = (
+        ToolCallReceiptV04
+        if type(request) is AgentRequestV04
+        else ToolCallReceipt
+    )
+    return receipt_type.model_validate(
+        sign_payload(
+            "action-receipt",
+            raw,
+            sidecar_private_key,
+            version=("0.4" if type(request) is AgentRequestV04 else "0.1"),
+        )
     )
 
 
@@ -2461,12 +2624,16 @@ def execute_repo_read(
             now,
             lock_descriptor,
         )
-        decision = authorize_tool_call(
-            context,
-            request,
-            arguments,
-            None,
-        )
+        if type(request) is AgentRequestV04:
+            decision = _require_bound_action(path, context, request, arguments)
+        else:
+            _require_bound_action(path, context, request, arguments)
+            decision = authorize_tool_call(
+                context,
+                request,
+                arguments,
+                None,
+            )
         if not decision.allowed:
             raise ToolCallDenied(decision)
         _preflight_repo_read_receipts(
@@ -2596,7 +2763,9 @@ def produce_deny_receipt(
             )
         ).hexdigest()
         raw = {
-            "protocol_version": "0.1",
+            "protocol_version": (
+                "0.4" if type(request) is AgentRequestV04 else "0.1"
+            ),
             "receipt_id": receipt_id,
             "work_order_digest": context.work_order.digest,
             "actor_type": "agent",
@@ -2643,8 +2812,31 @@ def produce_deny_receipt(
             "output_digest": None,
             "predicate_results": [],
         }
-        receipt = ToolCallReceipt.model_validate(
-            sign_payload("action-receipt", raw, sidecar_private_key)
+        allowed_error_codes = (
+            POLICY_ERROR_CODES_V04
+            if type(request) is AgentRequestV04
+            else POLICY_ERROR_CODES
+        )
+        if decision.error_code not in allowed_error_codes:
+            # The binding gate can deny a legacy request with a v0.4-only
+            # code (e.g. UNSIGNED_METADATA_REFERENCE) that the v0.1 receipt
+            # Literal cannot carry. Fail loudly as a denial; never leak a
+            # pydantic ValidationError or write a mis-typed receipt.
+            raise ToolCallDenied(decision)
+        receipt_type = (
+            ToolCallReceiptV04
+            if type(request) is AgentRequestV04
+            else ToolCallReceipt
+        )
+        receipt = receipt_type.model_validate(
+            sign_payload(
+                "action-receipt",
+                raw,
+                sidecar_private_key,
+                version=(
+                    "0.4" if type(request) is AgentRequestV04 else "0.1"
+                ),
+            )
         )
         receipt.validate_against_work_order(context.work_order)
         connection = evidence.connect_ledger(path)
@@ -2857,10 +3049,7 @@ def _run_tests_from_payload(
     payload: Mapping[str, object],
 ) -> ToolCallReceipt:
     """Forward one run-tests execution from a transport payload."""
-    from openworkproof.models import (
-        AgentRequest,
-        RunTestsArguments,
-    )
+    from openworkproof.models import RunTestsArguments, parse_agent_request
     from openworkproof.policy import ProspectiveExecutionFacts
 
     path = Path(ledger_path)
@@ -2873,7 +3062,7 @@ def _run_tests_from_payload(
         payload,
         now,
     )
-    request = AgentRequest.model_validate(payload["request"])
+    request = parse_agent_request(payload["request"])
     arguments = RunTestsArguments.model_validate(payload["arguments"])
     facts = ProspectiveExecutionFacts(
         execution_context_id=payload["facts"]["execution_context_id"],
@@ -2903,7 +3092,7 @@ def _repo_read_from_payload(
     payload: Mapping[str, object],
 ) -> ToolCallReceipt:
     """Forward one repo-read execution from a transport payload."""
-    from openworkproof.models import AgentRequest, RepoReadArguments
+    from openworkproof.models import RepoReadArguments, parse_agent_request
 
     path = Path(ledger_path)
     now = evidence._freeze_trusted_utc_second(
@@ -2915,7 +3104,7 @@ def _repo_read_from_payload(
         payload,
         now,
     )
-    request = AgentRequest.model_validate(payload["request"])
+    request = parse_agent_request(payload["request"])
     arguments = RepoReadArguments.model_validate(payload["arguments"])
     facts = ProspectiveExecutionFacts(
         execution_context_id=payload["facts"]["execution_context_id"],

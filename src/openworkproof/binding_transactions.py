@@ -669,10 +669,81 @@ def load_current_action_binding_manifest(
             raise BindingTransactionError(
                 "requested WorkOrder is not the authoritative ledger WorkOrder"
             )
-        _, current = _validated_manifest_history(connection, work_order)
+        try:
+            _, current = _validated_manifest_history(connection, work_order)
+        except sqlite3.OperationalError as error:
+            if "no such table" not in str(error):
+                raise
+            # A pre-v0.4 ledger has no binding tables; that is equivalent
+            # to "no manifest has ever been committed" for this WorkOrder.
+            raise BindingTransactionError(
+                "current binding manifest is unavailable"
+            ) from error
         if current is None:
             raise BindingTransactionError("current binding manifest is unavailable")
         return current
+    finally:
+        connection.close()
+
+
+def load_historical_action_binding_manifest(
+    ledger_path: Path,
+    *,
+    work_order_digest: str,
+    binding_manifest_id: str,
+    binding_manifest_digest: str,
+    judgment_commitment_id: str,
+    judgment_commitment_digest: str,
+    transaction_time: datetime,
+) -> ActionBindingManifest:
+    """Load the manifest that was current at one durable execution boundary."""
+
+    path = Path(ledger_path)
+    if not path.is_file():
+        raise BindingTransactionError("binding ledger is unavailable")
+    instant = datetime.strptime(
+        _canonical_utc_second(transaction_time), "%Y-%m-%dT%H:%M:%SZ"
+    ).replace(tzinfo=timezone.utc)
+    connection = evidence.connect_ledger(path)
+    try:
+        work_order = evidence.load_authoritative_work_order(connection)
+        if work_order.digest != work_order_digest:
+            raise BindingTransactionError(
+                "requested WorkOrder is not the authoritative ledger WorkOrder"
+            )
+        history, _ = _validated_manifest_history(connection, work_order)
+        record = history.get(binding_manifest_id)
+        if record is None:
+            raise BindingTransactionError(
+                "historical binding manifest is unavailable"
+            )
+        manifest, _, committed_at = record
+        if (
+            manifest.digest != binding_manifest_digest
+            or manifest.judgment_commitment_id != judgment_commitment_id
+            or manifest.judgment_commitment_digest
+            != judgment_commitment_digest
+        ):
+            raise BindingTransactionError(
+                "historical binding reference does not match"
+            )
+        if (
+            committed_at > instant
+            or not manifest.created_at <= instant < manifest.expires_at
+        ):
+            raise BindingTransactionError(
+                "historical binding manifest was not effective"
+            )
+        superseding_commits = tuple(
+            child_committed_at
+            for child, _, child_committed_at in history.values()
+            if child.supersedes_binding_manifest_id == binding_manifest_id
+        )
+        if any(committed_at <= instant for committed_at in superseding_commits):
+            raise BindingTransactionError(
+                "historical binding manifest was already superseded"
+            )
+        return manifest
     finally:
         connection.close()
 

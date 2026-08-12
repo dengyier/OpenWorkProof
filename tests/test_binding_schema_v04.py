@@ -11,6 +11,7 @@ import pytest
 import rfc8785
 
 from openworkproof.models import (
+    ACTION_RECEIPT_V04_ADAPTER,
     ActionBindingManifest,
     AuthorityCheckpoint,
     BindingDecision,
@@ -22,17 +23,22 @@ import openworkproof.schema_registry as api
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 V04_OBJECT_PATHS = {
     "action-binding-manifest": "action-binding-manifest.schema.json",
+    "action-receipt": "action-receipt.schema.json",
     "authority-checkpoint": "authority-checkpoint.schema.json",
     "binding-decision": "binding-decision.schema.json",
     "judgment-commitment": "judgment-commitment.schema.json",
 }
 V04_SCHEMA_FACTORIES = {
+    "action-receipt": ACTION_RECEIPT_V04_ADAPTER.json_schema,
     "action-binding-manifest": ActionBindingManifest.model_json_schema,
     "authority-checkpoint": AuthorityCheckpoint.model_json_schema,
     "binding-decision": BindingDecision.model_json_schema,
     "judgment-commitment": JudgmentCommitment.model_json_schema,
 }
 FROZEN_V04_DIGESTS = {
+    "action-receipt.schema.json": (
+        "7a7cd836da6f15bc003e96bc7b0b6ac1357c422f09395da9da050ec2f66f181e"
+    ),
     "action-binding-manifest.schema.json": (
         "6e4dc37a733345ea2e74188a38cea4527e2fcfb5bf1cd487bcfc2bbc6f2f59b2"
     ),
@@ -46,7 +52,7 @@ FROZEN_V04_DIGESTS = {
         "29a2fbca6bdd5dc6aaf2c023e6a0fd0361531a30ae7486cdc5f1023e2542ecd2"
     ),
     "schema-registry.json": (
-        "b347c54f523d2994142770191a467bd6e796dc4094fda1ac7da07d78729f8f30"
+        "66dea3711f1aa0f725b84f96b042e3b34e17713ace2f1e497df9628a2830d88d"
     ),
 }
 V04_FILENAMES = frozenset({"schema-registry.json", *V04_OBJECT_PATHS.values()})

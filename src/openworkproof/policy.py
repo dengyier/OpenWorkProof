@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 from itertools import islice
 import json
+from pathlib import Path
 import re
 
 import rfc8785
@@ -20,8 +21,10 @@ from openworkproof.composition import (
     validate_authorization_causal_bindings,
 )
 from openworkproof.models import (
+    ActionBindingManifest,
     ActionReceiptEnvelope,
     AgentRequest,
+    AgentRequestV04,
     ApplyPatchArguments,
     ApprovalHumanDecision,
     ApprovalDecisionReceipt,
@@ -33,6 +36,7 @@ from openworkproof.models import (
     GrantRevokedReceipt,
     KeyBinding,
     PatchResultEvidence,
+    POLICY_ERROR_CODES_V04,
     PolicyDecision,
     RepoReadArguments,
     RollbackReceipt,
@@ -80,6 +84,21 @@ DENIAL_PRECEDENCE = (
     "PREDICATE_DENIED",
     "QUOTA_EXHAUSTED",
 )
+
+_BOUND_ACTION_REASON_CODES = POLICY_ERROR_CODES_V04
+_BOUND_ACTION_KINDS = {
+    "owp.apply_patch": "patch",
+    "owp.create_pr_proposal": "proposal",
+    "owp.repo_read": "read",
+    "owp.rollback_patch": "rollback",
+    "owp.run_tests": "test",
+}
+_BOUND_ARGUMENT_TYPES = {
+    "owp.apply_patch": ApplyPatchArguments,
+    "owp.create_pr_proposal": CreatePrProposalArguments,
+    "owp.repo_read": RepoReadArguments,
+    "owp.run_tests": RunTestsArguments,
+}
 
 
 class AuthorizationPolicyError(RuntimeError):
@@ -265,7 +284,7 @@ def _validate_tool_authorization_inputs(
     }
     if type(context) is not AuthorizationContext:
         raise _fail("authorization context is malformed")
-    if type(request) is not AgentRequest:
+    if type(request) not in {AgentRequest, AgentRequestV04}:
         raise _fail("Agent request is malformed")
     tool_name = argument_tools.get(type(request_arguments))
     if tool_name is None:
@@ -313,6 +332,7 @@ def _validate_tool_authorization_inputs(
         "agent-request",
         request.model_dump(mode="json"),
         public_key,
+        version="0.4" if type(request) is AgentRequestV04 else "0.1",
     ):
         raise _fail("Agent request signature is invalid")
 
@@ -387,6 +407,228 @@ def _policy_decision(error_code: str | None) -> PolicyDecision:
             else "TOOL_CALL_DENIED"
         ),
     )
+
+
+def _bound_action_decision(reason_code: str | None) -> PolicyDecision:
+    if reason_code is not None and reason_code not in _BOUND_ACTION_REASON_CODES:
+        raise AuthorizationPolicyError("bound action reason code is not closed")
+    return PolicyDecision(
+        allowed=reason_code is None,
+        decision="allow" if reason_code is None else "deny",
+        error_code=reason_code,
+        reason=(
+            "BOUND_ACTION_AUTHORIZED"
+            if reason_code is None
+            else "BOUND_ACTION_DENIED"
+        ),
+    )
+
+
+def _bound_authorization_error_code(
+    error: AuthorizationPolicyError,
+) -> str:
+    return {
+        "Agent request integrity binding is invalid": (
+            "ACTION_ARGUMENTS_MISMATCH"
+        ),
+        "Agent request Grant or actor binding is invalid": (
+            "AUTH_SUBJECT_MISMATCH"
+        ),
+        "Agent request key binding is invalid": "BINDING_HISTORY_INVALID",
+        "Agent request signature is invalid": "AUTH_SIGNATURE_INVALID",
+        "Agent request is outside the freshness window": (
+            "AUTH_FRESHNESS_INVALID"
+        ),
+        "prospective execution controller is not the Sidecar": (
+            "AUTH_SUBJECT_MISMATCH"
+        ),
+        "test execution facts are required": "ACTION_ARGUMENTS_MISMATCH",
+        "prospective execution facts are malformed": (
+            "ACTION_ARGUMENTS_MISMATCH"
+        ),
+        "contract expired before tool authorization": "CAPABILITY_DENIED",
+        "routine Receipt capacity is exhausted": "QUOTA_EXHAUSTED",
+        "EVIDENCE_FAILURE_SEALED": "PREDICATE_DENIED",
+        "effective Grant balance is unavailable": "BINDING_HISTORY_INVALID",
+        "rollback authorization inputs are malformed": (
+            "ACTION_ARGUMENTS_MISMATCH"
+        ),
+        "rollback request Grant or actor binding is invalid": (
+            "AUTH_SUBJECT_MISMATCH"
+        ),
+        "rollback request key binding is invalid": "BINDING_HISTORY_INVALID",
+        "rollback request signature is invalid": "AUTH_SIGNATURE_INVALID",
+        "rollback request is outside the freshness window": (
+            "AUTH_FRESHNESS_INVALID"
+        ),
+        "rollback target patch is unavailable": "ACTION_ARGUMENTS_MISMATCH",
+        "rollback target binding is invalid": "ACTION_ARGUMENTS_MISMATCH",
+        "contract expired before rollback authorization": (
+            "CAPABILITY_DENIED"
+        ),
+    }.get(str(error), "BINDING_HISTORY_INVALID")
+
+
+def _bound_paths(arguments: object) -> tuple[str, ...] | None:
+    if isinstance(arguments, RepoReadArguments):
+        return (arguments.path,)
+    if isinstance(arguments, ApplyPatchArguments):
+        return arguments.target_paths
+    return ()
+
+
+def _paths_within_manifest(
+    paths: tuple[str, ...], allowed_roots: tuple[str, ...]
+) -> bool:
+    return all(
+        any(path == root or path.startswith(f"{root}/") for root in allowed_roots)
+        for path in paths
+    )
+
+
+def authorize_bound_action(
+    ledger_path: Path,
+    context: AuthorizationContext,
+    request: AgentRequest,
+    request_arguments: object | None,
+    execution_facts: ProspectiveExecutionFacts | None = None,
+) -> PolicyDecision:
+    """Authorize the native v0.4 binding before any execution side effect."""
+
+    if type(context) is not AuthorizationContext or type(request) not in {
+        AgentRequest,
+        AgentRequestV04,
+    }:
+        return _bound_action_decision("BINDING_REFERENCE_MISMATCH")
+    if request.work_order_digest != context.work_order.digest:
+        return _bound_action_decision("ALTERNATIVE_WORK_ORDER_DETECTED")
+    try:
+        from openworkproof.binding_transactions import (  # noqa: PLC0415
+            BindingTransactionError,
+            load_current_action_binding_manifest,
+        )
+    except Exception:
+        return _bound_action_decision("BINDING_HISTORY_INVALID")
+
+    try:
+        current = load_current_action_binding_manifest(
+            Path(ledger_path), context.work_order.digest
+        )
+    except Exception as error:
+        unavailable = isinstance(error, BindingTransactionError) and str(error) == (
+            "current binding manifest is unavailable"
+        )
+        if unavailable and type(request) is AgentRequest:
+            return _bound_action_decision(None)
+        return _bound_action_decision(
+            "BINDING_MANIFEST_UNAVAILABLE"
+            if unavailable
+            else "BINDING_HISTORY_INVALID"
+        )
+
+    if type(request) is AgentRequest:
+        return _bound_action_decision("UNSIGNED_METADATA_REFERENCE")
+    return _authorize_bound_action_with_manifest(
+        context,
+        request,
+        request_arguments,
+        execution_facts,
+        current,
+    )
+
+
+def _authorize_bound_action_with_manifest(
+    context: AuthorizationContext,
+    request: AgentRequestV04,
+    request_arguments: object | None,
+    execution_facts: ProspectiveExecutionFacts | None,
+    current: ActionBindingManifest,
+) -> PolicyDecision:
+    """Authorize one v0.4 request against an already replayed exact manifest."""
+
+    if request.action_binding_manifest_id != current.binding_manifest_id:
+        return _bound_action_decision("BINDING_MANIFEST_NOT_CURRENT")
+    if (
+        request.action_binding_manifest_digest != current.digest
+        or request.judgment_commitment_id != current.judgment_commitment_id
+        or request.judgment_commitment_digest
+        != current.judgment_commitment_digest
+    ):
+        return _bound_action_decision("BINDING_REFERENCE_MISMATCH")
+
+    now = context.transaction_time
+    if not current.created_at <= now < current.expires_at:
+        return _bound_action_decision("BINDING_MANIFEST_EXPIRED")
+    if (
+        current.adapter_id != "openworkproof/code-delivery-github/0.1"
+        or current.adapter_version != "0.1"
+    ):
+        return _bound_action_decision("ADAPTER_PROFILE_UNSUPPORTED")
+    if any(
+        type(receipt.nested_claim) in {AgentRequest, AgentRequestV04}
+        and receipt.nested_claim.nonce == request.nonce
+        for receipt in context.ledger_prefix.receipts
+    ):
+        return _bound_action_decision("AUTH_NONCE_REUSED")
+
+    action_kind = _BOUND_ACTION_KINDS.get(request.tool_name)
+    if (
+        action_kind is None
+        or request.tool_name not in context.work_order.allowed_tools
+        or request.tool_name not in current.allowed_tool_names
+        or action_kind not in current.allowed_action_kinds
+    ):
+        return _bound_action_decision("ACTION_OUTSIDE_APPROVED_SCOPE")
+    if request.tool_name == "owp.create_pr_proposal":
+        return _bound_action_decision("AUTHORITY_CHECKPOINT_MISSING")
+    if request.tool_name == "owp.rollback_patch":
+        if request_arguments is not None:
+            return _bound_action_decision("ACTION_ARGUMENTS_MISMATCH")
+        target = next(
+            (
+                receipt
+                for receipt in context.ledger_prefix.receipts
+                if receipt.receipt_id == context.active_patch_receipt_id
+            ),
+            None,
+        )
+        if (
+            not isinstance(target, ToolCallReceipt)
+            or target.tool_name != "owp.apply_patch"
+            or not isinstance(target.request_arguments, ApplyPatchArguments)
+        ):
+            return _bound_action_decision("ACTION_ARGUMENTS_MISMATCH")
+        if not _paths_within_manifest(
+            target.request_arguments.target_paths,
+            current.allowed_path_roots,
+        ):
+            return _bound_action_decision("ACTION_OUTSIDE_APPROVED_SCOPE")
+        try:
+            return _validate_rollback_common(context, request)
+        except AuthorizationPolicyError as error:
+            return _bound_action_decision(
+                _bound_authorization_error_code(error)
+            )
+    expected_type = _BOUND_ARGUMENT_TYPES[request.tool_name]
+    if type(request_arguments) is not expected_type:
+        return _bound_action_decision("ACTION_ARGUMENTS_MISMATCH")
+    if request.arguments_digest != request_arguments_digest(
+        request.tool_name, request_arguments
+    ):
+        return _bound_action_decision("ACTION_ARGUMENTS_MISMATCH")
+    paths = _bound_paths(request_arguments)
+    assert paths is not None
+    if not _paths_within_manifest(paths, current.allowed_path_roots):
+        return _bound_action_decision("ACTION_OUTSIDE_APPROVED_SCOPE")
+    try:
+        return _authorize_tool_call_common(
+            context,
+            request,
+            request_arguments,
+            execution_facts,
+        )
+    except AuthorizationPolicyError as error:
+        return _bound_action_decision(_bound_authorization_error_code(error))
 
 
 def _prospective_state_allowed(
@@ -595,7 +837,7 @@ def _compose_arguments_allowed(
     )
 
 
-def authorize_tool_call(
+def _authorize_tool_call_common(
     context: AuthorizationContext,
     request: AgentRequest,
     request_arguments: ToolRequestArguments,
@@ -609,6 +851,11 @@ def authorize_tool_call(
         request_arguments,
         execution_facts,
     )
+    if (
+        type(request) is AgentRequestV04
+        and request.tool_name not in _BOUND_ACTION_KINDS
+    ):
+        return _bound_action_decision("ACTION_OUTSIDE_APPROVED_SCOPE")
     if context.transaction_time > context.work_order.deadline:
         raise _fail("contract expired before tool authorization")
     if context.routine_capacity_remaining <= 0:
@@ -657,6 +904,24 @@ def authorize_tool_call(
         quota_allowed=_remaining_tool_calls(context, grant.grant_id) > 0,
     )
     return _policy_decision(error_code)
+
+
+def authorize_tool_call(
+    context: AuthorizationContext,
+    request: AgentRequest,
+    request_arguments: ToolRequestArguments,
+    execution_facts: ProspectiveExecutionFacts | None = None,
+) -> PolicyDecision:
+    """Authorize legacy requests; v0.4 requires the ledger-bound API."""
+
+    if type(request) is AgentRequestV04:
+        return _bound_action_decision("BINDING_MANIFEST_UNAVAILABLE")
+    return _authorize_tool_call_common(
+        context,
+        request,
+        request_arguments,
+        execution_facts,
+    )
 
 
 def validate_human_decision(
@@ -751,7 +1016,7 @@ def validate_human_decision(
     return _policy_decision(error_code)
 
 
-def validate_rollback(
+def _validate_rollback_common(
     context: AuthorizationContext,
     request: AgentRequest,
 ) -> PolicyDecision:
@@ -759,7 +1024,7 @@ def validate_rollback(
 
     if (
         type(context) is not AuthorizationContext
-        or type(request) is not AgentRequest
+        or type(request) not in {AgentRequest, AgentRequestV04}
     ):
         raise _fail("rollback authorization inputs are malformed")
     grants = {
@@ -791,6 +1056,7 @@ def validate_rollback(
         "agent-request",
         request.model_dump(mode="json"),
         public_key,
+        version="0.4" if type(request) is AgentRequestV04 else "0.1",
     ):
         raise _fail("rollback request signature is invalid")
     request_age = context.transaction_time - request.requested_at
@@ -854,6 +1120,17 @@ def validate_rollback(
             > 0,
         )
     )
+
+
+def validate_rollback(
+    context: AuthorizationContext,
+    request: AgentRequest,
+) -> PolicyDecision:
+    """Authorize legacy rollback; v0.4 requires the ledger-bound API."""
+
+    if type(request) is AgentRequestV04:
+        return _bound_action_decision("BINDING_MANIFEST_UNAVAILABLE")
+    return _validate_rollback_common(context, request)
 
 
 def _bounded_mapping(
@@ -2486,6 +2763,7 @@ __all__ = [
     "AuthorizationReplayState",
     "CommittedEvidence",
     "ProspectiveExecutionFacts",
+    "authorize_bound_action",
     "authorize_tool_call",
     "derive_authorization_context",
     "replay_authorization_policy",

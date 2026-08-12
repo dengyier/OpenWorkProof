@@ -11,7 +11,7 @@ import unicodedata
 from collections.abc import Iterator, Mapping
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal, get_args
 
 import rfc8785
 from pydantic import (
@@ -2728,6 +2728,23 @@ class AgentRequestV04(AgentRequest):
     action_binding_manifest_digest: Digest64
 
 
+def parse_agent_request(value: object) -> AgentRequest | AgentRequestV04:
+    """Parse only the explicitly versioned v0.4 AgentRequest sibling."""
+
+    if type(value) is AgentRequest:
+        return value
+    if type(value) is AgentRequestV04:
+        return value
+    if not isinstance(value, Mapping):
+        raise ValueError("AgentRequest payload is malformed")
+    schema_version = value.get("schema_version")
+    if schema_version is None:
+        return AgentRequest.model_validate(value)
+    if schema_version == "openworkproof-agent-request/0.4":
+        return AgentRequestV04.model_validate(value)
+    raise ValueError("AgentRequest schema version is unsupported")
+
+
 class BindingDecisionSignature(ProtocolModel):
     verifier_subject_id: Identifier
     verifier_key_id: KeyId
@@ -3380,6 +3397,33 @@ _POLICY_ERROR_CODES = Literal[
     "PREDICATE_DENIED",
     "QUOTA_EXHAUSTED",
 ]
+POLICY_ERROR_CODES = frozenset(get_args(_POLICY_ERROR_CODES))
+
+_POLICY_ERROR_CODES_V04 = Literal[
+    "STATE_DENIED",
+    "ROLE_DENIED",
+    "CAPABILITY_DENIED",
+    "APPROVAL_DENIED",
+    "PREDICATE_DENIED",
+    "QUOTA_EXHAUSTED",
+    "ACTION_ARGUMENTS_MISMATCH",
+    "ACTION_OUTSIDE_APPROVED_SCOPE",
+    "ADAPTER_PROFILE_UNSUPPORTED",
+    "ALTERNATIVE_WORK_ORDER_DETECTED",
+    "AUTH_FRESHNESS_INVALID",
+    "AUTH_NONCE_REUSED",
+    "AUTH_SIGNATURE_INVALID",
+    "AUTH_SUBJECT_MISMATCH",
+    "AUTHORITY_CHECKPOINT_MISSING",
+    "BINDING_HISTORY_INVALID",
+    "BINDING_MANIFEST_EXPIRED",
+    "BINDING_MANIFEST_NOT_CURRENT",
+    "BINDING_MANIFEST_UNAVAILABLE",
+    "BINDING_REFERENCE_MISMATCH",
+    "JUDGMENT_EXPIRED",
+    "UNSIGNED_METADATA_REFERENCE",
+]
+POLICY_ERROR_CODES_V04 = frozenset(get_args(_POLICY_ERROR_CODES_V04))
 
 _EXECUTION_ERROR_CODES = Literal[
     "HANDLER_ERROR",
@@ -3802,13 +3846,15 @@ class ToolCallReceipt(AgentReceiptEnvelope):
         elif any(value is None for value in derived):
             raise ValueError("started container tool requires runtime correlation")
 
-        if isinstance(self.request_arguments, RunTestsArguments):
+        if isinstance(self.request_arguments, RunTestsArguments) and not denied:
             if (
                 factors.fixed_test_source_digest
                 != self.request_arguments.fixed_test_source_digest
             ):
                 raise ValueError("fixed test correlation does not match request")
-        elif factors.fixed_test_source_digest is not None:
+        elif not isinstance(self.request_arguments, RunTestsArguments) and (
+            factors.fixed_test_source_digest is not None
+        ):
             raise ValueError("fixed test digest is run_tests-only")
 
         if denied:
@@ -4415,6 +4461,22 @@ class RollbackReceipt(AgentReceiptEnvelope):
         return self
 
 
+class ToolCallReceiptV04(ToolCallReceipt):
+    """Native v0.4 tool receipt with an explicit bound AgentRequest."""
+
+    protocol_version: Literal["0.4"]
+    nested_claim: AgentRequestV04
+    policy_error_code: _POLICY_ERROR_CODES_V04 | None
+
+
+class RollbackReceiptV04(RollbackReceipt):
+    """Native v0.4 rollback receipt with an explicit bound AgentRequest."""
+
+    protocol_version: Literal["0.4"]
+    nested_claim: AgentRequestV04
+    policy_error_code: _POLICY_ERROR_CODES_V04 | None
+
+
 ActionReceipt = Annotated[
     GrantIssuedReceipt
     | GrantConsumedReceipt
@@ -4432,14 +4494,52 @@ ActionReceipt = Annotated[
 # the parsed receipt to its WorkOrder via validate_receipt_or_error().
 ACTION_RECEIPT_ADAPTER = TypeAdapter(ActionReceipt)
 
+ActionReceiptV04 = Annotated[
+    ToolCallReceiptV04 | RollbackReceiptV04,
+    Field(discriminator="event_type"),
+]
+ACTION_RECEIPT_V04_ADAPTER = TypeAdapter(ActionReceiptV04)
+
+
+def action_receipt_adapter(value: Any) -> TypeAdapter:
+    """Select the exact frozen receipt parser from an explicit version field."""
+
+    source = (
+        value.model_dump(mode="json")
+        if isinstance(value, BaseModel)
+        else value
+    )
+    if not isinstance(source, Mapping):
+        raise ValueError("ActionReceipt must be an object")
+    version = source.get("protocol_version")
+    if version == "0.1":
+        return ACTION_RECEIPT_ADAPTER
+    if version == "0.4":
+        return ACTION_RECEIPT_V04_ADAPTER
+    raise ValueError("unsupported ActionReceipt protocol version")
+
+
+def parse_action_receipt(value: Any) -> ActionReceipt | ActionReceiptV04:
+    return action_receipt_adapter(value).validate_python(value)
+
+
+def parse_action_receipt_json(
+    value: str | bytes,
+) -> ActionReceipt | ActionReceiptV04:
+    try:
+        decoded = json.loads(value)
+    except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("ActionReceipt JSON is invalid") from error
+    return action_receipt_adapter(decoded).validate_json(value)
+
 
 def validate_receipt_or_error(
     value: Any,
     *,
     work_order: WorkOrder | None = None,
-) -> ActionReceipt | McpErrorEnvelope:
+) -> ActionReceipt | ActionReceiptV04 | McpErrorEnvelope:
     try:
-        receipt = ACTION_RECEIPT_ADAPTER.validate_python(value)
+        receipt = parse_action_receipt(value)
         if not isinstance(work_order, WorkOrder):
             raise ValueError("WorkOrder context is required")
         receipt.validate_against_work_order(work_order)
@@ -4856,9 +4956,11 @@ class TransitionDecision(ProtocolModel):
 
 __all__ = [
     "ACTION_RECEIPT_ADAPTER",
+    "ACTION_RECEIPT_V04_ADAPTER",
     "AcceptanceReceipt",
     "ActionBindingManifest",
     "ActionReceipt",
+    "ActionReceiptV04",
     "AgentRequest",
     "AgentRequestV04",
     "ApprovalGate",
@@ -4892,7 +4994,9 @@ __all__ = [
     "McpErrorEnvelope",
     "PatchResultEvidence",
     "PolicyAnchor",
+    "POLICY_ERROR_CODES",
     "PolicyDecision",
+    "POLICY_ERROR_CODES_V04",
     "PredicateResult",
     "PredicateSpec",
     "ProtocolModel",
@@ -4903,6 +5007,7 @@ __all__ = [
     "RepoReadOutput",
     "RootGrantTemplate",
     "RollbackReceipt",
+    "RollbackReceiptV04",
     "SafeNonNegativeInt",
     "SafePositiveInt",
     "SidecarEvent",
@@ -4915,6 +5020,7 @@ __all__ = [
     "TerminationDecisionReceipt",
     "TerminationHumanDecision",
     "ToolCallReceipt",
+    "ToolCallReceiptV04",
     "TransitionDecision",
     "VerificationArm",
     "VerificationArmResult",
@@ -4923,6 +5029,9 @@ __all__ = [
     "VerifierBinding",
     "WorkOrder",
     "request_arguments_digest",
+    "parse_agent_request",
+    "parse_action_receipt",
+    "parse_action_receipt_json",
     "validate_receipt_or_error",
     "validate_fixed_test_source_bytes",
 ]

@@ -47,6 +47,7 @@ from openworkproof.settlement import (
 )
 from openworkproof.signing import (
     decode_and_verify_key_binding,
+    verify_action_receipt_signature,
     verify_payload,
     verify_work_order_identity_bindings,
 )
@@ -437,15 +438,13 @@ def _load_receipts(
     by_id = {}
     for raw in raw_receipts:
         try:
-            receipt = evidence.ACTION_RECEIPT_ADAPTER.validate_python(raw)
+            receipt = evidence.parse_action_receipt(raw)
         except Exception as error:
             raise DeliveryPackageError("execution receipt is malformed") from error
         if (
             receipt.receipt_id in by_id
             or receipt.work_order_digest != work_order.digest
-            or not verify_payload(
-                "action-receipt", receipt.model_dump(mode="json"), sidecar_key
-            )
+            or not verify_action_receipt_signature(receipt, sidecar_key)
         ):
             raise DeliveryPackageError("execution receipt integrity failed")
         receipts.append(receipt)
@@ -1467,7 +1466,7 @@ def _ledger_export_read(
             )
         )
         receipts = tuple(
-            evidence.ACTION_RECEIPT_ADAPTER.validate_json(row[0])
+            evidence.parse_action_receipt_json(row[0])
             for row in receipt_rows
         )
         parent_rows = [
@@ -1610,7 +1609,7 @@ def _ledger_export_read_v03(ledger: Path):
             ),
         )
         receipts = tuple(
-            evidence.ACTION_RECEIPT_ADAPTER.validate_json(row[0])
+            evidence.parse_action_receipt_json(row[0])
             for row in connection.execute(
                 "SELECT receipt_json FROM receipts ORDER BY sequence"
             )

@@ -16,7 +16,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from openworkproof.models import (
+    ActionReceiptEnvelope,
     AgentRequest,
+    AgentRequestV04,
     ApprovalHumanDecision,
     AuthorityCheckpoint,
     HumanDecision,
@@ -81,6 +83,7 @@ _V03_SIGNED_DOMAINS = frozenset(
 _V04_CANONICAL_DOMAINS = frozenset(
     {
         "action-binding-manifest",
+        "action-receipt",
         "agent-request",
         "authority-checkpoint",
         "binding-decision",
@@ -88,7 +91,12 @@ _V04_CANONICAL_DOMAINS = frozenset(
     }
 )
 _V04_SIGNED_DOMAINS = frozenset(
-    {"action-binding-manifest", "agent-request", "judgment-commitment"}
+    {
+        "action-binding-manifest",
+        "action-receipt",
+        "agent-request",
+        "judgment-commitment",
+    }
 )
 
 
@@ -543,10 +551,12 @@ def verify_nested_claim(
 ) -> bool:
     if not verify_work_order_identity_bindings(work_order):
         return False
-    if not isinstance(
-        claim,
-        (AgentRequest, ApprovalHumanDecision, TerminationHumanDecision),
-    ):
+    if type(claim) not in {
+        AgentRequest,
+        AgentRequestV04,
+        ApprovalHumanDecision,
+        TerminationHumanDecision,
+    }:
         return False
     try:
         if claim.work_order_digest != work_order.digest:
@@ -564,7 +574,7 @@ def verify_nested_claim(
             return False
         binding = matches[0]
         public_key = decode_and_verify_key_binding(binding)
-        if isinstance(claim, AgentRequest):
+        if type(claim) in {AgentRequest, AgentRequestV04}:
             if binding.role not in {"Manager", "Developer", "Verifier"}:
                 return False
             domain = "agent-request"
@@ -576,6 +586,26 @@ def verify_nested_claim(
             domain,
             claim.model_dump(mode="json"),
             public_key,
+            version="0.4" if type(claim) is AgentRequestV04 else "0.1",
         )
     except (ValueError, TypeError):
         return False
+
+
+def verify_action_receipt_signature(
+    receipt: ActionReceiptEnvelope,
+    public_key: Ed25519PublicKey,
+) -> bool:
+    """Verify an ActionReceipt in its explicit protocol signing domain."""
+
+    if not isinstance(receipt, ActionReceiptEnvelope):
+        return False
+    version = receipt.protocol_version
+    if version not in {"0.1", "0.4"}:
+        return False
+    return verify_payload(
+        "action-receipt",
+        receipt.model_dump(mode="json"),
+        public_key,
+        version=version,
+    )

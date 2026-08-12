@@ -10,10 +10,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import ValidationError
 
 from openworkproof.models import (
-    ACTION_RECEIPT_ADAPTER,
     AcceptanceReceipt,
     ActionReceipt,
     ActionReceiptEnvelope,
+    AgentRequestV04,
     ApprovalDecisionReceipt,
     ApprovalRequestedReceipt,
     GrantConsumedReceipt,
@@ -28,8 +28,10 @@ from openworkproof.models import (
     TransitionDecision,
     VerificationDecision,
     WorkOrder,
+    parse_action_receipt,
 )
 from openworkproof.signing import (
+    verify_action_receipt_signature,
     verify_nested_claim,
     verify_payload,
     verify_work_order_identity_bindings,
@@ -158,36 +160,32 @@ def _validate_action_receipt(
     now: datetime,
 ) -> ActionReceipt | None:
     try:
-        parsed = ACTION_RECEIPT_ADAPTER.validate_python(
-            receipt.model_dump(mode="json")
-        )
+        parsed = parse_action_receipt(receipt.model_dump(mode="json"))
         parsed.validate_against_work_order(work_order)
         if isinstance(parsed, ToolCallReceipt):
             parsed.validate_predicates_against(work_order)
 
         gateway_key = _public_key(public_keys, parsed.gateway_signer_key_id)
-        if gateway_key is None or not verify_payload(
-            "action-receipt",
-            parsed.model_dump(mode="json"),
-            gateway_key,
+        if gateway_key is None or not verify_action_receipt_signature(
+            parsed, gateway_key
         ):
             return None
         if parsed.actor_type in {"agent", "human"}:
             actor_key = _public_key(public_keys, parsed.actor_key_id)
-            domain = (
-                "agent-request"
-                if parsed.actor_type == "agent"
-                else "human-decision"
-            )
-            if (
-                actor_key is None
-                or not verify_nested_claim(parsed.nested_claim, work_order)
-                or not verify_payload(
-                    domain,
-                    parsed.nested_claim.model_dump(mode="json"),
-                    actor_key,
-                )
-            ):
+            if actor_key is None or not verify_payload(
+                (
+                    "agent-request"
+                    if parsed.actor_type == "agent"
+                    else "human-decision"
+                ),
+                parsed.nested_claim.model_dump(mode="json"),
+                actor_key,
+                version=(
+                    "0.4"
+                    if type(parsed.nested_claim) is AgentRequestV04
+                    else "0.1"
+                ),
+            ) or not verify_nested_claim(parsed.nested_claim, work_order):
                 return None
 
         if now.tzinfo is None or now.utcoffset() is None:

@@ -42,6 +42,7 @@ from openworkproof.models import (
 from openworkproof.signing import (
     canonical_bytes,
     decode_and_verify_key_binding,
+    verify_action_receipt_signature,
     verify_payload,
     verify_work_order_identity_bindings,
 )
@@ -1505,7 +1506,7 @@ def _validate_causal_receipts(
         if row is None:
             raise VerificationTransactionError("arm result causal parent is missing")
         try:
-            receipt = evidence.ACTION_RECEIPT_ADAPTER.validate_json(row[0])
+            receipt = evidence.parse_action_receipt_json(row[0])
         except Exception as error:
             raise VerificationTransactionError("causal receipt canonical row is invalid") from error
         encoded = row[0].encode("utf-8") if isinstance(row[0], str) else row[0]
@@ -1513,9 +1514,7 @@ def _validate_causal_receipts(
             receipt.receipt_id != receipt_id
             or receipt.work_order_digest != work_order.digest
             or rfc8785.dumps(receipt.model_dump(mode="json")) != encoded
-            or not verify_payload(
-                "action-receipt", receipt.model_dump(mode="json"), sidecar_key
-            )
+            or not verify_action_receipt_signature(receipt, sidecar_key)
         ):
             raise VerificationTransactionError("causal receipt validation failed")
 
