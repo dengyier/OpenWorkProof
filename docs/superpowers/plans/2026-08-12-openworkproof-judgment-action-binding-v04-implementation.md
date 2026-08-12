@@ -864,18 +864,18 @@ git commit -m "feat: gate acceptance on verified bound work"
 **Files:**
 
 - Modify: `src/openworkproof/delivery_package.py`
-- Modify: `tests/evidence-bundles/verify_evidence_bundle.py`
+- Modify: `src/openworkproof/adapters/code_delivery_github.py`
 - Create: `tests/test_delivery_package_v04.py`
 
 - [x] **Step 1: Add package RED tests**
 
 Cover customer-private full replay, diagnostic/public replay unavailability, unsafe paths/symlinks/hardlinks, oversized input, manifest single-byte tamper, object substitution, reordered history, missing adapter input, and v0.1–v0.3 package compatibility.
 
-- [ ] **Step 2: Add version-aware protocol objects and manifest entries**
+- [x] **Step 2: Add version-aware protocol objects and manifest entries**
 
 Customer-private contains commitment, manifest, complete decision history, bound receipts, adapter profile/replay inputs, checkpoint chain when required, verification/scope/acceptance history, and a deterministic replay command.
 
-- [ ] **Step 3: Implement view-specific assertions**
+- [x] **Step 3: Implement view-specific assertions**
 
 Diagnostic/public packages must serialize:
 
@@ -885,11 +885,11 @@ Diagnostic/public packages must serialize:
 
 when private artifacts are absent. They must not expose private Issue text, paths, test names, customer keys, or commercial evidence.
 
-- [ ] **Step 4: Keep Layer 1 and Layer 2 outcomes separate**
+- [x] **Step 4: Keep Layer 1 and Layer 2 outcomes separate**
 
 Package signature/chain failure returns package verification failure. Only after Layer 1 passes may the binding replay return `BOUND`, `UNBOUND`, or `INDETERMINATE`.
 
-- [ ] **Step 5: Run package regressions**
+- [x] **Step 5: Run package regressions**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -899,7 +899,7 @@ Package signature/chain failure returns package verification failure. Only after
   tests/test_export_evidence_bundles.py -q
 ```
 
-- [ ] **Step 6: Commit offline replay**
+- [x] **Step 6: Commit offline replay**
 
 ```bash
 git add src/openworkproof/delivery_package.py \
@@ -934,7 +934,7 @@ Implement exactly:
 
 ```text
 owp judgment validate
-owp binding-manifest validate
+owp binding-manifest valite
 owp binding compose
 owp binding verify
 owp binding history
