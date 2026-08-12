@@ -775,9 +775,10 @@ git commit -m "feat: commit binding decisions with exact recovery"
 - Create: `src/openworkproof/authority.py`
 - Modify: `src/openworkproof/evidence.py`
 - Modify: `src/openworkproof/binding_transactions.py`
+- Modify: `src/openworkproof/binding.py`
 - Create: `tests/test_authority_checkpoint_v04.py`
 
-- [ ] **Step 1: Write chain/as-of RED tests**
+- [x] **Step 1: Write chain/as-of RED tests**
 
 Cover valid genesis and successor, wrong authority key, non-monotonic revision, skipped/incorrect predecessor, same revision fork, rollback, stale/expired at action time, resolver unavailable, and historical action valid at `occurred_at` despite later review expiry.
 
@@ -788,19 +789,19 @@ def test_historical_action_uses_checkpoint_as_of_occurred_at(case) -> None:
     assert verify_at(case, now=case.checkpoint.expires_at + timedelta(days=1)).historical_valid
 ```
 
-- [ ] **Step 2: Implement pure chain validation**
+- [x] **Step 2: Implement pure chain validation**
 
 Validate namespace/subject identity, signature, monotonic revision, exact predecessor digest, effective/expiry window, and fork detection. Keep trust-root configuration explicit and external.
 
-- [ ] **Step 3: Commit checkpoints append-only**
+- [x] **Step 3: Commit checkpoints append-only**
 
 Use the same transaction and readback rules. Reject a fork before writing. Resolver unavailability is an input status, never an unsigned replacement checkpoint.
 
-- [ ] **Step 4: Integrate high-risk decision rules**
+- [x] **Step 4: Integrate high-risk decision rules**
 
 High-risk profiles require `authority_status == "current"` at the action's as-of time. Missing/unavailable → `INDETERMINATE`; stale/fork/rollback with valid evidence → the approved `UNBOUND` classification and reason.
 
-- [ ] **Step 5: Run focused and checkpoint regressions**
+- [x] **Step 5: Run focused and checkpoint regressions**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -809,7 +810,7 @@ High-risk profiles require `authority_status == "current"` at the action's as-of
   tests/test_binding_transactions_v04.py -q
 ```
 
-- [ ] **Step 6: Record checkpoint and commit**
+- [x] **Step 6: Record checkpoint and commit**
 
 ```bash
 git add src/openworkproof/authority.py src/openworkproof/evidence.py \
@@ -824,9 +825,7 @@ git commit -m "feat: validate binding authority checkpoints as of action time"
 - Modify: `src/openworkproof/acceptance.py`
 - Modify: `src/openworkproof/settlement.py`
 - Modify: `src/openworkproof/delivery_package.py`
-- Create: `tests/test_acceptance_binding_v04.py`
-
-- [ ] **Step 1: Add acceptance-gate RED tests**
+- Create: `tests/test_acceptaacceptance-gate RED tests**
 
 Create a cross-product for verification (`VERIFIED`, `REFUTED`, `UNKNOWN`), binding (`BOUND`, `UNBOUND`, `INDETERMINATE`, missing), acceptance (`ACTIVE`, other), and checkpoint state. Only the approved complete tuple opens the gate.
 
