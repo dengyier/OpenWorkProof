@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from openworkproof.models import (
     AcceptanceReceipt,
+    BindingDecision,
     AcceptanceRejectionReceipt,
     AcceptanceTransitionReceipt,
     Digest64,
@@ -35,6 +36,7 @@ class SettlementReadiness(str, Enum):
     NOT_READY = "NOT_READY"
     READY_FOR_ACCEPTANCE = "READY_FOR_ACCEPTANCE"
     ACCEPTED_FOR_SETTLEMENT = "ACCEPTED_FOR_SETTLEMENT"
+    READY_FOR_SETTLEMENT_REVIEW = "READY_FOR_SETTLEMENT_REVIEW"
     SUSPENDED = "SUSPENDED"
     WITHDRAWN = "WITHDRAWN"
     SUPERSEDED = "SUPERSEDED"
@@ -310,3 +312,38 @@ def read_settlement_snapshot(ledger: Path) -> SettlementSnapshot:
     finally:
         evidence._best_effort_close(connection)
         evidence._release_target_lock(lock_descriptor)
+
+def settlement_readiness_v04(
+    *,
+    verification: VerificationDecisionV03 | None,
+    binding_decision: BindingDecision | None,
+    acceptance: EffectiveAcceptance,
+    commercial_evidence_refs: tuple[str, ...] | None = None,
+) -> SettlementReadiness:
+    """v0.4 dual-gate settlement readiness.
+
+    ``READY_FOR_SETTLEMENT_REVIEW`` is the only positive v0.4 state. It
+    requires a current VERIFIED verification, a current BOUND binding
+    decision, ``EffectiveAcceptance.ACTIVE`` and the presence of required
+    commercial evidence references. It never proves payment or settlement:
+    payment vouchers remain external commercial evidence.
+    """
+
+    if acceptance is EffectiveAcceptance.WITHDRAWN:
+        return SettlementReadiness.WITHDRAWN
+    if acceptance is EffectiveAcceptance.SUPERSEDED:
+        return SettlementReadiness.SUPERSEDED
+    if acceptance is EffectiveAcceptance.SUSPENDED:
+        return SettlementReadiness.SUSPENDED
+    if (
+        verification is None
+        or verification.decision != "VERIFIED"
+        or binding_decision is None
+        or binding_decision.decision != "BOUND"
+    ):
+        return SettlementReadiness.NOT_READY
+    if acceptance is not EffectiveAcceptance.ACTIVE:
+        return SettlementReadiness.NOT_READY
+    if not commercial_evidence_refs:
+        return SettlementReadiness.NOT_READY
+    return SettlementReadiness.READY_FOR_SETTLEMENT_REVIEW

@@ -23,6 +23,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import openworkproof.evidence as evidence
 from openworkproof.composition import replay_authorization_causality
 from openworkproof.models import (
+    ActionBindingManifest,
+    AuthorityCheckpoint,
+    BindingDecision,
+    EvaluationScopeManifest,
+    JudgmentCommitment,
+    SubjectClaim,
+    VerificationDecisionV03,
+    WorkOrder,
     AcceptanceReceipt,
     AcceptanceRejectionReceipt,
     AcceptanceTransitionReceipt,
@@ -43,6 +51,7 @@ from openworkproof.models import (
     request_arguments_digest,
 )
 from openworkproof.policy import AuthorizationContext
+from openworkproof.settlement import EffectiveAcceptance
 from openworkproof.runtime_context import RuntimeContextError, require_current_context
 from openworkproof.signing import key_id, sign_payload
 
@@ -3437,3 +3446,85 @@ def commit_acceptance_transition(
             parsed,
         ) from cleanup_errors[0]
     return parsed
+
+
+
+# --- Task 11: v0.4 acceptance dual gate ------------------------------------
+
+
+def v04_dual_gate_opens(
+    *,
+    verification: VerificationDecisionV03 | None,
+    binding_decision: BindingDecision | None,
+    acceptance: EffectiveAcceptance,
+    checkpoint_required: bool = False,
+    checkpoint_current: bool | None = None,
+) -> tuple[bool, tuple[str, ...]]:
+    """Cross-product decision table for the v0.4 acceptance gate.
+
+    Only the approved complete tuple opens the gate: verification VERIFIED,
+    binding BOUND, acceptance ACTIVE, and (for high-risk profiles) a current
+    external checkpoint. Any other combination is closed with a reason.
+    """
+
+    if verification is None or verification.decision != "VERIFIED":
+        return False, ("VERIFICATION_NOT_CURRENT",)
+    if binding_decision is None or binding_decision.decision != "BOUND":
+        return False, ("BINDING_NOT_CURRENT",)
+    if acceptance is not EffectiveAcceptance.ACTIVE:
+        return False, ("ACCEPTANCE_NOT_ACTIVE",)
+    if checkpoint_required and checkpoint_current is not True:
+        return False, ("AUTHORITY_CHECKPOINT_NOT_CURRENT",)
+    return True, ()
+
+
+def validate_v04_acceptance_chain(
+    *,
+    work_order: WorkOrder,
+    subject_claim: SubjectClaim,
+    scope: EvaluationScopeManifest,
+    judgment: JudgmentCommitment,
+    manifest: ActionBindingManifest,
+    verification: VerificationDecisionV03,
+    binding_decision: BindingDecision,
+    checkpoint: AuthorityCheckpoint | None = None,
+) -> tuple[bool, tuple[str, ...]]:
+    """Require exact same-chain identities before a v0.4 acceptance.
+
+    Every referenced object must belong to the same WorkOrder chain and be
+    linked by exact id/digest to the binding decision being accepted.
+    """
+
+    failures: list[str] = []
+    digest = work_order.digest
+    if subject_claim.work_order_digest != digest:
+        failures.append("SUBJECT_CLAIM_CHAIN_MISMATCH")
+    if scope.work_order_digest != digest:
+        failures.append("SCOPE_CHAIN_MISMATCH")
+    if manifest.work_order_digest != digest:
+        failures.append("MANIFEST_CHAIN_MISMATCH")
+    if verification.work_order_digest != digest:
+        failures.append("VERIFICATION_CHAIN_MISMATCH")
+    if binding_decision.work_order_digest != digest:
+        failures.append("BINDING_CHAIN_MISMATCH")
+    if (
+        manifest.judgment_commitment_id != judgment.commitment_id
+        or manifest.judgment_commitment_digest != judgment.digest
+    ):
+        failures.append("JUDGMENT_CHAIN_MISMATCH")
+    if binding_decision.judgment_commitment_digest != judgment.digest:
+        failures.append("BINDING_JUDGMENT_MISMATCH")
+    if binding_decision.action_binding_manifest_digest != manifest.digest:
+        failures.append("BINDING_MANIFEST_MISMATCH")
+    if (
+        binding_decision.verification_decision_id != verification.decision_id
+        or binding_decision.verification_decision_digest != verification.digest
+    ):
+        failures.append("BINDING_VERIFICATION_MISMATCH")
+    if checkpoint is not None:
+        if (
+            binding_decision.authority_checkpoint_digest
+            != checkpoint.digest
+        ):
+            failures.append("BINDING_CHECKPOINT_MISMATCH")
+    return (not failures, tuple(failures))

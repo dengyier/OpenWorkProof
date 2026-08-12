@@ -150,6 +150,7 @@ class DeliveryVerificationResult(ProtocolModel):
         "NOT_READY",
         "READY_FOR_ACCEPTANCE",
         "ACCEPTED_FOR_SETTLEMENT",
+        "READY_FOR_SETTLEMENT_REVIEW",
         "SUSPENDED",
         "WITHDRAWN",
         "SUPERSEDED",
@@ -1288,6 +1289,10 @@ def _readiness_answer(
         SettlementReadiness.ACCEPTED_FOR_SETTLEMENT: (
             "客户验收证据已生效，具备进入外部结算流程的证据条件。"
         ),
+        SettlementReadiness.READY_FOR_SETTLEMENT_REVIEW: (
+            "验证与绑定均通过且验收有效，已具备结算复核证据条件；"
+            "本结果不证明付款或结算已发生。"
+        ),
         SettlementReadiness.SUSPENDED: "验收已暂停，暂停原因解除前不可继续。",
         SettlementReadiness.WITHDRAWN: "验收已撤回，需要新的验收事实。",
         SettlementReadiness.SUPERSEDED: "原验收已被替代，应使用最新验收记录。",
@@ -1313,6 +1318,10 @@ def _next_action(
         ),
         SettlementReadiness.ACCEPTED_FOR_SETTLEMENT: (
             "下一步：按外部合同与支付系统执行结算；本协议不执行付款。"
+        ),
+        SettlementReadiness.READY_FOR_SETTLEMENT_REVIEW: (
+            "下一步：由外部结算复核人核对商业证据后执行付款；"
+            "本协议不证明付款或结算已发生。"
         ),
         SettlementReadiness.SUSPENDED: (
             "下一步：解决暂停原因，由 Acceptor 签署新的状态转换。"
