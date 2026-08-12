@@ -564,12 +564,24 @@ git commit -m "feat: bind work orders to customer judgments"
 
 **Files:**
 
-- Modify: `src/openworkproof/policy.py`
+- Modify: `specs/v0.4/schema-registry.json`
+- Modify: `src/openworkproof/binding_transactions.py`
+- Modify: `src/openworkproof/delivery_package.py`
+- Modify: `src/openworkproof/evidence.py`
 - Modify: `src/openworkproof/mcp_server.py`
 - Modify: `src/openworkproof/models.py`
+- Modify: `src/openworkproof/policy.py`
+- Modify: `src/openworkproof/schema_registry.py`
+- Modify: `src/openworkproof/schemas/v0.4/schema-registry.json`
+- Modify: `src/openworkproof/signing.py`
+- Modify: `src/openworkproof/state.py`
+- Modify: `src/openworkproof/verification.py`
+- Modify: `tests/test_binding_schema_v04.py`
+- Create: `specs/v0.4/action-receipt.schema.json`
+- Create: `src/openworkproof/schemas/v0.4/action-receipt.schema.json`
 - Create: `tests/test_binding_gateway_v04.py`
 
-- [ ] **Step 1: Write zero-execution gateway RED tests**
+- [x] **Step 1: Write zero-execution gateway RED tests**
 
 For every rejected request, assert driver call count, quota, receipts/evidence/business output, and all protocol tables remain unchanged except one explicit deny audit receipt where the existing gateway contract requires it:
 
@@ -585,19 +597,19 @@ def test_v04_request_missing_manifest_is_denied_before_execution(case) -> None:
 
 Cover missing pair fields, digest substitution, metadata-only reference, expired commitment, stale active manifest, wrong tool/action/path, reused nonce, and missing high-risk checkpoint.
 
-- [ ] **Step 2: Add a version-aware request parser/router**
+- [x] **Step 2: Add a version-aware request parser/router**
 
 Parse old `AgentRequest` unchanged. Parse v0.4 only when its explicit schema/version is present. Never infer v0.4 from metadata field names.
 
-- [ ] **Step 3: Implement `authorize_bound_action()`**
+- [x] **Step 3: Implement `authorize_bound_action()`**
 
 Validate the full WorkOrder → JudgmentCommitment → ActionBindingManifest → request digest chain and the live constraint intersection before invoking any repo/tool driver. Return closed reason codes, not free-form success semantics.
 
-- [ ] **Step 4: Bind receipts through the nested request digest**
+- [x] **Step 4: Bind receipts through the nested request digest**
 
 Prove in tests that replacing only manifest/commitment references changes the request digest and invalidates the receipt signature. Do not copy these references into unsigned metadata as a substitute.
 
-- [ ] **Step 5: Run gateway regressions**
+- [x] **Step 5: Run gateway regressions**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -608,7 +620,7 @@ Prove in tests that replacing only manifest/commitment references changes the re
   tests/test_repo_read_transaction.py -q
 ```
 
-- [ ] **Step 6: Commit the pre-execution gate**
+- [x] **Step 6: Commit the pre-execution gate**
 
 ```bash
 git add src/openworkproof/models.py src/openworkproof/policy.py \
