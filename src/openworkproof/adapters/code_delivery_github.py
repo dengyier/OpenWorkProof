@@ -147,10 +147,10 @@ def _validated_sorted_unique(
     *,
     allow_empty: bool = False,
 ) -> tuple[str, ...]:
-    if not isinstance(values, tuple) or not all(
+    if not isinstance(values, (tuple, list)) or not all(
         isinstance(item, str) for item in values
     ):
-        raise BindingInputError(f"{label} must be a tuple of strings")
+        raise BindingInputError(f"{label} must be a sequence of strings")
     if not allow_empty and not values:
         raise BindingInputError(f"{label} must not be empty")
     if len(values) > _MAX_COLLECTION:
@@ -159,7 +159,7 @@ def _validated_sorted_unique(
         raise BindingInputError(f"{label} must be sorted")
     if len(set(values)) != len(values):
         raise BindingInputError(f"{label} must be unique")
-    return values
+    return tuple(values)
 
 
 def _validate_digest64(value: str, label: str) -> str:

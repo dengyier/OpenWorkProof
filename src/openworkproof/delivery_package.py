@@ -38,6 +38,13 @@ from openworkproof.models import (
     WorkOrder,
 )
 from openworkproof.scope import ObservedScope, compare_observed_scope
+from openworkproof.adapters import (
+    CodeDeliveryAdapterProfile,
+    CodeDeliveryJudgmentInput,
+    CodeDeliveryReplayInput,
+    ObservedAction,
+    replay_code_delivery_binding,
+)
 from openworkproof.settlement import (
     AcceptanceHistory,
     EffectiveAcceptance,
@@ -104,6 +111,21 @@ class DeliveryManifest(ProtocolModel):
     full_offline_replay: bool | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    binding_protocol_version: Literal["0.4"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    judgment_commitment_digest: Digest64 | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    action_binding_manifest_digest: Digest64 | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    binding_decision_digest: Digest64 | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    binding_replay: Literal[
+        "unavailable_in_this_view", "BOUND", "UNBOUND", "INDETERMINATE"
+    ] | None = Field(default=None, exclude_if=lambda value: value is None)
     entries: tuple[DeliveryManifestEntry, ...]
 
     @model_validator(mode="after")
@@ -138,6 +160,37 @@ class DeliveryManifest(ProtocolModel):
             )
         ):
             raise ValueError("v0.2 manifest forbids v0.3 replay metadata")
+        if self.binding_protocol_version == "0.4":
+            if (
+                self.judgment_commitment_digest is None
+                or self.action_binding_manifest_digest is None
+                or self.binding_decision_digest is None
+                or self.binding_replay is None
+            ):
+                raise ValueError(
+                    "v0.4 manifest requires judgment, manifest, decision "
+                    "digests and a binding replay marker"
+                )
+            if (
+                self.binding_replay == "unavailable_in_this_view"
+                and self.privacy_view == "customer_private"
+            ):
+                raise ValueError(
+                    "customer-private v0.4 package must carry a real binding replay"
+                )
+        elif any(
+            value is not None
+            for value in (
+                self.binding_protocol_version,
+                self.judgment_commitment_digest,
+                self.action_binding_manifest_digest,
+                self.binding_decision_digest,
+                self.binding_replay,
+            )
+        ):
+            raise ValueError(
+                "pre-v0.4 manifest forbids v0.4 binding metadata"
+            )
         return self
 
 
@@ -157,6 +210,12 @@ class DeliveryVerificationResult(ProtocolModel):
     ]
     manifest_digest: Digest64
     full_offline_replay: bool | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    binding_replay: Literal[
+        "unavailable_in_this_view", "BOUND", "UNBOUND", "INDETERMINATE"
+    ] | None = Field(default=None, exclude_if=lambda value: value is None)
+    binding_reason_codes: tuple[str, ...] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
 
@@ -919,6 +978,133 @@ def _load_v03_protocol_objects(
     return work_order, claim, scope_manifest, profile, decision
 
 
+def _binding_report_html(report: dict) -> bytes:
+    """Render the v0.4 binding report summary (derived truth)."""
+
+    replay = report.get("binding_replay", "unavailable_in_this_view")
+    codes = ", ".join(report.get("binding_reason_codes", []))
+    return (
+        "<html><body>"
+        "<h1>Judgment-to-Action Binding Report</h1>"
+        f"<p>binding_replay: <code>{html.escape(str(replay))}</code></p>"
+        f"<p>binding_reason_codes: <code>{html.escape(codes)}</code></p>"
+        "<p>本结果不证明付款或结算已发生。</p>"
+        "</body></html>"
+    ).encode("utf-8")
+
+
+def _verify_v04_delivery_package(
+    root: Path,
+    manifest: DeliveryManifest,
+) -> DeliveryVerificationResult:
+    """Verify a v0.4 package: Layer 1 structure first, then the binding
+    replay (Layer 2). A Layer 1 failure is a package verification failure;
+    it is never reported as UNBOUND."""
+
+    report = _load_canonical_json(root, manifest, "binding-report.json")
+    if not isinstance(report, dict) or (
+        report.get("schema_version")
+        != "openworkproof-binding-report/0.4"
+        or report.get("privacy_view") != manifest.privacy_view
+        or report.get("judgment_commitment_digest")
+        != manifest.judgment_commitment_digest
+        or report.get("action_binding_manifest_digest")
+        != manifest.action_binding_manifest_digest
+        or report.get("binding_decision_digest")
+        != manifest.binding_decision_digest
+        or report.get("binding_replay") != manifest.binding_replay
+        or report.get("verification_decision")
+        not in {"VERIFIED", "REFUTED", "UNKNOWN"}
+        or report.get("effective_acceptance")
+        not in {"NONE", "ACTIVE", "SUSPENDED", "WITHDRAWN", "SUPERSEDED"}
+        or report.get("settlement_readiness")
+        not in {
+            "NOT_READY",
+            "READY_FOR_ACCEPTANCE",
+            "ACCEPTED_FOR_SETTLEMENT",
+            "READY_FOR_SETTLEMENT_REVIEW",
+            "SUSPENDED",
+            "WITHDRAWN",
+            "SUPERSEDED",
+        }
+    ):
+        raise DeliveryPackageError("v0.4 binding report binding failed")
+    if manifest.privacy_view != "public":
+        if _read_bound(root, manifest, "binding-report.html") != (
+            _binding_report_html(report)
+        ):
+            raise DeliveryPackageError(
+                "v0.4 binding report rendering is not derived truth"
+            )
+
+    if manifest.privacy_view == "customer_private":
+        private_paths = {
+            "binding-report.json",
+            "binding-report.html",
+            "binding-replay-inputs.json",
+        }
+        if set(_entry_map(manifest)) != private_paths:
+            raise DeliveryPackageError(
+                "customer-private v0.4 package file set is not exact"
+            )
+        inputs = _load_canonical_json(
+            root, manifest, "binding-replay-inputs.json"
+        )
+        try:
+            replay = replay_code_delivery_binding(
+                CodeDeliveryReplayInput(
+                    judgment=CodeDeliveryJudgmentInput(
+                        **inputs["judgment"]
+                    ),
+                    profile=CodeDeliveryAdapterProfile(
+                        **inputs["profile"]
+                    ),
+                    observed=ObservedAction(**inputs["observed"]),
+                )
+            )
+        except Exception as error:
+            raise DeliveryPackageError(
+                "v0.4 binding replay inputs are malformed"
+            ) from error
+        expected_codes = tuple(report.get("binding_reason_codes", []))
+        if (
+            replay.outcome != manifest.binding_replay
+            or replay.reason_codes != expected_codes
+        ):
+            raise DeliveryPackageError(
+                "v0.4 binding replay is not derived truth"
+            )
+        return DeliveryVerificationResult(
+            current_decision=report["verification_decision"],
+            effective_acceptance=report["effective_acceptance"],
+            settlement_readiness=report["settlement_readiness"],
+            manifest_digest=digest_manifest(manifest),
+            binding_replay=replay.outcome,
+            binding_reason_codes=replay.reason_codes,
+        )
+
+    if manifest.binding_replay != "unavailable_in_this_view":
+        raise DeliveryPackageError(
+            "non-private v0.4 package must declare replay unavailable"
+        )
+    if manifest.privacy_view == "diagnostic":
+        expected = {
+            "binding-report.json",
+            "binding-report.html",
+        }
+    else:
+        expected = {"binding-report.json"}
+    if set(_entry_map(manifest)) != expected:
+        raise DeliveryPackageError("redacted v0.4 package is not aggregate-only")
+    return DeliveryVerificationResult(
+        current_decision=report["verification_decision"],
+        effective_acceptance=report["effective_acceptance"],
+        settlement_readiness=report["settlement_readiness"],
+        manifest_digest=digest_manifest(manifest),
+        binding_replay="unavailable_in_this_view",
+    )
+
+
 def _verify_v03_delivery_package(
     root: Path,
     manifest: DeliveryManifest,
@@ -1202,6 +1388,8 @@ def _verify_v03_delivery_package(
 
 def verify_delivery_package(package_root: Path) -> DeliveryVerificationResult:
     manifest = load_and_verify_manifest(package_root)
+    if manifest.binding_protocol_version == "0.4":
+        return _verify_v04_delivery_package(Path(package_root), manifest)
     if manifest.verification_protocol_version == "0.3":
         return _verify_v03_delivery_package(Path(package_root), manifest)
     anchors = load_and_verify_anchors(package_root, manifest)
