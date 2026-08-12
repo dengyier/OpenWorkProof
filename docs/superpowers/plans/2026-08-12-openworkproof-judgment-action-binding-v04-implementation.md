@@ -825,7 +825,9 @@ git commit -m "feat: validate binding authority checkpoints as of action time"
 - Modify: `src/openworkproof/acceptance.py`
 - Modify: `src/openworkproof/settlement.py`
 - Modify: `src/openworkproof/delivery_package.py`
-- Create: `tests/test_acceptaacceptance-gate RED tests**
+- Create: `tests/test_acceptance_binding_v04.py`
+
+- [x] **Step 1: Add acceptance-gate RED tests**
 
 Create a cross-product for verification (`VERIFIED`, `REFUTED`, `UNKNOWN`), binding (`BOUND`, `UNBOUND`, `INDETERMINATE`, missing), acceptance (`ACTIVE`, other), and checkpoint state. Only the approved complete tuple opens the gate.
 
@@ -1103,7 +1105,11 @@ git commit -m "docs: publish judgment binding pilot boundaries"
 - Create: immutable candidate archives/build-contexts under the existing supply-chain layout
 - Modify: `docs/status.md`
 
-- [ ] **Step 1: Run the focused v0.4 ons_v04.py \
+- [x] **Step 1: Run the focused v0.4 suite**
+
+```bash
+./.venv/bin/python -m pytest \
+  tests/test_binding_models_v04.py \
   tests/test_binding_manifest_transactions_v04.py \
   tests/test_binding_gateway_v04.py \
   tests/test_code_delivery_binding_v04.py \
@@ -1120,7 +1126,7 @@ git commit -m "docs: publish judgment binding pilot boundaries"
 
 Expected: zero failures. Record exact counts rather than copying historical numbers.
 
-- [ ] **Step 2: Run frozen compatibility and portable full gates**
+- [x] **Step 2: Run frozen compatibility and portable full gates**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -1135,7 +1141,7 @@ Expected: zero failures. Record exact counts rather than copying historical numb
 
 Expected: zero failures. v0.1–v0.3 frozen schema and bundle hashes remain identical.
 
-- [ ] **Step 3: Update the trusted-helper allowlist surgically**
+- [x] **Step 3: Update the trusted-helper allowlist surgically**
 
 Add only v0.4 runtime modules required for offline verification. Run:
 
@@ -1145,11 +1151,11 @@ Add only v0.4 runtime modules required for offline verification. Run:
 
 Expected initial RED after source changes: current candidate inventory no longer uniquely binds the revision. Do not edit an old inventory.
 
-- [ ] **Step 4: Build a new immutable candidate inventory**
+- [x] **Step 4: Build a new immutable candidate inventory**
 
 Use the repository's `supply-chain/images/prepare_context.py`, existing Buildx commands, OCI-to-Docker conversion path, actual `docker load`/RepoDigest observations, and canonical inventory generator. Name the inventory with the implementation revision and recompute every archive/config/manifest hash.
 
-- [ ] **Step 5: Run candidate supply-chain gates**
+- [x] **Step 5: Run candidate supply-chain gates**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_image_supply_chain.py -q
@@ -1158,17 +1164,17 @@ Use the repository's `supply-chain/images/prepare_context.py`, existing Buildx c
 
 Expected: exactly one candidate matches the current revision and both candidate suites have zero failures.
 
-- [ ] **Step 6: Run required-live Docker with strict thread warning policy**
+- [x] **Step 6: Run required-live Docker with strict thread warning policy**
 
-Use the existing required-live environment and command recorded in the current candidate inventory/release ledger. Additionally set:
+Use the existing required-live environment and command recorded in the current candidate inventory/release ledger. Enforce the strict thread-warning policy with a pytest-resolved warning filter: an environment variable cannot resolve the ``pytest`` module name before pytest imports it, so the filter must be passed as a pytest argument:
 
 ```bash
-PYTHONWARNINGS=error::pytest.PytestUnhandledThreadExceptionWarning
+./.venv/bin/python -m pytest -W 'error::pytest.PytestUnhandledThreadExceptionWarning' <suite>
 ```
 
 Expected: zero failures, zero skips, zero unhandled thread exceptions. Record all remaining warnings by category; do not claim zero unless observed.
 
-- [ ] **Step 7: Run non-test release checks**
+- [x] **Step 7: Run non-test release checks**
 
 ```bash
 ./.venv/bin/python -m pip check
@@ -1181,11 +1187,11 @@ docker volume ls --filter name=openworkproof --format '{{.Name}}'
 
 Expected: dependency/compile/diff checks pass, no unexpected worktree changes, and no project container/volume residue.
 
-- [ ] **Step 8: Obtain independent read-only reviews**
+- [x] **Step 8: Obtain independent read-only reviews**
 
 Request one specification-coverage review and one code-quality/security-boundary review. Resolve all Critical and Important findings with focused RED/GREEN evidence. Do not let the implementation author self-certify the holdout expectations.
 
-- [ ] **Step 9: Update status truth and commit the candidate**
+- [x] **Step 9: Update status truth and commit the candidate**
 
 Write exact fresh counts, warning categories, candidate revision/hash, demo boundaries, and unresolved risks to `docs/status.md`.
 
@@ -1195,7 +1201,7 @@ git add supply-chain/images/trusted-helper/SOURCE_ALLOWLIST \
 git commit -m "build: bind judgment action v0.4 release candidate"
 ```
 
-- [ ] **Step 10: Final branch handoff without unilateral integration**
+- [x] **Step 10: Final branch handoff without unilateral integration**
 
 ```bash
 git log --oneline --decorate -20
@@ -1209,17 +1215,17 @@ Present three explicit choices: merge locally to `main`, push the feature branch
 
 ## Final Self-Review Checklist
 
-- [ ] Every approved design section maps to at least one task in the Spec Coverage Map.
-- [ ] `JudgmentCommitment` is Acceptor-signed before action and is not circularly bound to WorkOrder.
-- [ ] `ActionBindingManifest` proves WorkOrder/Commitment/Scope/adapter authority and unique active state.
-- [ ] `AgentRequestV04` and receipt signing bytes natively bind commitment and manifest; metadata does not satisfy the gate.
-- [ ] The GitHub code-delivery adapter is deterministic and version-pinned, with no LLM truth path.
-- [ ] `BOUND`, `UNBOUND`, and `INDETERMINATE` are separated from Layer 1 package validity, Acceptance, payment, and settlement.
-- [ ] AuthorityCheckpoint uses as-of semantics and cannot turn resolver failure into `BOUND`.
-- [ ] v0.1–v0.3 schema, signatures, ledgers, and bundles remain byte-compatible.
-- [ ] C0/A1–A18 and four pre-registered holdouts have immutable expectations and responsibility layers.
-- [ ] All new transactions cover pre-COMMIT zero-write, ACK-loss readback, idempotency, conflict, concurrency, and cleanup failure.
-- [ ] Customer-private, diagnostic, and public views make different replay claims and leak no forbidden private fields.
-- [ ] The commercial pilot remains a hypothesis until SOW/deposit/Acceptor/decision evidence exists.
-- [ ] No placeholder, TODO, fake key, unresolved type name, ellipsis implementation, or untestable success criterion remains in this plan.
-- [ ] No task adds a dashboard, payment rail, automatic settlement, blockchain, second adapter, or general policy language.
+- [x] Every approved design section maps to at least one task in the Spec Coverage Map.
+- [x] `JudgmentCommitment` is Acceptor-signed before action and is not circularly bound to WorkOrder.
+- [x] `ActionBindingManifest` proves WorkOrder/Commitment/Scope/adapter authority and unique active state.
+- [x] `AgentRequestV04` and receipt signing bytes natively bind commitment and manifest; metadata does not satisfy the gate.
+- [x] The GitHub code-delivery adapter is deterministic and version-pinned, with no LLM truth path.
+- [x] `BOUND`, `UNBOUND`, and `INDETERMINATE` are separated from Layer 1 package validity, Acceptance, payment, and settlement.
+- [x] AuthorityCheckpoint uses as-of semantics and cannot turn resolver failure into `BOUND`.
+- [x] v0.1–v0.3 schema, signatures, ledgers, and bundles remain byte-compatible.
+- [x] C0/A1–A18 and four pre-registered holdouts have immutable expectations and responsibility layers.
+- [x] All new transactions cover pre-COMMIT zero-write, ACK-loss readback, idempotency, conflict, concurrency, and cleanup failure.
+- [x] Customer-private, diagnostic, and public views make different replay claims and leak no forbidden private fields.
+- [x] The commercial pilot remains a hypothesis until SOW/deposit/Acceptor/decision evidence exists.
+- [x] No placeholder, TODO, fake key, unresolved type name, ellipsis implementation, or untestable success criterion remains in this plan.
+- [x] No task adds a dashboard, payment rail, automatic settlement, blockchain, second adapter, or general policy language.

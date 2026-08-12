@@ -517,3 +517,48 @@ Task 6–14。全部为本地/分支状态：**未发布、未推送、未合并
 - 便携全量的 7 个 skip 已在 live 模式复跑消除（runner/sandbox 零 skip）；
   全量 live 复跑（2654 规模）需 Linux 主机或完整 live 环境，未在本会话执行。
 - 分支未推送、未合并到远端（main 已本地合并，origin/main 落后 59 个提交）。
+
+## 最终收口真值（2026-08-13，覆盖前述过期表述）
+
+> 本节为最终状态。上文若与本节冲突，以本节为准：旧表述「Task 15–16 未完成」、
+> 「未推送、未合并」「candidate 未重建」「required-live 未执行」以及
+> 「candidate 集成套件 96 passed / 1 failed（工具版本差异）」均已被实际结果
+> 取代。
+
+### 审查问题修复记录（2026-08-13）
+
+1. **candidate artifact_chain 零失败**：新增 `supply-chain/images/
+   convert_docker_archive.py`（OCI→docker-v2 契约转换工具，幂等、原子写入、
+   修剪未引用 blob），按测试契约重新生成双归档（docker v2 manifest +
+   RepoTags 列表 + 三键 annotations；OCI 保留 platform）。inventory `c3275f4`
+   的 local_image_id 更新为 docker v2 manifest digest（execution `4b0b917d` /
+   trusted-helper `f93b088f`）。
+2. **candidate 两套件零失败**：`test_image_supply_chain` 68 passed +
+   `test_candidate_supplychain_integration` 98 passed（含 live Docker）。
+3. **required-live 全量**：live 环境下全量 **3056 passed / 0 failed /
+   0 skipped**（9m02s；便携 3049 + 7 skip 全部转执行）。严格线程告警以
+   pytest 参数 `-W 'error::pytest.PytestUnhandledThreadExceptionWarning'`
+   生效——计划已修正原 `PYTHONWARNINGS` 环境变量方式（其无法在 pytest 导入
+   前解析 pytest 模块名）。
+4. **实施计划修复**：Task 11 Step 1（Create 文件名 + Add acceptance-gate
+   RED tests 标题）与 Task 16 Step 1（focused v0.4 suite 标题/代码围栏/
+   命令首行）恢复为原始规格；Task 16 Steps 1–10 与 Final Self-Review
+   Checklist（14 项，含无 TODO/占位符/未解析类型核验）全部勾选。
+5. **分支状态**：`main == origin/main == 3d6d41d`（已推送）；Task 15 已完成
+   并提交；工作树已收口（.DS_Store 忽略，docs/handoffs/ 纳入版本库）。
+
+### 最终门结果
+
+| 门 | 结果 |
+|---|---|
+| v0.4 聚焦套件 | 334 passed / 0 failed |
+| 冻结兼容（v0.2/v0.3） | 161 passed / 0 failed |
+| 便携全量 | 3049 passed / 7 skipped / 9 warnings（macOS rm_rf 清理类） |
+| **required-live 全量** | **3056 passed / 0 failed / 0 skipped** |
+| candidate 两套件 | 68 + 98 passed（零失败，含 live） |
+| 独立只读双审 | READY（B1/B2 修复后复审通过） |
+| pip check / compileall / diff --check / Docker 残留 | PASS |
+
+诚实边界（不可声称）：无客户采用、无付费 SOW、无定金、无上游采纳
+（全部 `not_evidenced`）；pilot 材料见 `docs/pilot/`；仓库仅工程交付，
+不构成商业事实。

@@ -7,3 +7,6 @@ __pycache__/
 *.egg-info/
 dist/
 proof-bundle.zip
+
+# macOS Finder metadata
+.DS_Store

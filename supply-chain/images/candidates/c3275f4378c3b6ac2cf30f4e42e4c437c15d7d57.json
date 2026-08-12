@@ -51,12 +51,12 @@
     "docker": {
      "filename": "openworkproof-execution-test-candidate.docker-archive.tar",
      "format": "docker-archive",
-     "sha256": "bac16145923daea15293e77c5ec3e83bbbb14eb3bfa1f379dba3b3b0be43573e"
+     "sha256": "45c348197663066365ea1b9a5d23f086d90727915c4e2f71332e1a8cc3dd0493"
     },
     "oci": {
      "filename": "openworkproof-execution-test-candidate.oci-archive.tar",
      "format": "oci-image-layout-archive",
-     "sha256": "04cdae2df29c16ec5ec4fe89c3c66c1307dbe7984571b365d3e6a24255620389"
+     "sha256": "96a03c459b9f22d1a2bfd05ec1a2b0b3f2d8e2d2bb89f5f1e30942790502213e"
     }
    },
    "candidate_name": "openworkproof/execution-test:c3275f4378c3b6ac2cf30f4e42e4c437c15d7d57",
@@ -76,9 +76,9 @@
     "org.openworkproof.base.digest": "sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de",
     "org.openworkproof.image.role": "execution-test"
    },
-   "local_image_id": "sha256:e9951f8956d259af776a9c3986a4c88ba897160360b3f5d7969544233dafaa21",
+   "local_image_id": "sha256:4b0b917d017284cdad859cab1a69dc428ca15d00d1d82837d684c50ae31ef32c",
    "local_repo_digests": [
-    "openworkproof/execution-test@sha256:e9951f8956d259af776a9c3986a4c88ba897160360b3f5d7969544233dafaa21"
+    "openworkproof/execution-test@sha256:4b0b917d017284cdad859cab1a69dc428ca15d00d1d82837d684c50ae31ef32c"
    ],
    "oci_manifest_digest": "sha256:e9951f8956d259af776a9c3986a4c88ba897160360b3f5d7969544233dafaa21",
    "platform": "linux/arm64",
@@ -89,12 +89,12 @@
     "docker": {
      "filename": "openworkproof-trusted-helper-candidate.docker-archive.tar",
      "format": "docker-archive",
-     "sha256": "748c5e927af52a1a431ab61a7e822dc9433585f3da69b07450f41c2bfb20662a"
+     "sha256": "8d2b3a9730335ea238622aaf995430c9e42da98f402040dfdb71e88f5ace69be"
     },
     "oci": {
      "filename": "openworkproof-trusted-helper-candidate.oci-archive.tar",
      "format": "oci-image-layout-archive",
-     "sha256": "6c7c5fa347beeee5025f7414c05275f89590c01a7cc84ad54ffee30e73564848"
+     "sha256": "a1f15b8f29ae3b7917f8c32c1be432609346aba048dc4dce0fe1474b4175c305"
     }
    },
    "candidate_name": "openworkproof/trusted-helper-candidate:c3275f4378c3b6ac2cf30f4e42e4c437c15d7d57",
@@ -113,9 +113,9 @@
     "org.openworkproof.base.digest": "sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de",
     "org.openworkproof.image.role": "trusted-helper-candidate"
    },
-   "local_image_id": "sha256:c9d1349cd942fb20d39f403ba3fca62c9e919d9b09fde65882e10003fedb6571",
+   "local_image_id": "sha256:f93b088f8ea3828f7df851e2c10c0051a0aebc2155dd3a16493951296dc70ec2",
    "local_repo_digests": [
-    "openworkproof/trusted-helper-candidate@sha256:c9d1349cd942fb20d39f403ba3fca62c9e919d9b09fde65882e10003fedb6571"
+    "openworkproof/trusted-helper-candidate@sha256:f93b088f8ea3828f7df851e2c10c0051a0aebc2155dd3a16493951296dc70ec2"
    ],
    "oci_manifest_digest": "sha256:c9d1349cd942fb20d39f403ba3fca62c9e919d9b09fde65882e10003fedb6571",
    "platform": "linux/arm64",
