@@ -139,3 +139,18 @@ Manager-signed. CLI comparison exits `0` when satisfied, `3` when
 indeterminate, `4` when contradicted, and `1` for invalid input or another
 failed operation. Non-zero comparison output retains the status and reason
 codes.
+
+## v0.4 只读绑定工具
+
+v0.4 增加 4 个**只读**绑定验证工具。它们拒绝任何 Acceptor/Verifier
+私钥参数，只读不签名、不提交：
+
+| 工具 | 说明 |
+|---|---|
+| `owp_validate_judgment_commitment` | 验证签名 JudgmentCommitment；无权威上下文时 authority=not_checked |
+| `owp_validate_action_binding_manifest` | 验证签名 ActionBindingManifest（同上） |
+| `owp_get_binding_status` | 读取账本当前 BindingDecision head（只读） |
+| `owp_explain_binding_decision` | 验证并解释 BindingDecision（BOUND/UNBOUND/INDETERMINATE + reason codes） |
+
+MCP 验证**不能**充当 Acceptor/Verifier 签名者；签名必须通过外部服务或
+离线导入完成。

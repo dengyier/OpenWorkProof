@@ -684,3 +684,72 @@ OpenWorkProof aims to take agent work from "can generate results" to:
 
 OpenWorkProof doesn't make agents smarter. It gives them the accountability
 structure needed to participate in social coordination.
+
+---
+
+## Judgment-to-Action Binding v0.4
+
+v0.4 adds **judgment-to-action binding** to agent delivery: verifiable
+execution credentials that answer whether the action the agent actually took
+still corresponds to the business judgment the customer originally approved.
+
+### Business-First Language
+
+OpenWorkProof provides **verifiable execution credentials for agent
+delivery**. It:
+
+- ✅ proves which authorization the execution relied on, what it did, and
+  whether the verifier can actually catch a lie;
+- ❌ does not become a payment institution, a truth oracle, a legal
+  adjudicator, or a substitute for customer acceptance.
+
+### v0.4 State Chain and Gates
+
+```text
+Customer Acceptor signs JudgmentCommitment (before execution)
+      ↓
+Manager commits ActionBindingManifest (judgment ↔ execution binding)
+      ↓
+Agent v0.4 request + ActionReceipt (natively bound to the same Manifest)
+      ↓
+Independent Verifier composes BindingDecision (BOUND / UNBOUND / INDETERMINATE)
+      ↓
+Dual gate: VerificationDecision=VERIFIED ∧ BindingDecision=BOUND ∧ Acceptance=ACTIVE
+      ↓
+READY_FOR_SETTLEMENT_REVIEW (does not prove payment or settlement)
+```
+
+### External Authority Boundary
+
+High-risk profiles may attach an external **AuthorityCheckpoint** (an
+independent key in the customer's control domain). OWP only verifies the
+checkpoint's format, signature, chain and binding; it **does not own the
+external governance or trust root**. Authority is judged as-of the action
+time, and resolver unavailability never fabricates a checkpoint.
+
+### Truth Boundaries
+
+- `BOUND` only means "the action matches the recorded judgment". It does
+  **not mean** the judgment is correct, the code has no defects, the
+  customer accepted, or payment/settlement occurred.
+- Unobtained commercial states are always marked `not_evidenced`
+  (upstream adoption, customer use, payment).
+
+### Interfaces
+
+```text
+owp judgment validate
+owp binding-manifest validate
+owp binding compose
+owp binding verify
+owp binding history
+owp package replay --binding
+```
+
+Read-only MCP tools: `owp_validate_judgment_commitment`,
+`owp_validate_action_binding_manifest`, `owp_get_binding_status`,
+`owp_explain_binding_decision`. MCP validation **rejects any
+Acceptor/Verifier private-key argument** and never signs or commits.
+
+See [docs/status.md](docs/status.md) for the full implementation state and
+[docs/pilot/](docs/pilot/) for the 21-day paid pilot materials.

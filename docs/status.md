@@ -425,3 +425,34 @@ commit）已实现并验证。独立结果执行 episode 与五维 recomposition
 
 以上角色已经作为项目责任角色记录，但不能据此推断交付验证人类签署、
 独立验收已经完成。
+
+## Judgment-to-Action Binding v0.4 实现状态
+
+当前开发分支（codex/judgment-action-binding-v04）已完成 v0.4 协议栈
+Task 6–14。全部为本地/分支状态：**未发布、未推送、未合并、未被任何客户
+采用，未产生任何付款或结算证据。**
+
+| Task | 内容 | 状态 |
+|---|---|---|
+| 6 | 执行前原生绑定门（零执行/零配额/零业务输出） | ✅ 已实现 |
+| 7 | 确定性 GitHub code-delivery 适配器 | ✅ 已实现 |
+| 8 | BindingDecision 组合与验签（外部 trust map） | ✅ 已实现 |
+| 9 | 决策账本（append-only + 并发单赢家 + 恢复） | ✅ 已实现 |
+| 10 | AuthorityCheckpoint 外部权威链（as-of） | ✅ 已实现 |
+| 11 | Acceptance/SettlementReadiness 双门 | ✅ 已实现 |
+| 12 | v0.4 离线包导出与诚实隐私视图 | ✅ 已实现 |
+| 13 | Python/CLI/只读 MCP 服务契约 | ✅ 已实现 |
+| 14 | 注册攻击矩阵 C0+A1–A18 + 4 holdouts + 自营 demo | ✅ 已实现 |
+
+### 未完成（Task 15–16 及发布门）
+
+- 文档与 21 天试点材料（Task 15，进行中）
+- revision-bound candidate inventory、required-live 全量、完整便携全量、
+  推送/合并/PR（Task 16 与发布门）
+- 任何客户验收、付费 SOW、定金、上游采纳：**not_evidenced**
+
+## 真值边界声明
+
+`BOUND`（绑定决定）只表示「行动与记录判断一致」，**不等于**判断正确、
+代码无缺陷、客户验收、付款或结算。本协议不产生付款凭证；付款状态必须
+来自外部商业证据，未取得前一律 `not_evidenced`。

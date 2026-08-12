@@ -171,3 +171,23 @@ OpenWorkProof 构造，用于展示范围遗漏如何从旧绿灯变成 `UNKNOWN
   外部个人签署属线下事件,不由本仓库保证;
 - `public_keys` 由验证者自行获取;若 WorkOrder 绑定公钥本身不可信,
   验签结果仅在"信任该 WorkOrder 绑定"前提下成立。
+
+## v0.4 包离线验证（binding replay）
+
+v0.4 交付包通过 `verify_delivery_package` 离线验证，分两层：
+
+1. **Layer 1（结构）**：manifest 精确文件集、引用绑定、报告渲染
+   derived-truth 一致。失败即 `DeliveryPackageError`（package verification
+   failure），**绝不以 UNBOUND 掩盖 Layer 1 失败**。
+2. **Layer 2（绑定重放）**：客户私有视图从 `binding-replay-inputs.json`
+   重放 judgment-to-action 映射，结果必须与报告一致（BOUND / UNBOUND /
+   INDETERMINATE）；diagnostic/public 视图只报告
+   `binding_replay: unavailable_in_this_view`，不暴露 Issue 文本、路径、
+   测试名、客户密钥或商业证据。
+
+```bash
+python tests/evidence-bundles/verify_evidence_bundle.py \
+  tests/evidence-bundles/rich-4196-binding-v04-delivery-package.json
+```
+
+CLI：`owp package replay --binding <package>`。

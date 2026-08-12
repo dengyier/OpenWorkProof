@@ -672,3 +672,64 @@ OpenWorkProof 希望让 Agent 工作从「可以生成结果」，迈向：
 
 OpenWorkProof 不提高 Agent 的智力，而是为 Agent 增加进入社会协作所需的
 责任结构。
+
+---
+
+## Judgment-to-Action Binding v0.4
+
+v0.4 为 Agent 交付增加**判断—行动绑定**：用可验证的执行凭证回答
+「Agent 实际做的，是否仍然对应客户原先批准的业务判断」。
+
+### 业务语言（Business-First）
+
+OpenWorkProof 提供的是**可验证的 Agent 执行凭证**。它：
+
+- ✅ 证明「这次执行依据什么授权、做了什么、验证器是否真的能抓到谎言」；
+- ❌ 不成为支付机构、不充当真理预言机、不做法律裁决、不替代客户验收。
+
+### v0.4 状态链与门
+
+```text
+Customer Acceptor 签署 JudgmentCommitment（执行前）
+      ↓
+Manager 提交 ActionBindingManifest（判断↔执行约束绑定）
+      ↓
+Agent v0.4 请求 + ActionReceipt（原生绑定同一 Manifest）
+      ↓
+独立 Verifier 组合 BindingDecision（BOUND / UNBOUND / INDETERMINATE）
+      ↓
+双门：VerificationDecision=VERIFIED ∧ BindingDecision=BOUND ∧ Acceptance=ACTIVE
+      ↓
+READY_FOR_SETTLEMENT_REVIEW（不证明付款或结算）
+```
+
+### 外部权威边界
+
+高风险场景可接入外部 **AuthorityCheckpoint**（客户控制域的独立密钥）。
+OWP 只验证 checkpoint 的格式、签名、链与绑定，**不拥有外部治理与信任根**；
+权威状态只按行动发生时点（as-of）判定，解析器不可用时不伪造 checkpoint。
+
+### 真值边界（Truth Boundaries）
+
+- `BOUND` 只表示「行动与记录判断一致」，**不等于**判断正确、代码无缺陷、
+  客户验收、付款或结算。
+- 未取得的商业状态一律标记 `not_evidenced`（上游采纳、客户使用、付款）。
+
+### 接口
+
+```text
+owp judgment validate
+owp binding-manifest validate
+owp binding compose
+owp binding verify
+owp binding history
+owp package replay --binding
+```
+
+只读 MCP 工具：`owp_validate_judgment_commitment`、
+`owp_validate_action_binding_manifest`、`owp_get_binding_status`、
+`owp_explain_binding_decision`。MCP 验证**拒绝任何 Acceptor/Verifier 私钥
+参数**，只读不签名不提交。
+
+完整实现状态见 [docs/status.md](docs/status.md)，21 天付费试点材料见
+[docs/pilot/](docs/pilot/)。
