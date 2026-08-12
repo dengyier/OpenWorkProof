@@ -914,21 +914,18 @@ git commit -m "feat: replay judgment binding from private delivery packages"
 
 - Modify: `src/openworkproof/services.py`
 - Modify: `src/openworkproof/cli.py`
-- Modify: `src/openworkproof/mcp_server.py`
 - Modify: `src/openworkproof/mcp_transport.py`
-- Modify: `src/openworkproof/__init__.py`
-- Modify: `tests/test_cli_transport.py`
 - Create: `tests/test_binding_interfaces_v04.py`
 
-- [ ] **Step 1: Write interface-contract RED tests**
+- [x] **Step 1: Write interface-contract RED tests**
 
 Cover exact JSON shape, exit codes, stdout/stderr separation, invalid payload, missing ledger/key context, deterministic ordering, and parity across Python/CLI/MCP.
 
-- [ ] **Step 2: Add one Python service facade**
+- [x] **Step 2: Add one Python service facade**
 
 Expose validate/compose/verify/history/replay operations. CLI and MCP must call this facade rather than reimplement protocol logic.
 
-- [ ] **Step 3: Add the minimum CLI surface**
+- [x] **Step 3: Add the minimum CLI surface**
 
 Implement exactly:
 
@@ -943,7 +940,7 @@ owp package replay --binding
 
 Validation without ledger/key authority must report authority as `not_checked`, not “validly authorized”.
 
-- [ ] **Step 4: Add read-only MCP tools**
+- [x] **Step 4: Add read-only MCP tools**
 
 Implement exactly:
 
@@ -956,7 +953,7 @@ owp_explain_binding_decision
 
 Reject any Acceptor/Verifier private-key argument. MCP validation cannot commit or sign.
 
-- [ ] **Step 5: Run interface regressions**
+- [x] **Step 5: Run interface regressions**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -967,7 +964,7 @@ Reject any Acceptor/Verifier private-key argument. MCP validation cannot commit 
   tests/test_scope_interfaces_v03.py -q
 ```
 
-- [ ] **Step 6: Commit interfaces**
+- [x] **Step 6: Commit interfaces**
 
 ```bash
 git add src/openworkproof/services.py src/openworkproof/cli.py \
@@ -994,7 +991,7 @@ Represent every registered case as immutable test data with case id, attacker ke
 
 - [ ] **Step 2: Implement the coherent re-sign equivalent of `250 -> 2500`**
 
-Use a code-delivery analogue where Manager/Agent/Sidecar re-sign a complete internally valid chain for an action outside the Customer Acceptor's signed constraint. Assert Layer 1 passes and the adapter returns `UNBOUND`.
+Use a code-delivery analogue where Manager/Agent/Sidecar re-sign a complete internally valid chain for an action outside the Customer Acceplivery analogue where Manager/Agent/Sidecar re-sign a complete internally valid chain for an action outside the Customer Acceptor's signed constraint. Assert Layer 1 passes and the adapter returns `UNBOUND`.
 
 - [ ] **Step 3: Add required negative-control categories**
 
