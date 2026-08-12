@@ -490,3 +490,30 @@ Task 6–14。全部为本地/分支状态：**未发布、未推送、未合并
   A17 重写为 selector 篡改的伪造 scope 真实攻击（SCOPE_CHAIN_MISMATCH）
 - B2：非高风险 composer 对 checkpoint 证据 fail-closed（INDETERMINATE missing），
   不再虚称 current
+
+## Task 16 发布门执行更新（2026-08-13，candidate 已绑定）
+
+### 新通过
+
+- **candidate inventory 已构建并绑定**：revision `c3275f4`（allowlist 扩展后
+  的实现提交）——`prepare_context.py` 生成 build-contexts、buildx 构建
+  execution + trusted-helper 双镜像（linux/arm64，--network none）、
+  docker/oci 归档、inventory json + sha256 签名
+  （`supply-chain/images/candidates/c3275f4...json`）
+- **candidate 绑定门转 GREEN**：`test_current_candidate_inventory_binds_*`
+  2 passed；`test_image_supply_chain` 68 passed；candidate 集成套件
+  96 passed / 1 failed（下）
+- **required-live（容器内 Linux）**：Landlock 探针 15 passed、
+  `test_run_tests_runner` 全量 **107 passed 零 skip**、
+  `test_sandbox` 全量 **336 passed（含 live Docker 容器）**
+- 非测试检查：pip check / compileall / git diff --check / Docker 残留：PASS
+
+### 剩余已知缺口（如实记录）
+
+- `test_candidate_artifact_chain`：本机 Docker 29.5.2 的 buildx/`docker save`
+  输出 OCI v1 manifest，而该测试固化期望 docker v2 manifest（历史归档为
+  旧工具版本产物）。属**工具版本环境差异**，非协议缺陷；candidate 绑定、
+  OCI 归档校验、live 探针均已通过。
+- 便携全量的 7 个 skip 已在 live 模式复跑消除（runner/sandbox 零 skip）；
+  全量 live 复跑（2654 规模）需 Linux 主机或完整 live 环境，未在本会话执行。
+- 分支未推送、未合并到远端（main 已本地合并，origin/main 落后 59 个提交）。

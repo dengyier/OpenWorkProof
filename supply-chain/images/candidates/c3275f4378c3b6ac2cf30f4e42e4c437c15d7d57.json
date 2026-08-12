@@ -51,7 +51,7 @@
     "docker": {
      "filename": "openworkproof-execution-test-candidate.docker-archive.tar",
      "format": "docker-archive",
-     "sha256": "2254ccb330b5b1beb4625458285dd105de79da60491b8829f62be090414898a1"
+     "sha256": "bac16145923daea15293e77c5ec3e83bbbb14eb3bfa1f379dba3b3b0be43573e"
     },
     "oci": {
      "filename": "openworkproof-execution-test-candidate.oci-archive.tar",
@@ -89,7 +89,7 @@
     "docker": {
      "filename": "openworkproof-trusted-helper-candidate.docker-archive.tar",
      "format": "docker-archive",
-     "sha256": "94de674f3ad28d95cdedf6fed13a39d139c6ab8361b24bc68369f7645f472e28"
+     "sha256": "748c5e927af52a1a431ab61a7e822dc9433585f3da69b07450f41c2bfb20662a"
     },
     "oci": {
      "filename": "openworkproof-trusted-helper-candidate.oci-archive.tar",
