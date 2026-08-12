@@ -684,9 +684,10 @@ git commit -m "feat: replay github code delivery bindings"
 **Files:**
 
 - Modify: `src/openworkproof/binding.py`
+- Modify: `src/openworkproof/signing.py`
 - Create: `tests/test_binding_decision_v04.py`
 
-- [ ] **Step 1: Add outcome and reason-code RED tests**
+- [x] **Step 1: Add outcome and reason-code RED tests**
 
 Build a decision table covering:
 
@@ -696,19 +697,19 @@ Build a decision table covering:
 - `UNKNOWN` or `REFUTED` verification never → `BOUND`;
 - no reason-code combination may contradict its outcome.
 
-- [ ] **Step 2: Implement decision signing bytes**
+- [x] **Step 2: Implement decision signing bytes**
 
 Create `binding_decision_signing_bytes()` over the v0.4 canonical decision payload excluding digest and signatures. Validate verifier role, profile binding, sorted unique keys, one signature for standard and two independent signatures for high-risk.
 
-- [ ] **Step 3: Implement the pure composer**
+- [x] **Step 3: Implement the pure composer**
 
 Expose one pure composer with keyword-only inputs: `judgment: JudgmentCommitment`, `manifest: ActionBindingManifest`, `verification: VerificationDecisionV03`, `receipts: tuple[ActionReceiptEnvelope, ...]`, `replay: BindingReplayResult`, `checkpoint: AuthorityCheckpoint | None`, and `request: BindingDecisionDraftRequest`; return `BindingDecisionDraft`.
 
 The composer must recompute all references rather than trust caller-provided reason codes or digests.
 
-- [ ] **Step 4: Add signature and semantic tamper tests**
+- [x] **Step 4: Add signature and semantic tamper tests**
 
-Use full rebuilds. Include bad signature, extra/missing verifier, duplicated key, reordered receipts, changed replay digest, changed judgment, changed manifest, and validly re-signed but semantically inconsistent action.
+Use full rebuilds. Include bad signature, extra/missing verifier, duplicaty digest, changed judgment, changed manifest, and validly re-signed but semantically inconsistent action.
 
 - [ ] **Step 5: Run focused regressions**
 
