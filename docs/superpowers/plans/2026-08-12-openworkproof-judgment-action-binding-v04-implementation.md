@@ -829,19 +829,19 @@ git commit -m "feat: validate binding authority checkpoints as of action time"
 
 Create a cross-product for verification (`VERIFIED`, `REFUTED`, `UNKNOWN`), binding (`BOUND`, `UNBOUND`, `INDETERMINATE`, missing), acceptance (`ACTIVE`, other), and checkpoint state. Only the approved complete tuple opens the gate.
 
-- [ ] **Step 2: Add explicit version routing**
+- [x] **Step 2: Add explicit version routing**
 
 Existing v0.1–v0.3 acceptance remains unchanged unless the WorkOrder explicitly activates a v0.4 binding manifest/profile. A metadata-only judgment reference must not activate v0.4.
 
-- [ ] **Step 3: Require exact same-chain identities**
+- [x] **Step 3: Require exact same-chain identities**
 
 Before acceptance request/commit, match WorkOrder, SubjectClaim, EvaluationScope, JudgmentCommitment, ActionBindingManifest, VerificationDecisionV03, BindingDecision, and optional checkpoint by exact id/digest/currentness.
 
-- [ ] **Step 4: Rename the v0.4 readiness result**
+- [x] **Step 4: Rename the v0.4 readiness result**
 
 Add `READY_FOR_SETTLEMENT_REVIEW` as the only positive v0.4 settlement-readiness state. It must require `EffectiveAcceptance.ACTIVE` and required commercial evidence references. The summary copy must explicitly say no payment or settlement is proven.
 
-- [ ] **Step 5: Run acceptance regressions**
+- [x] **Step 5: Run acceptance regressions**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -851,7 +851,7 @@ Add `READY_FOR_SETTLEMENT_REVIEW` as the only positive v0.4 settlement-readiness
   tests/test_settlement_readiness.py -q
 ```
 
-- [ ] **Step 6: Commit dual-gate routing**
+- [x] **Step 6: Commit dual-gate routing**
 
 ```bash
 git add src/openworkproof/acceptance.py src/openworkproof/settlement.py \
@@ -867,7 +867,7 @@ git commit -m "feat: gate acceptance on verified bound work"
 - Modify: `tests/evidence-bundles/verify_evidence_bundle.py`
 - Create: `tests/test_delivery_package_v04.py`
 
-- [ ] **Step 1: Add package RED tests**
+- [x] **Step 1: Add package RED tests**
 
 Cover customer-private full replay, diagnostic/public replay unavailability, unsafe paths/symlinks/hardlinks, oversized input, manifest single-byte tamper, object substitution, reordered history, missing adapter input, and v0.1–v0.3 package compatibility.
 
