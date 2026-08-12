@@ -1814,10 +1814,24 @@ def test_candidate_inventory_selector_covers_every_tracked_definition() -> None:
     )
     assert allowlist == (
         "src/openworkproof/__init__.py",
+        "src/openworkproof/acceptance.py",
+        "src/openworkproof/adapters/code_delivery_github.py",
+        "src/openworkproof/authority.py",
+        "src/openworkproof/binding.py",
+        "src/openworkproof/binding_transactions.py",
+        "src/openworkproof/composition.py",
+        "src/openworkproof/delivery_package.py",
+        "src/openworkproof/evidence.py",
         "src/openworkproof/models.py",
+        "src/openworkproof/policy.py",
+        "src/openworkproof/predicates.py",
         "src/openworkproof/repo_tools.py",
         "src/openworkproof/scope.py",
+        "src/openworkproof/settlement.py",
+        "src/openworkproof/signing.py",
+        "src/openworkproof/state.py",
         "src/openworkproof/trusted_helper.py",
+        "src/openworkproof/verification.py",
     )
     assert CURRENT_DEFINITION_PATHS == ALL_TRACKED_DEFINITION_PATHS + allowlist
 
