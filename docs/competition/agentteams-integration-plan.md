@@ -156,7 +156,7 @@ Python 无执行面 SDK,故以自研协议过渡。
 
 | 步骤 | 交付物 | 验收 |
 |---|---|---|
-| 6. 场景升级 | Dify #33013 缺陷修复升级为多 Agent(方向三:研发全流程协同) | Manager 拆解→dev-worker 修复→verifier-worker 复现→OWP 验证+账本+审批→审计报告 |
+| 6. 场景升级 | AgentScope #2239 缺陷修复升级为多 Agent(方向三:研发全流程协同) | Manager 拆解→dev-worker 修复→verifier-worker 复现→OWP 验证+账本+审批→审计报告 |
 | 7. OWP MCP Server 接入 | Worker `spec.mcpServers` 指向 OWP | 任意 Worker 可调用 `owp_validate_*` |
 | 8. 审计 bot | Matrix 常驻 bot 独立复核 + 回写报告 | 双通道验证一致;篡改被抓 |
 | 9. 代码包 | `agentteams/`(YAML+适配器+README+运行证据)+ Demo 视频 | 评审可复现:单命令部署+跑通场景 |
@@ -165,16 +165,26 @@ Python 无执行面 SDK,故以自研协议过渡。
 
 ## 6. 复赛 Demo 场景(推荐:方向三 软件研发全流程协同)
 
-> 2026-08-13 更新:场景项目由 Rich #4196 更换为 **Dify #33013**
-> (langgenius/dify, AI 工作流平台 QuestionClassifierNode 崩溃)。
-> 理由:Dify 是**企业级 AI 工作流平台**(对比 Rich 终端美化库),与赛道
-> 「Agent 走向 Production」主题强相关;Issue 真实、一行修复可复现;
-> 已有 OWP M3 验证材料(tests/test_delivery_m3_dify.py,7 passed)可直接复用。
+> 2026-08-13 更新:场景项目定为 **AgentScope #2239**(agentscope-ai/agentscope,
+> 阿里通义生产级 Agent 框架, 28.9K stars)。
+> 理由:
+> 1. **同源生态叙事**:AgentScope 是 AgentTeams(HiClaw)的母生态(赛道必选
+>    框架),「用 OWP 验证协议修复 Agent 框架自身 bug,再用同源 AgentTeams
+>    多 Agent 演示修复闭环」形成闭环叙事;
+> 2. **真实未修复**:issue #2239(DictMixin.__getattr__ 抛 KeyError 而非
+>    AttributeError → deepcopy/hasattr/getattr default 全崩)仍 open,
+>    两条修复 PR(#2241/#2281)均未合并,可 pinned 当前 main(8f24009)复现;
+> 3. **教科书级可复现**:源码仅 6 行(_utils/_mixin.py),`deepcopy()` 空
+>    ChatResponse 即崩,4 行修复,回归矩阵(deepcopy/hasattr/getattr default/
+>    mapping KeyError 保留)清晰;
+> 4. **证据叙事钩子**:「Agent 响应无法被安全深拷贝用于日志/证据存证」——
+>    正是 OWP 执行证据领域的核心问题。
+> 备选:Dify #33013(已有 M3 材料, test_delivery_m3_dify.py 7 passed)。
 
 ```
 缺陷聚合(Manager) → 根因定位(dev-worker, OWP repo_read)
-  → 修复生成与执行(dev-worker, OWP apply_patch)
-  → 测试验证(verifier-worker, OWP run_tests 独立复现)
+  → 修复生成与执行(dev-worker, OWP apply_patch: DictMixin.__getattr__)
+  → 测试验证(verifier-worker, OWP run_tests 独立复现: deepcopy/hasattr/getattr)
   → 发布确认(OWP VerificationDecision + BindingDecision + 人类审批门)
   → 复盘与知识沉淀(OWP 账本 + 审计报告,离线可复核)
 ```
