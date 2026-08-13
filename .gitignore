@@ -10,3 +10,6 @@ proof-bundle.zip
 
 # macOS Finder metadata
 .DS_Store
+
+# slidep render service runtime state
+.slidep/
