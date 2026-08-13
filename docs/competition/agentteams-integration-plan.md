@@ -156,7 +156,7 @@ Python 无执行面 SDK,故以自研协议过渡。
 
 | 步骤 | 交付物 | 验收 |
 |---|---|---|
-| 6. 场景升级 | Rich #4196 缺陷修复升级为多 Agent(方向三:研发全流程协同) | Manager 拆解→dev-worker 修复→verifier-worker 复现→OWP 验证+账本+审批→审计报告 |
+| 6. 场景升级 | Dify #33013 缺陷修复升级为多 Agent(方向三:研发全流程协同) | Manager 拆解→dev-worker 修复→verifier-worker 复现→OWP 验证+账本+审批→审计报告 |
 | 7. OWP MCP Server 接入 | Worker `spec.mcpServers` 指向 OWP | 任意 Worker 可调用 `owp_validate_*` |
 | 8. 审计 bot | Matrix 常驻 bot 独立复核 + 回写报告 | 双通道验证一致;篡改被抓 |
 | 9. 代码包 | `agentteams/`(YAML+适配器+README+运行证据)+ Demo 视频 | 评审可复现:单命令部署+跑通场景 |
@@ -165,7 +165,11 @@ Python 无执行面 SDK,故以自研协议过渡。
 
 ## 6. 复赛 Demo 场景(推荐:方向三 软件研发全流程协同)
 
-基于现有 Rich #4196 真实 Issue demo 升级:
+> 2026-08-13 更新:场景项目由 Rich #4196 更换为 **Dify #33013**
+> (langgenius/dify, AI 工作流平台 QuestionClassifierNode 崩溃)。
+> 理由:Dify 是**企业级 AI 工作流平台**(对比 Rich 终端美化库),与赛道
+> 「Agent 走向 Production」主题强相关;Issue 真实、一行修复可复现;
+> 已有 OWP M3 验证材料(tests/test_delivery_m3_dify.py,7 passed)可直接复用。
 
 ```
 缺陷聚合(Manager) → 根因定位(dev-worker, OWP repo_read)
