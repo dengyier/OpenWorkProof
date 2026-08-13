@@ -78,3 +78,6 @@ OpenWorkProof —— Agent 工作契约与可验证执行协议
 - AgentTeams 接入规划:docs/competition/agentteams-integration-plan.md
 - AgentScope #2239 修复真值基准:tests/test_delivery_m4_agentscope.py
 - 复赛代码包:agentteams/(YAML 资源 + 双适配器 + 分派证据 + README)
+- 场景价值叙事(25% 权重):docs/competition/scenario-value-narrative.md
+- Skill 工程实证(25% 权重):docs/competition/skills-integration.md +
+  agentteams/evidence/skill-execution.log(7/8 Skill 调用证据)

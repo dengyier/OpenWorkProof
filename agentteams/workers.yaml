@@ -5,6 +5,20 @@ metadata:
 spec:
   model: deepseek-v4-pro
   runtime: openclaw
+  # ─────── OWP Skill 接入（25% 权重：工程体系与生态复用）───────
+  skills:
+    - owp.authorize         # S1 任务拆解与最小权限授权
+    - owp.repo_read         # S2 受限仓库读取
+    - owp.apply_patch       # S3 受限补丁应用
+    - owp.run_tests         # S4 可信测试执行
+    - owp.compose_proof     # S5 证据合成与证明链闭合
+    - owp.acceptance        # S6 终态验收与离线验签
+    # S7 rollback Skill 暂未工具化（账本 superseded_by 兜底；见 skills-integration.md §一）
+  mcpServers:
+    - name: owp
+      url: http://host.docker.internal:8765/mcp
+      transport: streamable-http
+  # ─────────────────────────────────────────────────────────────
   identity: |
     - Name: Developer
     - Specialization: bounded code repair, patch application and testing
@@ -16,9 +30,10 @@ spec:
     - Always state which files changed and which tests ran
   agents: |
     ## Behavior
-    - Read only through the bounded repo reader
-    - Apply patches only within the approved scope
-    - Run the fixed test suite and report raw output
+    - Read only through the bounded repo reader (OWP S2)
+    - Apply patches only within the approved scope (OWP S3)
+    - Run the fixed test suite via OWP and report raw output (OWP S4)
+    - Synthesize evidence chain (OWP S5) and request acceptance (OWP S6)
   resources:
     requests: { cpu: 500m, memory: 1Gi }
     limits: { cpu: "2", memory: 3Gi }
@@ -30,6 +45,15 @@ metadata:
 spec:
   model: deepseek-v4-pro
   runtime: openclaw
+  skills:
+    - owp.run_tests         # S4（独立模式）
+    - owp.compose_proof     # S5
+    - owp.acceptance        # S6
+    - owp.audit             # S8 全链审计
+  mcpServers:
+    - name: owp
+      url: http://host.docker.internal:8765/mcp
+      transport: streamable-http
   identity: |
     - Name: Verifier
     - Specialization: independent reproduction, evidence verification and audit
@@ -41,9 +65,10 @@ spec:
     - Distinguish observed facts from claims
   agents: |
     ## Behavior
-    - Independently reproduce test outcomes from committed evidence
+    - Independently reproduce test outcomes from committed evidence (OWP S4)
     - Cross-check the developer's changed paths and patch digest
     - Produce a signed verification conclusion or a refutation
+    - Audit the full chain and replay offline (OWP S8)
   resources:
     requests: { cpu: 500m, memory: 1Gi }
     limits: { cpu: "2", memory: 3Gi }
