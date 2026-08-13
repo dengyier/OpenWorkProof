@@ -1,0 +1,42 @@
+<Slide style={{ padding: '20px 72px', background: '#FFFFFF', fontFamily: '思源黑体', width: '1280px', height: '720px' }}>
+  <Box style={{ height: 100, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+    <Box style={{ flexDirection: 'column' }}>
+      <Text style={{ fontSize: 36, color: '#0F172A', fontWeight: 'bold' }}>多 Agent 生产化的最大瓶颈</Text>
+      <Text style={{ fontSize: 17, color: '#64748B', marginTop: 6 }}>Agent 说「我完成了」—— 凭什么相信它？</Text>
+    </Box>
+    <Text style={{ fontSize: 14, color: '#94A3B8' }}>02 / 09</Text>
+  </Box>
+  <Box style={{ height: 500, flexDirection: 'row', gap: 32, marginTop: 20 }}>
+    <Box style={{ flex: 3, flexDirection: 'column', gap: 22 }}>
+      <Box style={{ flex: 1, background: '#F8FAFC', borderRadius: 14, padding: 24, flexDirection: 'column', justifyContent: 'space-between' }}>
+        <Text style={{ fontSize: 26, color: '#0F172A', fontWeight: 'bold' }}>授权不明</Text>
+        <Text style={{ fontSize: 19, color: '#475569', lineHeight: 1.6 }}>每步操作依据哪一级授权？是否在配额内？谁能证明「这次执行是经过批准的」？</Text>
+      </Box>
+      <Box style={{ flex: 1, background: '#F8FAFC', borderRadius: 14, padding: 24, flexDirection: 'column', justifyContent: 'space-between' }}>
+        <Text style={{ fontSize: 26, color: '#0F172A', fontWeight: 'bold' }}>证据缺失</Text>
+        <Text style={{ fontSize: 19, color: '#475569', lineHeight: 1.6 }}>测试、补丁、报告是否形成完整因果链？执行证据能否在纠纷时离线复核？</Text>
+      </Box>
+      <Box style={{ flex: 1, background: '#F8FAFC', borderRadius: 14, padding: 24, flexDirection: 'column', justifyContent: 'space-between' }}>
+        <Text style={{ fontSize: 26, color: '#0F172A', fontWeight: 'bold' }}>验收无据</Text>
+        <Text style={{ fontSize: 19, color: '#475569', lineHeight: 1.6 }}>谁有权作最终接受或拒绝？接受/拒绝本身是否有可审计的签名与理由？</Text>
+      </Box>
+    </Box>
+    <Box style={{ flex: 2, flexDirection: 'column', gap: 22 }}>
+      <Box style={{ flex: 3, background: 'linear-gradient(135deg, #3B82F6 0%, #06B6D4 100%)', borderRadius: 14, padding: 28, flexDirection: 'column', justifyContent: 'center' }}>
+        <Text style={{ fontSize: 96, color: '#FFFFFF', fontWeight: 'bold', lineHeight: 1 }}>40%</Text>
+        <Text style={{ fontSize: 20, color: 'rgba(255,255,255,0.92)', marginTop: 12, lineHeight: 1.6 }}>Gartner 预测 2026 年底 40% 企业软件嵌入 AI Agent</Text>
+      </Box>
+      <Box style={{ flex: 2, background: '#0F172A', borderRadius: 14, padding: 26, flexDirection: 'column', justifyContent: 'center' }}>
+        <Text style={{ fontSize: 18, color: '#06B6D4', fontWeight: 'bold', letterSpacing: 1 }}>EU AI ACT</Text>
+        <Text style={{ fontSize: 19, color: 'rgba(255,255,255,0.9)', marginTop: 10, lineHeight: 1.6 }}>高风险条款已生效：无法证明「Agent 被授权、被约束、可问责」的企业面临合规风险</Text>
+      </Box>
+      <Box style={{ flex: 1, background: '#F1F5F9', borderRadius: 14, padding: 18, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+        <Text style={{ fontSize: 24, color: '#06B6D4', fontWeight: 'bold' }}>？</Text>
+        <Text style={{ fontSize: 18, color: '#475569' }}>现有信任基础设施聚焦身份层与支付层，独缺「工作」契约层</Text>
+      </Box>
+    </Box>
+  </Box>
+  <Box style={{ height: 60, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+    <Text style={{ fontSize: 14, color: '#94A3B8' }}>OpenWorkProof · Agent 工作契约与可验证执行协议</Text>
+  </Box>
+</Slide>

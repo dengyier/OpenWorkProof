@@ -1,0 +1,54 @@
+<Slide style={{ padding: '20px 72px', background: '#FFFFFF', fontFamily: '思源黑体', width: '1280px', height: '720px' }}>
+  <Box style={{ height: 100, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+    <Box style={{ flexDirection: 'column' }}>
+      <Text style={{ fontSize: 36, color: '#0F172A', fontWeight: 'bold' }}>核心方案：工作契约协议层</Text>
+      <Text style={{ fontSize: 17, color: '#64748B', marginTop: 6 }}>不替代框架、不替代工具 —— 补足「凭什么交付」的契约层</Text>
+    </Box>
+    <Text style={{ fontSize: 14, color: '#94A3B8' }}>03 / 09</Text>
+  </Box>
+  <Box style={{ height: 120, background: '#F8FAFC', borderRadius: 14, padding: 24, marginTop: 12, flexDirection: 'row', alignItems: 'center', gap: 24 }}>
+    <Text style={{ fontSize: 52, color: '#06B6D4', fontWeight: 'bold' }}>"</Text>
+    <Text style={{ fontSize: 22, color: '#0F172A', lineHeight: 1.6, flex: 1 }}>
+      OpenWorkProof 是 Agent 工作的<Text style={{ color: '#3B82F6', fontWeight: 'bold' }}>契约、授权、证据与验收</Text>协议层：
+      回答「工作凭什么被授权、过程凭什么可信、结果凭什么被验收」
+    </Text>
+  </Box>
+  <Box style={{ height: 310, marginTop: 24, flexDirection: 'column', justifyContent: 'space-between' }}>
+    <Box style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+      <Text style={{ fontSize: 22, color: '#0F172A', fontWeight: 'bold' }}>六个职能 Agent 构成端到端闭环</Text>
+      <Text style={{ fontSize: 16, color: '#94A3B8' }}>以 AgentTeams 为协同设计基点</Text>
+    </Box>
+    <Box style={{ flexDirection: 'row', gap: 18, marginTop: 14 }}>
+      {[
+        ['Maintainer', '维护工作区与根授权'],
+        ['Manager', '拆解任务·签发最小权限授权'],
+        ['Developer', '受限工作区执行'],
+        ['Verifier', '隔离上下文独立复现'],
+        ['Sidecar', '旁路观察·防篡改'],
+        ['Acceptor', '终态验收·签名终局'],
+      ].map((item, index) => (
+        <Box key={index} style={{ flex: 1, background: index === 1 ? 'linear-gradient(135deg, #3B82F6 0%, #06B6D4 100%)' : '#F8FAFC', borderRadius: 12, padding: '18px 14px', flexDirection: 'column', justifyContent: 'space-between', minHeight: 150 }}>
+          <Text style={{ fontSize: 20, color: index === 1 ? '#FFFFFF' : '#0F172A', fontWeight: 'bold' }}>{item[0]}</Text>
+          <Text style={{ fontSize: 14, color: index === 1 ? 'rgba(255,255,255,0.9)' : '#64748B', lineHeight: 1.5, marginTop: 8 }}>{item[1]}</Text>
+        </Box>
+      ))}
+    </Box>
+    <Box style={{ flexDirection: 'row', gap: 18, marginTop: 18 }}>
+      {[
+        ['Proof-Carrying Work', '交付物携带可验证证据'],
+        ['No-Cloning Authority', '子授权只衰减不可扩权'],
+        ['Fail Closed', '无法验证即拒绝'],
+        ['离线复核', '第三方凭证据包离线验签'],
+      ].map((item, index) => (
+        <Box key={index} style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10, background: '#FFFFFF', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, padding: '12px 14px' }}>
+          <Box style={{ width: 8, height: 8, borderRadius: 4, background: '#06B6D4' }} />
+          <Text style={{ fontSize: 16, color: '#0F172A', fontWeight: 'bold' }}>{item[0]}</Text>
+          <Text style={{ fontSize: 13, color: '#64748B', marginLeft: 4 }}>{item[1]}</Text>
+        </Box>
+      ))}
+    </Box>
+  </Box>
+  <Box style={{ height: 60, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+    <Text style={{ fontSize: 14, color: '#94A3B8' }}>OpenWorkProof · Agent 工作契约与可验证执行协议</Text>
+  </Box>
+</Slide>

@@ -1,0 +1,25 @@
+<Slide style={{ padding: '0px', position: 'relative', background: '#FFFFFF', fontFamily: '思源黑体', width: '1280px', height: '720px' }}>
+  <Box style={{ position: 'absolute', top: 0, right: 0, width: 460, height: 720, background: 'linear-gradient(135deg, #3B82F6 0%, #06B6D4 100%)' }} />
+  <Box style={{ position: 'absolute', top: 0, right: 0, width: 460, height: 720, background: 'rgba(255,255,255,0.06)' }} />
+  <Box style={{ position: 'absolute', bottom: 36, right: 48, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+    <Box style={{ width: 6, height: 28, background: 'rgba(255,255,255,0.7)', borderRadius: 3 }} />
+    <Text style={{ fontSize: 14, color: '#FFFFFF', opacity: 0.85 }}>github.com/dengyier/OpenWorkProof</Text>
+  </Box>
+  <Box style={{ position: 'relative', padding: '72px 80px', width: 820, height: 720, flexDirection: 'column', justifyContent: 'space-between' }}>
+    <Box>
+      <Text style={{ fontSize: 18, color: '#06B6D4', fontWeight: 'bold', letterSpacing: 2 }}>世界人工智能开源大赛 · Agent Infra（新智基座）赛道</Text>
+      <Text style={{ fontSize: 66, color: '#0F172A', fontWeight: 'bold', lineHeight: 1.15, marginTop: 28 }}>OpenWorkProof</Text>
+      <Text style={{ fontSize: 30, color: '#3B82F6', fontWeight: 'bold', marginTop: 14 }}>Agent 工作契约与可验证执行协议</Text>
+      <Text style={{ fontSize: 20, color: '#64748B', marginTop: 20, lineHeight: 1.7, width: 700 }}>
+        授权 / 执行 / 验证 / 审计 的端到端闭环 —— 让「Agent 完成了」成为可离线复核的事实，而非一句承诺
+      </Text>
+    </Box>
+    <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 16 }}>
+      <Box style={{ width: 8, height: 44, background: '#06B6D4', borderRadius: 4 }} />
+      <Box style={{ flexDirection: 'column' }}>
+        <Text style={{ fontSize: 18, color: '#0F172A', fontWeight: 'bold' }}>3056 项测试零失败 · AgentTeams 真实接入 · 真实 Issue 可复现演示</Text>
+        <Text style={{ fontSize: 15, color: '#94A3B8', marginTop: 4 }}>初赛提交 · 2026-08</Text>
+      </Box>
+    </Box>
+  </Box>
+</Slide>
