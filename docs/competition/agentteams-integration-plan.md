@@ -210,6 +210,23 @@ Python 无执行面 SDK,故以自研协议过渡。
 AgentTeams 为第三方开源框架(Apache 2.0),OWP 仅做集成,不拥有其信任根;
 执行凭证只证明「Agent 实际做的与记录判断一致」,不证明判断正确。
 
+### Worker 实时执行限制(2026-08-13,已定位根因)
+
+- **现象**:Manager 自动分派正常(证据存档),但 Worker 未响应任务;
+  Worker 容器仅有 openclaw-gateway 进程、无 agent spawn。
+- **根因**:Worker gateway 的 routing 日志显示
+  `resolveAgentRoute ... bindings=0` —— Matrix 房间→agent 的路由绑定缺失,
+  消息无法路由到 agent 实例。
+- **已尝试修复(不持久)**:`openclaw agents bind --agent main --bind matrix`
+  立即生效(`main <- matrix accountId=main`),但重启后被 AgentTeams 的
+  配置同步覆盖(openclaw.json 由 controller/storage 管理)。
+- **正确修复路径(复赛前)**:经 AgentTeams 官方机制配置路由绑定——worker
+  YAML `spec.channelPolicy`(通信权限)或 controller 对 worker 的绑定管理;
+  需查阅 AgentTeams docs(usage/worker-guide / resource-management)或
+  官方支持确认。
+- **演示兜底**:OWP M4 真值验证(tests/test_delivery_m4_agentscope.py)为
+  确定性基准,不依赖 Worker 执行——「Agent 声称 vs 机器验证」叙事成立。
+
 ---
 
 ## 8. 待办(下一步)
