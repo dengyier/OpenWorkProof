@@ -301,7 +301,7 @@ schema 双向互操作断言、pip/compileall/diff-check，并取得独立 spec 
 > 上文是 2026-08-12 23:08 的交接快照，仅代表当时磁盘状态。截至
 > 2026-08-13，v0.4 已全部完成并收口：
 
-- Task 6–16 全部实现并**已推送远端 main**（`main == origin/main == 3d6d41d`）
+- Task 6–16 全部实现并**已推送远端 main**（`main == origin/main == c5f605a`）
 - 独立只读双审 READY（B1/B2 已修复）；candidate inventory 绑定
   `c3275f4`；candidate 两套件零失败（`test_image_supply_chain` 68 +
   `test_candidate_supplychain_integration` 98，含 live）

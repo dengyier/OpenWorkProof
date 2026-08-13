@@ -544,7 +544,7 @@ Task 6–14。全部为本地/分支状态：**未发布、未推送、未合并
    RED tests 标题）与 Task 16 Step 1（focused v0.4 suite 标题/代码围栏/
    命令首行）恢复为原始规格；Task 16 Steps 1–10 与 Final Self-Review
    Checklist（14 项，含无 TODO/占位符/未解析类型核验）全部勾选。
-5. **分支状态**：`main == origin/main == 3d6d41d`（已推送）；Task 15 已完成
+5. **分支状态**：`main == origin/main == c5f605a`（已推送）；Task 15 已完成
    并提交；工作树已收口（.DS_Store 忽略，docs/handoffs/ 纳入版本库）。
 
 ### 最终门结果

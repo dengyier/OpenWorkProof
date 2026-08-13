@@ -13,8 +13,9 @@ integration.py::_verify_docker_archive / _verify_oci_archive) requires:
   the legacy manifest.json is a one-record list with Config/Layers blob paths
   and a non-empty RepoTags list.
 - oci archive: index.json is an OCI index whose single descriptor has exactly
-  {mediaType, digest, size, annotations} (no ``platform`` key) and the
-  ``org.opencontainers.image.created`` annotation.
+  {mediaType, digest, size, platform, annotations} (the ``platform`` key is
+  required: ``linux/arm64``) and the ``org.opencontainers.image.created``
+  annotation.
 
 This tool rewrites an archive in place to that contract. It is idempotent:
 running it twice on the same archive is a no-op. Blob contents are never
