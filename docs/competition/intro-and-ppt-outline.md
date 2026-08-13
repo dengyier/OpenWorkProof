@@ -29,10 +29,13 @@ SQLite 账本,第三方可凭证据包离线验签,高风险动作支持人工�
 核心机制:No-Cloning Authority(子授权只衰减不可扩权)、Proof-Carrying
 Work、Fail Closed、离线第三方复核。
 
-**复用价值与进展。** 8 个可复用 Skill;required-live 全量测试 2281
-passed、0 failed;基于真实开源 Issue 的五角色 9 步演示可复现;MCP/CLI/
-AgentTeams 接入层与候选镜像供应链门全部实现;交付物冻结签署并离线可验
-签,材料齐备。
+**复用价值与进展。** 8 个可复用 Skill;required-live 全量测试 3056
+passed、0 failed、0 skipped;AgentTeams(hiclaw)真实接入已跑通——Docker
+部署 + Matrix 房间协同 + 双适配器(agt 管理面 / Matrix 执行面)程序化
+闭环,Manager 已自动分派真实修复任务(证据存档);基于 AgentScope
+(AgentTeams 母生态框架)真实 Issue #2239 的可复现修复演示(离线测试
+3 passed,含 deepcopy 崩溃复现与回归矩阵);MCP/CLI 接入层与候选镜像
+供应链门全部实现;交付物冻结签署并离线可验签,材料齐备。
 
 ---
 
@@ -50,7 +53,8 @@ OpenWorkProof —— Agent 工作契约与可验证执行协议
 ### 02 方案设计
 - 六职能 Agent 角色编排(Identity 清单见附录)
 - 四对象协议:WorkOrder → CapabilityGrant → ActionReceipt → AcceptanceReceipt
-- AgentTeams 映射:TeamTask 生命周期 + 真实 TCP 上下文传递
+- AgentTeams(hiclaw)真实接入:Matrix 房间协同 + 双适配器
+  (agt 管理面 / Matrix 执行面),任务经 Matrix 提交、Manager 自动分派
 - 端到端闭环:任务输入 → 拆解 → 执行 → 验证 → 证据 → 审批/回滚
 
 ### 03 Skill 与工具集成
@@ -60,7 +64,8 @@ OpenWorkProof —— Agent 工作契约与可验证执行协议
 - 可观测:结构化日志 + 执行证据 + 离线验签
 
 ### 04 可行性与落地计划
-- 工程证据:2281 passed、0 failed(required-live);Rich #4196 五角色演示
+- 工程证据:3056 passed、0 failed、0 skipped(required-live);
+  AgentScope #2239 真实 Issue 多 Agent 演示(分派证据 + 离线真值验证)
 - 真实场景链路:9 步证据链 + 离线 bundle 验签
 - 落地路径:运维闭环、研发协同、风控审计三个行业场景
 - 开放/开源:Apache-2.0、协议 Schema 公开、候选镜像供应链可复现
@@ -70,3 +75,6 @@ OpenWorkProof —— Agent 工作契约与可验证执行协议
 - Skill 清单:docs/competition/skill-list.md
 - 交付验证计划与材料清单:docs/superpowers/plans/2026-08-07-openworkproof-delivery-validation-plan.md
 - 演示记录:docs/superpowers/2026-08-07-rich-4196-demo-log.md
+- AgentTeams 接入规划:docs/competition/agentteams-integration-plan.md
+- AgentScope #2239 修复真值基准:tests/test_delivery_m4_agentscope.py
+- 复赛代码包:agentteams/(YAML 资源 + 双适配器 + 分派证据 + README)
