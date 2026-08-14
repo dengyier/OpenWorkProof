@@ -31,15 +31,21 @@ from openworkproof.models import (
     BindingDecision,
     CapabilityGrant,
     CommitmentAnchor,
+    DecisionDraftRequest,
     EvaluationScopeManifest,
     JudgmentCommitment,
     PolicyAnchor,
     ScopeMember,
     SubjectClaim,
+    VerificationArmResultV03,
+    VerificationDecisionV03,
     VerificationProfileV02,
+    VerificationProfileV03,
     WorkOrder,
 )
 from openworkproof.signing import canonical_bytes, key_id, sign_payload
+from openworkproof.verification import compose_verification_decision_v03
+from openworkproof.verification import verification_decision_signing_bytes_v03
 
 
 WORK_ORDER_ID = "0" * 64
@@ -1172,6 +1178,238 @@ def signed_verification_profile(
             verification_profile_dict,
             ephemeral_role_keys["Manager"][0],
         )
+    )
+
+
+@pytest.fixture
+def frozen_role_keys_v05() -> dict[str, tuple[Ed25519PrivateKey, dict[str, str]]]:
+    return {
+        role: (
+            Ed25519PrivateKey.from_private_bytes(bytes([byte]) * 32),
+            {},
+        )
+        for role, byte in (("Manager", 51), ("Verifier", 52))
+    }
+
+
+@pytest.fixture
+def frozen_verification_profile_v03(
+    evaluation_scope_v03: EvaluationScopeManifest,
+    frozen_role_keys_v05: dict[str, tuple[Ed25519PrivateKey, dict[str, str]]],
+) -> VerificationProfileV03:
+    verifier_key = frozen_role_keys_v05["Verifier"][0]
+    verifier_public_key = verifier_key.public_key()
+    verifier = {
+        "binding_id": "a" * 64,
+        "verifier_subject_id": "verifier",
+        "verifier_key_id": key_id(verifier_public_key),
+        "verifier_public_key_b64url": _public_key_b64url(verifier_public_key),
+        "controller_factors": ["customer-independent-verifier"],
+        "execution_context_factors": ["isolated-container-a"],
+        "valid_from": "2026-01-01T00:00:04Z",
+        "expires_at": "2026-01-01T01:00:00Z",
+    }
+    common_arm = {
+        "source_commit": evaluation_scope_v03.source_revision,
+        "candidate_commit": evaluation_scope_v03.candidate_commit,
+        "workspace_manifest_digest": evaluation_scope_v03.workspace_manifest_digest,
+        "command_digest": "4" * 64,
+        "container_image_digest": IMAGE_A,
+        "fixed_test_source_digest": SHA256_B,
+        "required_evidence_purposes": ["verifier_result"],
+    }
+    payload = {
+        "schema_version": "openworkproof-verification-profile/0.3",
+        "profile_id": "6" * 64,
+        "work_order_digest": evaluation_scope_v03.work_order_digest,
+        "subject_claim_digest": evaluation_scope_v03.subject_claim_digest,
+        "evaluation_scope_id": evaluation_scope_v03.scope_id,
+        "evaluation_scope_digest": evaluation_scope_v03.digest,
+        "scope_requirement": "exact_match",
+        "delivery_trust_level": 1,
+        "policy_anchor_digest": None,
+        "commitment_anchor_digest": None,
+        "subject_kind": "tests_passed",
+        "assurance_level": "standard",
+        "verifier_bindings": [verifier],
+        "positive_arm": {
+            **common_arm,
+            "arm_id": "1" * 64,
+            "arm_kind": "positive",
+            "mutant_patch_digest": None,
+            "expected_exit_codes": [0],
+            "expected_outcome": "pass",
+            "result_artifact_paths": ["results/positive.json"],
+        },
+        "negative_arms": [
+            {
+                **common_arm,
+                "arm_id": "2" * 64,
+                "arm_kind": "negative",
+                "mutant_patch_digest": "5" * 64,
+                "expected_exit_codes": [1],
+                "expected_outcome": "fail",
+                "result_artifact_paths": ["results/negative.json"],
+            }
+        ],
+        "max_evidence_bytes": 1048576,
+        "max_output_bytes": 65536,
+        "created_at": "2026-01-01T00:00:05Z",
+        "expires_at": "2026-01-01T01:00:00Z",
+        "nonce": "b" * 64,
+    }
+    return VerificationProfileV03.model_validate(
+        sign_payload(
+            "verification-profile",
+            payload,
+            frozen_role_keys_v05["Manager"][0],
+            version="0.3",
+        )
+    )
+
+
+@pytest.fixture
+def frozen_verification_profile_v02(
+    frozen_verification_profile_v03: VerificationProfileV03,
+    frozen_role_keys_v05: dict[str, tuple[Ed25519PrivateKey, dict[str, str]]],
+) -> VerificationProfileV02:
+    payload = frozen_verification_profile_v03.model_dump(
+        mode="json",
+        exclude={
+            "digest",
+            "signature_alg",
+            "signer_key_id",
+            "signature",
+            "evaluation_scope_id",
+            "evaluation_scope_digest",
+            "scope_requirement",
+        },
+    )
+    payload["schema_version"] = "openworkproof-verification-profile/0.2"
+    return VerificationProfileV02.model_validate(
+        sign_payload(
+            "verification-profile",
+            payload,
+            frozen_role_keys_v05["Manager"][0],
+        )
+    )
+
+
+def _frozen_verification_arm_result_v03(
+    profile: VerificationProfileV03,
+    manifest: EvaluationScopeManifest,
+    verifier_key: Ed25519PrivateKey,
+    *,
+    arm_kind: str,
+) -> VerificationArmResultV03:
+    arm = profile.positive_arm if arm_kind == "positive" else profile.negative_arms[0]
+    result_id = "8" * 64 if arm_kind == "positive" else "9" * 64
+    payload = {
+        "schema_version": "openworkproof-verification-arm-result/0.3",
+        "arm_result_id": result_id,
+        "profile_digest": profile.digest,
+        "arm_id": arm.arm_id,
+        "arm_kind": arm_kind,
+        "mutation_status": "not_applicable" if arm_kind == "positive" else "applied",
+        "execution_status": "completed",
+        "expectation_status": "satisfied",
+        "reason_codes": []
+        if arm_kind == "positive"
+        else ["MUTATION_APPLIED", "MUTATION_CAUGHT"],
+        "action_receipt_ids": [result_id],
+        "evidence_refs": [
+            {
+                "path": f"results/{arm_kind}.json",
+                "sha256": "d" * 64,
+                "media_type": "application/json",
+                "size_bytes": 128,
+            }
+        ],
+        "scope_manifest_digest": manifest.digest,
+        "observed_member_count": manifest.member_count,
+        "observed_population_digest": manifest.population_digest,
+        "observed_required_target_ids": list(manifest.required_target_ids),
+        "scope_expectation_status": "satisfied",
+        "scope_evidence_refs": [
+            {
+                "path": f"scope/{arm_kind}.json",
+                "sha256": "e" * 64,
+                "media_type": "application/json",
+                "size_bytes": 128,
+            }
+        ],
+        "verifier_subject_id": profile.verifier_bindings[0].verifier_subject_id,
+        "verifier_key_id": profile.verifier_bindings[0].verifier_key_id,
+        "verifier_build_digest": "4" * 64,
+        "dependency_lock_digest": "5" * 64,
+        "controller_factors": list(profile.verifier_bindings[0].controller_factors),
+        "execution_context_factors": list(
+            profile.verifier_bindings[0].execution_context_factors
+        ),
+        "created_at": "2026-01-01T00:10:00Z",
+    }
+    return VerificationArmResultV03.model_validate(
+        sign_payload(
+            "verification-arm-result", payload, verifier_key, version="0.3"
+        )
+    )
+
+
+@pytest.fixture
+def frozen_verification_arm_result_v03(
+    frozen_verification_profile_v03: VerificationProfileV03,
+    evaluation_scope_v03: EvaluationScopeManifest,
+    frozen_role_keys_v05: dict[str, tuple[Ed25519PrivateKey, dict[str, str]]],
+) -> VerificationArmResultV03:
+    return _frozen_verification_arm_result_v03(
+        frozen_verification_profile_v03,
+        evaluation_scope_v03,
+        frozen_role_keys_v05["Verifier"][0],
+        arm_kind="positive",
+    )
+
+
+@pytest.fixture
+def frozen_verification_decision_v03(
+    frozen_verification_profile_v03: VerificationProfileV03,
+    evaluation_scope_v03: EvaluationScopeManifest,
+    frozen_verification_arm_result_v03: VerificationArmResultV03,
+    frozen_role_keys_v05: dict[str, tuple[Ed25519PrivateKey, dict[str, str]]],
+) -> VerificationDecisionV03:
+    verifier_key = frozen_role_keys_v05["Verifier"][0]
+    negative_result = _frozen_verification_arm_result_v03(
+        frozen_verification_profile_v03,
+        evaluation_scope_v03,
+        verifier_key,
+        arm_kind="negative",
+    )
+    draft = compose_verification_decision_v03(
+        profile=frozen_verification_profile_v03,
+        manifest=evaluation_scope_v03,
+        arm_results=(frozen_verification_arm_result_v03, negative_result),
+        request=DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    encoded = verification_decision_signing_bytes_v03(draft)
+    return VerificationDecisionV03.model_validate(
+        {
+            "schema_version": "openworkproof-verification-decision/0.3",
+            **draft.model_dump(mode="json"),
+            "digest": hashlib.sha256(encoded).hexdigest(),
+            "verifier_signatures": [
+                {
+                    "verifier_subject_id": "verifier",
+                    "verifier_key_id": key_id(verifier_key.public_key()),
+                    "signature_alg": "Ed25519",
+                    "signature": base64.urlsafe_b64encode(
+                        verifier_key.sign(encoded)
+                    ).decode("ascii").rstrip("="),
+                }
+            ],
+        }
     )
 
 
