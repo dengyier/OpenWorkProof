@@ -546,14 +546,19 @@ def _derived_control_status(
     execution / missing evidence -> ``unavailable``; fixture or provocation
     drift and any failing signature that differs from the expected signature
     -> ``mismatched``; an exact expected-signature match -> ``proven``; a
-    completed non-failing execution -> ``survived``. A signed observation
-    whose claimed status contradicts this derivation is invalid input.
+    completed non-failing execution -> ``survived``. A target failure is
+    derived from a non-zero exit code or a ``MUTATION_CAUGHT`` reason code,
+    so contradictory signatures cannot silently derive survived. A signed
+    observation whose claimed status contradicts this derivation is invalid
+    input.
     """
 
     observation = result.control_observation
     if observation is None:
         raise ValueError("negative arm requires a control observation")
     if not (contract.valid_from <= result.created_at <= contract.expires_at):
+        # The closed code set has one window code; a result before the window
+        # is treated as expired rather than invented as a new reason code.
         return "unavailable", "CONTROL_CONTRACT_EXPIRED"
     if result.mutation_status != "applied":
         return "unavailable", "CONTROL_EVIDENCE_MISSING"
@@ -570,10 +575,11 @@ def _derived_control_status(
         == contract.expected_failure_signature
     ):
         return "proven", None
-    if any(
-        exit_code != 0
-        for exit_code in observation.observed_failure_signature.exit_codes
-    ):
+    observed = observation.observed_failure_signature
+    target_failed = any(
+        exit_code != 0 for exit_code in observed.exit_codes
+    ) or "MUTATION_CAUGHT" in observed.reason_codes
+    if target_failed:
         return "mismatched", "CONTROL_FAILURE_SIGNATURE_MISMATCH"
     return "survived", "CONTROL_SURVIVED"
 
@@ -602,12 +608,16 @@ def assess_control_integrity(
     negative_ids = {arm.arm_id for arm in profile.negative_arms}
 
     seen: dict[str, VerificationArmResultV05] = {}
+    positive_seen = False
     for result in validated_results:
         if result.profile_digest != profile.digest:
             raise ValueError("arm result does not bind the supplied profile")
         if result.arm_id == positive_arm_id:
             if result.arm_kind != "positive":
                 raise ValueError("positive arm result kind mismatch")
+            if positive_seen:
+                raise ValueError("duplicate positive arm result")
+            positive_seen = True
             continue
         if result.arm_id not in negative_ids:
             raise ValueError("arm result references an unknown arm")

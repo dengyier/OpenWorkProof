@@ -573,6 +573,51 @@ def test_failure_signature_digest_is_sensitive_to_structured_fields(
     assert failure_signature_digest(changed) != failure_signature_digest(first)
 
 
+def test_control_observation_exit_zero_with_caught_reason_is_mismatched(
+    control_case: dict[str, Any],
+) -> None:
+    """A signature claiming MUTATION_CAUGHT while exiting zero is a failure
+    with a mismatched signature, never a silent survived."""
+    contract = control_case["profile"].control_contracts[0]
+    results = _negative_results(
+        control_case,
+        control_observation=_control_observation_payload(
+            contract,
+            control_status="mismatched",
+            exit_codes=[0],
+            signature={
+                **contract.expected_failure_signature.model_dump(mode="json"),
+                "exit_codes": [0],
+            },
+        ),
+    )
+    assert _assess_control(control_case, results) == ControlAssessmentResult(
+        "mismatched", ("CONTROL_FAILURE_SIGNATURE_MISMATCH",)
+    )
+
+
+def test_control_observation_survived_with_survived_reason(
+    control_case: dict[str, Any],
+) -> None:
+    contract = control_case["profile"].control_contracts[0]
+    results = _negative_results(
+        control_case,
+        control_observation=_control_observation_payload(
+            contract,
+            control_status="survived",
+            exit_codes=[0],
+            signature={
+                **contract.expected_failure_signature.model_dump(mode="json"),
+                "exit_codes": [0],
+                "reason_codes": ["MUTATION_SURVIVED"],
+            },
+        ),
+    )
+    assert _assess_control(control_case, results) == ControlAssessmentResult(
+        "survived", ("CONTROL_SURVIVED",)
+    )
+
+
 def test_failure_signature_ignores_platform_noise() -> None:
     # stderr, absolute paths, hostnames, durations, and temp directories have
     # no channel into the signed structure; identical structured fields must
@@ -588,3 +633,14 @@ def test_failure_signature_ignores_platform_noise() -> None:
     second = FailureSignatureV05.model_validate(dict(structured_fields))
     assert first == second
     assert failure_signature_digest(first) == failure_signature_digest(second)
+    for noise_field, noise_value in (
+        ("stderr", "raw log bytes"),
+        ("absolute_path", "/tmp/whatever"),
+        ("hostname", "runner-01"),
+        ("duration_seconds", 12.5),
+        ("temp_directory", "/tmp/owp-xyz"),
+    ):
+        with pytest.raises(ValidationError):
+            FailureSignatureV05.model_validate(
+                {**structured_fields, noise_field: noise_value}
+            )
