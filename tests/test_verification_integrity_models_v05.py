@@ -178,44 +178,78 @@ def _revalidate(model: Any, **changes: Any) -> Any:
     return type(model).model_validate(payload)
 
 
-class _NoIterationMapping(Mapping[str, Any]):
-    def __init__(self, declared_length: int) -> None:
-        self.declared_length = declared_length
+class _LyingMapping(Mapping[str, Any]):
+    def __init__(self) -> None:
+        self.length_attempts = 0
         self.iteration_attempts = 0
 
     def __len__(self) -> int:
-        return self.declared_length
+        self.length_attempts += 1
+        return 1
 
     def __iter__(self) -> Iterator[str]:
         self.iteration_attempts += 1
-        raise AssertionError("oversized mapping was iterated")
+        return iter(str(index) for index in range(1000))
+
+    def __getitem__(self, key: str) -> Any:
+        return key
+
+
+class _ThrowingMapping(Mapping[str, Any]):
+    def __init__(self) -> None:
+        self.length_attempts = 0
+        self.iteration_attempts = 0
+
+    def __len__(self) -> int:
+        self.length_attempts += 1
+        raise RuntimeError("mapping length must not be read")
+
+    def __iter__(self) -> Iterator[str]:
+        self.iteration_attempts += 1
+        raise RuntimeError("mapping iterator must not run")
 
     def __getitem__(self, key: str) -> Any:
         del key
-        raise AssertionError("oversized mapping item was consumed")
+        raise RuntimeError("mapping item must not be read")
 
 
-class _MeasuredSequence(Sequence[str]):
-    def __init__(
-        self,
-        values: tuple[str, ...],
-        *,
-        declared_length: int | None = None,
-    ) -> None:
-        self.values = values
-        self.declared_length = (
-            len(values) if declared_length is None else declared_length
-        )
-        self.consumed = 0
+class _LyingSequence(Sequence[str]):
+    def __init__(self) -> None:
+        self.length_attempts = 0
+        self.item_attempts = 0
 
     def __len__(self) -> int:
-        return self.declared_length
+        self.length_attempts += 1
+        return 1
 
     def __getitem__(self, index: int) -> str:
-        self.consumed += 1
-        if not self.values:
-            raise AssertionError("oversized sequence was consumed")
-        return self.values[index]
+        self.item_attempts += 1
+        if index < 1000:
+            return f"{index:064x}"
+        raise IndexError
+
+
+class _ThrowingSequence(Sequence[str]):
+    def __init__(self) -> None:
+        self.length_attempts = 0
+        self.item_attempts = 0
+
+    def __len__(self) -> int:
+        self.length_attempts += 1
+        raise RuntimeError("sequence length must not be read")
+
+    def __getitem__(self, index: int) -> str:
+        del index
+        self.item_attempts += 1
+        raise RuntimeError("sequence item must not be read")
+
+
+class _DictSubclass(dict[str, Any]):
+    pass
+
+
+class _ListSubclass(list[str]):
+    pass
 
 
 def _deep_mapping(depth: int) -> dict[str, Any]:
@@ -362,17 +396,47 @@ def test_population_member_digest_accepts_4096_and_rejects_4097_members() -> Non
         population_member_digest(member_ids)
 
 
-def test_raw_input_bounds_reject_4097_member_sequence_before_consumption() -> None:
-    members = _MeasuredSequence((), declared_length=4097)
-    with pytest.raises(ValueError, match="4096"):
-        population_member_digest(members)
-    assert members.consumed == 0
+@pytest.mark.parametrize(
+    "consumer",
+    (
+        population_contract_id,
+        control_contract_id,
+        failure_signature_digest,
+    ),
+)
+def test_closed_input_shape_rejects_lying_mapping_without_traversal(
+    consumer: Any,
+) -> None:
+    payload = _LyingMapping()
+    with pytest.raises(ValueError, match="exact built-in dict"):
+        consumer(payload)
+    assert payload.length_attempts == 0
+    assert payload.iteration_attempts == 0
 
 
-def test_raw_input_bounds_limit_member_sequence_consumption() -> None:
-    members = _MeasuredSequence(("1" * 64, "2" * 64))
-    population_member_digest(members)
-    assert members.consumed <= len(members) + 1
+@pytest.mark.parametrize(
+    "model_type",
+    (
+        PopulationContractV05,
+        PopulationObservationV05,
+        FailureSignatureV05,
+        ControlContractV05,
+        ControlObservationV05,
+        VerificationIntegrityAssessmentV05,
+        VerificationProfileV05,
+        VerificationArmResultV05,
+        VerificationDecisionDraftV05,
+        VerificationDecisionV05,
+    ),
+)
+def test_closed_input_shape_rejects_throwing_mapping_without_traversal(
+    model_type: type[Any],
+) -> None:
+    payload = _ThrowingMapping()
+    with pytest.raises(ValueError, match="exact built-in dict"):
+        model_type.model_validate(payload)
+    assert payload.length_attempts == 0
+    assert payload.iteration_attempts == 0
 
 
 @pytest.mark.parametrize(
@@ -384,20 +448,34 @@ def test_raw_input_bounds_limit_member_sequence_consumption() -> None:
         PopulationContractV05.model_validate,
     ),
 )
-def test_raw_input_bounds_reject_65_key_mapping_before_iteration(
-    consumer: Any,
+def test_closed_input_shape_rejects_dict_subclasses(consumer: Any) -> None:
+    with pytest.raises(ValueError, match="exact built-in dict"):
+        consumer(_DictSubclass())
+
+
+@pytest.mark.parametrize("sequence_type", (_LyingSequence, _ThrowingSequence))
+def test_closed_input_shape_rejects_custom_sequence_without_traversal(
+    sequence_type: type[Sequence[str]],
 ) -> None:
-    payload = _NoIterationMapping(65)
-    with pytest.raises(ValueError, match="64"):
-        consumer(payload)
-    assert payload.iteration_attempts == 0
+    members = sequence_type()
+    with pytest.raises(ValueError, match="exact built-in list or tuple"):
+        population_member_digest(members)
+    assert members.length_attempts == 0
+    assert members.item_attempts == 0
+
+
+def test_closed_input_shape_accepts_exact_list_tuple_and_rejects_subclass() -> None:
+    expected = population_member_digest(("1" * 64,))
+    assert population_member_digest(["1" * 64]) == expected
+    with pytest.raises(ValueError, match="exact built-in list or tuple"):
+        population_member_digest(_ListSubclass(["1" * 64]))
 
 
 @pytest.mark.parametrize(
     "consumer",
     (population_contract_id, control_contract_id, failure_signature_digest),
 )
-def test_raw_input_bounds_reject_extreme_depth_without_recursion_error(
+def test_closed_input_shape_still_rejects_extreme_builtin_depth(
     consumer: Any,
 ) -> None:
     with pytest.raises(ValueError, match="depth"):
@@ -1081,11 +1159,12 @@ def test_decision_reason_codes_preserve_v03_reasons_outside_integrity_equality(
 ) -> None:
     draft_payload = _decision_reason_payload(
         frozen_verification_decision_v03,
-        decision="VERIFIED",
+        decision="UNKNOWN",
         assessment=_integrity(),
         top_integrity_reasons=[],
         v03_reasons=["SCOPE_UNPROVEN"],
     )
+    draft_payload["scope_assessment"]["scope_status"] = "indeterminate"
     draft = VerificationDecisionDraftV05.model_validate(draft_payload)
     decision = VerificationDecisionV05.model_validate(
         _raw_decision_payload_v05(

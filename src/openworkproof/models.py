@@ -2519,30 +2519,66 @@ _VERIFICATION_INTEGRITY_CODES = (
 
 
 def _identity_payload(
-    value: ProtocolModel | Mapping[str, object], own_id: str
+    value: ProtocolModel | dict[str, object],
+    own_id: str,
+    model_type: type[ProtocolModel],
 ) -> dict[str, Any]:
-    if isinstance(value, ProtocolModel):
-        source: Mapping[str, object] = value.model_dump(mode="json")
-    elif isinstance(value, Mapping):
+    if type(value) is model_type:
+        source: dict[str, object] = value.model_dump(mode="json")
+    elif type(value) is dict:
         source = value
     else:
-        raise ValueError("identity payload must be a protocol model or mapping")
-    payload = _freeze_json(
-        source,
-        freeze_mapping=False,
-        max_array_items=4096,
-    )
+        raise ValueError(
+            "identity payload must be the exact model or exact built-in dict"
+        )
+    payload = _freeze_exact_json_payload(source, max_array_items=4096)
     payload.pop(own_id, None)
     return payload
 
 
-def _freeze_bounded_protocol_payload(
-    value: Any, model_type: type[ProtocolModel], *, max_array_items: int
-) -> Any:
-    if isinstance(value, model_type):
-        return value
-    if not isinstance(value, Mapping):
-        raise ValueError("protocol object must be a JSON object")
+def _validate_exact_json_containers(
+    value: Any, *, max_array_items: int, depth: int = 1
+) -> None:
+    if depth > 16:
+        raise ValueError("JSON nesting depth exceeds 16")
+    if type(value) is dict:
+        if len(value) > 64:
+            raise ValueError("JSON map exceeds 64 entries")
+        for key, item in value.items():
+            if type(key) is not str:
+                raise ValueError("JSON map keys must be strings")
+            _validate_exact_json_containers(
+                item,
+                max_array_items=max_array_items,
+                depth=depth + 1,
+            )
+        return
+    if type(value) in {list, tuple}:
+        if len(value) > max_array_items:
+            raise ValueError(
+                f"JSON array exceeds {max_array_items} items"
+            )
+        for item in value:
+            _validate_exact_json_containers(
+                item,
+                max_array_items=max_array_items,
+                depth=depth + 1,
+            )
+        return
+    if value is None or type(value) in {str, int, bool}:
+        return
+    if isinstance(value, (Mapping, Sequence)):
+        raise ValueError(
+            "JSON containers must use exact built-in dict, list, or tuple"
+        )
+
+
+def _freeze_exact_json_payload(
+    value: dict[str, object], *, max_array_items: int
+) -> dict[str, Any]:
+    _validate_exact_json_containers(
+        value, max_array_items=max_array_items
+    )
     return _freeze_json(
         value,
         freeze_mapping=False,
@@ -2550,41 +2586,50 @@ def _freeze_bounded_protocol_payload(
     )
 
 
+def _thaw_frozen_mappings(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _thaw_frozen_mappings(item) for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(_thaw_frozen_mappings(item) for item in value)
+    return value
+
+
+def _freeze_bounded_protocol_payload(
+    value: Any, model_type: type[ProtocolModel], *, max_array_items: int
+) -> Any:
+    if type(value) is model_type:
+        return value
+    if type(value) is not dict:
+        raise ValueError(
+            "protocol object must be the exact model or exact built-in dict"
+        )
+    return _thaw_frozen_mappings(
+        _freeze_exact_json_payload(value, max_array_items=max_array_items)
+    )
+
+
 def population_contract_id(
-    contract: PopulationContractV05 | Mapping[str, object],
+    contract: PopulationContractV05 | dict[str, object],
 ) -> str:
     return _jcs_digest(
         {
             "domain": "openworkproof/population-contract/v0.5",
-            "payload": _identity_payload(contract, "contract_id"),
+            "payload": _identity_payload(
+                contract, "contract_id", PopulationContractV05
+            ),
         }
     )
 
 
-def population_member_digest(member_ids: Sequence[str]) -> str:
-    if isinstance(member_ids, (str, bytes)):
-        raise ValueError("member ids must be a sequence of digests")
-    if not isinstance(member_ids, Sequence):
-        raise ValueError("member ids must be a sequence of digests")
+def population_member_digest(member_ids: list[str] | tuple[str, ...]) -> str:
+    if type(member_ids) not in {list, tuple}:
+        raise ValueError("member ids must use exact built-in list or tuple")
     declared_length = len(member_ids)
     if declared_length > 4096:
         raise ValueError("member ids exceed 4096 items")
-    iterator = iter(member_ids)
-    collected: list[str] = []
-    for _ in range(declared_length):
-        try:
-            collected.append(next(iterator))
-        except StopIteration as error:
-            raise ValueError(
-                "member sequence length changed during validation"
-            ) from error
-    try:
-        next(iterator)
-    except StopIteration:
-        pass
-    else:
-        raise ValueError("member sequence length changed during validation")
-    values = tuple(collected)
+    values = tuple(member_ids)
     for value in values:
         _digest64(value)
     if not _is_utf8_sorted_unique(values):
@@ -2683,6 +2728,13 @@ class PopulationObservationV05(ProtocolModel):
     observed_at: CanonicalUTCTime
     evidence_refs: tuple[EvidenceRef, ...]
 
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_json_shape(cls, value: Any) -> Any:
+        return _freeze_bounded_protocol_payload(
+            value, cls, max_array_items=256
+        )
+
     @model_validator(mode="after")
     def _closed_population_observation(self) -> PopulationObservationV05:
         if self.eligible_seen > 4096 or self.selected_count > 4096:
@@ -2748,18 +2800,18 @@ class FailureSignatureV05(ProtocolModel):
 
 
 def failure_signature_digest(
-    signature: FailureSignatureV05 | Mapping[str, object],
+    signature: FailureSignatureV05 | dict[str, object],
 ) -> str:
-    if isinstance(signature, FailureSignatureV05):
-        source: Mapping[str, object] = signature.model_dump(mode="json")
-    elif isinstance(signature, Mapping):
+    if type(signature) is FailureSignatureV05:
+        source: dict[str, object] = signature.model_dump(mode="json")
+    elif type(signature) is dict:
         source = signature
     else:
-        raise ValueError("failure signature must be a model or mapping")
-    payload = _freeze_json(
-        source,
-        freeze_mapping=False,
-        max_array_items=256,
+        raise ValueError(
+            "failure signature must be the exact model or exact built-in dict"
+        )
+    payload = _freeze_exact_json_payload(
+        source, max_array_items=256
     )
     return _jcs_digest(
         {
@@ -2770,12 +2822,14 @@ def failure_signature_digest(
 
 
 def control_contract_id(
-    contract: ControlContractV05 | Mapping[str, object],
+    contract: ControlContractV05 | dict[str, object],
 ) -> str:
     return _jcs_digest(
         {
             "domain": "openworkproof/control-contract/v0.5",
-            "payload": _identity_payload(contract, "control_id"),
+            "payload": _identity_payload(
+                contract, "control_id", ControlContractV05
+            ),
         }
     )
 
@@ -2855,6 +2909,13 @@ class VerificationIntegrityAssessmentV05(ProtocolModel):
     ]
     control_status: Literal["proven", "survived", "mismatched", "unavailable"]
     reason_codes: tuple[VerificationIntegrityReasonCode, ...]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_json_shape(cls, value: Any) -> Any:
+        return _freeze_bounded_protocol_payload(
+            value, cls, max_array_items=64
+        )
 
     @model_validator(mode="after")
     def _closed_integrity_assessment(self) -> VerificationIntegrityAssessmentV05:
@@ -2995,6 +3056,13 @@ class VerificationDecisionDraftV05(VerificationDecisionDraftV03):
     reason_codes: tuple[VerificationReasonCodeV05, ...]
     integrity_assessment: VerificationIntegrityAssessmentV05
 
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_json_shape(cls, value: Any) -> Any:
+        return _freeze_bounded_protocol_payload(
+            value, cls, max_array_items=256
+        )
+
     @model_validator(mode="after")
     def _closed_v05_draft(self) -> VerificationDecisionDraftV05:
         _validate_v05_decision_status(self.decision, self.integrity_assessment)
@@ -3008,6 +3076,13 @@ class VerificationDecisionV05(VerificationDecisionV03):
     schema_version: Literal["openworkproof-verification-decision/0.5"]
     reason_codes: tuple[VerificationReasonCodeV05, ...]
     integrity_assessment: VerificationIntegrityAssessmentV05
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_json_shape(cls, value: Any) -> Any:
+        return _freeze_bounded_protocol_payload(
+            value, cls, max_array_items=256
+        )
 
     @model_validator(mode="after")
     def _closed_decision(self) -> VerificationDecisionV05:
