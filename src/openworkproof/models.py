@@ -2806,7 +2806,7 @@ class ControlObservationV05(ProtocolModel):
         paths = tuple(reference.path for reference in self.evidence_refs)
         if not _is_utf8_sorted_unique(paths):
             raise ValueError("evidence refs must be path sorted and unique")
-        if self.control_status in {"proven", "survived"} and (
+        if self.control_status in {"proven", "survived", "mismatched"} and (
             self.observed_failure_signature.execution_status != "completed"
         ):
             raise ValueError(f"{self.control_status} control must be completed")

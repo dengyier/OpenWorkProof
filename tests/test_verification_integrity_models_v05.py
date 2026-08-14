@@ -463,8 +463,9 @@ def test_control_contract_id_excludes_own_id_and_binds_nested_signature() -> Non
         ("survived", "completed", True, True),
         ("survived", "timed_out", True, False),
         ("survived", "completed", False, False),
-        ("mismatched", "crashed", True, True),
+        ("mismatched", "crashed", True, False),
         ("mismatched", "completed", False, False),
+        ("unavailable", "crashed", True, True),
         ("unavailable", "evidence_unavailable", False, True),
     ),
 )
