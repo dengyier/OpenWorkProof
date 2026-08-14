@@ -36,9 +36,15 @@ from typing import Literal
 
 from openworkproof.models import (
     ControlContractV05,
+    DecisionDraftRequest,
     EvaluationScopeManifest,
     EvidenceRefV05,
+    ScopeAssessment,
+    VerificationArmResultReference,
     VerificationArmResultV05,
+    VerificationDecisionDraftV05,
+    VerificationDecisionV05,
+    VerificationIntegrityAssessmentV05,
     VerificationIntegrityReasonCode,
     VerificationProfileV05,
     population_member_digest,
@@ -766,6 +772,265 @@ def validate_population_observation(
     return None
 
 
+def compose_verification_decision_v05(
+    *,
+    profile: VerificationProfileV05,
+    manifest: EvaluationScopeManifest,
+    arm_results: Sequence[VerificationArmResultV05],
+    request: DecisionDraftRequest,
+    previous_decision: VerificationDecisionV05 | None = None,
+    rule_outputs: Mapping[str, Sequence[str]] | None = None,
+    evidence_inventory: Mapping[str, bytes] | None = None,
+) -> VerificationDecisionDraftV05:
+    """Compose the three-state v0.5 decision draft from signed inputs.
+
+    Runs the existing v0.3 semantic checks, then the population and control
+    assessments. Closed matrix: population not matched -> UNKNOWN; matched
+    with a survived control -> REFUTED; matched with a mismatched or
+    unavailable control -> UNKNOWN; matched with proven controls follows
+    the v0.3 satisfied/contradicted/independence rules. The integrity
+    assessment carries the sorted unique population and control reason
+    codes, and the top-level reason codes reproduce them exactly.
+    """
+
+    from openworkproof import verification as verification_module  # lazy import
+
+    if type(profile) is not VerificationProfileV05:
+        raise verification_module.VerificationInputError(
+            "profile must be an exact VerificationProfileV05"
+        )
+    if type(request) is not DecisionDraftRequest:
+        raise verification_module.VerificationInputError(
+            "request must be a DecisionDraftRequest"
+        )
+    if rule_outputs is None or evidence_inventory is None:
+        raise verification_module.VerificationInputError(
+            "rule outputs and evidence inventory are required to compose a v0.5 decision"
+        )
+    profile = _validated_profile(profile)
+    manifest = _validated_manifest(manifest)
+    verification_module.validate_verification_profile_v03(profile, manifest)
+    validate_population_contracts(profile, manifest, rule_outputs=rule_outputs)
+    validate_control_contracts(profile)
+
+    results = tuple(arm_results)
+    expected_arms = {
+        arm.arm_id: arm for arm in (profile.positive_arm, *profile.negative_arms)
+    }
+    if len(results) != len(expected_arms) or {
+        result.arm_id for result in results
+    } != set(expected_arms):
+        raise verification_module.VerificationInputError(
+            "arm result set is incomplete"
+        )
+    for result in results:
+        if type(result) is not VerificationArmResultV05:
+            raise verification_module.VerificationInputError(
+                "arm results must be exact VerificationArmResultV05"
+            )
+        if (
+            result.profile_digest != profile.digest
+            or result.scope_manifest_digest != manifest.digest
+        ):
+            raise verification_module.VerificationInputError(
+                "arm result binding mismatch"
+            )
+    if not profile.created_at <= request.decided_at < profile.expires_at:
+        raise verification_module.VerificationInputError(
+            "verification decision is outside profile validity"
+        )
+    if previous_decision is not None:
+        verification_module.validate_verification_decision_v05(
+            profile=profile, manifest=manifest, decision=previous_decision
+        )
+        if not previous_decision.decided_at < request.decided_at:
+            raise verification_module.VerificationInputError(
+                "superseding decision time is stale"
+            )
+
+    positive = tuple(
+        result for result in results if result.arm_kind == "positive"
+    )
+    negative = tuple(
+        result for result in results if result.arm_kind == "negative"
+    )
+    if len(positive) != 1 or len(negative) != len(profile.negative_arms):
+        raise verification_module.VerificationInputError(
+            "arm result set is incomplete"
+        )
+
+    population = assess_population_integrity(
+        profile,
+        manifest,
+        results,
+        rule_outputs=rule_outputs,
+        evidence_inventory=evidence_inventory,
+    )
+    control = assess_control_integrity(profile, results)
+
+    missing_required = tuple(
+        sorted(
+            {
+                target
+                for result in results
+                for target in (
+                    set(manifest.required_target_ids)
+                    - set(result.observed_required_target_ids)
+                )
+            }
+        )
+    )
+    counts = tuple(result.observed_member_count for result in results)
+    population_digests = {
+        result.observed_population_digest for result in results
+    }
+    scope_reasons = {
+        code
+        for result in results
+        for code in result.reason_codes
+        if code.startswith("SCOPE_")
+    }
+    cross_arm_mismatch = len(set(counts)) != 1 or len(population_digests) != 1
+    if cross_arm_mismatch:
+        scope_reasons.add("SCOPE_CROSS_ARM_MISMATCH")
+    if missing_required:
+        scope_reasons.add("SCOPE_REQUIRED_TARGET_MISSING")
+    population_mismatch = any(
+        result.observed_member_count != manifest.member_count
+        or result.observed_population_digest != manifest.population_digest
+        for result in results
+    )
+    if population_mismatch:
+        scope_reasons.add("SCOPE_POPULATION_DRIFT")
+    if any(not result.scope_evidence_refs for result in results):
+        scope_reasons.add("SCOPE_EVIDENCE_MISSING")
+
+    reported_statuses = {result.scope_expectation_status for result in results}
+    if (
+        cross_arm_mismatch
+        or missing_required
+        or "indeterminate" in reported_statuses
+        or "SCOPE_EVIDENCE_MISSING" in scope_reasons
+    ):
+        scope_status = "indeterminate"
+    elif population_mismatch or "contradicted" in reported_statuses:
+        scope_status = "contradicted"
+    else:
+        scope_status = "satisfied"
+
+    independence = verification_module.assess_independence(profile, results)
+    if scope_status != "satisfied":
+        decision = "UNKNOWN"
+    elif population.status != "matched":
+        decision = "UNKNOWN"
+    elif control.status == "survived":
+        decision = "REFUTED"
+    elif control.status in {"mismatched", "unavailable"}:
+        decision = "UNKNOWN"
+    elif positive[0].expectation_status == "contradicted" or any(
+        result.expectation_status == "contradicted" for result in negative
+    ):
+        decision = "REFUTED"
+    elif positive[0].expectation_status != "satisfied" or any(
+        result.expectation_status != "satisfied" for result in negative
+    ) or not independence.is_sufficient:
+        decision = "UNKNOWN"
+    else:
+        decision = "VERIFIED"
+
+    references: list[VerificationArmResultReference] = []
+    for result in results:
+        from openworkproof.acceptance import (  # lazy import
+            AcceptanceTransactionError,
+            evidence_snapshot_digest,
+        )
+
+        try:
+            snapshot = evidence_snapshot_digest(
+                tuple(
+                    sorted(
+                        (*result.evidence_refs, *result.scope_evidence_refs),
+                        key=lambda ref: ref.path,
+                    )
+                )
+            )
+        except AcceptanceTransactionError as error:
+            raise verification_module.VerificationInputError(
+                "arm result evidence is not canonical"
+            ) from error
+        references.append(
+            VerificationArmResultReference(
+                arm_id=result.arm_id,
+                arm_result_id=result.arm_result_id,
+                arm_result_digest=result.digest,
+                evidence_snapshot_digest=snapshot,
+            )
+        )
+
+    assessment = VerificationIntegrityAssessmentV05(
+        population_status=population.status,
+        control_status=control.status,
+        reason_codes=tuple(
+            sorted(set(population.reason_codes) | set(control.reason_codes))
+        ),
+    )
+    v03_reason_codes = {
+        *scope_reasons,
+        *independence.reason_codes,
+        *(code for result in results for code in result.reason_codes),
+    }
+    reason_codes = tuple(
+        sorted(v03_reason_codes | set(assessment.reason_codes))
+    )
+    scope_assessment = ScopeAssessment(
+        declared_member_count=manifest.member_count,
+        observed_member_counts=counts,
+        population_digest=manifest.population_digest,
+        required_target_count=len(manifest.required_target_ids),
+        missing_required_target_ids=missing_required,
+        scope_status=scope_status,
+    )
+    return VerificationDecisionDraftV05(
+        decision_id=request.decision_id,
+        work_order_digest=profile.work_order_digest,
+        subject_claim_digest=profile.subject_claim_digest,
+        profile_id=profile.profile_id,
+        profile_digest=profile.digest,
+        arm_results=tuple(
+            reference.model_dump(mode="json") for reference in references
+        ),
+        assurance_level=profile.assurance_level,
+        decision=decision,
+        independence=independence.model_dump(mode="json"),
+        reason_codes=reason_codes,
+        supersedes_decision_id=(
+            None if previous_decision is None else previous_decision.decision_id
+        ),
+        supersedes_decision_digest=(
+            None if previous_decision is None else previous_decision.digest
+        ),
+        causal_parent_receipt_ids=tuple(
+            sorted(
+                {
+                    receipt_id
+                    for result in results
+                    for receipt_id in result.action_receipt_ids
+                }
+            )
+        ),
+        causal_parent_decision_ids=(
+            ()
+            if previous_decision is None
+            else (previous_decision.decision_id,)
+        ),
+        decided_at=request.model_dump(mode="json")["decided_at"],
+        nonce=request.nonce,
+        scope_manifest_digest=manifest.digest,
+        scope_assessment=scope_assessment.model_dump(mode="json"),
+        integrity_assessment=assessment.model_dump(mode="json"),
+    )
+
+
 __all__ = [
     "PopulationAssessmentResult",
     "assess_population_integrity",
@@ -774,4 +1039,5 @@ __all__ = [
     "ControlAssessmentResult",
     "assess_control_integrity",
     "validate_control_contracts",
+    "compose_verification_decision_v05",
 ]

@@ -1190,3 +1190,458 @@ def test_v05_profile_remaining_faults_are_closed(
     finally:
         connection.close()
     assert count == rows
+
+
+# ---------------------------------------------------------------------------
+# Task 7: three-state v0.5 decisions.
+# ---------------------------------------------------------------------------
+
+import base64 as _base64
+
+from openworkproof.models import (
+    DecisionDraftRequest,
+    VerificationDecisionV05,
+)
+from openworkproof.signing import key_id as _key_id
+from openworkproof.verification import (
+    commit_verification_decision_v05,
+    prepare_verification_decision_v05,
+    verification_decision_signing_bytes_v05,
+    _derive_v05_rule_outputs,
+    _read_v05_population_inventory,
+)
+import openworkproof.integrity as _integrity
+
+
+def _sign_decision_draft_v05(case, draft) -> VerificationDecisionV05:
+    encoded = verification_decision_signing_bytes_v05(draft)
+    binding = case["profile"].verifier_bindings[0]
+    private_key = case["keys"]["Verifier"][0]
+    return VerificationDecisionV05.model_validate(
+        {
+            "schema_version": "openworkproof-verification-decision/0.5",
+            **draft.model_dump(mode="json"),
+            "digest": hashlib.sha256(encoded).hexdigest(),
+            "verifier_signatures": [
+                {
+                    "verifier_subject_id": binding.verifier_subject_id,
+                    "verifier_key_id": _key_id(private_key.public_key()),
+                    "signature_alg": "Ed25519",
+                    "signature": _base64.urlsafe_b64encode(
+                        private_key.sign(encoded)
+                    )
+                    .decode("ascii")
+                    .rstrip("="),
+                }
+            ],
+        }
+    )
+
+
+def _signed_decision_v05(case, request) -> VerificationDecisionV05:
+    return _sign_decision_draft_v05(
+        case, prepare_verification_decision_v05(case["ledger"], request)
+    )
+
+
+def _decision_inputs(case, results):
+    rule_outputs = _derive_v05_rule_outputs(
+        case["profile"], case["manifest"], case["ledger"]
+    )
+    inventory: dict[str, bytes] = {}
+    for result in results:
+        inventory.update(_read_v05_population_inventory(case["ledger"], result))
+    return rule_outputs, inventory
+
+
+def _compose_v05(case, *, results=None, profile=None, request=None):
+    profile = profile or case["profile"]
+    results = tuple(results or case["results"])
+    request = request or DecisionDraftRequest(
+        decision_id="c" * 64,
+        decided_at="2026-01-01T00:20:00Z",
+        nonce="d" * 64,
+    )
+    rule_outputs, inventory = _decision_inputs(
+        {**case, "profile": profile}, results
+    )
+    return _integrity.compose_verification_decision_v05(
+        profile=profile,
+        manifest=case["manifest"],
+        arm_results=results,
+        request=request,
+        rule_outputs=rule_outputs,
+        evidence_inventory=inventory,
+    )
+
+
+def test_v05_decision_matrix_matched_proven_positive_satisfied_is_verified(
+    v05_transaction_case,
+) -> None:
+    draft = _compose_v05(v05_transaction_case)
+    assert draft.decision == "VERIFIED"
+    assert draft.integrity_assessment.population_status == "matched"
+    assert draft.integrity_assessment.control_status == "proven"
+
+
+def test_v05_decision_matrix_matched_survived_is_refuted(
+    v05_transaction_case,
+) -> None:
+    case = v05_transaction_case
+    contract = case["profile"].control_contracts[0]
+    control = _v05_control_observation(
+        case["tmp_path"],
+        contract,
+        arm_kind="negative",
+        control_status="survived",
+        exit_codes=[0],
+        signature={
+            **contract.expected_failure_signature.model_dump(mode="json"),
+            "exit_codes": [0],
+            "reason_codes": ["MUTATION_SURVIVED"],
+        },
+    )
+    negative = _resign_arm_result_v05(
+        case, case["results"][1], control_observation=control
+    )
+    results = (case["results"][0], negative)
+    draft = _compose_v05(case, results=results)
+    assert draft.decision == "REFUTED"
+    assert draft.integrity_assessment.control_status == "survived"
+    assert "CONTROL_SURVIVED" in draft.integrity_assessment.reason_codes
+
+
+def test_v05_decision_matrix_empty_population_is_unknown(
+    v05_transaction_case,
+) -> None:
+    case = v05_transaction_case
+    results = []
+    for kind, result in zip(("positive", "negative"), case["results"], strict=True):
+        observations = []
+        for contract in case["profile"].population_contracts:
+            observations.append(
+                _v05_population_observation(
+                    case["tmp_path"],
+                    contract,
+                    suffix=f"empty-{kind}-{contract.member_kind}",
+                    eligible_seen=0,
+                    selected_count=0,
+                )
+            )
+        results.append(
+            _resign_arm_result_v05(case, result, population_observations=observations)
+        )
+    draft = _compose_v05(case, results=tuple(results))
+    assert draft.decision == "UNKNOWN"
+    assert draft.integrity_assessment.population_status == "empty"
+    assert "NO_ELIGIBLE_POPULATION" in draft.integrity_assessment.reason_codes
+
+
+def test_v05_decision_matrix_capture_failed_is_unknown(
+    v05_transaction_case,
+) -> None:
+    case = v05_transaction_case
+    results = []
+    for kind, result in zip(("positive", "negative"), case["results"], strict=True):
+        observations = []
+        for contract in case["profile"].population_contracts:
+            observations.append(
+                _v05_population_observation(
+                    case["tmp_path"],
+                    contract,
+                    suffix=f"capture-{kind}-{contract.member_kind}",
+                    eligible_seen=2,
+                    selected_count=0,
+                )
+            )
+        results.append(
+            _resign_arm_result_v05(case, result, population_observations=observations)
+        )
+    draft = _compose_v05(case, results=tuple(results))
+    assert draft.decision == "UNKNOWN"
+    assert draft.integrity_assessment.population_status == "capture_failed"
+
+
+def test_v05_decision_matrix_drifted_population_is_unknown(
+    v05_transaction_case,
+) -> None:
+    case = v05_transaction_case
+    observations = [
+        observation.model_dump(mode="json")
+        for observation in case["results"][0].population_observations
+    ]
+    observations[0]["eligible_population_digest"] = "f" * 64
+    positive = _resign_arm_result_v05(
+        case, case["results"][0], population_observations=observations
+    )
+    draft = _compose_v05(case, results=(positive, case["results"][1]))
+    assert draft.decision == "UNKNOWN"
+    assert draft.integrity_assessment.population_status == "drifted"
+
+
+def test_v05_decision_matrix_unavailable_population_is_unknown(
+    v05_transaction_case,
+) -> None:
+    case = v05_transaction_case
+    observations = [
+        observation.model_dump(mode="json")
+        for observation in case["results"][0].population_observations
+    ]
+    observations[0]["evidence_refs"] = observations[0]["evidence_refs"][:1]
+    positive = _resign_arm_result_v05(
+        case, case["results"][0], population_observations=observations
+    )
+    draft = _compose_v05(case, results=(positive, case["results"][1]))
+    assert draft.decision == "UNKNOWN"
+    assert draft.integrity_assessment.population_status == "unavailable"
+
+
+def test_v05_decision_matrix_mismatched_control_is_unknown(
+    v05_transaction_case,
+) -> None:
+    case = v05_transaction_case
+    contract = case["profile"].control_contracts[0]
+    control = _v05_control_observation(
+        case["tmp_path"],
+        contract,
+        arm_kind="negative",
+        control_status="mismatched",
+        fixture_digest="d" * 64,
+    )
+    negative = _resign_arm_result_v05(
+        case, case["results"][1], control_observation=control
+    )
+    draft = _compose_v05(case, results=(case["results"][0], negative))
+    assert draft.decision == "UNKNOWN"
+    assert draft.integrity_assessment.control_status == "mismatched"
+    assert "CONTROL_FIXTURE_DRIFT" in draft.integrity_assessment.reason_codes
+
+
+def test_v05_decision_matrix_positive_contradicted_is_refuted(
+    v05_transaction_case,
+) -> None:
+    case = v05_transaction_case
+    raw = case["results"][0].model_dump(
+        mode="json",
+        exclude={"digest", "signature_alg", "signer_key_id", "signature"},
+    )
+    raw["expectation_status"] = "contradicted"
+    raw["reason_codes"] = ["MUTATION_SURVIVED"]
+    positive = VerificationArmResultV05.model_validate(
+        sign_payload(
+            "verification-arm-result",
+            raw,
+            case["keys"]["Verifier"][0],
+            version="0.5",
+        )
+    )
+    draft = _compose_v05(case, results=(positive, case["results"][1]))
+    assert draft.decision == "REFUTED"
+
+
+def test_v05_decision_matrix_insufficient_independence_is_unknown(
+    v05_transaction_case,
+) -> None:
+    case = v05_transaction_case
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PrivateKey,
+    )
+
+    second_key = Ed25519PrivateKey.generate()
+    second_public_b64url = _base64.urlsafe_b64encode(
+        second_key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw
+        )
+    ).decode("ascii").rstrip("=")
+    raw = case["profile"].model_dump(
+        mode="json",
+        exclude={"digest", "signature_alg", "signer_key_id", "signature"},
+    )
+    raw["assurance_level"] = "high_risk"
+    raw["verifier_bindings"] = sorted(
+        [
+            *raw["verifier_bindings"],
+            {
+                **raw["verifier_bindings"][0],
+                "binding_id": "9" * 64,
+                "verifier_subject_id": "second-verifier",
+                "verifier_key_id": _key_id(second_key.public_key()),
+                "verifier_public_key_b64url": second_public_b64url,
+                "controller_factors": ["second-controller"],
+                "execution_context_factors": ["second-container"],
+            },
+        ],
+        key=lambda item: item["binding_id"],
+    )
+    high_risk = VerificationProfileV05.model_validate(
+        sign_payload(
+            "verification-profile",
+            raw,
+            case["keys"]["Manager"][0],
+            version="0.5",
+        )
+    )
+    rebound = []
+    for result in case["results"]:
+        raw_result = result.model_dump(
+            mode="json",
+            exclude={"digest", "signature_alg", "signer_key_id", "signature"},
+        )
+        raw_result["profile_digest"] = high_risk.digest
+        rebound.append(
+            VerificationArmResultV05.model_validate(
+                sign_payload(
+                    "verification-arm-result",
+                    raw_result,
+                    case["keys"]["Verifier"][0],
+                    version="0.5",
+                )
+            )
+        )
+    draft = _compose_v05(case, profile=high_risk, results=tuple(rebound))
+    assert draft.decision == "UNKNOWN"
+    assert any(
+        code.startswith("INDEPENDENCE") for code in draft.reason_codes
+    )
+
+
+def test_v05_decision_full_chain_commit_and_supersede(
+    v05_transaction_case,
+) -> None:
+    case = v05_transaction_case
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    for result in case["results"]:
+        commit_verification_arm_result_v05(case["ledger"], result)
+    first = _signed_decision_v05(
+        case,
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    assert first.decision == "VERIFIED"
+    assert commit_verification_decision_v05(case["ledger"], first) == first
+    second = _signed_decision_v05(
+        case,
+        DecisionDraftRequest(
+            decision_id="e" * 64,
+            decided_at="2026-01-01T00:21:00Z",
+            nonce="f" * 64,
+        ),
+    )
+    assert second.supersedes_decision_id == first.decision_id
+    assert commit_verification_decision_v05(case["ledger"], second) == second
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM verification_decisions_v05"
+        ).fetchone() == (2,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM verification_decision_parents_v05"
+        ).fetchone() == (4,)
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            connection.execute(
+                "UPDATE verification_decisions_v05 SET scope_id = '0' * 64"
+            )
+    finally:
+        connection.close()
+
+
+def test_v05_decision_idempotent_and_conflicting_bytes(
+    v05_transaction_case,
+) -> None:
+    case = v05_transaction_case
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    for result in case["results"]:
+        commit_verification_arm_result_v05(case["ledger"], result)
+    decision = _signed_decision_v05(
+        case,
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    commit_verification_decision_v05(case["ledger"], decision)
+    with pytest.raises(VerificationCommittedError):
+        commit_verification_decision_v05(case["ledger"], decision)
+    signature = decision.verifier_signatures[0].model_copy(
+        update={"signature": "A" * 86}
+    )
+    tampered = decision.model_copy(update={"verifier_signatures": (signature,)})
+    with pytest.raises(VerificationTransactionError):
+        commit_verification_decision_v05(case["ledger"], tampered)
+
+
+def test_v05_decision_stale_unsigned_parent_is_rejected(
+    v05_transaction_case,
+) -> None:
+    case = v05_transaction_case
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    for result in case["results"]:
+        commit_verification_arm_result_v05(case["ledger"], result)
+    first_request = DecisionDraftRequest(
+        decision_id="c" * 64,
+        decided_at="2026-01-01T00:20:00Z",
+        nonce="d" * 64,
+    )
+    stale_request = DecisionDraftRequest(
+        decision_id="e" * 64,
+        decided_at="2026-01-01T00:21:00Z",
+        nonce="f" * 64,
+    )
+    first = _signed_decision_v05(case, first_request)
+    stale = _signed_decision_v05(case, stale_request)
+    commit_verification_decision_v05(case["ledger"], first)
+    with pytest.raises(VerificationTransactionError, match="draft mismatch"):
+        commit_verification_decision_v05(case["ledger"], stale)
+
+
+def test_v05_decision_faults_and_concurrency(v05_transaction_case) -> None:
+    case = v05_transaction_case
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    for result in case["results"]:
+        commit_verification_arm_result_v05(case["ledger"], result)
+    decision = _signed_decision_v05(
+        case,
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    with pytest.raises(VerificationTransactionError):
+        commit_verification_decision_v05(
+            case["ledger"], decision, fault="commit_failure"
+        )
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM verification_decisions_v05"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+    with pytest.raises(VerificationCommittedError) as raised:
+        commit_verification_decision_v05(
+            case["ledger"], decision, fault="commit_ack_loss"
+        )
+    assert raised.value.committed == decision
+
+    def commit_once():
+        try:
+            return commit_verification_decision_v05(case["ledger"], decision)
+        except VerificationCommittedError as error:
+            return error.committed
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = tuple(pool.map(lambda _: commit_once(), range(2)))
+    assert outcomes == (decision, decision)
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM verification_decisions_v05"
+        ).fetchone() == (1,)
+    finally:
+        connection.close()
