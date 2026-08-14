@@ -31,14 +31,19 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import re
 from typing import Literal
+
+import rfc8785
 
 from openworkproof.models import (
     ControlContractV05,
     DecisionDraftRequest,
     EvaluationScopeManifest,
     EvidenceRefV05,
+    FailureSignatureV05,
+    PopulationObservationV05,
     ScopeAssessment,
     VerificationArmResultReference,
     VerificationArmResultV05,
@@ -70,6 +75,121 @@ class PopulationAssessmentResult:
 class ControlAssessmentResult:
     status: ControlAssessmentStatus
     reason_codes: tuple[VerificationIntegrityReasonCode, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PopulationObservationBuildResult:
+    """One adapter-built population observation with its replayable evidence.
+
+    ``observation`` is ``None`` when the adapter could not observe (collection
+    error, timeout, or selector/engine drift); the reason codes and status
+    then carry the failure. ``evidence_inventory`` maps SHA-256 digests to
+    the canonical population-evidence bytes the observation references.
+    """
+
+    observation: PopulationObservationV05 | None
+    evidence_inventory: tuple[tuple[str, bytes], ...]
+    eligible_member_ids: tuple[str, ...]
+    selected_member_ids: tuple[str, ...]
+    status: Literal["satisfied", "indeterminate"]
+    reason_codes: tuple[str, ...]
+
+
+def population_observation_payload(
+    *,
+    contract: PopulationContractV05,
+    eligible_member_ids: Sequence[str],
+    selected_member_ids: Sequence[str],
+    observed_at: str,
+    eligible_path: str = "evidence/eligible-population.json",
+    selected_path: str = "evidence/selected-population.json",
+) -> tuple[dict[str, object], dict[str, bytes]]:
+    """Build one canonical population observation payload and evidence docs."""
+
+    eligible = tuple(sorted(set(eligible_member_ids)))
+    selected = tuple(sorted(set(selected_member_ids)))
+    eligible_seen = len(eligible)
+    selected_count = len(selected)
+    if eligible_seen == 0 or selected_count == 0:
+        numerator, denominator = 0, 1
+    else:
+        divisor = math.gcd(selected_count, eligible_seen)
+        numerator = selected_count // divisor
+        denominator = eligible_seen // divisor
+    eligible_ref, eligible_bytes = _evidence_reference(
+        {
+            "schema_version": POPULATION_EVIDENCE_SCHEMA_VERSION,
+            "purpose": "eligible-population",
+            "member_ids": list(eligible),
+        },
+        eligible_path,
+    )
+    selected_ref, selected_bytes = _evidence_reference(
+        {
+            "schema_version": POPULATION_EVIDENCE_SCHEMA_VERSION,
+            "purpose": "selected-population",
+            "member_ids": list(selected),
+        },
+        selected_path,
+    )
+    observation = {
+        "contract_id": contract.contract_id,
+        "selector_rule_id": contract.selector_rule_id,
+        "selector_spec_digest": contract.selector_spec_digest,
+        "selector_engine_digest": contract.selector_engine_digest,
+        "eligible_seen": eligible_seen,
+        "eligible_population_digest": population_member_digest(eligible),
+        "selected_count": selected_count,
+        "selected_population_digest": population_member_digest(selected),
+        "capture_numerator": numerator,
+        "capture_denominator": denominator,
+        "observed_at": observed_at,
+        "evidence_refs": [eligible_ref, selected_ref],
+    }
+    inventory = {
+        eligible_ref["sha256"]: eligible_bytes,
+        selected_ref["sha256"]: selected_bytes,
+    }
+    return observation, inventory
+
+
+def _evidence_reference(
+    document: Mapping[str, object], path: str
+) -> tuple[dict[str, object], bytes]:
+    content = rfc8785.dumps(dict(document))
+    return (
+        {
+            "path": path,
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "media_type": "application/json",
+            "size_bytes": len(content),
+        },
+        content,
+    )
+
+
+def build_failure_signature(
+    *,
+    execution_status: str,
+    exit_codes: Sequence[int],
+    reason_codes: Sequence[str],
+    predicate_ids: Sequence[str],
+    evidence_purposes: Sequence[str],
+) -> FailureSignatureV05:
+    """Build one closed failure signature from structured fields only.
+
+    Raw stderr, absolute paths, hostnames, durations, and arbitrary metadata
+    have no channel into this structure; the closed model rejects unknown
+    fields and non-canonical arrays.
+    """
+
+    return FailureSignatureV05(
+        execution_status=execution_status,  # type: ignore[arg-type]
+        exit_codes=tuple(sorted(set(exit_codes))),
+        reason_codes=tuple(sorted(set(reason_codes))),
+        predicate_ids=tuple(sorted(set(predicate_ids))),
+        required_evidence_purposes=tuple(sorted(set(evidence_purposes))),
+    )
 
 
 def _validated_profile(profile: VerificationProfileV05) -> VerificationProfileV05:

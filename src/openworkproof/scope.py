@@ -17,11 +17,17 @@ from typing import Any, Literal
 import rfc8785
 from pydantic import TypeAdapter, model_validator
 
+from openworkproof.integrity import (
+    PopulationObservationBuildResult,
+    population_observation_payload,
+)
 from openworkproof.models import (
     Digest64,
     EvaluationScopeDraft,
     EvaluationScopeManifest,
     ObjectId40,
+    PopulationContractV05,
+    PopulationObservationV05,
     ProtocolModel,
     SafeNonNegativeInt,
     ScopeLocator,
@@ -723,3 +729,349 @@ def select_pytest_collection(
         status="indeterminate" if reason_codes else "satisfied",
         reason_codes=reason_codes,
     )
+
+
+# ---------------------------------------------------------------------------
+# v0.5 population observation adapters: Git diff closure and pytest collection.
+# ---------------------------------------------------------------------------
+
+def _canonical_utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _adapter_observation(
+    contract: "PopulationContractV05",
+    eligible_members: Sequence[ScopeMember],
+    selected_members: Sequence[ScopeMember],
+    reasons: list[str],
+) -> "PopulationObservationBuildResult":
+    eligible_ids = tuple(member.member_id for member in eligible_members)
+    selected_ids = tuple(member.member_id for member in selected_members)
+    if set(selected_ids) != set(contract.declared_selected_member_ids):
+        reasons.append("SCOPE_SELECTOR_MISMATCH")
+    reasons = list(dict.fromkeys(reasons))
+    if reasons:
+        return PopulationObservationBuildResult(
+            observation=None,
+            evidence_inventory=(),
+            eligible_member_ids=eligible_ids,
+            selected_member_ids=selected_ids,
+            status="indeterminate",
+            reason_codes=tuple(reasons),
+        )
+    payload, inventory = population_observation_payload(
+        contract=contract,
+        eligible_member_ids=eligible_ids,
+        selected_member_ids=selected_ids,
+        observed_at=_canonical_utc_now(),
+    )
+    return PopulationObservationBuildResult(
+        observation=PopulationObservationV05.model_validate(payload),
+        evidence_inventory=tuple(sorted(inventory.items())),
+        eligible_member_ids=eligible_ids,
+        selected_member_ids=selected_ids,
+        status="satisfied",
+        reason_codes=(),
+    )
+
+
+def _reject_unsafe_locator(value: str) -> None:
+    if not isinstance(value, str) or not value or value.startswith("/"):
+        raise ValueError("selector locator must be a relative path")
+    segments = value.split("/")
+    if any(segment in {"", ".", ".."} for segment in segments):
+        raise ValueError("selector locator must not traverse paths")
+
+
+def observe_git_population(
+    repo: Path,
+    *,
+    contract: "PopulationContractV05",
+    source_revision: str,
+    candidate_commit: str,
+    allowlist_locators: Sequence[str] = (),
+    excluded_locators: Sequence[str] = (),
+    required_locators: Sequence[str] = (),
+) -> "PopulationObservationBuildResult":
+    """Observe the Git eligible population (the committed diff closure) and
+    the selected population (the closure after allowlist, exclusions, and
+    required targets). The frozen selector spec binds every input; any
+    revision or engine drift closes the observation as indeterminate."""
+
+    from openworkproof.models import PopulationContractV05
+
+    if type(contract) is not PopulationContractV05:
+        raise ValueError("contract must be an exact PopulationContractV05")
+    root = _validated_repo(repo)
+    _validate_commit(root, source_revision, "source_revision")
+    _validate_commit(root, candidate_commit, "candidate_commit")
+    for label, values in (
+        ("allowlist", allowlist_locators),
+        ("excluded", excluded_locators),
+        ("required", required_locators),
+    ):
+        for value in values:
+            _reject_unsafe_locator(value)
+    allowlist = tuple(sorted(set(allowlist_locators)))
+    excluded = tuple(sorted(set(excluded_locators)))
+    required = tuple(sorted(set(required_locators)))
+    spec = _selector_spec_bytes(
+        "git_diff_closure",
+        {
+            "source_revision": source_revision,
+            "candidate_commit": candidate_commit,
+            "git_diff_mode": "name-status-z-find-renames",
+            "allowlist_locators": list(allowlist),
+            "excluded_locators": list(excluded),
+            "required_locators": list(required),
+        },
+    )
+    reasons: list[str] = []
+    if hashlib.sha256(spec).hexdigest() != contract.selector_spec_digest:
+        reasons.append("SCOPE_SELECTOR_MISMATCH")
+    if _selector_engine_digest() != contract.selector_engine_digest:
+        reasons.append("SCOPE_SELECTOR_MISMATCH")
+    if reasons:
+        return PopulationObservationBuildResult(
+            observation=None,
+            evidence_inventory=(),
+            eligible_member_ids=(),
+            selected_member_ids=(),
+            status="indeterminate",
+            reason_codes=tuple(dict.fromkeys(reasons)),
+        )
+    status_check = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    ).stdout
+    if status_check.strip():
+        raise ValueError("repository has uncommitted content")
+
+    raw = subprocess.run(
+        [
+            "git", "diff", "--name-status", "-z", "--find-renames",
+            source_revision, candidate_commit, "--",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    ).stdout
+    tokens = raw.split(b"\x00")
+    if tokens and tokens[-1] == b"":
+        tokens.pop()
+    eligible: list[ScopeMember] = []
+    index = 0
+    while index < len(tokens):
+        status = tokens[index].decode("ascii")
+        index += 1
+        if status.startswith(("R", "C")):
+            if index + 1 >= len(tokens):
+                raise ValueError("Git rename record is truncated")
+            old_path = tokens[index].decode("utf-8")
+            new_path = tokens[index + 1].decode("utf-8")
+            index += 2
+            eligible.append(
+                _git_blob_member(
+                    root,
+                    commit=source_revision,
+                    source_revision=source_revision,
+                    locator=old_path,
+                )
+            )
+            eligible.append(
+                _git_blob_member(
+                    root,
+                    commit=candidate_commit,
+                    source_revision=source_revision,
+                    locator=new_path,
+                )
+            )
+            continue
+        if index >= len(tokens):
+            raise ValueError("Git diff record is truncated")
+        path = tokens[index].decode("utf-8")
+        index += 1
+        if status == "D":
+            commit = source_revision
+        elif status[:1] in {"A", "M", "T"}:
+            commit = candidate_commit
+        else:
+            raise ValueError(f"unsupported committed Git status: {status}")
+        eligible.append(
+            _git_blob_member(
+                root,
+                commit=commit,
+                source_revision=source_revision,
+                locator=path,
+            )
+        )
+    eligible = tuple(_sorted_members(eligible))
+    if not eligible:
+        reasons.append("SCOPE_EMPTY")
+    eligible_locators = {member.locator for member in eligible}
+    selected = tuple(
+        member
+        for member in eligible
+        if member.locator not in excluded
+        and (not allowlist or member.locator in set(allowlist))
+    )
+    missing_required = [
+        locator for locator in required if locator not in eligible_locators
+    ]
+    if missing_required:
+        reasons.append("SCOPE_REQUIRED_TARGET_MISSING")
+    return _adapter_observation(
+        contract, eligible, selected, reasons
+    )
+
+
+def observe_pytest_population(
+    repo: Path,
+    *,
+    contract: "PopulationContractV05",
+    source_revision: str,
+    candidate_commit: str,
+    python_executable: Path,
+    selector_args: Sequence[str],
+    timeout_seconds: int,
+) -> "PopulationObservationBuildResult":
+    """Observe the pytest eligible population (the full pre-selector
+    collection) and the selected population (the selector-applied
+    collection). Both phases run with plugin autoload disabled in a frozen
+    checkout of the candidate commit."""
+
+    from openworkproof.models import PopulationContractV05
+
+    if type(contract) is not PopulationContractV05:
+        raise ValueError("contract must be an exact PopulationContractV05")
+    root = _validated_repo(repo)
+    _validate_commit(root, source_revision, "source_revision")
+    _validate_commit(root, candidate_commit, "candidate_commit")
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 300:
+        raise ValueError("timeout_seconds must be in 1..300")
+    if type(selector_args) not in {list, tuple} or any(
+        type(item) is not str for item in selector_args
+    ):
+        raise ValueError("selector_args must be an exact list or tuple of strings")
+    python = Path(python_executable).resolve(strict=True)
+    if not python.is_file():
+        raise ValueError("python_executable must be a file")
+    python_digest = hashlib.sha256(python.read_bytes()).hexdigest()
+    base_command = (str(python), "-I", "-m", "pytest", "--collect-only", "-q")
+    spec = _selector_spec_bytes(
+        "pytest_collection",
+        {
+            "source_revision": source_revision,
+            "candidate_commit": candidate_commit,
+            "python_executable_digest": python_digest,
+            "argv": [*list(base_command[1:]), *list(selector_args)],
+            "timeout_seconds": timeout_seconds,
+        },
+    )
+    reasons: list[str] = []
+    if hashlib.sha256(spec).hexdigest() != contract.selector_spec_digest:
+        reasons.append("SCOPE_SELECTOR_MISMATCH")
+    if _selector_engine_digest() != contract.selector_engine_digest:
+        reasons.append("SCOPE_SELECTOR_MISMATCH")
+    if reasons:
+        return PopulationObservationBuildResult(
+            observation=None,
+            evidence_inventory=(),
+            eligible_member_ids=(),
+            selected_member_ids=(),
+            status="indeterminate",
+            reason_codes=tuple(dict.fromkeys(reasons)),
+        )
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+            "LC_ALL": "C.UTF-8",
+            "TZ": "UTC",
+        }
+    )
+    temporary_parent = Path(tempfile.mkdtemp(prefix="owp-observe-pytest-"))
+    checkout = temporary_parent / "checkout"
+    added = False
+    node_ids: tuple[str, ...] = ()
+    try:
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", "--quiet", str(checkout), candidate_commit],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+        added = True
+
+        def collect(extra_args: Sequence[str]) -> list[str]:
+            completed = subprocess.run(
+                [*base_command, *list(extra_args)],
+                cwd=checkout,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+            if completed.returncode not in {0, 5}:
+                raise ValueError("pytest collection failed")
+            return sorted(
+                {
+                    line.strip()
+                    for line in completed.stdout.splitlines()
+                    if "::" in line.strip()
+                },
+                key=lambda item: item.encode("utf-8"),
+            )
+
+        try:
+            eligible_nodes = collect(())
+            selected_nodes = collect(selector_args)
+        except (ValueError, subprocess.TimeoutExpired):
+            reasons.append("SCOPE_SELECTOR_MISMATCH")
+            return PopulationObservationBuildResult(
+                observation=None,
+                evidence_inventory=(),
+                eligible_member_ids=(),
+                selected_member_ids=(),
+                status="indeterminate",
+                reason_codes=tuple(dict.fromkeys(reasons)),
+            )
+        node_ids = tuple(sorted(set([*eligible_nodes, *selected_nodes])))
+        if not eligible_nodes:
+            reasons.append("SCOPE_EMPTY")
+        eligible_members = tuple(
+            _git_blob_member(
+                root,
+                commit=candidate_commit,
+                source_revision=source_revision,
+                locator=node_id,
+                member_kind="test_case",
+            )
+            for node_id in eligible_nodes
+        )
+        selected_members = tuple(
+            _git_blob_member(
+                root,
+                commit=candidate_commit,
+                source_revision=source_revision,
+                locator=node_id,
+                member_kind="test_case",
+            )
+            for node_id in selected_nodes
+        )
+        return _adapter_observation(
+            contract, eligible_members, selected_members, reasons
+        )
+    finally:
+        if added:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(checkout)],
+                cwd=root,
+                check=False,
+                capture_output=True,
+            )
+        shutil.rmtree(temporary_parent, ignore_errors=True)
