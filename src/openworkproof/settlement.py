@@ -252,6 +252,7 @@ def read_settlement_snapshot(ledger: Path) -> SettlementSnapshot:
         ):
             raise SettlementReadError("acceptance terminal history is invalid")
         try:
+            acceptance_module._resolve_current_verification_record(connection)
             current = acceptance_module._load_current_verification_decision(
                 connection
             )

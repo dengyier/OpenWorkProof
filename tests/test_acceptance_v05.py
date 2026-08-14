@@ -95,6 +95,15 @@ def _insert_decision_row(case, decision) -> None:
                 "2026-01-01T00:20:00Z",
             ),
         )
+        for ordinal, reference in enumerate(decision.arm_results):
+            connection.execute(
+                """
+                INSERT INTO verification_decision_parents_v05 (
+                    decision_id, ordinal, arm_result_id
+                ) VALUES (?, ?, ?)
+                """,
+                (decision.decision_id, ordinal, reference.arm_result_id),
+            )
         connection.execute("COMMIT")
     finally:
         connection.close()
@@ -385,3 +394,141 @@ def test_v05_fabricated_decision_row_in_foreign_family_is_ambiguous(
             acceptance._resolve_current_verification_record(connection)
     finally:
         connection.close()
+
+
+def test_v05_decision_chain_without_parents_rows_closes_the_gate(
+    v05_transaction_case,
+) -> None:
+    case = v05_transaction_case
+    decision = _commit_v05_decision(case)
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "DROP TRIGGER verification_decision_parents_v05_are_immutable_delete"
+        )
+        connection.execute(
+            "DELETE FROM verification_decision_parents_v05 WHERE decision_id = ?",
+            (decision.decision_id,),
+        )
+        connection.execute("COMMIT")
+    finally:
+        connection.close()
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        with pytest.raises(acceptance.AcceptanceTransactionError):
+            acceptance._require_current_verified_decision_if_v02(connection)
+    finally:
+        connection.close()
+
+
+def test_v05_tampered_decision_signature_raises_closed_exception(
+    v05_transaction_case,
+) -> None:
+    case = v05_transaction_case
+    decision = _commit_v05_decision(case)
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "DROP TRIGGER verification_decisions_v05_are_immutable_update"
+        )
+        tampered = decision.model_copy(
+            update={
+                "verifier_signatures": (
+                    decision.verifier_signatures[0].model_copy(
+                        update={"signature": "A" * 86}
+                    ),
+                )
+            }
+        )
+        connection.execute(
+            "UPDATE verification_decisions_v05 SET decision_json = ? "
+            "WHERE decision_id = ?",
+            (
+                rfc8785.dumps(tampered.model_dump(mode="json")),
+                decision.decision_id,
+            ),
+        )
+        connection.execute("COMMIT")
+    finally:
+        connection.close()
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        with pytest.raises(acceptance.AcceptanceTransactionError):
+            acceptance._require_current_verified_decision_if_v02(connection)
+    finally:
+        connection.close()
+
+
+def test_v05_transition_rejects_cross_family_terminal_row(
+    v05_transaction_case,
+    signed_acceptance_receipt,
+) -> None:
+    case = v05_transaction_case
+    decision = _commit_v05_decision(case)
+    _commit_acceptance_fixture(case["ledger"], signed_acceptance_receipt)
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            INSERT INTO verification_decisions (
+                decision_id, predecessor_id, decision_json
+            ) VALUES (?, NULL, ?)
+            """,
+            ("bb" * 32, rfc8785.dumps({"nonce": "x"})),
+        )
+        connection.execute(
+            """
+            INSERT INTO acceptance_transitions (
+                transition_id, target_acceptance_id,
+                verification_decision_id, transition_json
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                "aa" * 32,
+                signed_acceptance_receipt.acceptance_id,
+                "bb" * 32,
+                rfc8785.dumps({"nonce": "x"}),
+            ),
+        )
+        connection.execute("COMMIT")
+    finally:
+        connection.close()
+    receipt = _transition_for_v05(
+        case=case,
+        decision=decision,
+        signed_acceptance_receipt=signed_acceptance_receipt,
+        transition="withdrawn",
+    )
+    with pytest.raises(
+        acceptance.AcceptanceTransactionError, match="protocol families"
+    ):
+        acceptance.commit_acceptance_transition(case["ledger"], receipt)
+
+
+def test_v05_settlement_rejects_cross_family_decision_ambiguity(
+    v05_transaction_case,
+) -> None:
+    case = v05_transaction_case
+    decision = _commit_v05_decision(case)
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            INSERT INTO verification_decisions (
+                decision_id, predecessor_id, decision_json
+            ) VALUES (?, NULL, ?)
+            """,
+            (
+                decision.decision_id,
+                rfc8785.dumps({"nonce": "x"}),
+            ),
+        )
+        connection.execute("COMMIT")
+    finally:
+        connection.close()
+    with pytest.raises(Exception, match="invalid"):
+        read_settlement_snapshot(case["ledger"])

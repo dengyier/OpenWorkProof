@@ -1404,7 +1404,6 @@ def _load_current_verification_decision(
     from openworkproof import verification  # noqa: PLC0415
     from openworkproof.models import (  # noqa: PLC0415
         EvaluationScopeManifest,
-        VerificationDecisionV05,
         VerificationProfileV05,
     )
 
@@ -1478,29 +1477,14 @@ def _load_current_verification_decision(
             raise AcceptanceTransactionError(
                 "v0.5 evaluation scope row is not canonical"
             )
-        previous: VerificationDecisionV05 | None = None
-        decision: VerificationDecisionV05 | None = None
-        for decision_id, digest, predecessor_id, decision_raw in connection.execute(
-            """
-            SELECT decision_id, decision_digest, predecessor_id, decision_json
-            FROM verification_decisions_v05 ORDER BY rowid
-            """
-        ):
-            parsed = VerificationDecisionV05.model_validate_json(decision_raw)
-            if (
-                parsed.decision_id != decision_id
-                or parsed.digest != digest
-                or predecessor_id
-                != (None if previous is None else previous.decision_id)
-            ):
-                raise AcceptanceTransactionError(
-                    "v0.5 verification decision chain is invalid"
-                )
-            verification.validate_verification_decision_v05(
-                profile=profile, manifest=manifest, decision=parsed
+        try:
+            decision = verification._load_current_decision_v05(
+                connection, profile=profile, manifest=manifest
             )
-            previous = parsed
-        decision = previous
+        except verification.VerificationTransactionError as error:
+            raise AcceptanceTransactionError(str(error)) from error
+        except verification.VerificationInputError as error:
+            raise AcceptanceTransactionError(str(error)) from error
         version = "0.5"
     if decision is None:
         raise AcceptanceTransactionError(
@@ -3458,6 +3442,24 @@ def commit_acceptance_transition(
             raise AcceptanceTransactionError(
                 "acceptance already has a terminal transition"
             )
+        for other_table in (
+            "acceptance_transitions",
+            "acceptance_transitions_v03",
+            "acceptance_transitions_v05",
+        ):
+            if other_table == transition_table:
+                continue
+            if (
+                connection.execute(
+                    f"SELECT 1 FROM {other_table} "
+                    "WHERE target_acceptance_id = ?",
+                    (parsed.target_acceptance_id,),
+                ).fetchone()
+                is not None
+            ):
+                raise AcceptanceTransactionError(
+                    "acceptance transition spans protocol families"
+                )
         verification._assert_nonce_unused(connection, parsed.nonce)
         if protocol_version == "0.2":
             connection.execute(
