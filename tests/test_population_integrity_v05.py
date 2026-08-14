@@ -94,23 +94,30 @@ def _signed_manifest(
     manager_key: Ed25519PrivateKey,
     *,
     members: Sequence[ScopeMember] | None = None,
+    selector_kinds: Sequence[str] | None = None,
 ) -> EvaluationScopeManifest:
     payload = base.model_dump(
         mode="json",
         exclude={"digest", "signature_alg", "signer_key_id", "signature"},
     )
     original = payload["selector_rules"][0]
+    kinds = list(selector_kinds) if selector_kinds is not None else [
+        original["selector_kind"],
+        original["selector_kind"],
+    ]
     payload["selector_rules"] = sorted(
         (
             {
                 **original,
                 "rule_id": "3" * 64,
+                "selector_kind": kinds[0],
                 "selector_spec_digest": "4" * 64,
                 "selector_engine_digest": "5" * 64,
             },
             {
                 **original,
                 "rule_id": "6" * 64,
+                "selector_kind": kinds[1],
                 "selector_spec_digest": "7" * 64,
                 "selector_engine_digest": "8" * 64,
             },
@@ -1125,6 +1132,10 @@ def _assess(
 def test_population_assessment_empty_contract_is_not_masked_by_other_contracts(
     population_case: dict[str, Any],
 ) -> None:
+    """Design 6.1.1: an empty population follows empty_population_policy=unknown
+    and stays empty/NO_ELIGIBLE_POPULATION even when the rule output is
+    non-empty; it is never misreported as a collection failure and can
+    never reach matched."""
     changes, inventory = _default_assessment_inputs(population_case)
     source_contract = next(
         contract
@@ -1404,6 +1415,34 @@ def _synthetic_member(
             "source_revision": manifest.source_revision,
         }
     )
+
+
+def test_profile_rejects_selector_witness_drifting_from_signed_scope_partition(
+    population_case: dict[str, Any],
+) -> None:
+    """First-adapter selector outputs are provable from the signed manifest."""
+    base = population_case["manifest"]
+    extra = _synthetic_member(base, "source_file", "src/extra.py")
+    manifest = _signed_manifest(
+        base,
+        population_case["manager_key"],
+        members=(*base.members, extra),
+        selector_kinds=("git_diff_closure", "pytest_collection"),
+    )
+    profile = _signed_profile(
+        population_case["base_profile"],
+        manifest,
+        population_case["manager_key"],
+    )
+    outputs = _rule_outputs({**population_case, "manifest": manifest})
+    git_rule_id = manifest.selector_rules[0].rule_id
+    outputs[git_rule_id] = [
+        member_id
+        for member_id in outputs[git_rule_id]
+        if member_id != extra.member_id
+    ]
+    with pytest.raises(ValueError, match="kind partition"):
+        validate_population_contracts(profile, manifest, rule_outputs=outputs)
 
 
 def test_population_assessment_rejects_under_reported_eligible_population(

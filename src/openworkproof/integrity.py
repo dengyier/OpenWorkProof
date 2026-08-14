@@ -4,15 +4,17 @@ This module derives one deterministic population status from signed v0.5
 inputs. Two external inputs are required to make the derivation sound:
 
 - ``rule_outputs``: the authoritative output member set of every v0.3
-  selector rule. It must be produced by replaying the signed selector spec
-  and engine digests against the frozen Git revision; the pure function
-  cannot replay Git or pytest itself. Declared selected members must be a
-  subset of their bound rule's output, every output must be a Scope member,
-  and the eligible evidence must contain the bound rule's output (a
-  verifier cannot shrink the eligible population to inflate the capture
-  rate). The adapter layer binds the witness provenance by replaying with
-  the signed engine digest. Missing outputs make the assessment
-  ``unavailable``.
+  selector rule, produced by replaying the signed selector spec and engine
+  digests against the frozen Git revision. Declared selected members must
+  be a subset of their bound rule's output, and the eligible evidence must
+  contain the bound rule's output (a verifier cannot shrink the eligible
+  population to inflate the capture rate). For the first-adapter selector
+  kinds (``git_diff_closure`` / ``pytest_collection``) the output is
+  provable from the signed manifest itself and must equal the signed scope
+  kind partition, so caller metadata cannot drift it; for ``explicit``
+  rules the caller supplies the replayed output and the adapter layer must
+  bind it to the signed selector engine digest. Missing outputs make the
+  assessment ``unavailable``.
 - ``evidence_inventory``: an authoritative artifact inventory that maps
   SHA-256 digests to evidence bytes. Every ``EvidenceRefV05`` inside a
   population observation must replay exactly (content digest and byte size)
@@ -114,7 +116,11 @@ def validate_population_contracts(
     ``rule_outputs`` is the authoritative output member set per selector
     rule, replayed from the signed selector spec and engine digests. Every
     declared selected member must be a member of its bound rule's output;
-    relying on the Scope manifest population alone is not sufficient.
+    relying on the Scope manifest population alone is not sufficient. For
+    the first-adapter selector kinds (``git_diff_closure`` /
+    ``pytest_collection``) the output must equal the signed scope kind
+    partition exactly, so caller-supplied outputs cannot drift from signed
+    data.
     """
 
     profile = _validated_profile(profile)
@@ -164,6 +170,18 @@ def validate_population_contracts(
             raise ValueError("population contract member kind does not match selector")
 
         output_ids = set(validated_outputs[rule_id])
+        if rule.selector_kind in {"git_diff_closure", "pytest_collection"}:
+            kind_partition = tuple(
+                sorted(
+                    member.member_id
+                    for member in manifest.members
+                    if member.member_kind == contract.member_kind
+                )
+            )
+            if tuple(sorted(output_ids)) != kind_partition:
+                raise ValueError(
+                    "selector rule outputs must equal the signed scope kind partition"
+                )
         for member_id in contract.declared_selected_member_ids:
             member = members_by_id.get(member_id)
             if member is None:
@@ -225,7 +243,7 @@ def _parse_population_evidence(
 
     try:
         document = json.loads(content.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
         raise ValueError("population evidence is not valid JSON") from error
     if not isinstance(document, dict) or set(document) != {
         "schema_version",
@@ -301,9 +319,11 @@ def assess_population_integrity(
     an empty population -> ``empty``; below count/capture thresholds or a
     zero selected population with a non-empty eligible population ->
     ``capture_failed``; otherwise ``matched``. Each contract's
-    ``empty_population_policy=unknown`` takes effect independently, and the
-    eligible evidence must contain the bound rule's output so a verifier
-    cannot inflate the capture rate by shrinking the eligible population.
+    ``empty_population_policy=unknown`` takes effect independently: an
+    empty eligible population is ``empty`` (never ``matched`` and never a
+    collection failure) even when the bound rule output is non-empty, and
+    a non-empty eligible population must contain the bound rule's output
+    so a verifier cannot inflate the capture rate by shrinking it.
     """
 
     profile = _validated_profile(profile)
