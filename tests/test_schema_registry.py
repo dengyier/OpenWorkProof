@@ -76,6 +76,14 @@ V02_OBJECT_PATHS = {
 V02_SCHEMA_FILENAMES = frozenset(
     {"schema-registry.json", *V02_OBJECT_PATHS.values()}
 )
+V05_OBJECT_PATHS = {
+    "verification-arm-result": "verification-arm-result.schema.json",
+    "verification-decision": "verification-decision.schema.json",
+    "verification-profile": "verification-profile.schema.json",
+}
+V05_SCHEMA_FILENAMES = frozenset(
+    {"schema-registry.json", *V05_OBJECT_PATHS.values()}
+)
 FROZEN_V02_DIGESTS = {
     "acceptance-transition.schema.json": (
         "504a06d4748b0ea045f40c2182ee85e2b59cea8793d6c9259f695dc6c764e1a0"
@@ -243,6 +251,24 @@ def test_package_and_published_mirror_match_frozen_v02_anchors() -> None:
         )
 
 
+def test_every_frozen_version_resource_and_spec_mirror_match_anchors() -> None:
+    api = _api()
+
+    for version, expected_digests in api._FROZEN_DIGESTS_BY_VERSION.items():
+        package = resources.files("openworkproof").joinpath(
+            "schemas", f"v{version}"
+        )
+        mirror = PROJECT_ROOT / "specs" / f"v{version}"
+        filenames = api._FILENAMES_BY_VERSION[version]
+        assert {item.name for item in package.iterdir()} == filenames
+        assert {item.name for item in mirror.iterdir()} == filenames
+        for filename, expected_digest in expected_digests.items():
+            package_bytes = package.joinpath(filename).read_bytes()
+            assert package_bytes == mirror.joinpath(filename).read_bytes()
+            assert hashlib.sha256(package_bytes).hexdigest() == expected_digest
+            assert package_bytes == rfc8785.dumps(json.loads(package_bytes))
+
+
 def test_current_generators_match_frozen_v01_schema_anchors() -> None:
     api = _api()
     generated = {
@@ -345,7 +371,7 @@ def test_unknown_version_and_object_type_fail_closed(tmp_path: Path) -> None:
     assert result.error_code == "UNKNOWN_PROTOCOL_VERSION"
 
 
-def test_v04_registry_routing_is_closed_and_explicit() -> None:
+def test_version_registry_routing_is_closed_and_explicit() -> None:
     api = _api()
 
     assert api._OBJECT_PATHS_BY_VERSION == {
@@ -353,12 +379,14 @@ def test_v04_registry_routing_is_closed_and_explicit() -> None:
         "0.2": V02_OBJECT_PATHS,
         "0.3": api.V03_OBJECT_PATHS,
         "0.4": api.V04_OBJECT_PATHS,
+        "0.5": V05_OBJECT_PATHS,
     }
     assert set(api._SCHEMA_FACTORIES_BY_VERSION) == {
         "0.1",
         "0.2",
         "0.3",
         "0.4",
+        "0.5",
     }
     assert set(api._SCHEMA_FACTORIES_BY_VERSION["0.1"]) == set(OBJECT_PATHS)
     assert set(api._SCHEMA_FACTORIES_BY_VERSION["0.2"]) == set(
@@ -370,6 +398,9 @@ def test_v04_registry_routing_is_closed_and_explicit() -> None:
     assert set(api._SCHEMA_FACTORIES_BY_VERSION["0.4"]) == set(
         api.V04_OBJECT_PATHS
     )
+    assert set(api._SCHEMA_FACTORIES_BY_VERSION["0.5"]) == set(
+        V05_OBJECT_PATHS
+    )
     assert set(api._generated_files(version="0.1")) == SCHEMA_FILENAMES
     assert set(api._generated_files(version="0.2")) == V02_SCHEMA_FILENAMES
     assert set(api._generated_files(version="0.3")) == {
@@ -380,6 +411,130 @@ def test_v04_registry_routing_is_closed_and_explicit() -> None:
         "schema-registry.json",
         *api.V04_OBJECT_PATHS.values(),
     }
+    assert set(api._generated_files(version="0.5")) == V05_SCHEMA_FILENAMES
+
+
+def test_v05_registry_contains_only_the_three_signed_protocol_objects(
+    tmp_path: Path,
+) -> None:
+    api = _api()
+
+    assert api.V05_OBJECT_PATHS == V05_OBJECT_PATHS
+    assert set(api._SCHEMA_FACTORIES_BY_VERSION["0.5"]) == set(
+        V05_OBJECT_PATHS
+    )
+    assert set(api._generated_files(version="0.5")) == V05_SCHEMA_FILENAMES
+
+    runtime = tmp_path / "runtime"
+    mirror = tmp_path / "mirror"
+    api.write_authoritative_schemas(runtime, mirror=mirror, version="0.5")
+
+    assert _snapshot(runtime) == _snapshot(mirror)
+    assert set(_snapshot(runtime)) == V05_SCHEMA_FILENAMES
+    registry = json.loads(runtime.joinpath("schema-registry.json").read_bytes())
+    assert registry == api._FROZEN_V05_REGISTRY
+    assert [entry["object_type"] for entry in registry["schemas"]] == sorted(
+        V05_OBJECT_PATHS
+    )
+    for filename, expected_digest in api._FROZEN_V05_DIGESTS.items():
+        raw = runtime.joinpath(filename).read_bytes()
+        assert hashlib.sha256(raw).hexdigest() == expected_digest
+        assert raw == rfc8785.dumps(json.loads(raw))
+
+
+def test_v05_schema_generation_is_independent_canonical_and_closed(
+    tmp_path: Path,
+) -> None:
+    api = _api()
+    outputs: list[dict[str, bytes]] = []
+
+    for run in ("one", "two"):
+        runtime = tmp_path / run / "runtime"
+        mirror = tmp_path / run / "spec"
+        assert api.main(
+            [
+                "--version",
+                "0.5",
+                "--destination",
+                str(runtime),
+                "--mirror",
+                str(mirror),
+            ]
+        ) == 0
+        snapshot = _snapshot(runtime)
+        assert snapshot == _snapshot(mirror)
+        outputs.append(snapshot)
+
+        for filename, raw in snapshot.items():
+            schema = json.loads(raw)
+            assert raw == rfc8785.dumps(schema)
+            if filename != "schema-registry.json":
+                assert schema["additionalProperties"] is False
+                assert all(
+                    definition.get("additionalProperties") is False
+                    for definition in schema.get("$defs", {}).values()
+                    if definition.get("type") == "object"
+                )
+
+    assert outputs[0] == outputs[1]
+
+
+def test_v05_authority_rejects_nested_and_cross_version_object_lookups() -> None:
+    api = _api()
+
+    assert api.authoritative_schema("verification-profile", version="0.5")
+    for nested_object in (
+        "population-contract",
+        "population-observation",
+        "failure-signature",
+        "control-contract",
+        "control-observation",
+        "verification-integrity-assessment",
+    ):
+        with pytest.raises(ValueError, match="unknown object type"):
+            api.authoritative_schema(nested_object, version="0.5")
+    with pytest.raises(ValueError, match="unknown object type"):
+        api.authoritative_schema("verification-profile", version="0.4")
+
+
+def test_v05_atomic_replace_preserves_existing_targets_on_mirror_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _api()
+    destination = tmp_path / "destination"
+    mirror = tmp_path / "mirror"
+    destination.mkdir()
+    mirror.mkdir()
+    destination_before = {
+        name: f"old:{name}".encode() for name in V05_SCHEMA_FILENAMES
+    }
+    mirror_before = {
+        name: f"mirror:{name}".encode() for name in V05_SCHEMA_FILENAMES
+    }
+    for name, content in destination_before.items():
+        destination.joinpath(name).write_bytes(content)
+    for name, content in mirror_before.items():
+        mirror.joinpath(name).write_bytes(content)
+    original_replace = Path.replace
+    failed = False
+
+    def fail_first_replace_to_mirror(source: Path, target: Path) -> Path:
+        nonlocal failed
+        if Path(target) == mirror and not failed:
+            failed = True
+            raise OSError("simulated v05 mirror commit failure")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", fail_first_replace_to_mirror)
+    with pytest.raises(OSError, match="simulated v05 mirror commit failure"):
+        api.write_authoritative_schemas(
+            destination, mirror=mirror, version="0.5"
+        )
+
+    assert _snapshot(destination) == destination_before
+    assert _snapshot(mirror) == mirror_before
+    assert _schema_transaction_artifacts(tmp_path) == set()
 
 
 def test_v02_writer_emits_frozen_package_and_mirror(tmp_path: Path) -> None:
@@ -399,7 +554,7 @@ def test_v02_writer_emits_frozen_package_and_mirror(tmp_path: Path) -> None:
         assert hashlib.sha256(destination.joinpath(name).read_bytes()).hexdigest() == expected
 
 
-def test_v03_schema_remains_closed_and_canonical_in_v04_registry(
+def test_v03_schema_remains_closed_and_canonical_in_later_registries(
     tmp_path: Path,
 ) -> None:
     api = _api()
@@ -414,6 +569,7 @@ def test_v03_schema_remains_closed_and_canonical_in_v04_registry(
         "0.2",
         "0.3",
         "0.4",
+        "0.5",
     }
     assert set(api._OBJECT_PATHS_BY_VERSION["0.3"]) == expected_objects
     generated = api._generated_files(version="0.3")
@@ -1003,6 +1159,16 @@ def test_built_wheel_contains_all_authoritative_schema_resources(
             "schema-registry.json",
             *_api().V04_OBJECT_PATHS.values(),
         }
+        v05_members = {
+            name.removeprefix("openworkproof/schemas/v0.5/")
+            for name in archive.namelist()
+            if name.startswith("openworkproof/schemas/v0.5/")
+            and not name.endswith("/")
+        }
+        assert v05_members == V05_SCHEMA_FILENAMES
+        for name, expected_digest in _api()._FROZEN_V05_DIGESTS.items():
+            content = archive.read(f"openworkproof/schemas/v0.5/{name}")
+            assert hashlib.sha256(content).hexdigest() == expected_digest
 
 
 def test_registry_loads_from_an_installed_wheel_outside_project_cwd(

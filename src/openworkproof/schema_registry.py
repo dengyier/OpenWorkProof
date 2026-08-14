@@ -35,10 +35,13 @@ from openworkproof.models import (
     SubjectClaim,
     VerificationArmResult,
     VerificationArmResultV03,
+    VerificationArmResultV05,
     VerificationDecision,
     VerificationDecisionV03,
+    VerificationDecisionV05,
     VerificationProfileV02,
     VerificationProfileV03,
+    VerificationProfileV05,
     WorkOrder,
 )
 
@@ -241,29 +244,69 @@ _FROZEN_V04_REGISTRY = {
         for object_type, path in V04_OBJECT_PATHS.items()
     ],
 }
+V05_OBJECT_PATHS = {
+    "verification-arm-result": "verification-arm-result.schema.json",
+    "verification-decision": "verification-decision.schema.json",
+    "verification-profile": "verification-profile.schema.json",
+}
+V05_SCHEMA_FACTORIES: dict[str, Callable[[], dict[str, Any]]] = {
+    "verification-arm-result": VerificationArmResultV05.model_json_schema,
+    "verification-decision": VerificationDecisionV05.model_json_schema,
+    "verification-profile": VerificationProfileV05.model_json_schema,
+}
+_FROZEN_V05_DIGESTS = {
+    "verification-arm-result.schema.json": (
+        "ec67cae6ece9994d2eed1affba292b3230684c7ebe97815a812acedbfee3e400"
+    ),
+    "verification-decision.schema.json": (
+        "f8be3906e9f30574adac1461150dd1e337e4468a325bbf6f7d187345c4fd6fc8"
+    ),
+    "verification-profile.schema.json": (
+        "2bfb2dfaa61ca1d8d3ff010048ac0498456a4c789684bc0d6cf96764e94d8667"
+    ),
+    "schema-registry.json": (
+        "8fe7fb78883db5f332688d7b793abaeeb0f5b78aef7d9960b40243b6388306fa"
+    ),
+}
+_FROZEN_V05_REGISTRY = {
+    "schema_version": _REGISTRY_SCHEMA_VERSION,
+    "protocol_version": "0.5",
+    "schemas": [
+        {
+            "object_type": object_type,
+            "path": path,
+            "sha256": _FROZEN_V05_DIGESTS[path],
+        }
+        for object_type, path in V05_OBJECT_PATHS.items()
+    ],
+}
 _OBJECT_PATHS_BY_VERSION = {
     "0.1": V01_OBJECT_PATHS,
     "0.2": V02_OBJECT_PATHS,
     "0.3": V03_OBJECT_PATHS,
     "0.4": V04_OBJECT_PATHS,
+    "0.5": V05_OBJECT_PATHS,
 }
 _SCHEMA_FACTORIES_BY_VERSION = {
     "0.1": V01_SCHEMA_FACTORIES,
     "0.2": V02_SCHEMA_FACTORIES,
     "0.3": V03_SCHEMA_FACTORIES,
     "0.4": V04_SCHEMA_FACTORIES,
+    "0.5": V05_SCHEMA_FACTORIES,
 }
 _FROZEN_DIGESTS_BY_VERSION = {
     "0.1": _FROZEN_V01_DIGESTS,
     "0.2": _FROZEN_V02_DIGESTS,
     "0.3": _FROZEN_V03_DIGESTS,
     "0.4": _FROZEN_V04_DIGESTS,
+    "0.5": _FROZEN_V05_DIGESTS,
 }
 _FROZEN_REGISTRIES_BY_VERSION = {
     "0.1": _FROZEN_V01_REGISTRY,
     "0.2": _FROZEN_V02_REGISTRY,
     "0.3": _FROZEN_V03_REGISTRY,
     "0.4": _FROZEN_V04_REGISTRY,
+    "0.5": _FROZEN_V05_REGISTRY,
 }
 _FILENAMES_BY_VERSION = {
     version: frozenset({_REGISTRY_FILENAME, *object_paths.values()})
