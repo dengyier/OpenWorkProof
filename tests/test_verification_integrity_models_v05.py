@@ -9,9 +9,11 @@ from typing import Any
 import pytest
 import rfc8785
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 import openworkproof.models as models_module
+from openworkproof.schema_registry import authoritative_schema
 from openworkproof.models import (
     ActionBindingManifest,
     ControlContractV05,
@@ -575,7 +577,9 @@ def test_failure_signature_exact_fields_formula_and_mutation_sensitivity() -> No
 )
 def test_failure_signature_rejects_invalid_arrays(field: str, value: Any) -> None:
     signature = FailureSignatureV05.model_validate(_failure_signature_payload())
-    with pytest.raises(ValidationError, match="non-empty|sorted|unique|64|256"):
+    with pytest.raises(
+        ValidationError, match="non-empty|sorted|unique|at least|64|256"
+    ):
         _revalidate(signature, **{field: value})
 
 
@@ -1001,6 +1005,115 @@ def _valid_v05_model_instances(
     )
 
 
+def _definition_validator(
+    schema: dict[str, Any], definition_name: str
+) -> Draft202012Validator:
+    return Draft202012Validator(
+        {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": schema["$defs"],
+            "$ref": f"#/$defs/{definition_name}",
+        }
+    )
+
+
+def _assert_schema_and_model_reject(
+    validator: Draft202012Validator,
+    model_type: type[Any],
+    payload: dict[str, Any],
+) -> None:
+    assert list(validator.iter_errors(payload))
+    with pytest.raises(ValidationError):
+        model_type.model_validate(payload)
+
+
+def test_v05_json_schema_rejects_expressible_new_field_violations(
+    frozen_verification_profile_v03: VerificationProfileV03,
+    frozen_verification_arm_result_v03: VerificationArmResultV03,
+    frozen_verification_decision_v03: VerificationDecisionV03,
+    frozen_role_keys_v05: dict[str, tuple[Ed25519PrivateKey, dict[str, str]]],
+) -> None:
+    instances = _valid_v05_model_instances(
+        frozen_verification_profile_v03,
+        frozen_verification_arm_result_v03,
+        frozen_verification_decision_v03,
+        frozen_role_keys_v05,
+    )
+    profile, arm_result, decision = instances[6], instances[7], instances[9]
+    profile_schema = authoritative_schema("verification-profile", version="0.5")
+    arm_schema = authoritative_schema("verification-arm-result", version="0.5")
+    decision_schema = authoritative_schema("verification-decision", version="0.5")
+
+    for schema in (profile_schema, arm_schema, decision_schema):
+        assert "semantic validation" in schema["$comment"]
+
+    malformed_profile = profile.model_dump(mode="json")
+    malformed_profile["population_contracts"][0]["contract_id"] = "f" * 63
+    _assert_schema_and_model_reject(
+        Draft202012Validator(profile_schema),
+        VerificationProfileV05,
+        malformed_profile,
+    )
+
+    malformed_result = arm_result.model_dump(mode="json")
+    malformed_result["population_observations"][0]["eligible_seen"] = -1
+    _assert_schema_and_model_reject(
+        Draft202012Validator(arm_schema),
+        VerificationArmResultV05,
+        malformed_result,
+    )
+
+    malformed_decision = decision.model_dump(mode="json")
+    malformed_decision["integrity_assessment"]["population_status"] = "invalid"
+    _assert_schema_and_model_reject(
+        Draft202012Validator(decision_schema),
+        VerificationDecisionV05,
+        malformed_decision,
+    )
+
+    contract = instances[0].model_dump(mode="json")
+    contract["minimum_capture_denominator"] = 0
+    _assert_schema_and_model_reject(
+        _definition_validator(profile_schema, "PopulationContractV05"),
+        PopulationContractV05,
+        contract,
+    )
+
+    oversized_contract = instances[0].model_dump(mode="json")
+    oversized_contract["declared_selected_member_ids"] = ["4" * 64] * 4097
+    _assert_schema_and_model_reject(
+        _definition_validator(profile_schema, "PopulationContractV05"),
+        PopulationContractV05,
+        oversized_contract,
+    )
+
+    duplicate_failure_signature = instances[2].model_dump(mode="json")
+    duplicate_failure_signature["exit_codes"] = [1, 1]
+    _assert_schema_and_model_reject(
+        _definition_validator(profile_schema, "FailureSignatureV05"),
+        FailureSignatureV05,
+        duplicate_failure_signature,
+    )
+
+    malformed_contract_time = instances[3].model_dump(mode="json")
+    malformed_contract_time["valid_from"] = "2026-01-01T00:00:00+00:00"
+    _assert_schema_and_model_reject(
+        _definition_validator(profile_schema, "ControlContractV05"),
+        ControlContractV05,
+        malformed_contract_time,
+    )
+
+    malformed_evidence = instances[1].model_dump(mode="json")
+    malformed_evidence["evidence_refs"][0].update(
+        path="../invalid", sha256="bad", media_type="invalid", size_bytes=0
+    )
+    _assert_schema_and_model_reject(
+        _definition_validator(arm_schema, "PopulationObservationV05"),
+        PopulationObservationV05,
+        malformed_evidence,
+    )
+
+
 @pytest.mark.parametrize(
     ("model_index", "field", "invalid_value"),
     (
@@ -1076,7 +1189,7 @@ def test_v05_profile_rejects_population_and_control_cardinality(
         ([_population_contract_payload()] * 2, None, "population contracts"),
         (None, [], "control contracts"),
     ):
-        with pytest.raises(ValidationError, match=message):
+        with pytest.raises(ValidationError, match=f"{message}|at least"):
             _signed_profile_v05(
                 frozen_verification_profile_v03,
                 manager_key,
@@ -1175,7 +1288,9 @@ def test_v05_arm_result_rejects_empty_duplicate_and_control_wrong_arm_kind(
 ) -> None:
     verifier_key = frozen_role_keys_v05["Verifier"][0]
     observation = _population_observation_payload()
-    with pytest.raises(ValidationError, match="population observations"):
+    with pytest.raises(
+        ValidationError, match="population observations|at least"
+    ):
         _signed_arm_result_v05(
             frozen_verification_arm_result_v03,
             verifier_key,

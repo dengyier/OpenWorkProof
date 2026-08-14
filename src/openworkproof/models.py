@@ -23,6 +23,7 @@ from pydantic import (
     PlainSerializer,
     TypeAdapter,
     ValidationError,
+    WithJsonSchema,
     field_validator,
     model_serializer,
     model_validator,
@@ -2643,26 +2644,101 @@ def population_member_digest(member_ids: list[str] | tuple[str, ...]) -> str:
     )
 
 
-_V05_MODEL_CONFIG = ConfigDict(revalidate_instances="subclass-instances")
+_V05_SCHEMA_COMMENT = (
+    "OpenWorkProof semantic validation is mandatory after JSON Schema "
+    "validation; canonical ordering, digest recomputation, cross-field "
+    "relationships, and signatures are not fully expressed here."
+)
+_V05_MODEL_CONFIG = ConfigDict(
+    revalidate_instances="subclass-instances",
+    json_schema_extra={"$comment": _V05_SCHEMA_COMMENT},
+)
+V05Digest64 = Annotated[
+    str,
+    Field(pattern=r"^[0-9a-f]{64}$"),
+    BeforeValidator(_digest64),
+]
+V05SafeNonNegativeInt = Annotated[
+    int,
+    Field(ge=0, le=MAX_SAFE_INTEGER),
+    BeforeValidator(lambda value: _require_exact_int(value, positive=False)),
+]
+V05SafePositiveInt = Annotated[
+    int,
+    Field(ge=1, le=MAX_SAFE_INTEGER),
+    BeforeValidator(lambda value: _require_exact_int(value, positive=True)),
+]
+V05CanonicalUTCTime = Annotated[
+    datetime,
+    BeforeValidator(_parse_canonical_time),
+    PlainSerializer(_serialize_canonical_time, return_type=str),
+    WithJsonSchema(
+        {
+            "type": "string",
+            "format": "date-time",
+            "pattern": r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+        }
+    ),
+]
+V05Identifier = Annotated[
+    str,
+    Field(min_length=1, max_length=128),
+    BeforeValidator(_identifier),
+]
+V05CanonicalRoot = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=512,
+        pattern=r"^[A-Za-z0-9._/-]+$",
+        json_schema_extra={
+            "allOf": [
+                {"not": {"pattern": r"(^|/)\.\.?(/|$)"}},
+                {"not": {"pattern": r"^/|/$|//"}},
+                {"not": {"pattern": r"^\.git(?:/|$)"}},
+            ]
+        },
+    ),
+    BeforeValidator(_validate_root),
+]
+
+
+class EvidenceRefV05(ProtocolModel):
+    model_config = _V05_MODEL_CONFIG
+
+    path: V05CanonicalRoot
+    sha256: V05Digest64
+    media_type: Literal["text/x-diff", "application/json"]
+    size_bytes: V05SafePositiveInt
+
+    @model_validator(mode="after")
+    def _validate_size(self) -> EvidenceRefV05:
+        if self.size_bytes > MAX_ARTIFACT_BYTES:
+            raise ValueError("evidence reference exceeds 8 MiB")
+        return self
 
 
 class PopulationContractV05(ProtocolModel):
     model_config = _V05_MODEL_CONFIG
 
-    contract_id: Digest64
-    selector_rule_id: Digest64
+    contract_id: V05Digest64
+    selector_rule_id: V05Digest64
     member_kind: Literal["source_file", "test_case"]
-    selector_spec_digest: Digest64
-    selector_engine_digest: Digest64
-    declared_selected_member_ids: tuple[Digest64, ...]
-    minimum_eligible_count: SafeNonNegativeInt
-    minimum_selected_count: SafeNonNegativeInt
-    maximum_eligible_count: SafeNonNegativeInt
-    maximum_selected_count: SafeNonNegativeInt
-    minimum_capture_numerator: SafeNonNegativeInt
-    minimum_capture_denominator: SafePositiveInt
+    selector_spec_digest: V05Digest64
+    selector_engine_digest: V05Digest64
+    declared_selected_member_ids: tuple[V05Digest64, ...] = Field(
+        min_length=1, max_length=4096, json_schema_extra={"uniqueItems": True}
+    )
+    minimum_eligible_count: V05SafeNonNegativeInt
+    minimum_selected_count: V05SafeNonNegativeInt
+    maximum_eligible_count: V05SafeNonNegativeInt
+    maximum_selected_count: V05SafeNonNegativeInt
+    minimum_capture_numerator: V05SafeNonNegativeInt
+    minimum_capture_denominator: V05SafePositiveInt
     empty_population_policy: Literal["unknown"]
-    required_population_evidence_purposes: tuple[Identifier, ...]
+    required_population_evidence_purposes: tuple[V05Identifier, ...] = Field(
+        min_length=1, max_length=256, json_schema_extra={"uniqueItems": True}
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -2722,18 +2798,20 @@ class PopulationContractV05(ProtocolModel):
 class PopulationObservationV05(ProtocolModel):
     model_config = _V05_MODEL_CONFIG
 
-    contract_id: Digest64
-    selector_rule_id: Digest64
-    selector_spec_digest: Digest64
-    selector_engine_digest: Digest64
-    eligible_seen: SafeNonNegativeInt
-    eligible_population_digest: Digest64
-    selected_count: SafeNonNegativeInt
-    selected_population_digest: Digest64
-    capture_numerator: SafeNonNegativeInt
-    capture_denominator: SafePositiveInt
-    observed_at: CanonicalUTCTime
-    evidence_refs: tuple[EvidenceRef, ...]
+    contract_id: V05Digest64
+    selector_rule_id: V05Digest64
+    selector_spec_digest: V05Digest64
+    selector_engine_digest: V05Digest64
+    eligible_seen: V05SafeNonNegativeInt
+    eligible_population_digest: V05Digest64
+    selected_count: V05SafeNonNegativeInt
+    selected_population_digest: V05Digest64
+    capture_numerator: V05SafeNonNegativeInt
+    capture_denominator: V05SafePositiveInt
+    observed_at: V05CanonicalUTCTime
+    evidence_refs: tuple[EvidenceRefV05, ...] = Field(
+        max_length=256, json_schema_extra={"uniqueItems": True}
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -2775,10 +2853,18 @@ class FailureSignatureV05(ProtocolModel):
     model_config = _V05_MODEL_CONFIG
 
     execution_status: VerificationArmExecutionStatus
-    exit_codes: tuple[SafeNonNegativeInt, ...]
-    reason_codes: tuple[VerificationReasonCodeV03, ...]
-    predicate_ids: tuple[Identifier, ...]
-    required_evidence_purposes: tuple[Identifier, ...]
+    exit_codes: tuple[V05SafeNonNegativeInt, ...] = Field(
+        min_length=1, max_length=64, json_schema_extra={"uniqueItems": True}
+    )
+    reason_codes: tuple[VerificationReasonCodeV03, ...] = Field(
+        min_length=1, max_length=256, json_schema_extra={"uniqueItems": True}
+    )
+    predicate_ids: tuple[V05Identifier, ...] = Field(
+        min_length=1, max_length=256, json_schema_extra={"uniqueItems": True}
+    )
+    required_evidence_purposes: tuple[V05Identifier, ...] = Field(
+        min_length=1, max_length=256, json_schema_extra={"uniqueItems": True}
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -2846,15 +2932,15 @@ def control_contract_id(
 class ControlContractV05(ProtocolModel):
     model_config = _V05_MODEL_CONFIG
 
-    control_id: Digest64
-    arm_id: Digest64
+    control_id: V05Digest64
+    arm_id: V05Digest64
     control_target: Literal["semantic_regression", "required_target_coverage"]
-    fixture_digest: Digest64
-    provocation_digest: Digest64
+    fixture_digest: V05Digest64
+    provocation_digest: V05Digest64
     expected_failure_signature: FailureSignatureV05
-    expected_failure_signature_digest: Digest64
-    valid_from: CanonicalUTCTime
-    expires_at: CanonicalUTCTime
+    expected_failure_signature_digest: V05Digest64
+    valid_from: V05CanonicalUTCTime
+    expires_at: V05CanonicalUTCTime
 
     @model_validator(mode="before")
     @classmethod
@@ -2881,13 +2967,15 @@ class ControlContractV05(ProtocolModel):
 class ControlObservationV05(ProtocolModel):
     model_config = _V05_MODEL_CONFIG
 
-    control_id: Digest64
-    fixture_digest: Digest64
-    provocation_digest: Digest64
+    control_id: V05Digest64
+    fixture_digest: V05Digest64
+    provocation_digest: V05Digest64
     observed_failure_signature: FailureSignatureV05
-    observed_failure_signature_digest: Digest64
+    observed_failure_signature_digest: V05Digest64
     control_status: Literal["proven", "survived", "mismatched", "unavailable"]
-    evidence_refs: tuple[EvidenceRef, ...]
+    evidence_refs: tuple[EvidenceRefV05, ...] = Field(
+        max_length=256, json_schema_extra={"uniqueItems": True}
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -2923,7 +3011,9 @@ class VerificationIntegrityAssessmentV05(ProtocolModel):
         "matched", "empty", "capture_failed", "drifted", "unavailable"
     ]
     control_status: Literal["proven", "survived", "mismatched", "unavailable"]
-    reason_codes: tuple[VerificationIntegrityReasonCode, ...]
+    reason_codes: tuple[VerificationIntegrityReasonCode, ...] = Field(
+        max_length=64, json_schema_extra={"uniqueItems": True}
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -2971,8 +3061,12 @@ class VerificationProfileV05(VerificationProfileV03):
     _signed_version = "0.5"
 
     schema_version: Literal["openworkproof-verification-profile/0.5"]
-    population_contracts: tuple[PopulationContractV05, ...]
-    control_contracts: tuple[ControlContractV05, ...]
+    population_contracts: tuple[PopulationContractV05, ...] = Field(
+        min_length=1, max_length=4096, json_schema_extra={"uniqueItems": True}
+    )
+    control_contracts: tuple[ControlContractV05, ...] = Field(
+        min_length=1, max_length=4096, json_schema_extra={"uniqueItems": True}
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -3018,7 +3112,9 @@ class VerificationArmResultV05(VerificationArmResultV03):
     _signed_version = "0.5"
 
     schema_version: Literal["openworkproof-verification-arm-result/0.5"]
-    population_observations: tuple[PopulationObservationV05, ...]
+    population_observations: tuple[PopulationObservationV05, ...] = Field(
+        min_length=1, max_length=4096, json_schema_extra={"uniqueItems": True}
+    )
     control_observation: ControlObservationV05 | None
 
     @model_validator(mode="before")

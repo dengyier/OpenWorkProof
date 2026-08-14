@@ -145,11 +145,20 @@ def _snapshot(directory: Path) -> dict[str, bytes]:
     }
 
 
-def _write_old_schema_set(directory: Path) -> dict[str, bytes]:
+def _write_schema_set(
+    directory: Path,
+    filenames: frozenset[str],
+    *,
+    prefix: str,
+) -> dict[str, bytes]:
     directory.mkdir()
-    for name in SCHEMA_FILENAMES:
-        directory.joinpath(name).write_bytes(f"old:{name}".encode())
+    for name in filenames:
+        directory.joinpath(name).write_bytes(f"{prefix}:{name}".encode())
     return _snapshot(directory)
+
+
+def _write_old_schema_set(directory: Path) -> dict[str, bytes]:
+    return _write_schema_set(directory, SCHEMA_FILENAMES, prefix="old")
 
 
 def _schema_transaction_artifacts(parent: Path) -> set[str]:
@@ -497,46 +506,6 @@ def test_v05_authority_rejects_nested_and_cross_version_object_lookups() -> None
         api.authoritative_schema("verification-profile", version="0.4")
 
 
-def test_v05_atomic_replace_preserves_existing_targets_on_mirror_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    api = _api()
-    destination = tmp_path / "destination"
-    mirror = tmp_path / "mirror"
-    destination.mkdir()
-    mirror.mkdir()
-    destination_before = {
-        name: f"old:{name}".encode() for name in V05_SCHEMA_FILENAMES
-    }
-    mirror_before = {
-        name: f"mirror:{name}".encode() for name in V05_SCHEMA_FILENAMES
-    }
-    for name, content in destination_before.items():
-        destination.joinpath(name).write_bytes(content)
-    for name, content in mirror_before.items():
-        mirror.joinpath(name).write_bytes(content)
-    original_replace = Path.replace
-    failed = False
-
-    def fail_first_replace_to_mirror(source: Path, target: Path) -> Path:
-        nonlocal failed
-        if Path(target) == mirror and not failed:
-            failed = True
-            raise OSError("simulated v05 mirror commit failure")
-        return original_replace(source, target)
-
-    monkeypatch.setattr(Path, "replace", fail_first_replace_to_mirror)
-    with pytest.raises(OSError, match="simulated v05 mirror commit failure"):
-        api.write_authoritative_schemas(
-            destination, mirror=mirror, version="0.5"
-        )
-
-    assert _snapshot(destination) == destination_before
-    assert _snapshot(mirror) == mirror_before
-    assert _schema_transaction_artifacts(tmp_path) == set()
-
-
 def test_v02_writer_emits_frozen_package_and_mirror(tmp_path: Path) -> None:
     api = _api()
     destination = tmp_path / "package"
@@ -869,15 +838,23 @@ def test_writer_rejects_conflicting_targets_without_mutation(
     assert _snapshot(destination) == before
 
 
+@pytest.mark.parametrize(
+    ("version", "filenames"),
+    (("0.1", SCHEMA_FILENAMES), ("0.5", V05_SCHEMA_FILENAMES)),
+)
 def test_second_target_commit_failure_rolls_back_both_targets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    version: str,
+    filenames: frozenset[str],
 ) -> None:
     api = _api()
     destination = tmp_path / "destination"
     mirror = tmp_path / "mirror"
-    destination_before = _write_old_schema_set(destination)
-    mirror_before = _write_old_schema_set(mirror)
+    destination_before = _write_schema_set(
+        destination, filenames, prefix="old"
+    )
+    mirror_before = _write_schema_set(mirror, filenames, prefix="mirror")
     original_replace = Path.replace
     failed = False
 
@@ -891,10 +868,13 @@ def test_second_target_commit_failure_rolls_back_both_targets(
     monkeypatch.setattr(Path, "replace", fail_first_replace_to_mirror)
 
     with pytest.raises(OSError, match="simulated mirror commit failure"):
-        api.write_authoritative_schemas(destination, mirror=mirror)
+        api.write_authoritative_schemas(
+            destination, mirror=mirror, version=version
+        )
 
     assert _snapshot(destination) == destination_before
     assert _snapshot(mirror) == mirror_before
+    assert _schema_transaction_artifacts(tmp_path) == set()
 
 
 def test_second_stage_write_failure_cleans_unreturned_stage(
@@ -1128,47 +1108,21 @@ def test_symlink_lock_file_is_rejected_without_touching_its_target(
 def test_built_wheel_contains_all_authoritative_schema_resources(
     built_wheel: Path,
 ) -> None:
+    api = _api()
     with zipfile.ZipFile(built_wheel) as archive:
-        members = {
-            name.removeprefix("openworkproof/schemas/v0.1/")
-            for name in archive.namelist()
-            if name.startswith("openworkproof/schemas/v0.1/")
-            and not name.endswith("/")
-        }
-        assert members == SCHEMA_FILENAMES
-        for name, expected_digest in FROZEN_V01_DIGESTS.items():
-            content = archive.read(f"openworkproof/schemas/v0.1/{name}")
-            assert hashlib.sha256(content).hexdigest() == expected_digest
-        v02_members = {
-            name.removeprefix("openworkproof/schemas/v0.2/")
-            for name in archive.namelist()
-            if name.startswith("openworkproof/schemas/v0.2/")
-            and not name.endswith("/")
-        }
-        assert v02_members == V02_SCHEMA_FILENAMES
-        for name, expected_digest in FROZEN_V02_DIGESTS.items():
-            content = archive.read(f"openworkproof/schemas/v0.2/{name}")
-            assert hashlib.sha256(content).hexdigest() == expected_digest
-        v04_members = {
-            name.removeprefix("openworkproof/schemas/v0.4/")
-            for name in archive.namelist()
-            if name.startswith("openworkproof/schemas/v0.4/")
-            and not name.endswith("/")
-        }
-        assert v04_members == {
-            "schema-registry.json",
-            *_api().V04_OBJECT_PATHS.values(),
-        }
-        v05_members = {
-            name.removeprefix("openworkproof/schemas/v0.5/")
-            for name in archive.namelist()
-            if name.startswith("openworkproof/schemas/v0.5/")
-            and not name.endswith("/")
-        }
-        assert v05_members == V05_SCHEMA_FILENAMES
-        for name, expected_digest in _api()._FROZEN_V05_DIGESTS.items():
-            content = archive.read(f"openworkproof/schemas/v0.5/{name}")
-            assert hashlib.sha256(content).hexdigest() == expected_digest
+        for version, filenames in api._FILENAMES_BY_VERSION.items():
+            prefix = f"openworkproof/schemas/v{version}/"
+            members = {
+                name.removeprefix(prefix)
+                for name in archive.namelist()
+                if name.startswith(prefix) and not name.endswith("/")
+            }
+            assert members == filenames
+            for name, expected_digest in api._FROZEN_DIGESTS_BY_VERSION[
+                version
+            ].items():
+                content = archive.read(f"{prefix}{name}")
+                assert hashlib.sha256(content).hexdigest() == expected_digest
 
 
 def test_registry_loads_from_an_installed_wheel_outside_project_cwd(

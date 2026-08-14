@@ -256,16 +256,16 @@ V05_SCHEMA_FACTORIES: dict[str, Callable[[], dict[str, Any]]] = {
 }
 _FROZEN_V05_DIGESTS = {
     "verification-arm-result.schema.json": (
-        "ec67cae6ece9994d2eed1affba292b3230684c7ebe97815a812acedbfee3e400"
+        "a9cdf4dc110511ae5f527f19a6061665d5393d60a9163d150d34440ac2ecdc26"
     ),
     "verification-decision.schema.json": (
-        "f8be3906e9f30574adac1461150dd1e337e4468a325bbf6f7d187345c4fd6fc8"
+        "4a569520cb8336af272a73ba8981ef86b94c7c667371ecf29dfd782920d64bcd"
     ),
     "verification-profile.schema.json": (
-        "2bfb2dfaa61ca1d8d3ff010048ac0498456a4c789684bc0d6cf96764e94d8667"
+        "100bec3f748c56ca96645ed301bf19209673709f1058918178c9e942df8fcc2e"
     ),
     "schema-registry.json": (
-        "8fe7fb78883db5f332688d7b793abaeeb0f5b78aef7d9960b40243b6388306fa"
+        "4bd90dfe909b1c0d4446e99b830506c917dde81b689f477805073ceee859dfa0"
     ),
 }
 _FROZEN_V05_REGISTRY = {
