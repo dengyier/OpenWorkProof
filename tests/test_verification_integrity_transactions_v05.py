@@ -1645,3 +1645,261 @@ def test_v05_decision_faults_and_concurrency(v05_transaction_case) -> None:
         ).fetchone() == (1,)
     finally:
         connection.close()
+
+
+def test_v05_compose_rejects_forged_arm_signature(
+    v05_transaction_case,
+) -> None:
+    case = v05_transaction_case
+    tampered = case["results"][0].model_copy(
+        update={"signature": "A" * 86}
+    )
+    with pytest.raises(Exception, match="signature"):
+        _compose_v05(case, results=(tampered, case["results"][1]))
+
+
+def test_v05_decision_rejects_stale_arm_results(v05_transaction_case) -> None:
+    case = v05_transaction_case
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    for result in case["results"]:
+        commit_verification_arm_result_v05(case["ledger"], result)
+    draft = prepare_verification_decision_v05(
+        case["ledger"],
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    decision = _sign_decision_draft_v05(case, draft)
+    newer = _resign_arm_result_v05(
+        case,
+        case["results"][0],
+        arm_result_id="a1" * 32,
+        created_at="2026-01-01T00:30:00Z",
+    )
+    commit_verification_arm_result_v05(case["ledger"], newer)
+    with pytest.raises(VerificationTransactionError, match="stale"):
+        commit_verification_decision_v05(case["ledger"], decision)
+
+
+def test_v05_decision_chain_rejects_forged_root(v05_transaction_case) -> None:
+    case = v05_transaction_case
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    for result in case["results"]:
+        commit_verification_arm_result_v05(case["ledger"], result)
+    decision = _signed_decision_v05(
+        case,
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    second = _signed_decision_v05(
+        case,
+        DecisionDraftRequest(
+            decision_id="e" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="1f" * 32,
+        ),
+    )
+    commit_verification_decision_v05(case["ledger"], decision)
+    import rfc8785 as _rfc8785
+
+    second_json = _rfc8785.dumps(second.model_dump(mode="json"))
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        row = connection.execute(
+            "SELECT decision_digest, profile_id, scope_id "
+            "FROM verification_decisions_v05 WHERE decision_id = ?",
+            (decision.decision_id,),
+        ).fetchone()
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            INSERT INTO verification_decisions_v05 (
+                decision_id, decision_digest, profile_id, scope_id,
+                predecessor_id, decision_json, committed_at
+            ) VALUES (?, ?, ?, ?, NULL, ?, ?)
+            """,
+            ("ab" * 32, second.digest, row[1], row[2], second_json, "2026-01-01T00:00:00Z"),
+        )
+        connection.execute("COMMIT")
+    finally:
+        connection.close()
+    with pytest.raises(VerificationTransactionError, match="chain"):
+        prepare_verification_decision_v05(
+            case["ledger"],
+            DecisionDraftRequest(
+                decision_id="e" * 64,
+                decided_at="2026-01-01T00:21:00Z",
+                nonce="f" * 64,
+            ),
+        )
+
+
+def test_v05_decision_dangling_predecessor_rejected_by_fk(
+    v05_transaction_case,
+) -> None:
+    case = v05_transaction_case
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    for result in case["results"]:
+        commit_verification_arm_result_v05(case["ledger"], result)
+    decision = _signed_decision_v05(
+        case,
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    second = _signed_decision_v05(
+        case,
+        DecisionDraftRequest(
+            decision_id="e" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="1f" * 32,
+        ),
+    )
+    commit_verification_decision_v05(case["ledger"], decision)
+    import rfc8785 as _rfc8785
+
+    second_json = _rfc8785.dumps(second.model_dump(mode="json"))
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        row = connection.execute(
+            "SELECT decision_digest, profile_id, scope_id "
+            "FROM verification_decisions_v05 WHERE decision_id = ?",
+            (decision.decision_id,),
+        ).fetchone()
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO verification_decisions_v05 (
+                    decision_id, decision_digest, profile_id, scope_id,
+                    predecessor_id, decision_json, committed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "ab" * 32,
+                    second.digest,
+                    row[1],
+                    row[2],
+                    "ff" * 32,
+                    second_json,
+                    "2026-01-01T00:00:00Z",
+                ),
+            )
+            connection.execute("COMMIT")
+    finally:
+        connection.close()
+
+
+def test_v05_decision_cleanup_failure_commits_truth(v05_transaction_case) -> None:
+    case = v05_transaction_case
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    for result in case["results"]:
+        commit_verification_arm_result_v05(case["ledger"], result)
+    decision = _signed_decision_v05(
+        case,
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    with pytest.raises(VerificationCommittedError) as raised:
+        commit_verification_decision_v05(
+            case["ledger"], decision, fault="cleanup_failure"
+        )
+    assert raised.value.committed == decision
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM verification_decisions_v05"
+        ).fetchone() == (1,)
+    finally:
+        connection.close()
+
+
+def test_v05_decision_idempotency_is_time_independent(
+    v05_transaction_case, monkeypatch
+) -> None:
+    import openworkproof.verification as verification_module
+
+    case = v05_transaction_case
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    for result in case["results"]:
+        commit_verification_arm_result_v05(case["ledger"], result)
+    decision = _signed_decision_v05(
+        case,
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    commit_verification_decision_v05(case["ledger"], decision)
+    monkeypatch.setattr(
+        verification_module, "_utc_committed_at", lambda: "2026-01-01T00:59:59Z"
+    )
+    with pytest.raises(VerificationCommittedError) as raised:
+        commit_verification_decision_v05(case["ledger"], decision)
+    assert raised.value.committed == decision
+
+
+def test_v05_decision_conflicting_concurrency_one_wins(
+    v05_transaction_case,
+) -> None:
+    case = v05_transaction_case
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    for result in case["results"]:
+        commit_verification_arm_result_v05(case["ledger"], result)
+    first = _signed_decision_v05(
+        case,
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    second = _signed_decision_v05(
+        case,
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="f" * 64,
+        ),
+    )
+    assert first != second
+
+    def commit_first():
+        try:
+            commit_verification_decision_v05(case["ledger"], first)
+            return "committed-first"
+        except VerificationTransactionError as error:
+            return str(error)
+
+    def commit_second():
+        try:
+            commit_verification_decision_v05(case["ledger"], second)
+            return "committed-second"
+        except VerificationTransactionError as error:
+            return str(error)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = tuple(pool.map(lambda fn: fn(), (commit_first, commit_second)))
+    committed = [item for item in outcomes if item.startswith("committed")]
+    rejected = [item for item in outcomes if item.startswith("v0.5")]
+    assert len(committed) == 1
+    assert len(rejected) == 1
+    assert "already used" in rejected[0]
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM verification_decisions_v05"
+        ).fetchone() == (1,)
+    finally:
+        connection.close()

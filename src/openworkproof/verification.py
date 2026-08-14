@@ -3304,12 +3304,23 @@ def _exact_decision_v05_readback(
     decision: VerificationDecisionV05,
     committed_at: str,
 ) -> bool:
+    return _exact_decision_v05_row(path, decision) and _decision_committed_at(
+        path, decision.decision_id
+    ) == committed_at
+
+
+def _exact_decision_v05_row(
+    path: Path,
+    decision: VerificationDecisionV05,
+) -> bool:
+    """Compare the deterministic committed columns only; committed_at is
+    deliberately excluded so idempotent retries stay time-independent."""
     connection = evidence.connect_ledger(path)
     try:
         row = connection.execute(
             """
             SELECT decision_digest, profile_id, scope_id, predecessor_id,
-                   decision_json, committed_at
+                   decision_json
             FROM verification_decisions_v05 WHERE decision_id = ?
             """,
             (decision.decision_id,),
@@ -3327,7 +3338,6 @@ def _exact_decision_v05_readback(
             profile[1],
             decision.supersedes_decision_id,
             _canonical_model_blob(decision),
-            committed_at,
         ):
             return False
         parents = tuple(
@@ -3344,6 +3354,19 @@ def _exact_decision_v05_readback(
             (ordinal, reference.arm_result_id)
             for ordinal, reference in enumerate(decision.arm_results)
         )
+    finally:
+        connection.close()
+
+
+def _decision_committed_at(path: Path, decision_id: str) -> str | None:
+    connection = evidence.connect_ledger(path)
+    try:
+        row = connection.execute(
+            "SELECT committed_at FROM verification_decisions_v05 "
+            "WHERE decision_id = ?",
+            (decision_id,),
+        ).fetchone()
+        return None if row is None else row[0]
     finally:
         connection.close()
 
@@ -3371,9 +3394,7 @@ def commit_verification_decision_v05(
             connection, profile=profile, manifest=manifest
         )
         if current is not None and current.decision_id == parsed.decision_id:
-            if current == parsed and _exact_decision_v05_readback(
-                path, parsed, committed_at
-            ):
+            if current == parsed and _exact_decision_v05_row(path, parsed):
                 raise VerificationCommittedError(
                     "the exact v0.5 verification decision is already committed",
                     parsed,
@@ -3447,9 +3468,7 @@ def commit_verification_decision_v05(
             _canonical_model_blob(parsed),
         )
         if existing is not None:
-            if existing == expected and _exact_decision_v05_readback(
-                path, parsed, committed_at
-            ):
+            if existing == expected and _exact_decision_v05_row(path, parsed):
                 raise VerificationCommittedError(
                     "the exact v0.5 verification decision is already committed",
                     parsed,

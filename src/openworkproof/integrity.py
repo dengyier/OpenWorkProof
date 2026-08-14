@@ -794,6 +794,10 @@ def compose_verification_decision_v05(
     """
 
     from openworkproof import verification as verification_module  # lazy import
+    from openworkproof.acceptance import (  # lazy import
+        AcceptanceTransactionError,
+        evidence_snapshot_digest,
+    )
 
     if type(profile) is not VerificationProfileV05:
         raise verification_module.VerificationInputError(
@@ -834,6 +838,43 @@ def compose_verification_decision_v05(
         ):
             raise verification_module.VerificationInputError(
                 "arm result binding mismatch"
+            )
+    bindings = {
+        binding.verifier_key_id: binding for binding in profile.verifier_bindings
+    }
+    for result in results:
+        arm = expected_arms[result.arm_id]
+        if result.arm_kind != arm.arm_kind:
+            raise verification_module.VerificationInputError(
+                "arm result kind or id mismatch"
+            )
+        binding = bindings.get(result.verifier_key_id)
+        if (
+            binding is None
+            or binding.verifier_subject_id != result.verifier_subject_id
+            or binding.controller_factors != result.controller_factors
+            or binding.execution_context_factors != result.execution_context_factors
+        ):
+            raise verification_module.VerificationInputError(
+                "arm result verifier is not profile-bound"
+            )
+        if not (
+            binding.valid_from <= result.created_at < binding.expires_at
+            and profile.created_at <= result.created_at < profile.expires_at
+        ):
+            raise verification_module.VerificationInputError(
+                "arm result verifier binding is not current"
+            )
+        if not verification_module.verify_payload(
+            "verification-arm-result",
+            result.model_dump(mode="json"),
+            verification_module._decode_public_key(
+                binding.verifier_public_key_b64url
+            ),
+            version="0.5",
+        ):
+            raise verification_module.VerificationInputError(
+                "arm result signature is invalid"
             )
     if not profile.created_at <= request.decided_at < profile.expires_at:
         raise verification_module.VerificationInputError(
@@ -940,11 +981,6 @@ def compose_verification_decision_v05(
 
     references: list[VerificationArmResultReference] = []
     for result in results:
-        from openworkproof.acceptance import (  # lazy import
-            AcceptanceTransactionError,
-            evidence_snapshot_digest,
-        )
-
         try:
             snapshot = evidence_snapshot_digest(
                 tuple(
