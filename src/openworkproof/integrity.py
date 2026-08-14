@@ -7,8 +7,12 @@ inputs. Two external inputs are required to make the derivation sound:
   selector rule. It must be produced by replaying the signed selector spec
   and engine digests against the frozen Git revision; the pure function
   cannot replay Git or pytest itself. Declared selected members must be a
-  subset of their bound rule's output, and every output must be a Scope
-  member. Missing outputs make the assessment ``unavailable``.
+  subset of their bound rule's output, every output must be a Scope member,
+  and the eligible evidence must contain the bound rule's output (a
+  verifier cannot shrink the eligible population to inflate the capture
+  rate). The adapter layer binds the witness provenance by replaying with
+  the signed engine digest. Missing outputs make the assessment
+  ``unavailable``.
 - ``evidence_inventory``: an authoritative artifact inventory that maps
   SHA-256 digests to evidence bytes. Every ``EvidenceRefV05`` inside a
   population observation must replay exactly (content digest and byte size)
@@ -158,10 +162,6 @@ def validate_population_contracts(
             != contract.member_kind
         ):
             raise ValueError("population contract member kind does not match selector")
-        if not contract.declared_selected_member_ids:
-            raise ValueError("population contract declaration cannot be empty")
-        if len(contract.declared_selected_member_ids) > 4096:
-            raise ValueError("population contract declaration exceeds 4096 members")
 
         output_ids = set(validated_outputs[rule_id])
         for member_id in contract.declared_selected_member_ids:
@@ -174,8 +174,6 @@ def validate_population_contracts(
                 raise ValueError(
                     "population contract member kind does not match member"
                 )
-            if member.member_kind == "delivery_artifact":
-                raise ValueError("delivery artifacts cannot be population members")
             if member_id not in output_ids:
                 raise ValueError(
                     "population contract declares a member "
@@ -227,7 +225,7 @@ def _parse_population_evidence(
 
     try:
         document = json.loads(content.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         raise ValueError("population evidence is not valid JSON") from error
     if not isinstance(document, dict) or set(document) != {
         "schema_version",
@@ -273,13 +271,13 @@ def _resolve_population_evidence(
             raise ValueError("population evidence content is unavailable")
         if type(content) is not bytes:
             raise ValueError("population evidence content must be bytes")
-        if hashlib.sha256(content).hexdigest() != ref.sha256:
-            raise ValueError(
-                "population evidence content does not replay the signed reference"
-            )
         if len(content) != ref.size_bytes:
             raise ValueError(
                 "population evidence size does not replay the signed reference"
+            )
+        if hashlib.sha256(content).hexdigest() != ref.sha256:
+            raise ValueError(
+                "population evidence content does not replay the signed reference"
             )
         purpose, member_ids = _parse_population_evidence(content)
         if purpose in purposes:
@@ -300,9 +298,12 @@ def assess_population_integrity(
 
     Closed precedence: missing or unreplayable evidence -> ``unavailable``;
     rule/engine/digest/cross-arm mismatch -> ``drifted``; any contract with
-    an empty population -> ``empty``; below count/capture thresholds ->
+    an empty population -> ``empty``; below count/capture thresholds or a
+    zero selected population with a non-empty eligible population ->
     ``capture_failed``; otherwise ``matched``. Each contract's
-    ``empty_population_policy=unknown`` takes effect independently.
+    ``empty_population_policy=unknown`` takes effect independently, and the
+    eligible evidence must contain the bound rule's output so a verifier
+    cannot inflate the capture rate by shrinking the eligible population.
     """
 
     profile = _validated_profile(profile)
@@ -318,6 +319,8 @@ def assess_population_integrity(
             "unavailable", ("POPULATION_EVIDENCE_MISSING",)
         )
 
+    rules_by_id = {rule.rule_id: rule for rule in manifest.selector_rules}
+    outputs_by_rule = _validated_rule_outputs(rule_outputs, rules_by_id)
     contracts_by_id = {
         contract.contract_id: contract for contract in profile.population_contracts
     }
@@ -387,6 +390,13 @@ def assess_population_integrity(
                 != observation.eligible_population_digest
             ):
                 drift_reasons.add("POPULATION_DIGEST_MISMATCH")
+            expected_eligible = outputs_by_rule.get(
+                observation.selector_rule_id, ()
+            )
+            if eligible_ids and not set(expected_eligible).issubset(
+                eligible_ids
+            ):
+                drift_reasons.add("POPULATION_DIGEST_MISMATCH")
             if observation.selected_count == 0:
                 if (
                     selected_ids
@@ -422,6 +432,7 @@ def assess_population_integrity(
             if observation.eligible_seen > 0 and (
                 observation.eligible_seen < contract.minimum_eligible_count
                 or observation.eligible_seen > contract.maximum_eligible_count
+                or observation.selected_count == 0
                 or observation.selected_count < contract.minimum_selected_count
                 or observation.selected_count > contract.maximum_selected_count
                 or below_capture

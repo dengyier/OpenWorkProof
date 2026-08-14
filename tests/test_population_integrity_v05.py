@@ -92,6 +92,8 @@ def _control_contract(arm_id: str, fixture_digest: str) -> dict[str, Any]:
 def _signed_manifest(
     base: EvaluationScopeManifest,
     manager_key: Ed25519PrivateKey,
+    *,
+    members: Sequence[ScopeMember] | None = None,
 ) -> EvaluationScopeManifest:
     payload = base.model_dump(
         mode="json",
@@ -115,6 +117,22 @@ def _signed_manifest(
         ),
         key=lambda rule: (rule["selector_kind"].encode("utf-8"), rule["rule_id"]),
     )
+    if members is not None:
+        ordered_members = tuple(
+            sorted(
+                members,
+                key=lambda member: (
+                    member.member_kind,
+                    member.locator_digest,
+                    member.member_id,
+                ),
+            )
+        )
+        payload["members"] = [
+            member.model_dump(mode="json") for member in ordered_members
+        ]
+        payload["member_count"] = len(ordered_members)
+        payload["population_digest"] = population_digest(ordered_members)
     payload["scope_id"] = evaluation_scope_id(
         {key: value for key, value in payload.items() if key != "scope_id"}
     )
@@ -129,6 +147,7 @@ def _signed_profile(
     manager_key: Ed25519PrivateKey,
     *,
     contract_changes: dict[str, dict[str, Any]] | None = None,
+    declared_by_kind: dict[str, Sequence[str]] | None = None,
 ) -> VerificationProfileV05:
     payload = base.model_dump(
         mode="json",
@@ -145,10 +164,11 @@ def _signed_profile(
         )
         for kind in ("source_file", "test_case")
     }
+    declared_by_kind = declared_by_kind or {}
     contracts = [
         _contract(
             rule.model_dump(mode="json"),
-            members_by_kind[kind],
+            sorted(declared_by_kind.get(kind, members_by_kind[kind])),
             kind,
         )
         for rule, kind in zip(
@@ -229,16 +249,31 @@ def _observation(
     declared = list(contract.declared_selected_member_ids)
     eligible_seen = len(declared) if eligible_seen is None else eligible_seen
     selected_count = len(declared) if selected_count is None else selected_count
+
+    def _synthetic_extras(count: int) -> list[str]:
+        extras: list[str] = []
+        index = 0
+        while len(extras) < count:
+            candidate = f"e{index:063x}"
+            index += 1
+            if candidate not in declared:
+                extras.append(candidate)
+        return extras
+
     if eligible_seen == 0:
         eligible_members: list[str] = []
         selected_members: list[str] = []
         numerator, denominator = 0, 1
     elif selected_count == 0:
-        eligible_members = [f"e{index:063x}" for index in range(eligible_seen)]
+        eligible_members = declared + _synthetic_extras(
+            max(0, eligible_seen - len(declared))
+        )
         selected_members = []
         numerator, denominator = 0, 1
     else:
-        eligible_members = [f"e{index:063x}" for index in range(eligible_seen)]
+        eligible_members = declared + _synthetic_extras(
+            max(0, eligible_seen - len(declared))
+        )
         selected_members = declared
         numerator, denominator = selected_count, eligible_seen
     if capture_numerator is not None and capture_denominator is not None:
@@ -441,33 +476,19 @@ def test_profile_rejects_missing_or_duplicate_contract(
         contract.model_dump(mode="json")
         for contract in population_case["profile"].population_contracts
     ]
-    malformed = (
-        population_case["profile"].model_copy(
-            update={
-                "population_contracts": tuple(
-                    population_case["profile"].population_contracts[:1]
-                )
-            }
-        )
-        if mutation == "missing"
-        else population_case["profile"].model_copy(
-            update={
-                "population_contracts": tuple(
-                    [
-                        population_case["profile"].population_contracts[0],
-                        population_case["profile"].population_contracts[0],
-                    ]
-                )
-            }
-        )
-    )
-    assert contracts
-    with pytest.raises(ValueError):
-        validate_population_contracts(
-            malformed,
-            population_case["manifest"],
-            rule_outputs=_rule_outputs(population_case),
-        )
+    if mutation == "missing":
+        malformed = _resigned_profile(population_case, contracts[:1])
+        with pytest.raises(ValueError):
+            validate_population_contracts(
+                malformed,
+                population_case["manifest"],
+                rule_outputs=_rule_outputs(population_case),
+            )
+    else:
+        with pytest.raises(ValueError):
+            _resigned_profile(
+                population_case, [contracts[0], contracts[0]]
+            )
 
 
 @pytest.mark.parametrize(
@@ -624,22 +645,16 @@ def test_population_assessment_requires_every_contract_observation_by_id(
 def test_profile_rejects_4097_declared_members(
     population_case: dict[str, Any]
 ) -> None:
-    contract = population_case["profile"].population_contracts[0].model_copy(
-        update={
-            "declared_selected_member_ids": tuple(
-                f"{index:064x}" for index in range(4097)
-            )
-        }
-    )
-    malformed = population_case["profile"].model_copy(
-        update={"population_contracts": (contract,)}
-    )
+    contracts = [
+        contract.model_dump(mode="json")
+        for contract in population_case["profile"].population_contracts
+    ]
     with pytest.raises(ValueError):
-        validate_population_contracts(
-            malformed,
-            population_case["manifest"],
-            rule_outputs=_rule_outputs(population_case),
-        )
+        contracts[0]["declared_selected_member_ids"] = [
+            f"{index:064x}" for index in range(4097)
+        ]
+        contracts[0]["contract_id"] = population_contract_id(contracts[0])
+        _resigned_profile(population_case, contracts)
 
 
 def test_signed_profile_cross_object_anomaly_is_invalid_not_unknown(
@@ -1218,7 +1233,7 @@ def test_population_assessment_recomputes_eligible_digest_from_evidence(
         if item.member_kind == "test_case"
     )
     declared = list(contract.declared_selected_member_ids)
-    eligible = [f"{index:064x}" for index in range(100)]
+    eligible = declared + [f"e{index:063x}" for index in range(99)]
     kind_changes, kind_inventory = _population_observation_changes(
         contract,
         eligible,
@@ -1242,7 +1257,7 @@ def test_population_assessment_eligible_count_must_equal_evidence_members(
         if item.member_kind == "test_case"
     )
     declared = list(contract.declared_selected_member_ids)
-    eligible = [f"{index:064x}" for index in range(100)]
+    eligible = declared + [f"e{index:063x}" for index in range(99)]
     kind_changes, kind_inventory = _population_observation_changes(
         contract, eligible, declared, eligible_seen=101
     )
@@ -1369,3 +1384,180 @@ def test_population_assessment_without_evidence_inventory_is_unavailable(
     assert result == PopulationAssessmentResult(
         "unavailable", ("POPULATION_EVIDENCE_MISSING",)
     )
+
+
+# ---------------------------------------------------------------------------
+# Second-review fix tests: C1 (eligible under-reporting), F4 (selected zero),
+# I1 (unparseable evidence), I3/I4/F8 (witness semantics coverage).
+# ---------------------------------------------------------------------------
+
+def _synthetic_member(
+    manifest: EvaluationScopeManifest, kind: str, locator: str
+) -> ScopeMember:
+    return ScopeMember.model_validate(
+        {
+            "member_id": scope_member_id(kind, locator),
+            "member_kind": kind,
+            "locator": locator,
+            "locator_digest": hashlib.sha256(locator.encode("utf-8")).hexdigest(),
+            "content_digest": "c" * 64,
+            "source_revision": manifest.source_revision,
+        }
+    )
+
+
+def test_population_assessment_rejects_under_reported_eligible_population(
+    population_case: dict[str, Any],
+) -> None:
+    """A verifier may not shrink eligible below the rule output to raise capture."""
+    contract = next(
+        item
+        for item in population_case["profile"].population_contracts
+        if item.member_kind == "test_case"
+    )
+    declared = list(contract.declared_selected_member_ids)
+    kind_changes, kind_inventory = _population_observation_changes(
+        contract, ["f" * 64], declared
+    )
+    changes, inventory = _default_assessment_inputs(population_case)
+    changes[contract.member_kind] = kind_changes
+    inventory.update(kind_inventory)
+    result = _assess(population_case, changes=changes, inventory=inventory)
+    assert result.status == "drifted"
+    assert "POPULATION_DIGEST_MISMATCH" in result.reason_codes
+
+
+def test_population_assessment_selected_zero_is_capture_failed_regardless_of_minimum(
+    population_case: dict[str, Any],
+) -> None:
+    case = dict(population_case)
+    case["profile"] = _signed_profile(
+        case["base_profile"],
+        case["manifest"],
+        case["manager_key"],
+        contract_changes={
+            "test_case": {
+                "minimum_selected_count": 0,
+                "minimum_capture_numerator": 0,
+                "minimum_capture_denominator": 1,
+            }
+        },
+    )
+    contract = next(
+        item
+        for item in case["profile"].population_contracts
+        if item.member_kind == "test_case"
+    )
+    declared = list(contract.declared_selected_member_ids)
+    kind_changes, kind_inventory = _population_observation_changes(
+        contract,
+        declared + [f"e{index:063x}" for index in range(399)],
+        [],
+    )
+    changes, inventory = _default_assessment_inputs(case)
+    changes[contract.member_kind] = kind_changes
+    inventory.update(kind_inventory)
+    result = _assess(case, changes=changes, inventory=inventory)
+    assert result == PopulationAssessmentResult(
+        "capture_failed", ("POPULATION_CAPTURE_FAILED",)
+    )
+
+
+def test_population_assessment_deeply_nested_evidence_is_unavailable(
+    population_case: dict[str, Any],
+) -> None:
+    contract = next(
+        item
+        for item in population_case["profile"].population_contracts
+        if item.member_kind == "test_case"
+    )
+    declared = list(contract.declared_selected_member_ids)
+    nested = (
+        b'{"schema_version":"openworkproof-population-evidence/0.5",'
+        b'"purpose":"eligible-population","member_ids":'
+        + b"[" * 50_000
+        + b"0"
+        + b"]" * 50_000
+        + b"}"
+    )
+    eligible_ref, eligible_content = _population_evidence_ref(
+        "eligible-population", declared, raw_content=nested
+    )
+    kind_changes, kind_inventory = _population_observation_changes(
+        contract,
+        declared,
+        declared,
+        eligible_ref=(eligible_ref, eligible_content),
+    )
+    changes, inventory = _default_assessment_inputs(population_case)
+    changes[contract.member_kind] = kind_changes
+    inventory.update(kind_inventory)
+    result = _assess(population_case, changes=changes, inventory=inventory)
+    assert result == PopulationAssessmentResult(
+        "unavailable", ("POPULATION_EVIDENCE_MISSING",)
+    )
+
+
+def test_profile_rejects_declared_members_outside_replayed_rule_output(
+    population_case: dict[str, Any],
+) -> None:
+    """The witness is a real replay output, not the kind-partitioned manifest."""
+    base = population_case["manifest"]
+    extra = _synthetic_member(base, "source_file", "src/extra.py")
+    manifest = _signed_manifest(
+        base,
+        population_case["manager_key"],
+        members=(*base.members, extra),
+    )
+    profile = _signed_profile(
+        population_case["base_profile"],
+        manifest,
+        population_case["manager_key"],
+    )
+    outputs = _rule_outputs({**population_case, "manifest": manifest})
+    source_rule_id = manifest.selector_rules[0].rule_id
+    outputs[source_rule_id] = [
+        member_id
+        for member_id in outputs[source_rule_id]
+        if member_id != extra.member_id
+    ]
+    with pytest.raises(ValueError, match="not produced"):
+        validate_population_contracts(profile, manifest, rule_outputs=outputs)
+
+
+def test_profile_rejects_duplicate_declaration_across_contracts(
+    population_case: dict[str, Any],
+) -> None:
+    manifest = population_case["manifest"]
+    source_member_id = next(
+        member.member_id
+        for member in manifest.members
+        if member.member_kind == "source_file"
+    )
+    rules = [rule.model_dump(mode="json") for rule in manifest.selector_rules]
+    contracts = [
+        _contract(rules[0], [source_member_id], "source_file"),
+        _contract(rules[1], [source_member_id], "source_file"),
+    ]
+    profile = _resigned_profile(population_case, contracts)
+    witness = {
+        rules[0]["rule_id"]: [source_member_id],
+        rules[1]["rule_id"]: [source_member_id],
+    }
+    with pytest.raises(ValueError, match="multiple contracts"):
+        validate_population_contracts(profile, manifest, rule_outputs=witness)
+
+
+def test_population_assessment_rejects_incomplete_rule_outputs_as_invalid_input(
+    population_case: dict[str, Any],
+) -> None:
+    outputs = _rule_outputs(population_case)
+    outputs.pop(next(iter(outputs)))
+    with pytest.raises(ValueError):
+        assess_population_integrity(
+            population_case["profile"],
+            population_case["manifest"],
+            population_case["results"],
+            rule_outputs=outputs,
+            evidence_inventory=_population_inventory(),
+        )
