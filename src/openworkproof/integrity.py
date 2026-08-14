@@ -35,6 +35,7 @@ import re
 from typing import Literal
 
 from openworkproof.models import (
+    ControlContractV05,
     EvaluationScopeManifest,
     EvidenceRefV05,
     VerificationArmResultV05,
@@ -47,6 +48,7 @@ from openworkproof.models import (
 PopulationAssessmentStatus = Literal[
     "matched", "empty", "capture_failed", "drifted", "unavailable"
 ]
+ControlAssessmentStatus = Literal["proven", "survived", "mismatched", "unavailable"]
 
 POPULATION_EVIDENCE_SCHEMA_VERSION = "openworkproof-population-evidence/0.5"
 _MEMBER_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -55,6 +57,12 @@ _MEMBER_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 @dataclass(frozen=True, slots=True)
 class PopulationAssessmentResult:
     status: PopulationAssessmentStatus
+    reason_codes: tuple[VerificationIntegrityReasonCode, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ControlAssessmentResult:
+    status: ControlAssessmentStatus
     reason_codes: tuple[VerificationIntegrityReasonCode, ...]
 
 
@@ -484,8 +492,176 @@ def assess_population_integrity(
     return PopulationAssessmentResult("matched", ())
 
 
+# ---------------------------------------------------------------------------
+# v0.5 control integrity: negative controls proved by exact failure signature.
+# ---------------------------------------------------------------------------
+
+_CONTROL_MISMATCH_CODES = frozenset(
+    {
+        "CONTROL_FIXTURE_DRIFT",
+        "CONTROL_PROVOCATION_DRIFT",
+        "CONTROL_FAILURE_SIGNATURE_MISMATCH",
+    }
+)
+_CONTROL_UNAVAILABLE_CODES = frozenset(
+    {
+        "CONTROL_CONTRACT_EXPIRED",
+        "CONTROL_EVIDENCE_MISSING",
+    }
+)
+
+
+def validate_control_contracts(profile: VerificationProfileV05) -> None:
+    """Reject a signed profile whose control contracts do not match its arms.
+
+    Every negative arm must have exactly one control contract, the positive
+    arm must have none, and each contract's fixture digest must equal its
+    arm's mutant patch digest. Windows, closed control targets, and
+    recomputed digests are enforced by the closed v0.5 models.
+    """
+
+    profile = _validated_profile(profile)
+    contracts_by_arm = {
+        contract.arm_id: contract for contract in profile.control_contracts
+    }
+    if len(contracts_by_arm) != len(profile.control_contracts):
+        raise ValueError("control contracts must be unique per negative arm")
+    negative_by_id = {arm.arm_id: arm for arm in profile.negative_arms}
+    if set(contracts_by_arm) != set(negative_by_id):
+        raise ValueError("every negative arm requires exactly one control contract")
+    for arm_id, contract in contracts_by_arm.items():
+        if contract.fixture_digest != negative_by_id[arm_id].mutant_patch_digest:
+            raise ValueError(
+                "control fixture_digest must equal arm mutant_patch_digest"
+            )
+
+
+def _derived_control_status(
+    contract: ControlContractV05,
+    result: VerificationArmResultV05,
+) -> tuple[ControlAssessmentStatus, VerificationIntegrityReasonCode | None]:
+    """Derive one observation's closed control status from its content.
+
+    The design's closed truth table: expired / unapplied fixture / incomplete
+    execution / missing evidence -> ``unavailable``; fixture or provocation
+    drift and any failing signature that differs from the expected signature
+    -> ``mismatched``; an exact expected-signature match -> ``proven``; a
+    completed non-failing execution -> ``survived``. A signed observation
+    whose claimed status contradicts this derivation is invalid input.
+    """
+
+    observation = result.control_observation
+    if observation is None:
+        raise ValueError("negative arm requires a control observation")
+    if not (contract.valid_from <= result.created_at <= contract.expires_at):
+        return "unavailable", "CONTROL_CONTRACT_EXPIRED"
+    if result.mutation_status != "applied":
+        return "unavailable", "CONTROL_EVIDENCE_MISSING"
+    if observation.observed_failure_signature.execution_status != "completed":
+        return "unavailable", "CONTROL_EVIDENCE_MISSING"
+    if not observation.evidence_refs:
+        return "unavailable", "CONTROL_EVIDENCE_MISSING"
+    if observation.fixture_digest != contract.fixture_digest:
+        return "mismatched", "CONTROL_FIXTURE_DRIFT"
+    if observation.provocation_digest != contract.provocation_digest:
+        return "mismatched", "CONTROL_PROVOCATION_DRIFT"
+    if (
+        observation.observed_failure_signature
+        == contract.expected_failure_signature
+    ):
+        return "proven", None
+    if any(
+        exit_code != 0
+        for exit_code in observation.observed_failure_signature.exit_codes
+    ):
+        return "mismatched", "CONTROL_FAILURE_SIGNATURE_MISMATCH"
+    return "survived", "CONTROL_SURVIVED"
+
+
+def assess_control_integrity(
+    profile: VerificationProfileV05,
+    results: Sequence[VerificationArmResultV05],
+) -> ControlAssessmentResult:
+    """Aggregate negative-control observations into one closed control status.
+
+    Design 7.2 precedence: all proven -> ``proven``; any survived ->
+    ``survived``; no survived with any mismatched -> ``mismatched``; any
+    other incomplete set -> ``unavailable``. Each observation's claimed
+    status is re-derived from its signed content and must match; caller
+    metadata is never trusted alone.
+    """
+
+    validate_control_contracts(profile)
+    profile = _validated_profile(profile)
+    validated_results = _validated_results(results)
+
+    contracts_by_arm = {
+        contract.arm_id: contract for contract in profile.control_contracts
+    }
+    positive_arm_id = profile.positive_arm.arm_id
+    negative_ids = {arm.arm_id for arm in profile.negative_arms}
+
+    seen: dict[str, VerificationArmResultV05] = {}
+    for result in validated_results:
+        if result.profile_digest != profile.digest:
+            raise ValueError("arm result does not bind the supplied profile")
+        if result.arm_id == positive_arm_id:
+            if result.arm_kind != "positive":
+                raise ValueError("positive arm result kind mismatch")
+            continue
+        if result.arm_id not in negative_ids:
+            raise ValueError("arm result references an unknown arm")
+        if result.arm_kind != "negative":
+            raise ValueError("negative arm result kind mismatch")
+        if result.arm_id in seen:
+            raise ValueError("duplicate arm result")
+        seen[result.arm_id] = result
+
+    if set(seen) != negative_ids:
+        return ControlAssessmentResult(
+            "unavailable", ("CONTROL_EVIDENCE_MISSING",)
+        )
+
+    statuses: set[ControlAssessmentStatus] = set()
+    reason_codes: set[VerificationIntegrityReasonCode] = set()
+    for arm_id in sorted(negative_ids):
+        result = seen[arm_id]
+        contract = contracts_by_arm[arm_id]
+        observation = result.control_observation
+        if observation is None or observation.control_id != contract.control_id:
+            raise ValueError(
+                "negative arm control observation does not bind its contract"
+            )
+        derived, code = _derived_control_status(contract, result)
+        if observation.control_status != derived:
+            raise ValueError(
+                f"control observation claims {observation.control_status} "
+                f"but derives {derived}"
+            )
+        statuses.add(derived)
+        if code is not None:
+            reason_codes.add(code)
+
+    if statuses == {"proven"}:
+        return ControlAssessmentResult("proven", ())
+    if "survived" in statuses:
+        return ControlAssessmentResult("survived", ("CONTROL_SURVIVED",))
+    if "mismatched" in statuses:
+        return ControlAssessmentResult(
+            "mismatched",
+            tuple(sorted(reason_codes & _CONTROL_MISMATCH_CODES)),
+        )
+    return ControlAssessmentResult(
+        "unavailable",
+        tuple(sorted(reason_codes & _CONTROL_UNAVAILABLE_CODES)),
+    )
+
+
 __all__ = [
     "PopulationAssessmentResult",
     "assess_population_integrity",
     "validate_population_contracts",
+    "ControlAssessmentResult",
+    "assess_control_integrity",
+    "validate_control_contracts",
 ]
