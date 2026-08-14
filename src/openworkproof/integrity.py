@@ -183,6 +183,17 @@ def build_failure_signature(
     fields and non-canonical arrays.
     """
 
+    for label, values in (
+        ("exit_codes", exit_codes),
+        ("reason_codes", reason_codes),
+        ("predicate_ids", predicate_ids),
+        ("evidence_purposes", evidence_purposes),
+    ):
+        if type(values) not in {list, tuple}:
+            raise ValueError(f"{label} must be an exact list or tuple")
+        for value in values:
+            if type(value) is not (str if label != "exit_codes" else int):
+                raise ValueError(f"{label} entries have the wrong type")
     return FailureSignatureV05(
         execution_status=execution_status,  # type: ignore[arg-type]
         exit_codes=tuple(sorted(set(exit_codes))),

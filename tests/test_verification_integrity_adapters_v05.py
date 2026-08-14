@@ -147,6 +147,9 @@ test "$2" = "-m"
 test "$3" = "pytest"
 test "$4" = "--collect-only"
 test "$5" = "-q"
+test "$PYTEST_DISABLE_PLUGIN_AUTOLOAD" = "1"
+test "$LC_ALL" = "C.UTF-8"
+test "$TZ" = "UTC"
 {extra_body}
 """
     if selection is None:
@@ -203,7 +206,7 @@ def test_pytest_adapter_observes_eligible_and_selected(
             "python_executable_digest": hashlib.sha256(
                 python.read_bytes()
             ).hexdigest(),
-            "argv": ["-I", "-m", "pytest", "--collect-only", "-q", *selector_args],
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
             "timeout_seconds": 60,
         },
         declared_ids=declared,
@@ -236,7 +239,7 @@ def test_pytest_adapter_deterministic_replay(pytest_repo, tmp_path: Path) -> Non
         "source_revision": head,
         "candidate_commit": head,
         "python_executable_digest": hashlib.sha256(python.read_bytes()).hexdigest(),
-        "argv": ["-I", "-m", "pytest", "--collect-only", "-q", *selector_args],
+        "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
         "timeout_seconds": 60,
     }
     contract = _contract(
@@ -288,7 +291,7 @@ def test_pytest_adapter_selector_yielding_zero_is_mismatched(
             "source_revision": head,
             "candidate_commit": head,
             "python_executable_digest": hashlib.sha256(python.read_bytes()).hexdigest(),
-            "argv": ["-I", "-m", "pytest", "--collect-only", "-q", *selector_args],
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
             "timeout_seconds": 60,
         },
         declared_ids=declared,
@@ -336,8 +339,12 @@ def test_pytest_adapter_no_eligible_nodes(tmp_path: Path) -> None:
         selector_args=[],
         timeout_seconds=60,
     )
-    assert result.status == "indeterminate"
-    assert "SCOPE_EMPTY" in result.reason_codes
+    assert result.status == "satisfied"
+    assert result.reason_codes == ()
+    assert result.observation is not None
+    assert result.observation.eligible_seen == 0
+    assert result.observation.selected_count == 0
+    assert (result.observation.capture_numerator, result.observation.capture_denominator) == (0, 1)
 
 
 def test_pytest_adapter_collection_error(pytest_repo, tmp_path: Path) -> None:
@@ -457,9 +464,6 @@ def test_git_adapter_add_modify_delete_rename(tmp_path: Path) -> None:
             "source_revision": source,
             "candidate_commit": candidate,
             "git_diff_mode": "name-status-z-find-renames",
-            "allowlist_locators": [],
-            "excluded_locators": [],
-            "required_locators": [],
         },
         declared_ids=eligible_ids,
     )
@@ -484,9 +488,6 @@ def test_git_adapter_allowlist_exclusion_and_required(tmp_path: Path) -> None:
         "source_revision": source,
         "candidate_commit": candidate,
         "git_diff_mode": "name-status-z-find-renames",
-        "allowlist_locators": ["src/b.py"],
-        "excluded_locators": [],
-        "required_locators": [],
     }
     contract = _contract(
         rule_id="1" * 64,
@@ -508,11 +509,7 @@ def test_git_adapter_allowlist_exclusion_and_required(tmp_path: Path) -> None:
         rule_id="1" * 64,
         selector_kind="git_diff_closure",
         member_kind="source_file",
-        spec_payload={
-            **spec_payload,
-            "allowlist_locators": [],
-            "excluded_locators": ["src/b.py"],
-        },
+        spec_payload=spec_payload,
         declared_ids=[c_id],
     )
     excluded_result = observe_git_population(
@@ -528,11 +525,7 @@ def test_git_adapter_allowlist_exclusion_and_required(tmp_path: Path) -> None:
         rule_id="1" * 64,
         selector_kind="git_diff_closure",
         member_kind="source_file",
-        spec_payload={
-            **spec_payload,
-            "allowlist_locators": [],
-            "required_locators": ["src/zz.py"],
-        },
+        spec_payload=spec_payload,
         declared_ids=[b_id],
     )
     missing = observe_git_population(
@@ -544,6 +537,23 @@ def test_git_adapter_allowlist_exclusion_and_required(tmp_path: Path) -> None:
     )
     assert missing.status == "indeterminate"
     assert "SCOPE_REQUIRED_TARGET_MISSING" in missing.reason_codes
+
+    forced_contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="git_diff_closure",
+        member_kind="source_file",
+        spec_payload=spec_payload,
+        declared_ids=[b_id, c_id],
+    )
+    forced = observe_git_population(
+        repo,
+        contract=forced_contract,
+        source_revision=source,
+        candidate_commit=candidate,
+        allowlist_locators=["src/b.py"],
+        required_locators=["src/c.py"],
+    )
+    _replay_check(forced, [b_id, c_id], [b_id, c_id])
 
 
 def test_git_adapter_rejects_unsafe_inputs(tmp_path: Path) -> None:
@@ -558,9 +568,6 @@ def test_git_adapter_rejects_unsafe_inputs(tmp_path: Path) -> None:
             "source_revision": source,
             "candidate_commit": candidate,
             "git_diff_mode": "name-status-z-find-renames",
-            "allowlist_locators": [],
-            "excluded_locators": [],
-            "required_locators": [],
         },
         declared_ids=[scope_member_id("source_file", "src/b.py")],
     )
@@ -597,9 +604,6 @@ def test_git_adapter_rejects_symlink_and_revision_drift(tmp_path: Path) -> None:
             "source_revision": source,
             "candidate_commit": candidate,
             "git_diff_mode": "name-status-z-find-renames",
-            "allowlist_locators": [],
-            "excluded_locators": [],
-            "required_locators": [],
         },
         declared_ids=[scope_member_id("source_file", "src/link.py")],
     )
@@ -618,9 +622,6 @@ def test_git_adapter_rejects_symlink_and_revision_drift(tmp_path: Path) -> None:
             "source_revision": candidate,
             "candidate_commit": source,
             "git_diff_mode": "name-status-z-find-renames",
-            "allowlist_locators": [],
-            "excluded_locators": [],
-            "required_locators": [],
         },
         declared_ids=[scope_member_id("source_file", "src/a.py")],
     )
@@ -650,9 +651,6 @@ def test_git_adapter_unchanged_count_changed_identity(tmp_path: Path) -> None:
             "source_revision": source,
             "candidate_commit": first,
             "git_diff_mode": "name-status-z-find-renames",
-            "allowlist_locators": [],
-            "excluded_locators": [],
-            "required_locators": [],
         },
         declared_ids=[scope_member_id("source_file", "src/x.py")],
     )
@@ -665,9 +663,6 @@ def test_git_adapter_unchanged_count_changed_identity(tmp_path: Path) -> None:
             "source_revision": second_source,
             "candidate_commit": second_candidate,
             "git_diff_mode": "name-status-z-find-renames",
-            "allowlist_locators": [],
-            "excluded_locators": [],
-            "required_locators": [],
         },
         declared_ids=[scope_member_id("source_file", "src/y.py")],
     )
@@ -736,9 +731,6 @@ def test_population_observation_payload_replays() -> None:
             "source_revision": "a" * 40,
             "candidate_commit": "b" * 40,
             "git_diff_mode": "name-status-z-find-renames",
-            "allowlist_locators": [],
-            "excluded_locators": [],
-            "required_locators": [],
         },
         declared_ids=[scope_member_id("source_file", "src/b.py")],
     )
@@ -760,3 +752,141 @@ def test_population_observation_payload_replays() -> None:
     for ref in payload["evidence_refs"]:
         content = inventory[ref["sha256"]]
         assert hashlib.sha256(content).hexdigest() == ref["sha256"]
+
+
+def test_pytest_adapter_required_node_omission(pytest_repo, tmp_path: Path) -> None:
+    repo, head = pytest_repo
+    selector_args = ["tests/test_a.py"]
+    python = _collect_fake(
+        tmp_path,
+        name="fake-python",
+        selection=["tests/test_a.py::test_a1"],
+    )
+    declared = [scope_member_id("test_case", "tests/test_a.py::test_a1")]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "python_executable_digest": hashlib.sha256(python.read_bytes()).hexdigest(),
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
+            "timeout_seconds": 60,
+        },
+        declared_ids=declared,
+    )
+    result = observe_pytest_population(
+        repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=python,
+        selector_args=selector_args,
+        timeout_seconds=60,
+        required_node_ids=["tests/test_zz.py::test_zz"],
+    )
+    assert result.status == "indeterminate"
+    assert "SCOPE_REQUIRED_TARGET_MISSING" in result.reason_codes
+
+
+def test_git_adapter_engine_drift(tmp_path: Path) -> None:
+    repo = _git_repo(tmp_path)
+    source = _commit(repo, {"src/a.py": "a"}, "baseline")
+    candidate = _commit(repo, {"src/b.py": "b"}, "changes")
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="git_diff_closure",
+        member_kind="source_file",
+        spec_payload={
+            "source_revision": source,
+            "candidate_commit": candidate,
+            "git_diff_mode": "name-status-z-find-renames",
+        },
+        declared_ids=[scope_member_id("source_file", "src/b.py")],
+        engine_digest="f" * 64,
+    )
+    result = observe_git_population(
+        repo,
+        contract=contract,
+        source_revision=source,
+        candidate_commit=candidate,
+    )
+    assert result.status == "indeterminate"
+    assert "SCOPE_SELECTOR_MISMATCH" in result.reason_codes
+
+
+def test_adapter_spec_digest_uses_v03_rule_encoding(tmp_path: Path) -> None:
+    """The v0.3 selector builder and the v0.5 adapter must share one spec
+    encoding so a contract bound to the rule digest is satisfiable."""
+    from openworkproof.scope import select_git_diff_closure
+
+    repo = _git_repo(tmp_path)
+    source = _commit(repo, {"src/a.py": "a"}, "baseline")
+    candidate = _commit(repo, {"src/b.py": "b"}, "changes")
+    execution = select_git_diff_closure(
+        repo, source_revision=source, candidate_commit=candidate
+    )
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="git_diff_closure",
+        member_kind="source_file",
+        spec_payload={
+            "source_revision": source,
+            "candidate_commit": candidate,
+            "git_diff_mode": "name-status-z-find-renames",
+        },
+        declared_ids=[scope_member_id("source_file", "src/b.py")],
+    )
+    assert contract.selector_spec_digest == hashlib.sha256(
+        execution.selector_spec_bytes
+    ).hexdigest()
+    result = observe_git_population(
+        repo,
+        contract=contract,
+        source_revision=source,
+        candidate_commit=candidate,
+    )
+    assert result.status == "satisfied"
+
+
+def test_adapter_observed_at_injection_makes_replay_byte_identical(
+    pytest_repo, tmp_path: Path
+) -> None:
+    repo, head = pytest_repo
+    selector_args = ["tests/test_c.py"]
+    python = _collect_fake(
+        tmp_path,
+        name="fake-python",
+        selection=["tests/test_c.py::test_c1"],
+    )
+    declared = [scope_member_id("test_case", "tests/test_c.py::test_c1")]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "python_executable_digest": hashlib.sha256(python.read_bytes()).hexdigest(),
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
+            "timeout_seconds": 60,
+        },
+        declared_ids=declared,
+    )
+    kwargs = dict(
+        repo=repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=python,
+        selector_args=selector_args,
+        timeout_seconds=60,
+        observed_at="2026-01-01T00:10:00Z",
+    )
+    first = observe_pytest_population(**kwargs)
+    second = observe_pytest_population(**kwargs)
+    assert first.observation is not None and second.observation is not None
+    assert first.observation.model_dump(mode="json") == second.observation.model_dump(
+        mode="json"
+    )
