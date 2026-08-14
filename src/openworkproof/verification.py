@@ -2514,7 +2514,7 @@ def _derive_v05_rule_outputs(
             )
         try:
             document = json.loads(matched_bytes.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError) as error:
+        except (UnicodeDecodeError, ValueError, RecursionError) as error:
             raise VerificationTransactionError(
                 "v0.5 selector specification is invalid"
             ) from error
@@ -2597,6 +2597,7 @@ def _load_profile_context_v05(
         or profile.evaluation_scope_digest != manifest.digest
     ):
         raise VerificationTransactionError("v0.5 profile authority is invalid")
+    _validate_selector_spec_evidence(path, manifest)
     try:
         integrity.validate_population_contracts(
             profile,
@@ -2692,6 +2693,7 @@ def commit_verification_profile_v05(
             <= min(manifest.expires_at, work_order.deadline)
         ):
             raise VerificationTransactionError("v0.5 profile validity is outside scope")
+        _validate_selector_spec_evidence(path, manifest)
         try:
             integrity.validate_population_contracts(
                 parsed,
@@ -2902,8 +2904,17 @@ def _validate_single_arm_result_v05(
         ) from error
     if result.control_observation is not None:
         contract = next(
-            item for item in profile.control_contracts if item.arm_id == result.arm_id
+            (
+                item
+                for item in profile.control_contracts
+                if item.arm_id == result.arm_id
+            ),
+            None,
         )
+        if contract is None:
+            raise VerificationTransactionError(
+                "v0.5 control contract is unavailable"
+            )
         observation = result.control_observation
         if observation.control_id != contract.control_id:
             raise VerificationTransactionError(
