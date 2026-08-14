@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
+import rfc8785
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 
@@ -173,13 +175,44 @@ def _signed_profile(
     )
 
 
-def _evidence(path: str) -> dict[str, Any]:
-    return {
-        "path": path,
-        "sha256": "e" * 64,
-        "media_type": "application/json",
-        "size_bytes": 128,
+_EVIDENCE_CONTENT: dict[str, bytes] = {}
+
+_OBSERVATION_PARAMS = {
+    "eligible_seen",
+    "selected_count",
+    "eligible_population_digest",
+    "selected_population_digest",
+    "capture_numerator",
+    "capture_denominator",
+    "evidence_refs",
+}
+
+
+def _population_inventory() -> dict[str, bytes]:
+    return dict(_EVIDENCE_CONTENT)
+
+
+def _evidence(
+    purpose: str,
+    member_ids: Sequence[str] = (),
+    *,
+    path: str | None = None,
+    raw_content: bytes | None = None,
+) -> dict[str, Any]:
+    document: dict[str, Any] = {
+        "schema_version": "openworkproof-population-evidence/0.5",
+        "purpose": purpose,
+        "member_ids": sorted(set(member_ids)),
     }
+    content = rfc8785.dumps(document) if raw_content is None else raw_content
+    reference = {
+        "path": path if path is not None else f"evidence/{purpose}.json",
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "media_type": "application/json",
+        "size_bytes": len(content),
+    }
+    _EVIDENCE_CONTENT[reference["sha256"]] = content
+    return reference
 
 
 def _observation(
@@ -187,44 +220,65 @@ def _observation(
     *,
     eligible_seen: int | None = None,
     selected_count: int | None = None,
-    eligible_digest: str | None = None,
-    selected_digest: str | None = None,
+    eligible_population_digest: str | None = None,
+    selected_population_digest: str | None = None,
+    capture_numerator: int | None = None,
+    capture_denominator: int | None = None,
+    evidence_refs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    selected_ids = contract.declared_selected_member_ids
-    eligible_seen = len(selected_ids) if eligible_seen is None else eligible_seen
-    selected_count = len(selected_ids) if selected_count is None else selected_count
+    declared = list(contract.declared_selected_member_ids)
+    eligible_seen = len(declared) if eligible_seen is None else eligible_seen
+    selected_count = len(declared) if selected_count is None else selected_count
     if eligible_seen == 0:
+        eligible_members: list[str] = []
+        selected_members: list[str] = []
         numerator, denominator = 0, 1
     elif selected_count == 0:
+        eligible_members = [f"e{index:063x}" for index in range(eligible_seen)]
+        selected_members = []
         numerator, denominator = 0, 1
     else:
+        eligible_members = [f"e{index:063x}" for index in range(eligible_seen)]
+        selected_members = declared
         numerator, denominator = selected_count, eligible_seen
+    if capture_numerator is not None and capture_denominator is not None:
+        numerator, denominator = capture_numerator, capture_denominator
     return {
         "contract_id": contract.contract_id,
         "selector_rule_id": contract.selector_rule_id,
         "selector_spec_digest": contract.selector_spec_digest,
         "selector_engine_digest": contract.selector_engine_digest,
         "eligible_seen": eligible_seen,
-        "eligible_population_digest": eligible_digest
-        or (
-            population_member_digest(())
-            if eligible_seen == 0
-            else population_member_digest(selected_ids)
+        "eligible_population_digest": (
+            eligible_population_digest
+            if eligible_population_digest is not None
+            else (
+                population_member_digest(())
+                if eligible_seen == 0
+                else population_member_digest(eligible_members)
+            )
         ),
         "selected_count": selected_count,
-        "selected_population_digest": selected_digest
-        or (
-            population_member_digest(())
-            if selected_count == 0
-            else population_member_digest(selected_ids)
+        "selected_population_digest": (
+            selected_population_digest
+            if selected_population_digest is not None
+            else (
+                population_member_digest(())
+                if selected_count == 0
+                else population_member_digest(selected_members)
+            )
         ),
         "capture_numerator": numerator,
         "capture_denominator": denominator,
         "observed_at": "2026-01-01T00:10:00Z",
-        "evidence_refs": [
-            _evidence("eligible-population"),
-            _evidence("selected-population"),
-        ],
+        "evidence_refs": (
+            [
+                _evidence("eligible-population", eligible_members),
+                _evidence("selected-population", selected_members),
+            ]
+            if evidence_refs is None
+            else evidence_refs
+        ),
     }
 
 
@@ -269,10 +323,16 @@ def _signed_result(
     )
     observations = []
     for contract in profile.population_contracts:
-        observation = _observation(contract)
         changes = (observation_changes or {}).get(contract.member_kind)
-        if changes:
-            observation.update(copy.deepcopy(changes))
+        params = copy.deepcopy(changes) if changes else {}
+        updates = {
+            key: params.pop(key)
+            for key in list(params)
+            if key not in _OBSERVATION_PARAMS
+        }
+        observation = _observation(contract, **params)
+        if updates:
+            observation.update(updates)
         observations.append(observation)
     payload["population_observations"] = sorted(
         observations, key=lambda observation: observation["contract_id"]
@@ -365,7 +425,9 @@ def test_profile_contracts_exactly_cover_scope_and_selector_rules(
 ) -> None:
     assert (
         validate_population_contracts(
-            population_case["profile"], population_case["manifest"]
+            population_case["profile"],
+            population_case["manifest"],
+            rule_outputs=_rule_outputs(population_case),
         )
         is None
     )
@@ -401,7 +463,11 @@ def test_profile_rejects_missing_or_duplicate_contract(
     )
     assert contracts
     with pytest.raises(ValueError):
-        validate_population_contracts(malformed, population_case["manifest"])
+        validate_population_contracts(
+            malformed,
+            population_case["manifest"],
+            rule_outputs=_rule_outputs(population_case),
+        )
 
 
 @pytest.mark.parametrize(
@@ -419,7 +485,11 @@ def test_profile_rejects_selector_mapping_drift(
     contracts[0]["contract_id"] = population_contract_id(contracts[0])
     profile = _resigned_profile(population_case, contracts)
     with pytest.raises(ValueError):
-        validate_population_contracts(profile, population_case["manifest"])
+        validate_population_contracts(
+            profile,
+            population_case["manifest"],
+            rule_outputs=_rule_outputs(population_case),
+        )
 
 
 @pytest.mark.parametrize("mutation", ("orphan", "wrong_kind", "duplicate_member"))
@@ -448,7 +518,11 @@ def test_profile_rejects_invalid_declared_member_relations(
         source["contract_id"] = population_contract_id(source)
     profile = _resigned_profile(population_case, contracts)
     with pytest.raises(ValueError):
-        validate_population_contracts(profile, population_case["manifest"])
+        validate_population_contracts(
+            profile,
+            population_case["manifest"],
+            rule_outputs=_rule_outputs(population_case),
+        )
 
 
 def test_profile_rejects_delivery_artifact_member(
@@ -512,7 +586,11 @@ def test_profile_rejects_delivery_artifact_member(
     case = {**population_case, "profile": profile}
     malformed_profile = _resigned_profile(case, contracts)
     with pytest.raises(ValueError):
-        validate_population_contracts(malformed_profile, manifest)
+        validate_population_contracts(
+            malformed_profile,
+            manifest,
+            rule_outputs=_rule_outputs(population_case),
+        )
 
 
 def test_population_assessment_requires_every_contract_observation_by_id(
@@ -536,6 +614,8 @@ def test_population_assessment_requires_every_contract_observation_by_id(
         population_case["profile"],
         population_case["manifest"],
         (incomplete, population_case["results"][1]),
+        rule_outputs=_rule_outputs(population_case),
+        evidence_inventory=_population_inventory(),
     )
     assert assessed.status == "drifted"
     assert "POPULATION_CROSS_ARM_MISMATCH" in assessed.reason_codes
@@ -555,7 +635,11 @@ def test_profile_rejects_4097_declared_members(
         update={"population_contracts": (contract,)}
     )
     with pytest.raises(ValueError):
-        validate_population_contracts(malformed, population_case["manifest"])
+        validate_population_contracts(
+            malformed,
+            population_case["manifest"],
+            rule_outputs=_rule_outputs(population_case),
+        )
 
 
 def test_signed_profile_cross_object_anomaly_is_invalid_not_unknown(
@@ -570,7 +654,11 @@ def test_signed_profile_cross_object_anomaly_is_invalid_not_unknown(
     profile = _resigned_profile(population_case, contracts)
     with pytest.raises(ValueError):
         assess_population_integrity(
-            profile, population_case["manifest"], population_case["results"]
+            profile,
+            population_case["manifest"],
+            population_case["results"],
+            rule_outputs=_rule_outputs(population_case),
+            evidence_inventory=_population_inventory(),
         )
 
 
@@ -601,7 +689,6 @@ def test_population_assessment_matches_at_exact_minimum_capture(
             "test_case": {
                 "eligible_seen": 100,
                 "selected_count": 1,
-                "eligible_population_digest": "a" * 64,
                 "selected_population_digest": selected_digest,
                 "capture_numerator": 1,
                 "capture_denominator": 100,
@@ -611,7 +698,6 @@ def test_population_assessment_matches_at_exact_minimum_capture(
             "test_case": {
                 "eligible_seen": 100,
                 "selected_count": 1,
-                "eligible_population_digest": "a" * 64,
                 "selected_population_digest": selected_digest,
                 "capture_numerator": 1,
                 "capture_denominator": 100,
@@ -619,7 +705,11 @@ def test_population_assessment_matches_at_exact_minimum_capture(
         },
     )
     assert assess_population_integrity(
-        case["profile"], case["manifest"], results
+        case["profile"],
+        case["manifest"],
+        results,
+        rule_outputs=_rule_outputs(case),
+        evidence_inventory=_population_inventory(),
     ) == PopulationAssessmentResult("matched", ())
 
 
@@ -641,6 +731,8 @@ def test_population_assessment_empty_precedes_thresholds(
         population_case["profile"],
         population_case["manifest"],
         _results(population_case, positive_changes=empty, negative_changes=empty),
+        rule_outputs=_rule_outputs(population_case),
+        evidence_inventory=_population_inventory(),
     )
     assert result == PopulationAssessmentResult(
         "empty", ("NO_ELIGIBLE_POPULATION",)
@@ -653,7 +745,6 @@ def test_population_assessment_eligible_400_selected_zero_is_capture_failed(
     changes = {
         "test_case": {
             "eligible_seen": 400,
-            "eligible_population_digest": "a" * 64,
             "selected_count": 0,
             "selected_population_digest": population_member_digest(()),
             "capture_numerator": 0,
@@ -668,6 +759,8 @@ def test_population_assessment_eligible_400_selected_zero_is_capture_failed(
             positive_changes=changes,
             negative_changes=changes,
         ),
+        rule_outputs=_rule_outputs(population_case),
+        evidence_inventory=_population_inventory(),
     )
     assert result == PopulationAssessmentResult(
         "capture_failed", ("POPULATION_CAPTURE_FAILED",)
@@ -713,6 +806,8 @@ def test_population_assessment_detects_rule_engine_and_digest_drift(
             positive_changes=changes,
             negative_changes=changes,
         ),
+        rule_outputs=_rule_outputs(population_case),
+        evidence_inventory=_population_inventory(),
     )
     assert result.status == "drifted"
     assert reason in result.reason_codes
@@ -728,6 +823,8 @@ def test_population_assessment_missing_required_evidence_is_unavailable(
         population_case["profile"],
         population_case["manifest"],
         _results(population_case, positive_changes=changes),
+        rule_outputs=_rule_outputs(population_case),
+        evidence_inventory=_population_inventory(),
     )
     assert result == PopulationAssessmentResult(
         "unavailable", ("POPULATION_EVIDENCE_MISSING",)
@@ -740,7 +837,6 @@ def test_population_assessment_selected_count_must_equal_declaration(
     changes = {
         "test_case": {
             "eligible_seen": 2,
-            "eligible_population_digest": "a" * 64,
             "selected_count": 2,
             "selected_population_digest": "b" * 64,
             "capture_numerator": 1,
@@ -755,6 +851,8 @@ def test_population_assessment_selected_count_must_equal_declaration(
             positive_changes=changes,
             negative_changes=changes,
         ),
+        rule_outputs=_rule_outputs(population_case),
+        evidence_inventory=_population_inventory(),
     )
     assert result.status == "drifted"
     assert "POPULATION_DIGEST_MISMATCH" in result.reason_codes
@@ -766,7 +864,6 @@ def test_population_assessment_zero_selected_requires_empty_digest(
     changes = {
         "test_case": {
             "eligible_seen": 400,
-            "eligible_population_digest": "a" * 64,
             "selected_count": 0,
             "selected_population_digest": "b" * 64,
             "capture_numerator": 0,
@@ -781,6 +878,8 @@ def test_population_assessment_zero_selected_requires_empty_digest(
             positive_changes=changes,
             negative_changes=changes,
         ),
+        rule_outputs=_rule_outputs(population_case),
+        evidence_inventory=_population_inventory(),
     )
     assert result.status == "drifted"
     assert "POPULATION_DIGEST_MISMATCH" in result.reason_codes
@@ -806,6 +905,8 @@ def test_population_assessment_detects_cross_arm_mismatch(
         population_case["profile"],
         population_case["manifest"],
         _results(population_case, negative_changes={"test_case": changes}),
+        rule_outputs=_rule_outputs(population_case),
+        evidence_inventory=_population_inventory(),
     )
     assert result.status == "drifted"
     assert "POPULATION_CROSS_ARM_MISMATCH" in result.reason_codes
@@ -829,6 +930,8 @@ def test_population_assessment_precedence_and_reason_codes_are_closed(
             positive_changes=changes,
             negative_changes=changes,
         ),
+        rule_outputs=_rule_outputs(population_case),
+        evidence_inventory=_population_inventory(),
     )
     assert drifted.status == "drifted"
     assert drifted.reason_codes == tuple(sorted(set(drifted.reason_codes)))
@@ -850,7 +953,419 @@ def test_population_assessment_precedence_and_reason_codes_are_closed(
                 }
             },
         ),
+        rule_outputs=_rule_outputs(population_case),
+        evidence_inventory=_population_inventory(),
     )
     assert unavailable == PopulationAssessmentResult(
+        "unavailable", ("POPULATION_EVIDENCE_MISSING",)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 4 review-fix RED tests: the four recorded defects.
+# ---------------------------------------------------------------------------
+
+def _rule_outputs(case: dict[str, Any]) -> dict[str, list[str]]:
+    """Authoritative selector-rule output witness derived from Scope members."""
+    manifest: EvaluationScopeManifest = case["manifest"]
+    members_by_kind = {
+        kind: sorted(
+            member.member_id
+            for member in manifest.members
+            if member.member_kind == kind
+        )
+        for kind in ("source_file", "test_case")
+    }
+    return {
+        manifest.selector_rules[0].rule_id: members_by_kind["source_file"],
+        manifest.selector_rules[1].rule_id: members_by_kind["test_case"],
+    }
+
+
+def _population_evidence_ref(
+    purpose: str,
+    member_ids: Sequence[str],
+    *,
+    path: str | None = None,
+    raw_content: bytes | None = None,
+) -> tuple[dict[str, Any], bytes]:
+    document: dict[str, Any] = {
+        "schema_version": "openworkproof-population-evidence/0.5",
+        "purpose": purpose,
+        "member_ids": sorted(set(member_ids)),
+    }
+    content = rfc8785.dumps(document) if raw_content is None else raw_content
+    reference = {
+        "path": path if path is not None else f"evidence/{purpose}.json",
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "media_type": "application/json",
+        "size_bytes": len(content),
+    }
+    return reference, content
+
+
+def _population_observation_changes(
+    contract: PopulationContractV05,
+    eligible_member_ids: Sequence[str],
+    selected_member_ids: Sequence[str],
+    *,
+    eligible_seen: int | None = None,
+    selected_count: int | None = None,
+    eligible_digest: str | None = None,
+    selected_digest: str | None = None,
+    eligible_ref: tuple[dict[str, Any], bytes] | None = None,
+    selected_ref: tuple[dict[str, Any], bytes] | None = None,
+) -> tuple[dict[str, Any], dict[str, bytes]]:
+    eligible = sorted(set(eligible_member_ids))
+    selected = sorted(set(selected_member_ids))
+    eligible_seen = len(eligible) if eligible_seen is None else eligible_seen
+    selected_count = len(selected) if selected_count is None else selected_count
+    numerator, denominator = (
+        (0, 1)
+        if eligible_seen == 0 or selected_count == 0
+        else (selected_count, eligible_seen)
+    )
+    eligible_reference, eligible_content = (
+        eligible_ref
+        if eligible_ref is not None
+        else _population_evidence_ref("eligible-population", eligible)
+    )
+    selected_reference, selected_content = (
+        selected_ref
+        if selected_ref is not None
+        else _population_evidence_ref("selected-population", selected)
+    )
+    changes: dict[str, Any] = {
+        "eligible_seen": eligible_seen,
+        "eligible_population_digest": (
+            population_member_digest(())
+            if eligible_seen == 0
+            else (
+                eligible_digest
+                if eligible_digest is not None
+                else population_member_digest(eligible)
+            )
+        ),
+        "selected_count": selected_count,
+        "selected_population_digest": (
+            population_member_digest(())
+            if selected_count == 0
+            else (
+                selected_digest
+                if selected_digest is not None
+                else population_member_digest(selected)
+            )
+        ),
+        "capture_numerator": numerator,
+        "capture_denominator": denominator,
+        "evidence_refs": [eligible_reference, selected_reference],
+    }
+    inventory = {
+        eligible_reference["sha256"]: eligible_content,
+        selected_reference["sha256"]: selected_content,
+    }
+    return changes, inventory
+
+
+def _default_assessment_inputs(
+    case: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, bytes]]:
+    changes: dict[str, dict[str, Any]] = {}
+    inventory: dict[str, bytes] = {}
+    for contract in case["profile"].population_contracts:
+        declared = list(contract.declared_selected_member_ids)
+        kind_changes, kind_inventory = _population_observation_changes(
+            contract, declared, declared
+        )
+        changes[contract.member_kind] = kind_changes
+        inventory.update(kind_inventory)
+    return changes, inventory
+
+
+def _assess(
+    case: dict[str, Any],
+    *,
+    changes: dict[str, dict[str, Any]] | None = None,
+    inventory: dict[str, bytes] | None = None,
+    rule_outputs: dict[str, list[str]] | None = None,
+) -> PopulationAssessmentResult:
+    default_changes, default_inventory = _default_assessment_inputs(case)
+    changes = {**default_changes, **(changes or {})}
+    if inventory is None:
+        inventory = default_inventory
+    results = _results(
+        case,
+        positive_changes=changes,
+        negative_changes=changes,
+    )
+    return assess_population_integrity(
+        case["profile"],
+        case["manifest"],
+        results,
+        rule_outputs=_rule_outputs(case) if rule_outputs is None else rule_outputs,
+        evidence_inventory=inventory,
+    )
+
+
+def test_population_assessment_empty_contract_is_not_masked_by_other_contracts(
+    population_case: dict[str, Any],
+) -> None:
+    changes, inventory = _default_assessment_inputs(population_case)
+    source_contract = next(
+        contract
+        for contract in population_case["profile"].population_contracts
+        if contract.member_kind == "source_file"
+    )
+    empty_changes, empty_inventory = _population_observation_changes(
+        source_contract, [], []
+    )
+    changes[source_contract.member_kind] = empty_changes
+    inventory.update(empty_inventory)
+    result = _assess(population_case, changes=changes, inventory=inventory)
+    assert result == PopulationAssessmentResult(
+        "empty", ("NO_ELIGIBLE_POPULATION",)
+    )
+
+
+def test_population_assessment_rejects_path_strings_as_evidence_purposes(
+    population_case: dict[str, Any],
+) -> None:
+    changes: dict[str, dict[str, Any]] = {}
+    inventory: dict[str, bytes] = {}
+    for contract in population_case["profile"].population_contracts:
+        declared = list(contract.declared_selected_member_ids)
+        eligible_ref, eligible_content = _population_evidence_ref(
+            "eligible-population",
+            declared,
+            path="eligible-population",
+            raw_content=b"opaque raw log bytes\n",
+        )
+        selected_ref, selected_content = _population_evidence_ref(
+            "selected-population",
+            declared,
+            path="selected-population",
+            raw_content=b"opaque raw log bytes\n",
+        )
+        changes[contract.member_kind] = {
+            "evidence_refs": [eligible_ref, selected_ref]
+        }
+        inventory.update(
+            {
+                eligible_ref["sha256"]: eligible_content,
+                selected_ref["sha256"]: selected_content,
+            }
+        )
+    result = _assess(population_case, changes=changes, inventory=inventory)
+    assert result == PopulationAssessmentResult(
+        "unavailable", ("POPULATION_EVIDENCE_MISSING",)
+    )
+
+
+def test_population_assessment_binds_purpose_through_replayed_content(
+    population_case: dict[str, Any],
+) -> None:
+    changes, inventory = _default_assessment_inputs(population_case)
+    for contract in population_case["profile"].population_contracts:
+        declared = list(contract.declared_selected_member_ids)
+        eligible_ref, eligible_content = _population_evidence_ref(
+            "eligible-population", declared, path="reports/a.json"
+        )
+        selected_ref, selected_content = _population_evidence_ref(
+            "selected-population", declared, path="reports/b.json"
+        )
+        changes[contract.member_kind]["evidence_refs"] = [
+            eligible_ref,
+            selected_ref,
+        ]
+        inventory.update(
+            {
+                eligible_ref["sha256"]: eligible_content,
+                selected_ref["sha256"]: selected_content,
+            }
+        )
+    result = _assess(population_case, changes=changes, inventory=inventory)
+    assert result == PopulationAssessmentResult("matched", ())
+
+
+def test_population_assessment_evidence_content_must_replay_signed_ref(
+    population_case: dict[str, Any],
+) -> None:
+    changes, inventory = _default_assessment_inputs(population_case)
+    inventory[next(iter(inventory))] = b'{"tampered": true}'
+    result = _assess(population_case, changes=changes, inventory=inventory)
+    assert result == PopulationAssessmentResult(
+        "unavailable", ("POPULATION_EVIDENCE_MISSING",)
+    )
+
+
+def test_population_assessment_missing_evidence_content_is_unavailable(
+    population_case: dict[str, Any],
+) -> None:
+    changes, inventory = _default_assessment_inputs(population_case)
+    inventory.pop(next(iter(inventory)))
+    result = _assess(population_case, changes=changes, inventory=inventory)
+    assert result == PopulationAssessmentResult(
+        "unavailable", ("POPULATION_EVIDENCE_MISSING",)
+    )
+
+
+def test_population_assessment_recomputes_eligible_digest_from_evidence(
+    population_case: dict[str, Any],
+) -> None:
+    contract = next(
+        item
+        for item in population_case["profile"].population_contracts
+        if item.member_kind == "test_case"
+    )
+    declared = list(contract.declared_selected_member_ids)
+    eligible = [f"{index:064x}" for index in range(100)]
+    kind_changes, kind_inventory = _population_observation_changes(
+        contract,
+        eligible,
+        declared,
+        eligible_digest=population_member_digest(()),
+    )
+    changes, inventory = _default_assessment_inputs(population_case)
+    changes[contract.member_kind] = kind_changes
+    inventory.update(kind_inventory)
+    result = _assess(population_case, changes=changes, inventory=inventory)
+    assert result.status == "drifted"
+    assert "POPULATION_DIGEST_MISMATCH" in result.reason_codes
+
+
+def test_population_assessment_eligible_count_must_equal_evidence_members(
+    population_case: dict[str, Any],
+) -> None:
+    contract = next(
+        item
+        for item in population_case["profile"].population_contracts
+        if item.member_kind == "test_case"
+    )
+    declared = list(contract.declared_selected_member_ids)
+    eligible = [f"{index:064x}" for index in range(100)]
+    kind_changes, kind_inventory = _population_observation_changes(
+        contract, eligible, declared, eligible_seen=101
+    )
+    changes, inventory = _default_assessment_inputs(population_case)
+    changes[contract.member_kind] = kind_changes
+    inventory.update(kind_inventory)
+    result = _assess(population_case, changes=changes, inventory=inventory)
+    assert result.status == "drifted"
+    assert "POPULATION_DIGEST_MISMATCH" in result.reason_codes
+
+
+def test_population_assessment_selected_evidence_must_equal_declared_members(
+    population_case: dict[str, Any],
+) -> None:
+    contract = next(
+        item
+        for item in population_case["profile"].population_contracts
+        if item.member_kind == "test_case"
+    )
+    declared = list(contract.declared_selected_member_ids)
+    kind_changes, kind_inventory = _population_observation_changes(
+        contract,
+        declared,
+        ["f" * 64],
+        selected_digest=population_member_digest(declared),
+    )
+    changes, inventory = _default_assessment_inputs(population_case)
+    changes[contract.member_kind] = kind_changes
+    inventory.update(kind_inventory)
+    result = _assess(population_case, changes=changes, inventory=inventory)
+    assert result.status == "drifted"
+    assert "POPULATION_DIGEST_MISMATCH" in result.reason_codes
+
+
+def test_profile_rejects_declared_members_not_produced_by_bound_rule(
+    population_case: dict[str, Any],
+) -> None:
+    contracts = [
+        contract.model_dump(mode="json")
+        for contract in population_case["profile"].population_contracts
+    ]
+    source = next(item for item in contracts if item["member_kind"] == "source_file")
+    test = next(item for item in contracts if item["member_kind"] == "test_case")
+    source["member_kind"], test["member_kind"] = (
+        test["member_kind"],
+        source["member_kind"],
+    )
+    (
+        source["declared_selected_member_ids"],
+        test["declared_selected_member_ids"],
+    ) = (
+        list(test["declared_selected_member_ids"]),
+        list(source["declared_selected_member_ids"]),
+    )
+    source["contract_id"] = population_contract_id(source)
+    test["contract_id"] = population_contract_id(test)
+    profile = _resigned_profile(population_case, contracts)
+    with pytest.raises(ValueError, match="not produced"):
+        validate_population_contracts(
+            profile,
+            population_case["manifest"],
+            rule_outputs=_rule_outputs(population_case),
+        )
+
+
+def test_profile_requires_rule_output_witness(
+    population_case: dict[str, Any],
+) -> None:
+    with pytest.raises(ValueError, match="rule outputs"):
+        validate_population_contracts(
+            population_case["profile"], population_case["manifest"]
+        )
+
+
+def test_profile_rejects_rule_outputs_outside_scope_members(
+    population_case: dict[str, Any],
+) -> None:
+    outputs = _rule_outputs(population_case)
+    rule_id = next(iter(outputs))
+    outputs[rule_id] = [*outputs[rule_id], "f" * 64]
+    with pytest.raises(ValueError, match="non-scope"):
+        validate_population_contracts(
+            population_case["profile"],
+            population_case["manifest"],
+            rule_outputs=outputs,
+        )
+
+
+def test_profile_rejects_incomplete_rule_output_witness(
+    population_case: dict[str, Any],
+) -> None:
+    outputs = _rule_outputs(population_case)
+    outputs.pop(next(iter(outputs)))
+    with pytest.raises(ValueError, match="exactly"):
+        validate_population_contracts(
+            population_case["profile"],
+            population_case["manifest"],
+            rule_outputs=outputs,
+        )
+
+
+def test_population_assessment_without_rule_outputs_is_unavailable(
+    population_case: dict[str, Any],
+) -> None:
+    result = assess_population_integrity(
+        population_case["profile"],
+        population_case["manifest"],
+        population_case["results"],
+    )
+    assert result == PopulationAssessmentResult(
+        "unavailable", ("POPULATION_EVIDENCE_MISSING",)
+    )
+
+
+def test_population_assessment_without_evidence_inventory_is_unavailable(
+    population_case: dict[str, Any],
+) -> None:
+    result = assess_population_integrity(
+        population_case["profile"],
+        population_case["manifest"],
+        population_case["results"],
+        rule_outputs=_rule_outputs(population_case),
+    )
+    assert result == PopulationAssessmentResult(
         "unavailable", ("POPULATION_EVIDENCE_MISSING",)
     )

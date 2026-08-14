@@ -1,13 +1,36 @@
-"""Pure verification-integrity derivation for v0.5 population evidence."""
+"""Pure verification-integrity derivation for v0.5 population evidence.
+
+This module derives one deterministic population status from signed v0.5
+inputs. Two external inputs are required to make the derivation sound:
+
+- ``rule_outputs``: the authoritative output member set of every v0.3
+  selector rule. It must be produced by replaying the signed selector spec
+  and engine digests against the frozen Git revision; the pure function
+  cannot replay Git or pytest itself. Declared selected members must be a
+  subset of their bound rule's output, and every output must be a Scope
+  member. Missing outputs make the assessment ``unavailable``.
+- ``evidence_inventory``: an authoritative artifact inventory that maps
+  SHA-256 digests to evidence bytes. Every ``EvidenceRefV05`` inside a
+  population observation must replay exactly (content digest and byte size)
+  and must carry a canonical population-evidence document whose declared
+  ``purpose`` satisfies the contract's required evidence purposes. The
+  evidence document's member list is the authoritative population from
+  which the eligible and selected counts and digests are recomputed.
+  ``EvidenceRefV05.path`` is a locator only and never satisfies a purpose.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import hashlib
+import json
+import re
 from typing import Literal
 
 from openworkproof.models import (
     EvaluationScopeManifest,
+    EvidenceRefV05,
     VerificationArmResultV05,
     VerificationIntegrityReasonCode,
     VerificationProfileV05,
@@ -18,6 +41,9 @@ from openworkproof.models import (
 PopulationAssessmentStatus = Literal[
     "matched", "empty", "capture_failed", "drifted", "unavailable"
 ]
+
+POPULATION_EVIDENCE_SCHEMA_VERSION = "openworkproof-population-evidence/0.5"
+_MEMBER_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,14 +74,51 @@ def _rule_member_kind(selector_kind: str, declared_kind: str) -> str:
     raise ValueError("unsupported selector kind")
 
 
+def _validated_rule_outputs(
+    rule_outputs: Mapping[str, Sequence[str]],
+    rules_by_id: dict[str, object],
+) -> dict[str, tuple[str, ...]]:
+    if not isinstance(rule_outputs, Mapping):
+        raise ValueError("rule outputs must be a mapping")
+    if set(rule_outputs) != set(rules_by_id):
+        raise ValueError("rule outputs must cover exactly the selector rules")
+    validated: dict[str, tuple[str, ...]] = {}
+    for rule_id, outputs in rule_outputs.items():
+        if type(outputs) not in {list, tuple}:
+            raise ValueError("rule outputs must use exact built-in list or tuple")
+        if len(outputs) > 4096:
+            raise ValueError("rule outputs exceed 4096 members")
+        member_ids: list[str] = []
+        for value in outputs:
+            if type(value) is not str or _MEMBER_ID_PATTERN.fullmatch(value) is None:
+                raise ValueError("rule outputs must be 64-hex member identifiers")
+            member_ids.append(value)
+        if len(member_ids) != len(set(member_ids)):
+            raise ValueError("rule outputs must be unique")
+        validated[rule_id] = tuple(sorted(member_ids))
+    return validated
+
+
 def validate_population_contracts(
     profile: VerificationProfileV05,
     manifest: EvaluationScopeManifest,
+    *,
+    rule_outputs: Mapping[str, Sequence[str]] | None = None,
 ) -> None:
-    """Reject a signed profile whose population contracts do not match Scope."""
+    """Reject a signed profile whose population contracts do not match Scope.
+
+    ``rule_outputs`` is the authoritative output member set per selector
+    rule, replayed from the signed selector spec and engine digests. Every
+    declared selected member must be a member of its bound rule's output;
+    relying on the Scope manifest population alone is not sufficient.
+    """
 
     profile = _validated_profile(profile)
     manifest = _validated_manifest(manifest)
+    if rule_outputs is None:
+        raise ValueError(
+            "rule outputs are required to validate the declared selected members"
+        )
     if (
         profile.evaluation_scope_id != manifest.scope_id
         or profile.evaluation_scope_digest != manifest.digest
@@ -65,6 +128,7 @@ def validate_population_contracts(
     rules_by_id = {rule.rule_id: rule for rule in manifest.selector_rules}
     if len(rules_by_id) != len(manifest.selector_rules):
         raise ValueError("selector rule identifiers must be unique")
+    validated_outputs = _validated_rule_outputs(rule_outputs, rules_by_id)
     contracts_by_rule = {
         contract.selector_rule_id: contract
         for contract in profile.population_contracts
@@ -99,14 +163,10 @@ def validate_population_contracts(
         if len(contract.declared_selected_member_ids) > 4096:
             raise ValueError("population contract declaration exceeds 4096 members")
 
-        rule_output_ids = {
-            member.member_id
-            for member in manifest.members
-            if member.member_kind == contract.member_kind
-        }
+        output_ids = set(validated_outputs[rule_id])
         for member_id in contract.declared_selected_member_ids:
             member = members_by_id.get(member_id)
-            if member is None or member_id not in rule_output_ids:
+            if member is None:
                 raise ValueError(
                     "population contract declares an orphan selector member"
                 )
@@ -116,9 +176,22 @@ def validate_population_contracts(
                 )
             if member.member_kind == "delivery_artifact":
                 raise ValueError("delivery artifacts cannot be population members")
+            if member_id not in output_ids:
+                raise ValueError(
+                    "population contract declares a member "
+                    "not produced by the bound selector rule"
+                )
             if member_id in declared_owner:
                 raise ValueError("population member is declared by multiple contracts")
             declared_owner[member_id] = contract.contract_id
+        for member_id in output_ids:
+            member = members_by_id.get(member_id)
+            if member is None:
+                raise ValueError("rule outputs reference a non-scope member")
+            if member.member_kind != contract.member_kind:
+                raise ValueError(
+                    "rule output member kind does not match the contract"
+                )
 
     if set(declared_owner) != scoped_population_ids:
         raise ValueError(
@@ -143,17 +216,107 @@ def _validated_results(
     return tuple(validated)
 
 
+def _parse_population_evidence(
+    content: bytes,
+) -> tuple[str, tuple[str, ...]]:
+    """Parse one canonical population-evidence document.
+
+    Returns ``(purpose, member_ids)``; raises ``ValueError`` when the
+    document is not replayable as closed v0.5 population evidence.
+    """
+
+    try:
+        document = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("population evidence is not valid JSON") from error
+    if not isinstance(document, dict) or set(document) != {
+        "schema_version",
+        "purpose",
+        "member_ids",
+    }:
+        raise ValueError("population evidence document must have a closed schema")
+    if document["schema_version"] != POPULATION_EVIDENCE_SCHEMA_VERSION:
+        raise ValueError("population evidence schema version is not 0.5")
+    purpose = document["purpose"]
+    if type(purpose) is not str or not purpose or len(purpose) > 128:
+        raise ValueError("population evidence purpose must be a bounded string")
+    member_ids = document["member_ids"]
+    if type(member_ids) is not list or len(member_ids) > 4096:
+        raise ValueError("population evidence member ids must be a bounded array")
+    validated: list[str] = []
+    for value in member_ids:
+        if type(value) is not str or _MEMBER_ID_PATTERN.fullmatch(value) is None:
+            raise ValueError(
+                "population evidence member ids must be 64-hex identifiers"
+            )
+        validated.append(value)
+    if validated != sorted(validated) or len(validated) != len(set(validated)):
+        raise ValueError("population evidence member ids must be sorted and unique")
+    return purpose, tuple(validated)
+
+
+def _resolve_population_evidence(
+    refs: Sequence[EvidenceRefV05],
+    inventory: Mapping[str, bytes],
+) -> dict[str, tuple[str, ...]]:
+    """Replay every evidence ref and return the declared purpose bindings.
+
+    Each ref must resolve through the authoritative artifact inventory, its
+    content must replay the signed SHA-256 and byte size, and its document
+    must declare a purpose. Paths never satisfy a purpose.
+    """
+
+    purposes: dict[str, tuple[str, ...]] = {}
+    for ref in refs:
+        content = inventory.get(ref.sha256)
+        if content is None:
+            raise ValueError("population evidence content is unavailable")
+        if type(content) is not bytes:
+            raise ValueError("population evidence content must be bytes")
+        if hashlib.sha256(content).hexdigest() != ref.sha256:
+            raise ValueError(
+                "population evidence content does not replay the signed reference"
+            )
+        if len(content) != ref.size_bytes:
+            raise ValueError(
+                "population evidence size does not replay the signed reference"
+            )
+        purpose, member_ids = _parse_population_evidence(content)
+        if purpose in purposes:
+            raise ValueError("population evidence repeats a purpose")
+        purposes[purpose] = member_ids
+    return purposes
+
+
 def assess_population_integrity(
     profile: VerificationProfileV05,
     manifest: EvaluationScopeManifest,
     results: Sequence[VerificationArmResultV05],
+    *,
+    rule_outputs: Mapping[str, Sequence[str]] | None = None,
+    evidence_inventory: Mapping[str, bytes] | None = None,
 ) -> PopulationAssessmentResult:
-    """Derive one deterministic population status from signed v0.5 inputs."""
+    """Derive one deterministic population status from signed v0.5 inputs.
 
-    validate_population_contracts(profile, manifest)
+    Closed precedence: missing or unreplayable evidence -> ``unavailable``;
+    rule/engine/digest/cross-arm mismatch -> ``drifted``; any contract with
+    an empty population -> ``empty``; below count/capture thresholds ->
+    ``capture_failed``; otherwise ``matched``. Each contract's
+    ``empty_population_policy=unknown`` takes effect independently.
+    """
+
     profile = _validated_profile(profile)
     manifest = _validated_manifest(manifest)
+    if rule_outputs is None:
+        return PopulationAssessmentResult(
+            "unavailable", ("POPULATION_EVIDENCE_MISSING",)
+        )
+    validate_population_contracts(profile, manifest, rule_outputs=rule_outputs)
     validated_results = _validated_results(results)
+    if not isinstance(evidence_inventory, Mapping):
+        return PopulationAssessmentResult(
+            "unavailable", ("POPULATION_EVIDENCE_MISSING",)
+        )
 
     contracts_by_id = {
         contract.contract_id: contract for contract in profile.population_contracts
@@ -171,10 +334,10 @@ def assess_population_integrity(
     evidence_missing = False
     drift_reasons: set[VerificationIntegrityReasonCode] = set()
     capture_failed = False
+    any_empty = False
     observations_by_contract: dict[str, list[tuple[int, str, int, str]]] = {
         contract_id: [] for contract_id in contracts_by_id
     }
-    all_empty = bool(validated_results)
 
     for result in validated_results:
         if (
@@ -203,23 +366,42 @@ def assess_population_integrity(
             if observation.selector_engine_digest != contract.selector_engine_digest:
                 drift_reasons.add("POPULATION_ENGINE_DRIFT")
 
-            evidence_paths = {reference.path for reference in observation.evidence_refs}
+            try:
+                evidence_purposes = _resolve_population_evidence(
+                    observation.evidence_refs, evidence_inventory
+                )
+            except ValueError:
+                evidence_missing = True
+                continue
             if not set(contract.required_population_evidence_purposes).issubset(
-                evidence_paths
+                evidence_purposes
             ):
                 evidence_missing = True
+                continue
 
-            selected_ids = contract.declared_selected_member_ids
-            selected_digest_mismatch = (
-                observation.selected_population_digest
-                != population_member_digest(())
-                if observation.selected_count == 0
-                else observation.selected_count != len(selected_ids)
-                or observation.selected_population_digest
-                != population_member_digest(selected_ids)
-            )
-            if selected_digest_mismatch:
+            eligible_ids = evidence_purposes.get("eligible-population", ())
+            selected_ids = evidence_purposes.get("selected-population", ())
+            if (
+                len(eligible_ids) != observation.eligible_seen
+                or population_member_digest(eligible_ids)
+                != observation.eligible_population_digest
+            ):
                 drift_reasons.add("POPULATION_DIGEST_MISMATCH")
+            if observation.selected_count == 0:
+                if (
+                    selected_ids
+                    or observation.selected_population_digest
+                    != population_member_digest(())
+                ):
+                    drift_reasons.add("POPULATION_DIGEST_MISMATCH")
+            else:
+                if (
+                    selected_ids != tuple(contract.declared_selected_member_ids)
+                    or len(selected_ids) != observation.selected_count
+                    or population_member_digest(selected_ids)
+                    != observation.selected_population_digest
+                ):
+                    drift_reasons.add("POPULATION_DIGEST_MISMATCH")
 
             observations_by_contract[contract.contract_id].append(
                 (
@@ -229,9 +411,8 @@ def assess_population_integrity(
                     observation.selected_population_digest,
                 )
             )
-            all_empty = all_empty and (
-                observation.eligible_seen == 0 and observation.selected_count == 0
-            )
+            if observation.eligible_seen == 0:
+                any_empty = True
             below_capture = (
                 observation.capture_numerator
                 * contract.minimum_capture_denominator
@@ -261,7 +442,7 @@ def assess_population_integrity(
         return PopulationAssessmentResult(
             "drifted", tuple(sorted(drift_reasons))
         )
-    if all_empty:
+    if any_empty:
         return PopulationAssessmentResult(
             "empty", ("NO_ELIGIBLE_POPULATION",)
         )
