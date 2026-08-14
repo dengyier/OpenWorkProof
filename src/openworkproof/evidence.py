@@ -727,6 +727,160 @@ _SCHEMA = (
     )
     """,
     """
+    CREATE TABLE verification_profiles_v05 (
+        profile_id TEXT PRIMARY KEY,
+        profile_digest TEXT NOT NULL UNIQUE,
+        scope_id TEXT NOT NULL UNIQUE
+            REFERENCES evaluation_scopes_v03(scope_id),
+        scope_digest TEXT NOT NULL,
+        subject_claim_id TEXT NOT NULL UNIQUE,
+        profile_json BLOB NOT NULL UNIQUE,
+        committed_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TRIGGER verification_profiles_v05_are_immutable_update
+    BEFORE UPDATE ON verification_profiles_v05
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.5 verification profile is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER verification_profiles_v05_are_immutable_delete
+    BEFORE DELETE ON verification_profiles_v05
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.5 verification profile is immutable');
+    END
+    """,
+    """
+    CREATE TABLE verification_arm_results_v05 (
+        arm_result_id TEXT PRIMARY KEY,
+        arm_result_digest TEXT NOT NULL UNIQUE,
+        profile_id TEXT NOT NULL
+            REFERENCES verification_profiles_v05(profile_id),
+        arm_id TEXT NOT NULL,
+        arm_result_json BLOB NOT NULL UNIQUE,
+        committed_at TEXT NOT NULL,
+        UNIQUE(profile_id, arm_id, arm_result_id)
+    )
+    """,
+    """
+    CREATE TRIGGER verification_arm_results_v05_are_immutable_update
+    BEFORE UPDATE ON verification_arm_results_v05
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.5 arm result is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER verification_arm_results_v05_are_immutable_delete
+    BEFORE DELETE ON verification_arm_results_v05
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.5 arm result is immutable');
+    END
+    """,
+    """
+    CREATE TABLE verification_decisions_v05 (
+        decision_id TEXT PRIMARY KEY,
+        decision_digest TEXT NOT NULL UNIQUE,
+        profile_id TEXT NOT NULL
+            REFERENCES verification_profiles_v05(profile_id),
+        scope_id TEXT NOT NULL
+            REFERENCES evaluation_scopes_v03(scope_id),
+        predecessor_id TEXT UNIQUE
+            REFERENCES verification_decisions_v05(decision_id),
+        decision_json BLOB NOT NULL UNIQUE,
+        committed_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TRIGGER verification_decisions_v05_are_immutable_update
+    BEFORE UPDATE ON verification_decisions_v05
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.5 verification decision is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER verification_decisions_v05_are_immutable_delete
+    BEFORE DELETE ON verification_decisions_v05
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.5 verification decision is immutable');
+    END
+    """,
+    """
+    CREATE TABLE verification_decision_parents_v05 (
+        decision_id TEXT NOT NULL
+            REFERENCES verification_decisions_v05(decision_id),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        arm_result_id TEXT NOT NULL
+            REFERENCES verification_arm_results_v05(arm_result_id),
+        PRIMARY KEY(decision_id, ordinal),
+        UNIQUE(decision_id, arm_result_id)
+    )
+    """,
+    """
+    CREATE TRIGGER verification_decision_parents_v05_are_immutable_update
+    BEFORE UPDATE ON verification_decision_parents_v05
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.5 verification decision parent is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER verification_decision_parents_v05_are_immutable_delete
+    BEFORE DELETE ON verification_decision_parents_v05
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.5 verification decision parent is immutable');
+    END
+    """,
+    """
+    CREATE TABLE acceptance_transitions_v05 (
+        transition_id TEXT PRIMARY KEY,
+        transition_digest TEXT NOT NULL UNIQUE,
+        target_acceptance_id TEXT NOT NULL UNIQUE,
+        verification_decision_id TEXT NOT NULL
+            REFERENCES verification_decisions_v05(decision_id),
+        transition_json BLOB NOT NULL UNIQUE,
+        committed_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TRIGGER acceptance_transitions_v05_are_immutable_update
+    BEFORE UPDATE ON acceptance_transitions_v05
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.5 acceptance transition is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER acceptance_transitions_v05_are_immutable_delete
+    BEFORE DELETE ON acceptance_transitions_v05
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.5 acceptance transition is immutable');
+    END
+    """,
+    """
+    CREATE TABLE acceptance_transition_parents_v05 (
+        transition_id TEXT NOT NULL
+            REFERENCES acceptance_transitions_v05(transition_id),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        parent_id TEXT NOT NULL,
+        PRIMARY KEY(transition_id, ordinal),
+        UNIQUE(transition_id, parent_id)
+    )
+    """,
+    """
+    CREATE TRIGGER acceptance_transition_parents_v05_are_immutable_update
+    BEFORE UPDATE ON acceptance_transition_parents_v05
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.5 acceptance transition parent is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER acceptance_transition_parents_v05_are_immutable_delete
+    BEFORE DELETE ON acceptance_transition_parents_v05
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.5 acceptance transition parent is immutable');
+    END
+    """,
+    """
     CREATE TABLE judgment_commitments_v04 (
         commitment_id TEXT PRIMARY KEY,
         commitment_digest TEXT NOT NULL,

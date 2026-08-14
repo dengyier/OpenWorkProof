@@ -667,10 +667,110 @@ def assess_control_integrity(
     )
 
 
+def validate_population_observation(
+    profile: VerificationProfileV05,
+    manifest: EvaluationScopeManifest,
+    result: VerificationArmResultV05,
+    *,
+    rule_outputs: Mapping[str, Sequence[str]] | None = None,
+    evidence_inventory: Mapping[str, bytes] | None = None,
+) -> None:
+    """Validate one arm result's population observations without aggregation.
+
+    Used by the append-only transaction layer to prove that a single signed
+    arm result's observations replay exactly before commit. Raises
+    ``ValueError`` when evidence is missing or unreplayable, or when any
+    observation's rule, engine, digest, or eligible binding drifts from the
+    signed contract. Returns ``None`` when every observation replays to a
+    consistent matched / empty / capture_failed state.
+    """
+
+    profile = _validated_profile(profile)
+    manifest = _validated_manifest(manifest)
+    if rule_outputs is None:
+        raise ValueError("rule outputs are required to replay observations")
+    validate_population_contracts(profile, manifest, rule_outputs=rule_outputs)
+    result = _validated_results((result,))[0]
+    if not isinstance(evidence_inventory, Mapping):
+        raise ValueError("evidence inventory is required to replay observations")
+    if (
+        result.profile_digest != profile.digest
+        or result.scope_manifest_digest != manifest.digest
+    ):
+        raise ValueError("arm result does not bind the supplied profile and scope")
+    contracts_by_id = {
+        contract.contract_id: contract for contract in profile.population_contracts
+    }
+    observation_ids = [
+        observation.contract_id for observation in result.population_observations
+    ]
+    if (
+        len(observation_ids) != len(set(observation_ids))
+        or set(observation_ids) != set(contracts_by_id)
+    ):
+        raise ValueError("population observations do not cover the contracts")
+
+    outputs_by_rule = {
+        rule_id: tuple(sorted(member_ids))
+        for rule_id, member_ids in _validated_rule_outputs(
+            rule_outputs, {rule.rule_id: rule for rule in manifest.selector_rules}
+        ).items()
+    }
+    for observation in result.population_observations:
+        contract = contracts_by_id[observation.contract_id]
+        if (
+            observation.selector_rule_id != contract.selector_rule_id
+            or observation.selector_spec_digest != contract.selector_spec_digest
+            or observation.selector_engine_digest != contract.selector_engine_digest
+        ):
+            raise ValueError("population observation drifts from its contract")
+        evidence_purposes = _resolve_population_evidence(
+            observation.evidence_refs, evidence_inventory
+        )
+        if not set(contract.required_population_evidence_purposes).issubset(
+            evidence_purposes
+        ):
+            raise ValueError("population observation evidence purposes are missing")
+        eligible_ids = evidence_purposes.get("eligible-population", ())
+        selected_ids = evidence_purposes.get("selected-population", ())
+        if (
+            len(eligible_ids) != observation.eligible_seen
+            or population_member_digest(eligible_ids)
+            != observation.eligible_population_digest
+        ):
+            raise ValueError("population observation eligible digest does not replay")
+        expected_eligible = outputs_by_rule.get(observation.selector_rule_id, ())
+        if eligible_ids and not set(expected_eligible).issubset(eligible_ids):
+            raise ValueError(
+                "population observation eligible set does not contain the rule output"
+            )
+        if observation.selected_count == 0:
+            if (
+                selected_ids
+                or observation.selected_population_digest
+                != population_member_digest(())
+            ):
+                raise ValueError(
+                    "population observation selected digest does not replay"
+                )
+        else:
+            if (
+                selected_ids != tuple(contract.declared_selected_member_ids)
+                or len(selected_ids) != observation.selected_count
+                or population_member_digest(selected_ids)
+                != observation.selected_population_digest
+            ):
+                raise ValueError(
+                    "population observation selected digest does not replay"
+                )
+    return None
+
+
 __all__ = [
     "PopulationAssessmentResult",
     "assess_population_integrity",
     "validate_population_contracts",
+    "validate_population_observation",
     "ControlAssessmentResult",
     "assess_control_integrity",
     "validate_control_contracts",

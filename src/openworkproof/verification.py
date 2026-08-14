@@ -6,7 +6,7 @@ import base64
 import hashlib
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Sequence
 from typing import Callable, Literal, TypeVar
@@ -15,6 +15,7 @@ import rfc8785
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+import openworkproof.integrity as integrity
 from openworkproof.acceptance import (
     AcceptanceTransactionError,
     evidence_snapshot_digest,
@@ -28,6 +29,7 @@ from openworkproof.models import (
     VerificationArmResult,
     VerificationArmResultV03,
     VerificationArmResultReference,
+    VerificationArmResultV05,
     VerificationDecision,
     VerificationDecisionDraft,
     VerificationDecisionDraftV03,
@@ -35,6 +37,7 @@ from openworkproof.models import (
     VerificationIndependenceAssessment,
     VerificationProfileV02,
     VerificationProfileV03,
+    VerificationProfileV05,
     VerificationReasonCode,
     ScopeAssessment,
     WorkOrder,
@@ -948,6 +951,9 @@ def _assert_nonce_unused(
         ("verification_profiles_v03", "profile_id", "profile_json"),
         ("verification_decisions_v03", "decision_id", "decision_json"),
         ("acceptance_transitions_v03", "transition_id", "transition_json"),
+        ("verification_profiles_v05", "profile_id", "profile_json"),
+        ("verification_decisions_v05", "decision_id", "decision_json"),
+        ("acceptance_transitions_v05", "transition_id", "transition_json"),
     ):
         for identifier, raw in connection.execute(
             f"SELECT {identifier_column}, {json_column} FROM {table}"
@@ -2441,5 +2447,579 @@ def commit_verification_decision_v03(
         path,
         stage=stage,
         readback=lambda _: _exact_decision_v03_readback(path, parsed),
+        fault=fault,
+    )
+
+
+# ---------------------------------------------------------------------------
+# v0.5 verification integrity transactions.
+# ---------------------------------------------------------------------------
+
+def _utc_committed_at() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _derive_v05_rule_outputs(
+    profile: VerificationProfileV05,
+    manifest: EvaluationScopeManifest,
+    path: Path,
+) -> dict[str, tuple[str, ...]]:
+    """Replay each selector rule's authoritative output from its signed
+    selector specification evidence, then intersect with the signed scope
+    members. First-adapter selector kinds derive the signed scope kind
+    partition; explicit rules derive the members named by the spec."""
+    root = path.parent.resolve(strict=True)
+    members_by_locator = {
+        member.locator: member.member_id for member in manifest.members
+    }
+    kind_partition = {
+        kind: tuple(
+            sorted(
+                member.member_id
+                for member in manifest.members
+                if member.member_kind == kind
+            )
+        )
+        for kind in ("source_file", "test_case")
+    }
+    outputs: dict[str, tuple[str, ...]] = {}
+    for rule in manifest.selector_rules:
+        matched_bytes: bytes | None = None
+        for relative in rule.required_evidence_paths:
+            target = root
+            for segment in relative.split("/"):
+                target = target / segment
+                if target.is_symlink():
+                    raise VerificationTransactionError(
+                        "v0.5 selector evidence traverses a symlink"
+                    )
+            try:
+                resolved = target.resolve(strict=True)
+                resolved.relative_to(root)
+            except (FileNotFoundError, ValueError) as error:
+                raise VerificationTransactionError(
+                    "v0.5 selector evidence is unavailable"
+                ) from error
+            if not resolved.is_file():
+                raise VerificationTransactionError(
+                    "v0.5 selector evidence is unavailable"
+                )
+            raw = resolved.read_bytes()
+            if hashlib.sha256(raw).hexdigest() == rule.selector_spec_digest:
+                matched_bytes = raw
+                break
+        if matched_bytes is None:
+            raise VerificationTransactionError(
+                "v0.5 selector specification evidence is unavailable"
+            )
+        try:
+            document = json.loads(matched_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as error:
+            raise VerificationTransactionError(
+                "v0.5 selector specification is invalid"
+            ) from error
+        if not isinstance(document, dict):
+            raise VerificationTransactionError(
+                "v0.5 selector specification is invalid"
+            )
+        selector_kind = document.get("selector_kind")
+        if selector_kind in {"git_diff_closure", "pytest_collection"}:
+            kind = (
+                "source_file"
+                if selector_kind == "git_diff_closure"
+                else "test_case"
+            )
+            outputs[rule.rule_id] = kind_partition[kind]
+        elif selector_kind == "explicit":
+            locators = document.get("locators")
+            if not isinstance(locators, list) or any(
+                type(item) is not str for item in locators
+            ):
+                raise VerificationTransactionError(
+                    "v0.5 explicit selector specification is invalid"
+                )
+            outputs[rule.rule_id] = tuple(
+                sorted(
+                    member_id
+                    for locator, member_id in members_by_locator.items()
+                    if locator in set(locators)
+                )
+            )
+        else:
+            raise VerificationTransactionError(
+                "v0.5 selector kind is unsupported"
+            )
+    return outputs
+
+
+def _load_profile_context_v05(
+    connection: sqlite3.Connection,
+    *,
+    profile_digest: str,
+    path: Path,
+) -> tuple[
+    WorkOrder,
+    SubjectClaim,
+    EvaluationScopeManifest,
+    VerificationProfileV05,
+]:
+    matches: list[VerificationProfileV05] = []
+    for profile_id, raw in connection.execute(
+        "SELECT profile_id, profile_json FROM verification_profiles_v05 "
+        "ORDER BY profile_id"
+    ):
+        profile = _load_canonical_model(
+            VerificationProfileV05, raw, "v0.5 verification profile"
+        )
+        if profile.profile_id != profile_id:
+            raise VerificationTransactionError(
+                "v0.5 profile index does not match canonical row"
+            )
+        if profile.digest == profile_digest:
+            matches.append(profile)
+    if len(matches) != 1:
+        raise VerificationTransactionError("v0.5 verification profile is unavailable")
+    profile = matches[0]
+    work_order, claim, manifest = _load_scope_profile_context(
+        connection, scope_id=profile.evaluation_scope_id
+    )
+    manager = _manager_binding(work_order)
+    if (
+        profile.signer_key_id != manager.key_id
+        or not verify_payload(
+            "verification-profile",
+            profile.model_dump(mode="json"),
+            decode_and_verify_key_binding(manager),
+            version="0.5",
+        )
+        or profile.work_order_digest != work_order.digest
+        or profile.subject_claim_digest != claim.digest
+        or profile.evaluation_scope_digest != manifest.digest
+    ):
+        raise VerificationTransactionError("v0.5 profile authority is invalid")
+    try:
+        integrity.validate_population_contracts(
+            profile,
+            manifest,
+            rule_outputs=_derive_v05_rule_outputs(profile, manifest, path),
+        )
+        integrity.validate_control_contracts(profile)
+    except ValueError as error:
+        raise VerificationTransactionError(
+            "v0.5 profile contracts are invalid"
+        ) from error
+    return work_order, claim, manifest, profile
+
+
+def _exact_profile_v05_readback(
+    path: Path,
+    *,
+    profile: VerificationProfileV05,
+    committed_at: str,
+) -> bool:
+    connection = evidence.connect_ledger(path)
+    try:
+        row = connection.execute(
+            """
+            SELECT p.profile_digest, p.scope_id, p.scope_digest,
+                   p.subject_claim_id, s.claim_id, p.profile_json, p.committed_at
+            FROM verification_profiles_v05 AS p
+            JOIN evaluation_scopes_v03 AS s ON s.scope_id = p.scope_id
+            WHERE p.profile_id = ?
+            """,
+            (profile.profile_id,),
+        ).fetchone()
+        return (
+            row is not None
+            and row[0:3]
+            == (
+                profile.digest,
+                profile.evaluation_scope_id,
+                profile.evaluation_scope_digest,
+            )
+            and row[3] == row[4]
+            and row[5] == _canonical_model_blob(profile)
+            and row[6] == committed_at
+        )
+    finally:
+        connection.close()
+
+
+def commit_verification_profile_v05(
+    ledger_path: Path,
+    profile: VerificationProfileV05,
+    *,
+    fault: _Fault | None = None,
+) -> VerificationProfileV05:
+    path = Path(ledger_path)
+    try:
+        parsed = VerificationProfileV05.model_validate(
+            profile.model_dump(mode="json")
+        )
+    except Exception as error:
+        raise VerificationTransactionError("v0.5 profile input is malformed") from error
+    committed_at = _utc_committed_at()
+
+    def stage(connection: sqlite3.Connection) -> VerificationProfileV05:
+        work_order, claim, manifest = _load_scope_profile_context(
+            connection, scope_id=parsed.evaluation_scope_id
+        )
+        manager = _manager_binding(work_order)
+        manager_key = decode_and_verify_key_binding(manager)
+        if (
+            parsed.signer_key_id != manager.key_id
+            or not verify_payload(
+                "verification-profile",
+                parsed.model_dump(mode="json"),
+                manager_key,
+                version="0.5",
+            )
+        ):
+            raise VerificationTransactionError(
+                "v0.5 profile Manager signature is invalid"
+            )
+        if (
+            parsed.work_order_digest != work_order.digest
+            or parsed.subject_claim_digest != claim.digest
+            or parsed.evaluation_scope_digest != manifest.digest
+        ):
+            raise VerificationTransactionError(
+                "v0.5 profile authority digests do not match"
+            )
+        if not (
+            manifest.created_at <= parsed.created_at
+            < parsed.expires_at
+            <= min(manifest.expires_at, work_order.deadline)
+        ):
+            raise VerificationTransactionError("v0.5 profile validity is outside scope")
+        try:
+            integrity.validate_population_contracts(
+                parsed,
+                manifest,
+                rule_outputs=_derive_v05_rule_outputs(parsed, manifest, path),
+            )
+            integrity.validate_control_contracts(parsed)
+        except ValueError as error:
+            raise VerificationTransactionError(
+                "v0.5 profile contracts are invalid"
+            ) from error
+        if (
+            parsed.policy_anchor_digest is not None
+            or parsed.commitment_anchor_digest is not None
+        ):
+            raise VerificationTransactionError(
+                "v0.5 external anchors require an explicit transaction input"
+            )
+        existing = connection.execute(
+            """
+            SELECT profile_digest, scope_id, scope_digest,
+                   subject_claim_id, profile_json
+            FROM verification_profiles_v05 WHERE profile_id = ?
+            """,
+            (parsed.profile_id,),
+        ).fetchone()
+        exact = (
+            parsed.digest,
+            parsed.evaluation_scope_id,
+            parsed.evaluation_scope_digest,
+            claim.claim_id,
+            _canonical_model_blob(parsed),
+        )
+        if existing is not None:
+            if existing == exact:
+                raise VerificationCommittedError(
+                    "the exact v0.5 verification profile is already committed",
+                    parsed,
+                )
+            raise VerificationTransactionError(
+                "v0.5 verification profile id is already used"
+            )
+        _assert_nonce_unused(connection, parsed.nonce)
+        connection.execute(
+            """
+            INSERT INTO verification_profiles_v05 (
+                profile_id, profile_digest, scope_id, scope_digest,
+                subject_claim_id, profile_json, committed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (parsed.profile_id, *exact, committed_at),
+        )
+        return parsed
+
+    return _commit_with_readback(
+        path,
+        stage=stage,
+        readback=lambda _: _exact_profile_v05_readback(
+            path, profile=parsed, committed_at=committed_at
+        ),
+        fault=fault,
+    )
+
+
+def load_verification_profile_v05(
+    ledger_path: Path,
+    profile_id: str,
+) -> VerificationProfileV05:
+    path = Path(ledger_path)
+    if not path.is_file():
+        raise VerificationTransactionError("verification ledger is unavailable")
+    connection = evidence.connect_ledger(path)
+    try:
+        row = connection.execute(
+            "SELECT profile_id, profile_json FROM verification_profiles_v05 "
+            "WHERE profile_id = ?",
+            (profile_id,),
+        ).fetchone()
+        if row is None:
+            raise VerificationTransactionError("v0.5 verification profile is unavailable")
+        profile = _load_canonical_model(
+            VerificationProfileV05, row[1], "v0.5 verification profile"
+        )
+        if profile.profile_id != profile_id:
+            raise VerificationTransactionError(
+                "v0.5 profile index does not match canonical row"
+            )
+        _load_profile_context_v05(
+            connection, profile_digest=profile.digest, path=path
+        )
+        return profile
+    finally:
+        connection.close()
+
+
+def _read_v05_population_inventory(
+    path: Path,
+    result: VerificationArmResultV05,
+) -> dict[str, bytes]:
+    inventory: dict[str, bytes] = {}
+    for observation in result.population_observations:
+        for ref in observation.evidence_refs:
+            raw = _read_evidence_ref(path, ref, canonical_json=False)
+            inventory[ref.sha256] = raw
+    return inventory
+
+
+def _validate_single_arm_result_v05(
+    *,
+    connection: sqlite3.Connection,
+    path: Path,
+    work_order: WorkOrder,
+    profile: VerificationProfileV05,
+    manifest: EvaluationScopeManifest,
+    result: VerificationArmResultV05,
+) -> None:
+    expected_arms = {
+        arm.arm_id: arm for arm in (profile.positive_arm, *profile.negative_arms)
+    }
+    arm = expected_arms.get(result.arm_id)
+    binding = next(
+        (
+            item
+            for item in profile.verifier_bindings
+            if item.verifier_key_id == result.verifier_key_id
+        ),
+        None,
+    )
+    if (
+        result.profile_digest != profile.digest
+        or result.scope_manifest_digest != manifest.digest
+        or arm is None
+        or result.arm_kind != arm.arm_kind
+    ):
+        raise VerificationTransactionError("v0.5 arm result binding mismatch")
+    if (
+        binding is None
+        or binding.verifier_subject_id != result.verifier_subject_id
+        or binding.controller_factors != result.controller_factors
+        or binding.execution_context_factors != result.execution_context_factors
+        or not (
+            binding.valid_from <= result.created_at < binding.expires_at
+            and profile.created_at <= result.created_at < profile.expires_at
+        )
+        or not verify_payload(
+            "verification-arm-result",
+            result.model_dump(mode="json"),
+            _decode_public_key(binding.verifier_public_key_b64url),
+            version="0.5",
+        )
+    ):
+        raise VerificationTransactionError("v0.5 arm result signature is invalid")
+    _validate_selector_spec_evidence(path, manifest)
+    _validate_causal_receipts(
+        connection=connection,
+        work_order=work_order,
+        receipt_ids=result.action_receipt_ids,
+    )
+    all_refs = (*result.evidence_refs, *result.scope_evidence_refs)
+    for observation in result.population_observations:
+        all_refs = (*all_refs, *observation.evidence_refs)
+    if result.control_observation is not None:
+        all_refs = (*all_refs, *result.control_observation.evidence_refs)
+    if sum(ref.size_bytes for ref in all_refs) > profile.max_evidence_bytes:
+        raise VerificationTransactionError("v0.5 arm result evidence limit exceeded")
+    if any(ref.path not in set(arm.result_artifact_paths) for ref in result.evidence_refs):
+        raise VerificationTransactionError("v0.5 arm result evidence path is outside profile")
+    if len(result.scope_evidence_refs) != 1 or not result.scope_evidence_refs[0].path.startswith(
+        "scope/"
+    ):
+        raise VerificationTransactionError("v0.5 scope evidence binding is invalid")
+    for ref in result.evidence_refs:
+        _read_evidence_ref(path, ref, canonical_json=False)
+    raw_scope = _read_evidence_ref(
+        path, result.scope_evidence_refs[0], canonical_json=True
+    )
+    try:
+        observed = ObservedScope.model_validate_json(raw_scope)
+    except Exception as error:
+        raise VerificationTransactionError("scope evidence payload is invalid") from error
+    comparison = compare_observed_scope(manifest, observed)
+    scope_reasons = tuple(
+        code for code in result.reason_codes if code.startswith("SCOPE_")
+    )
+    if (
+        result.observed_member_count != observed.member_count
+        or result.observed_population_digest != observed.population_digest
+        or result.observed_required_target_ids != observed.required_target_ids
+        or result.scope_expectation_status != comparison.scope_status
+        or scope_reasons != tuple(sorted(comparison.reason_codes))
+    ):
+        raise VerificationTransactionError(
+            "v0.5 arm result does not match recomputed scope evidence"
+        )
+    rule_outputs = _derive_v05_rule_outputs(profile, manifest, path)
+    inventory = _read_v05_population_inventory(path, result)
+    try:
+        integrity.validate_population_observation(
+            profile,
+            manifest,
+            result,
+            rule_outputs=rule_outputs,
+            evidence_inventory=inventory,
+        )
+    except ValueError as error:
+        raise VerificationTransactionError(
+            "v0.5 population observations do not replay"
+        ) from error
+    if result.control_observation is not None:
+        contract = next(
+            item for item in profile.control_contracts if item.arm_id == result.arm_id
+        )
+        observation = result.control_observation
+        if observation.control_id != contract.control_id:
+            raise VerificationTransactionError(
+                "v0.5 control observation does not bind its contract"
+            )
+        for ref in observation.evidence_refs:
+            _read_evidence_ref(path, ref, canonical_json=False)
+        try:
+            derived, code = integrity._derived_control_status(contract, result)
+        except ValueError as error:
+            raise VerificationTransactionError(
+                "v0.5 control observation is invalid"
+            ) from error
+        if code == "CONTROL_CONTRACT_EXPIRED":
+            raise VerificationTransactionError(
+                "v0.5 control observation is outside the contract window"
+            )
+        if observation.control_status != derived:
+            raise VerificationTransactionError(
+                "v0.5 control observation claims an inconsistent status"
+            )
+
+
+def _exact_arm_result_v05_readback(
+    path: Path,
+    result: VerificationArmResultV05,
+    committed_at: str,
+) -> bool:
+    connection = evidence.connect_ledger(path)
+    try:
+        row = connection.execute(
+            """
+            SELECT arm_result_digest, profile_id, arm_id, arm_result_json,
+                   committed_at
+            FROM verification_arm_results_v05 WHERE arm_result_id = ?
+            """,
+            (result.arm_result_id,),
+        ).fetchone()
+        profile_row = connection.execute(
+            "SELECT profile_id FROM verification_profiles_v05 "
+            "WHERE profile_digest = ?",
+            (result.profile_digest,),
+        ).fetchone()
+        return profile_row is not None and row == (
+            result.digest,
+            profile_row[0],
+            result.arm_id,
+            _canonical_model_blob(result),
+            committed_at,
+        )
+    finally:
+        connection.close()
+
+
+def commit_verification_arm_result_v05(
+    ledger_path: Path,
+    result: VerificationArmResultV05,
+    *,
+    fault: _Fault | None = None,
+) -> VerificationArmResultV05:
+    path = Path(ledger_path)
+    try:
+        parsed = VerificationArmResultV05.model_validate(
+            result.model_dump(mode="json")
+        )
+    except Exception as error:
+        raise VerificationTransactionError("v0.5 arm result input is malformed") from error
+    committed_at = _utc_committed_at()
+
+    def stage(connection: sqlite3.Connection) -> VerificationArmResultV05:
+        work_order, _, manifest, profile = _load_profile_context_v05(
+            connection, profile_digest=parsed.profile_digest, path=path
+        )
+        _validate_single_arm_result_v05(
+            connection=connection,
+            path=path,
+            work_order=work_order,
+            profile=profile,
+            manifest=manifest,
+            result=parsed,
+        )
+        existing = connection.execute(
+            """
+            SELECT arm_result_digest, profile_id, arm_id, arm_result_json
+            FROM verification_arm_results_v05 WHERE arm_result_id = ?
+            """,
+            (parsed.arm_result_id,),
+        ).fetchone()
+        expected = (
+            parsed.digest,
+            profile.profile_id,
+            parsed.arm_id,
+            _canonical_model_blob(parsed),
+        )
+        if existing is not None:
+            if existing == expected:
+                raise VerificationCommittedError(
+                    "the exact v0.5 arm result is already committed", parsed
+                )
+            raise VerificationTransactionError("v0.5 arm result id is already used")
+        connection.execute(
+            """
+            INSERT INTO verification_arm_results_v05 (
+                arm_result_id, arm_result_digest, profile_id, arm_id,
+                arm_result_json, committed_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (parsed.arm_result_id, *expected, committed_at),
+        )
+        return parsed
+
+    return _commit_with_readback(
+        path,
+        stage=stage,
+        readback=lambda _: _exact_arm_result_v05_readback(
+            path, parsed, committed_at
+        ),
         fault=fault,
     )
