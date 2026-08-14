@@ -67,10 +67,12 @@ def test_customer_private_v05_package_replays_offline(v05_transaction_case) -> N
         entry.path for entry in manifest.entries if "evidence/controls/" in entry.path
     ]
     assert len(control_paths) >= 1
+    from openworkproof.delivery_package import digest_manifest
+
     result = verify_delivery_package(output)
     assert result.current_decision == "VERIFIED"
     assert result.full_offline_replay is True
-    assert result.manifest_digest == manifest.entries[-1].sha256 or True
+    assert result.manifest_digest == digest_manifest(manifest)
 
 
 def test_v05_public_and_diagnostic_views_are_aggregate_only(
@@ -158,3 +160,123 @@ def test_v05_explain_and_compare_derived_views(v05_transaction_case) -> None:
     assert comparison["control_changes"] == []
     assert comparison["population_status_left"] == "matched"
     assert comparison["population_status_right"] == "matched"
+
+
+def _retamper(case, root, relative, new_bytes):
+    """Replace one packaged file and repair the manifest digest chain."""
+    target = root / relative
+    target.write_bytes(new_bytes)
+    manifest_path = root / "manifest.json"
+    import rfc8785
+
+    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for entry in manifest_payload["entries"]:
+        if entry["path"] == relative:
+            entry["sha256"] = __import__("hashlib").sha256(new_bytes).hexdigest()
+            entry["size_bytes"] = len(new_bytes)
+    manifest_path.write_bytes(rfc8785.dumps(manifest_payload))
+
+
+def test_v05_package_tampered_claim_fails_closed(v05_transaction_case) -> None:
+    case = _full_case(v05_transaction_case)
+    output = case["tmp_path"] / "customer-package"
+    export_delivery_package(case["ledger"], output, privacy_view="customer_private")
+    claim_path = output / "subject-claim.json"
+    tampered = json.loads(claim_path.read_text(encoding="utf-8"))
+    tampered["claim_statement"] = "replaced claim"
+    _retamper(
+        case, output, "subject-claim.json",
+        __import__("rfc8785").dumps(tampered),
+    )
+    with pytest.raises(DeliveryPackageError):
+        verify_delivery_package(output)
+
+
+def test_v05_package_tampered_scope_evidence_fails_closed(
+    v05_transaction_case,
+) -> None:
+    case = _full_case(v05_transaction_case)
+    output = case["tmp_path"] / "customer-package"
+    manifest = export_delivery_package(
+        case["ledger"], output, privacy_view="customer_private"
+    )
+    scope_entry = next(
+        entry for entry in manifest.entries if "evidence/scope/" in entry.path
+    )
+    _retamper(case, output, scope_entry.path, b"tampered scope evidence")
+    with pytest.raises(DeliveryPackageError):
+        verify_delivery_package(output)
+
+
+def test_v05_package_tampered_manifest_digest_fails_closed(
+    v05_transaction_case,
+) -> None:
+    case = _full_case(v05_transaction_case)
+    output = case["tmp_path"] / "customer-package"
+    export_delivery_package(case["ledger"], output, privacy_view="customer_private")
+    manifest_path = output / "manifest.json"
+    import rfc8785
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["verification_decision_digest"] = "0" * 64
+    manifest_path.write_bytes(rfc8785.dumps(payload))
+    with pytest.raises(DeliveryPackageError):
+        verify_delivery_package(output)
+
+
+def test_v05_package_tampered_schema_fails_closed(v05_transaction_case) -> None:
+    case = _full_case(v05_transaction_case)
+    output = case["tmp_path"] / "customer-package"
+    export_delivery_package(case["ledger"], output, privacy_view="customer_private")
+    _retamper(
+        case,
+        output,
+        "schemas/verification-profile.schema.json",
+        b'{"tampered": true}',
+    )
+    with pytest.raises(DeliveryPackageError):
+        verify_delivery_package(output)
+
+
+def test_v05_package_invalid_object_raises_closed_exception(
+    v05_transaction_case,
+) -> None:
+    case = _full_case(v05_transaction_case)
+    output = case["tmp_path"] / "customer-package"
+    export_delivery_package(case["ledger"], output, privacy_view="customer_private")
+    _retamper(case, output, "verification-profile.json", b"{}")
+    with pytest.raises(DeliveryPackageError):
+        verify_delivery_package(output)
+
+
+def test_ledger_delivery_protocol_detects_exactly_one_family(
+    v05_transaction_case,
+) -> None:
+    from openworkproof.delivery_package import _ledger_delivery_protocol
+
+    case = _full_case(v05_transaction_case)
+    assert _ledger_delivery_protocol(case["ledger"]) == "0.5"
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            INSERT INTO verification_profiles_v03 (
+                profile_id, profile_digest, scope_id, scope_digest,
+                subject_claim_id, profile_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "ab" * 32,
+                "c" * 64,
+                case["manifest"].scope_id,
+                case["manifest"].digest,
+                "d" * 64,
+                __import__("rfc8785").dumps({"nonce": "x"}),
+            ),
+        )
+        connection.execute("COMMIT")
+    finally:
+        connection.close()
+    with pytest.raises(DeliveryPackageError, match="ambiguous"):
+        _ledger_delivery_protocol(case["ledger"])
