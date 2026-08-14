@@ -1114,6 +1114,41 @@ def test_v05_json_schema_rejects_expressible_new_field_violations(
     )
 
 
+def test_v05_arm_schema_constrains_inherited_evidence_refs(
+    frozen_verification_profile_v03: VerificationProfileV03,
+    frozen_verification_arm_result_v03: VerificationArmResultV03,
+    frozen_verification_decision_v03: VerificationDecisionV03,
+    frozen_role_keys_v05: dict[str, tuple[Ed25519PrivateKey, dict[str, str]]],
+) -> None:
+    instances = _valid_v05_model_instances(
+        frozen_verification_profile_v03,
+        frozen_verification_arm_result_v03,
+        frozen_verification_decision_v03,
+        frozen_role_keys_v05,
+    )
+    arm_result = instances[7]
+    schema = authoritative_schema("verification-arm-result", version="0.5")
+    validator = Draft202012Validator(schema)
+    valid_payload = arm_result.model_dump(mode="json")
+
+    assert list(validator.iter_errors(valid_payload)) == []
+    assert VerificationArmResultV05.model_validate(valid_payload) == arm_result
+
+    for field in ("evidence_refs", "scope_evidence_refs"):
+        malformed = copy.deepcopy(valid_payload)
+        malformed[field][0].update(
+            path="../invalid",
+            sha256="bad",
+            media_type="application/json",
+            size_bytes=0,
+        )
+        _assert_schema_and_model_reject(
+            validator,
+            VerificationArmResultV05,
+            malformed,
+        )
+
+
 @pytest.mark.parametrize(
     ("model_index", "field", "invalid_value"),
     (

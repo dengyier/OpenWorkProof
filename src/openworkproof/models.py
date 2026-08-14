@@ -3112,6 +3112,12 @@ class VerificationArmResultV05(VerificationArmResultV03):
     _signed_version = "0.5"
 
     schema_version: Literal["openworkproof-verification-arm-result/0.5"]
+    evidence_refs: tuple[EvidenceRefV05, ...] = Field(
+        max_length=256, json_schema_extra={"uniqueItems": True}
+    )
+    scope_evidence_refs: tuple[EvidenceRefV05, ...] = Field(
+        max_length=256, json_schema_extra={"uniqueItems": True}
+    )
     population_observations: tuple[PopulationObservationV05, ...] = Field(
         min_length=1, max_length=4096, json_schema_extra={"uniqueItems": True}
     )
