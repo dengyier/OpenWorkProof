@@ -2243,7 +2243,7 @@ class VerificationDecisionSignature(ProtocolModel):
 def _validate_verification_decision_content(
     *,
     arm_results: tuple[VerificationArmResultReference, ...],
-    reason_codes: tuple[VerificationReasonCode, ...],
+    reason_codes: tuple[str, ...],
     supersedes_decision_id: str | None,
     supersedes_decision_digest: str | None,
     causal_parent_receipt_ids: tuple[str, ...],
@@ -2513,17 +2513,25 @@ _CONTROL_MISMATCH_CODES = frozenset(
         "CONTROL_FAILURE_SIGNATURE_MISMATCH",
     }
 )
+_VERIFICATION_INTEGRITY_CODES = (
+    _POPULATION_INTEGRITY_CODES | _CONTROL_INTEGRITY_CODES
+)
 
 
 def _identity_payload(
     value: ProtocolModel | Mapping[str, object], own_id: str
 ) -> dict[str, Any]:
     if isinstance(value, ProtocolModel):
-        payload = value.model_dump(mode="json")
+        source: Mapping[str, object] = value.model_dump(mode="json")
     elif isinstance(value, Mapping):
-        payload = dict(value)
+        source = value
     else:
         raise ValueError("identity payload must be a protocol model or mapping")
+    payload = _freeze_json(
+        source,
+        freeze_mapping=False,
+        max_array_items=4096,
+    )
     payload.pop(own_id, None)
     return payload
 
@@ -2536,7 +2544,7 @@ def _freeze_bounded_protocol_payload(
     if not isinstance(value, Mapping):
         raise ValueError("protocol object must be a JSON object")
     return _freeze_json(
-        dict(value),
+        value,
         freeze_mapping=False,
         max_array_items=max_array_items,
     )
@@ -2556,17 +2564,36 @@ def population_contract_id(
 def population_member_digest(member_ids: Sequence[str]) -> str:
     if isinstance(member_ids, (str, bytes)):
         raise ValueError("member ids must be a sequence of digests")
-    values = tuple(member_ids)
-    if len(values) > 4096:
+    if not isinstance(member_ids, Sequence):
+        raise ValueError("member ids must be a sequence of digests")
+    declared_length = len(member_ids)
+    if declared_length > 4096:
         raise ValueError("member ids exceed 4096 items")
+    iterator = iter(member_ids)
+    collected: list[str] = []
+    for _ in range(declared_length):
+        try:
+            collected.append(next(iterator))
+        except StopIteration as error:
+            raise ValueError(
+                "member sequence length changed during validation"
+            ) from error
+    try:
+        next(iterator)
+    except StopIteration:
+        pass
+    else:
+        raise ValueError("member sequence length changed during validation")
+    values = tuple(collected)
     for value in values:
         _digest64(value)
     if not _is_utf8_sorted_unique(values):
         raise ValueError("member ids must be sorted and unique")
+    payload = _freeze_json(values, max_array_items=4096)
     return _jcs_digest(
         {
             "domain": "openworkproof/population-members/v0.5",
-            "payload": values,
+            "payload": payload,
         }
     )
 
@@ -2724,11 +2751,16 @@ def failure_signature_digest(
     signature: FailureSignatureV05 | Mapping[str, object],
 ) -> str:
     if isinstance(signature, FailureSignatureV05):
-        payload: object = signature.model_dump(mode="json")
+        source: Mapping[str, object] = signature.model_dump(mode="json")
     elif isinstance(signature, Mapping):
-        payload = dict(signature)
+        source = signature
     else:
         raise ValueError("failure signature must be a model or mapping")
+    payload = _freeze_json(
+        source,
+        freeze_mapping=False,
+        max_array_items=256,
+    )
     return _jcs_digest(
         {
             "domain": "openworkproof/failure-signature/v0.5",
@@ -2948,6 +2980,17 @@ def _validate_v05_decision_status(
         raise ValueError("mismatched or unavailable control requires UNKNOWN")
 
 
+def _validate_v05_decision_reason_codes(
+    reason_codes: tuple[str, ...],
+    assessment: VerificationIntegrityAssessmentV05,
+) -> None:
+    top_level_integrity_codes = set(reason_codes) & _VERIFICATION_INTEGRITY_CODES
+    if top_level_integrity_codes != set(assessment.reason_codes):
+        raise ValueError(
+            "top-level integrity reason codes must exactly match assessment"
+        )
+
+
 class VerificationDecisionDraftV05(VerificationDecisionDraftV03):
     reason_codes: tuple[VerificationReasonCodeV05, ...]
     integrity_assessment: VerificationIntegrityAssessmentV05
@@ -2955,12 +2998,13 @@ class VerificationDecisionDraftV05(VerificationDecisionDraftV03):
     @model_validator(mode="after")
     def _closed_v05_draft(self) -> VerificationDecisionDraftV05:
         _validate_v05_decision_status(self.decision, self.integrity_assessment)
+        _validate_v05_decision_reason_codes(
+            self.reason_codes, self.integrity_assessment
+        )
         return self
 
 
 class VerificationDecisionV05(VerificationDecisionV03):
-    _signed_version = "0.5"
-
     schema_version: Literal["openworkproof-verification-decision/0.5"]
     reason_codes: tuple[VerificationReasonCodeV05, ...]
     integrity_assessment: VerificationIntegrityAssessmentV05
@@ -2980,6 +3024,9 @@ class VerificationDecisionV05(VerificationDecisionV03):
         ):
             raise ValueError("non-satisfied scope requires UNKNOWN")
         _validate_v05_decision_status(self.decision, self.integrity_assessment)
+        _validate_v05_decision_reason_codes(
+            self.reason_codes, self.integrity_assessment
+        )
         expected_signatures = 2 if self.assurance_level == "high_risk" else 1
         if len(self.verifier_signatures) != expected_signatures:
             raise ValueError("decision signature set has the wrong size")
@@ -5584,6 +5631,7 @@ __all__ = [
     "ToolCallReceiptV04",
     "TransitionDecision",
     "VerificationArm",
+    "VerificationArmExecutionStatus",
     "VerificationArmResult",
     "VerificationArmResultV05",
     "VerificationDecisionDraftV05",

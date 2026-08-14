@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
 import pytest
@@ -9,6 +11,7 @@ import rfc8785
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 
+import openworkproof.models as models_module
 from openworkproof.models import (
     ActionBindingManifest,
     ControlContractV05,
@@ -33,6 +36,7 @@ from openworkproof.models import (
 )
 from openworkproof.signing import (
     canonical_bytes,
+    key_id,
     sign_payload,
     verify_payload,
 )
@@ -54,6 +58,17 @@ def test_v05_model_names_import_and_instantiate_without_validation() -> None:
     )
 
     assert all(model_type.model_construct().__class__ is model_type for model_type in model_types)
+
+
+def test_v05_minor_api_surface_is_closed_and_type_correct() -> None:
+    assert "VerificationArmExecutionStatus" in models_module.__all__
+    assert VerificationDecisionV05.__private_attributes__ == {}
+    assert (
+        models_module._validate_verification_decision_content.__annotations__[
+            "reason_codes"
+        ]
+        == "tuple[str, ...]"
+    )
 
 
 def _evidence(path: str) -> dict[str, Any]:
@@ -163,6 +178,56 @@ def _revalidate(model: Any, **changes: Any) -> Any:
     return type(model).model_validate(payload)
 
 
+class _NoIterationMapping(Mapping[str, Any]):
+    def __init__(self, declared_length: int) -> None:
+        self.declared_length = declared_length
+        self.iteration_attempts = 0
+
+    def __len__(self) -> int:
+        return self.declared_length
+
+    def __iter__(self) -> Iterator[str]:
+        self.iteration_attempts += 1
+        raise AssertionError("oversized mapping was iterated")
+
+    def __getitem__(self, key: str) -> Any:
+        del key
+        raise AssertionError("oversized mapping item was consumed")
+
+
+class _MeasuredSequence(Sequence[str]):
+    def __init__(
+        self,
+        values: tuple[str, ...],
+        *,
+        declared_length: int | None = None,
+    ) -> None:
+        self.values = values
+        self.declared_length = (
+            len(values) if declared_length is None else declared_length
+        )
+        self.consumed = 0
+
+    def __len__(self) -> int:
+        return self.declared_length
+
+    def __getitem__(self, index: int) -> str:
+        self.consumed += 1
+        if not self.values:
+            raise AssertionError("oversized sequence was consumed")
+        return self.values[index]
+
+
+def _deep_mapping(depth: int) -> dict[str, Any]:
+    root: dict[str, Any] = {}
+    cursor = root
+    for _ in range(depth):
+        child: dict[str, Any] = {}
+        cursor["child"] = child
+        cursor = child
+    return root
+
+
 def test_population_contract_exact_fields_and_domain_formula() -> None:
     raw = _population_contract_payload()
     contract = PopulationContractV05.model_validate(raw)
@@ -267,7 +332,6 @@ def test_population_contract_rejects_oversized_declared_arrays(
 ) -> None:
     raw = _population_contract_payload()
     raw[field] = value
-    raw["contract_id"] = population_contract_id(raw)
     with pytest.raises(ValidationError, match=message):
         PopulationContractV05.model_validate(raw)
 
@@ -296,6 +360,48 @@ def test_population_member_digest_accepts_4096_and_rejects_4097_members() -> Non
     assert population_member_digest(member_ids[:4096]) != "0" * 64
     with pytest.raises(ValueError, match="4096"):
         population_member_digest(member_ids)
+
+
+def test_raw_input_bounds_reject_4097_member_sequence_before_consumption() -> None:
+    members = _MeasuredSequence((), declared_length=4097)
+    with pytest.raises(ValueError, match="4096"):
+        population_member_digest(members)
+    assert members.consumed == 0
+
+
+def test_raw_input_bounds_limit_member_sequence_consumption() -> None:
+    members = _MeasuredSequence(("1" * 64, "2" * 64))
+    population_member_digest(members)
+    assert members.consumed <= len(members) + 1
+
+
+@pytest.mark.parametrize(
+    "consumer",
+    (
+        population_contract_id,
+        control_contract_id,
+        failure_signature_digest,
+        PopulationContractV05.model_validate,
+    ),
+)
+def test_raw_input_bounds_reject_65_key_mapping_before_iteration(
+    consumer: Any,
+) -> None:
+    payload = _NoIterationMapping(65)
+    with pytest.raises(ValueError, match="64"):
+        consumer(payload)
+    assert payload.iteration_attempts == 0
+
+
+@pytest.mark.parametrize(
+    "consumer",
+    (population_contract_id, control_contract_id, failure_signature_digest),
+)
+def test_raw_input_bounds_reject_extreme_depth_without_recursion_error(
+    consumer: Any,
+) -> None:
+    with pytest.raises(ValueError, match="depth"):
+        consumer(_deep_mapping(1500))
 
 
 def test_population_observation_accepts_exact_reduced_fraction() -> None:
@@ -693,9 +799,11 @@ def _draft_v05(
         mode="json",
         exclude={"schema_version", "digest", "verifier_signatures"},
     )
+    integrity = _integrity(population_status, control_status)
     payload["decision"] = decision
-    payload["integrity_assessment"] = _integrity(
-        population_status, control_status
+    payload["integrity_assessment"] = integrity
+    payload["reason_codes"] = sorted(
+        list(base.reason_codes) + integrity["reason_codes"]
     )
     return VerificationDecisionDraftV05.model_validate(payload)
 
@@ -703,23 +811,62 @@ def _draft_v05(
 def _decision_payload_v05(
     draft: VerificationDecisionDraftV05,
     base: VerificationDecisionV03,
+    verifier_key: Ed25519PrivateKey,
+) -> dict[str, Any]:
+    return _raw_decision_payload_v05(
+        draft.model_dump(mode="json"), base, verifier_key
+    )
+
+
+def _raw_decision_payload_v05(
+    draft_payload: dict[str, Any],
+    base: VerificationDecisionV03,
+    verifier_key: Ed25519PrivateKey,
 ) -> dict[str, Any]:
     unsigned = {
         "schema_version": "openworkproof-verification-decision/0.5",
-        **draft.model_dump(mode="json"),
+        **copy.deepcopy(draft_payload),
     }
+    encoded = canonical_bytes(
+        "verification-decision", unsigned, version="0.5"
+    )
     return {
         **unsigned,
-        "digest": hashlib.sha256(
-            canonical_bytes(
-                "verification-decision", unsigned, version="0.5"
-            )
-        ).hexdigest(),
+        "digest": hashlib.sha256(encoded).hexdigest(),
         "verifier_signatures": [
-            signature.model_dump(mode="json")
-            for signature in base.verifier_signatures
+            {
+                "verifier_subject_id": (
+                    base.verifier_signatures[0].verifier_subject_id
+                ),
+                "verifier_key_id": key_id(verifier_key.public_key()),
+                "signature_alg": "Ed25519",
+                "signature": base64.urlsafe_b64encode(
+                    verifier_key.sign(encoded)
+                ).decode("ascii").rstrip("="),
+            }
         ],
     }
+
+
+def _decision_reason_payload(
+    base: VerificationDecisionV03,
+    *,
+    decision: str,
+    assessment: dict[str, Any],
+    top_integrity_reasons: list[str],
+    v03_reasons: list[str] | None = None,
+) -> dict[str, Any]:
+    payload = base.model_dump(
+        mode="json",
+        exclude={"schema_version", "digest", "verifier_signatures"},
+    )
+    payload["decision"] = decision
+    payload["integrity_assessment"] = assessment
+    payload["reason_codes"] = sorted(
+        (list(base.reason_codes) if v03_reasons is None else v03_reasons)
+        + top_integrity_reasons
+    )
+    return payload
 
 
 def test_v05_profile_is_signed_only_in_v05_domain(
@@ -891,16 +1038,97 @@ def test_v05_arm_result_rejects_empty_duplicate_and_control_wrong_arm_kind(
         )
 
 
-def test_v05_decision_uses_exact_v05_digest_and_keeps_signature_cardinality(
+@pytest.mark.parametrize(
+    ("decision", "assessment", "top_integrity_reasons"),
+    (
+        ("REFUTED", _integrity("matched", "survived"), []),
+        ("VERIFIED", _integrity("matched", "proven"), ["CONTROL_SURVIVED"]),
+        (
+            "UNKNOWN",
+            _integrity("drifted", "proven"),
+            ["POPULATION_ENGINE_DRIFT"],
+        ),
+    ),
+)
+def test_decision_reason_codes_match_integrity_assessment_exactly(
     frozen_verification_decision_v03: VerificationDecisionV03,
+    frozen_role_keys_v05: dict[str, tuple[Ed25519PrivateKey, dict[str, str]]],
+    decision: str,
+    assessment: dict[str, Any],
+    top_integrity_reasons: list[str],
+) -> None:
+    draft_payload = _decision_reason_payload(
+        frozen_verification_decision_v03,
+        decision=decision,
+        assessment=assessment,
+        top_integrity_reasons=top_integrity_reasons,
+    )
+    with pytest.raises(ValidationError, match="integrity reason codes"):
+        VerificationDecisionDraftV05.model_validate(draft_payload)
+    with pytest.raises(ValidationError, match="integrity reason codes"):
+        VerificationDecisionV05.model_validate(
+            _raw_decision_payload_v05(
+                draft_payload,
+                frozen_verification_decision_v03,
+                frozen_role_keys_v05["Verifier"][0],
+            )
+        )
+
+
+def test_decision_reason_codes_preserve_v03_reasons_outside_integrity_equality(
+    frozen_verification_decision_v03: VerificationDecisionV03,
+    frozen_role_keys_v05: dict[str, tuple[Ed25519PrivateKey, dict[str, str]]],
+) -> None:
+    draft_payload = _decision_reason_payload(
+        frozen_verification_decision_v03,
+        decision="VERIFIED",
+        assessment=_integrity(),
+        top_integrity_reasons=[],
+        v03_reasons=["SCOPE_UNPROVEN"],
+    )
+    draft = VerificationDecisionDraftV05.model_validate(draft_payload)
+    decision = VerificationDecisionV05.model_validate(
+        _raw_decision_payload_v05(
+            draft.model_dump(mode="json"),
+            frozen_verification_decision_v03,
+            frozen_role_keys_v05["Verifier"][0],
+        )
+    )
+    assert draft.reason_codes == decision.reason_codes == ("SCOPE_UNPROVEN",)
+
+
+def test_v05_decision_signature_uses_exact_v05_bytes_and_keeps_cardinality(
+    frozen_verification_decision_v03: VerificationDecisionV03,
+    frozen_role_keys_v05: dict[str, tuple[Ed25519PrivateKey, dict[str, str]]],
 ) -> None:
     draft = _draft_v05(frozen_verification_decision_v03)
-    payload = _decision_payload_v05(draft, frozen_verification_decision_v03)
+    payload = _decision_payload_v05(
+        draft,
+        frozen_verification_decision_v03,
+        frozen_role_keys_v05["Verifier"][0],
+    )
     decision = VerificationDecisionV05.model_validate(payload)
     assert decision.schema_version == "openworkproof-verification-decision/0.5"
+    unsigned = decision.model_dump(
+        mode="json", exclude={"digest", "verifier_signatures"}
+    )
+    encoded = canonical_bytes(
+        "verification-decision", unsigned, version="0.5"
+    )
+    frozen_role_keys_v05["Verifier"][0].public_key().verify(
+        base64.urlsafe_b64decode(
+            decision.verifier_signatures[0].signature
+            + "=" * (-len(decision.verifier_signatures[0].signature) % 4)
+        ),
+        encoded,
+    )
 
     wrong = copy.deepcopy(payload)
-    unsigned = {key: value for key, value in wrong.items() if key not in {"digest", "verifier_signatures"}}
+    unsigned = {
+        key: value
+        for key, value in wrong.items()
+        if key not in {"digest", "verifier_signatures"}
+    }
     wrong["digest"] = hashlib.sha256(
         rfc8785.dumps(
             {
@@ -932,6 +1160,7 @@ def test_v05_decision_uses_exact_v05_digest_and_keeps_signature_cardinality(
 )
 def test_v05_draft_and_decision_reject_contradictory_integrity_status(
     frozen_verification_decision_v03: VerificationDecisionV03,
+    frozen_role_keys_v05: dict[str, tuple[Ed25519PrivateKey, dict[str, str]]],
     population_status: str,
     control_status: str,
     decision: str,
@@ -956,16 +1185,13 @@ def test_v05_draft_and_decision_reject_contradictory_integrity_status(
         population_status=population_status,
         control_status=control_status,
     )
-    payload = _decision_payload_v05(draft, frozen_verification_decision_v03)
-    payload["decision"] = decision
-    unsigned = {
-        key: value
-        for key, value in payload.items()
-        if key not in {"digest", "verifier_signatures"}
-    }
-    payload["digest"] = hashlib.sha256(
-        canonical_bytes("verification-decision", unsigned, version="0.5")
-    ).hexdigest()
+    draft_payload = draft.model_dump(mode="json")
+    draft_payload["decision"] = decision
+    payload = _raw_decision_payload_v05(
+        draft_payload,
+        frozen_verification_decision_v03,
+        frozen_role_keys_v05["Verifier"][0],
+    )
     with pytest.raises(ValidationError, match="UNKNOWN|REFUTED"):
         VerificationDecisionV05.model_validate(payload)
 
@@ -1019,7 +1245,11 @@ def test_v05_siblings_reject_unknown_fields_and_wrong_schema(
     )
     draft = _draft_v05(frozen_verification_decision_v03)
     decision = VerificationDecisionV05.model_validate(
-        _decision_payload_v05(draft, frozen_verification_decision_v03)
+        _decision_payload_v05(
+            draft,
+            frozen_verification_decision_v03,
+            frozen_role_keys_v05["Verifier"][0],
+        )
     )
 
     for model in (profile, arm_result, draft, decision):
