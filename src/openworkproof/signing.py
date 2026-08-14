@@ -99,6 +99,16 @@ _V04_SIGNED_DOMAINS = frozenset(
         "judgment-commitment",
     }
 )
+_V05_CANONICAL_DOMAINS = frozenset(
+    {
+        "verification-profile",
+        "verification-arm-result",
+        "verification-decision",
+    }
+)
+_V05_SIGNED_DOMAINS = frozenset(
+    {"verification-profile", "verification-arm-result"}
+)
 
 
 def _canonical_domains_for_version(version: str) -> frozenset[str]:
@@ -108,6 +118,8 @@ def _canonical_domains_for_version(version: str) -> frozenset[str]:
         return _V03_CANONICAL_DOMAINS
     if version == "0.4":
         return _V04_CANONICAL_DOMAINS
+    if version == "0.5":
+        return _V05_CANONICAL_DOMAINS
     raise ValueError("unknown protocol version")
 
 
@@ -118,6 +130,8 @@ def _signed_domains_for_version(version: str) -> frozenset[str]:
         return _V03_SIGNED_DOMAINS
     if version == "0.4":
         return _V04_SIGNED_DOMAINS
+    if version == "0.5":
+        return _V05_SIGNED_DOMAINS
     raise ValueError("unknown protocol version")
 
 MAX_JSON_DEPTH = 128
@@ -310,7 +324,7 @@ def canonical_bytes(
     object_type: str,
     payload: Mapping[str, Any],
     *,
-    version: Literal["0.1", "0.3", "0.4"] = "0.1",
+    version: Literal["0.1", "0.3", "0.4", "0.5"] = "0.1",
 ) -> bytes:
     allowed_domains = _canonical_domains_for_version(version)
     if (
@@ -332,7 +346,7 @@ def digest_payload(
     object_type: str,
     payload: Mapping[str, Any],
     *,
-    version: Literal["0.1", "0.3", "0.4"] = "0.1",
+    version: Literal["0.1", "0.3", "0.4", "0.5"] = "0.1",
 ) -> str:
     return hashlib.sha256(
         canonical_bytes(object_type, payload, version=version)
@@ -374,7 +388,7 @@ def sign_payload(
     payload: Mapping[str, Any],
     private_key: Ed25519PrivateKey,
     *,
-    version: Literal["0.1", "0.3", "0.4"] = "0.1",
+    version: Literal["0.1", "0.3", "0.4", "0.5"] = "0.1",
 ) -> dict[str, Any]:
     allowed_domains = _signed_domains_for_version(version)
     if type(object_type) is not str or object_type not in allowed_domains:
@@ -398,7 +412,7 @@ def verify_payload(
     signed: Mapping[str, Any],
     public_key: Ed25519PublicKey,
     *,
-    version: Literal["0.1", "0.3", "0.4"] = "0.1",
+    version: Literal["0.1", "0.3", "0.4", "0.5"] = "0.1",
 ) -> bool:
     try:
         allowed_domains = _signed_domains_for_version(version)

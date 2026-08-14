@@ -6,9 +6,10 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import re
 import unicodedata
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import Annotated, Any, ClassVar, Literal, get_args
@@ -2440,6 +2441,561 @@ class VerificationDecisionV03(VerificationDecision):
         expected_digest = _jcs_digest(
             {
                 "domain": "openworkproof/verification-decision/v0.3",
+                "payload": payload,
+            }
+        )
+        if self.digest != expected_digest:
+            raise ValueError("digest does not match verification decision payload")
+        return self
+
+
+VerificationArmExecutionStatus = Literal[
+    "completed",
+    "timed_out",
+    "crashed",
+    "resource_exhausted",
+    "evidence_unavailable",
+]
+
+VerificationIntegrityReasonCode = Literal[
+    "NO_ELIGIBLE_POPULATION",
+    "POPULATION_CAPTURE_FAILED",
+    "POPULATION_RULE_DRIFT",
+    "POPULATION_ENGINE_DRIFT",
+    "POPULATION_DIGEST_MISMATCH",
+    "POPULATION_CROSS_ARM_MISMATCH",
+    "POPULATION_EVIDENCE_MISSING",
+    "CONTROL_CONTRACT_EXPIRED",
+    "CONTROL_FIXTURE_DRIFT",
+    "CONTROL_PROVOCATION_DRIFT",
+    "CONTROL_FAILURE_SIGNATURE_MISMATCH",
+    "CONTROL_SURVIVED",
+    "CONTROL_EVIDENCE_MISSING",
+]
+
+VerificationReasonCodeV05 = (
+    VerificationReasonCodeV03 | VerificationIntegrityReasonCode
+)
+
+_POPULATION_INTEGRITY_CODES = frozenset(
+    {
+        "NO_ELIGIBLE_POPULATION",
+        "POPULATION_CAPTURE_FAILED",
+        "POPULATION_RULE_DRIFT",
+        "POPULATION_ENGINE_DRIFT",
+        "POPULATION_DIGEST_MISMATCH",
+        "POPULATION_CROSS_ARM_MISMATCH",
+        "POPULATION_EVIDENCE_MISSING",
+    }
+)
+_POPULATION_DRIFT_CODES = frozenset(
+    {
+        "POPULATION_RULE_DRIFT",
+        "POPULATION_ENGINE_DRIFT",
+        "POPULATION_DIGEST_MISMATCH",
+        "POPULATION_CROSS_ARM_MISMATCH",
+    }
+)
+_CONTROL_INTEGRITY_CODES = frozenset(
+    {
+        "CONTROL_CONTRACT_EXPIRED",
+        "CONTROL_FIXTURE_DRIFT",
+        "CONTROL_PROVOCATION_DRIFT",
+        "CONTROL_FAILURE_SIGNATURE_MISMATCH",
+        "CONTROL_SURVIVED",
+        "CONTROL_EVIDENCE_MISSING",
+    }
+)
+_CONTROL_MISMATCH_CODES = frozenset(
+    {
+        "CONTROL_FIXTURE_DRIFT",
+        "CONTROL_PROVOCATION_DRIFT",
+        "CONTROL_FAILURE_SIGNATURE_MISMATCH",
+    }
+)
+
+
+def _identity_payload(
+    value: ProtocolModel | Mapping[str, object], own_id: str
+) -> dict[str, Any]:
+    if isinstance(value, ProtocolModel):
+        payload = value.model_dump(mode="json")
+    elif isinstance(value, Mapping):
+        payload = dict(value)
+    else:
+        raise ValueError("identity payload must be a protocol model or mapping")
+    payload.pop(own_id, None)
+    return payload
+
+
+def _freeze_bounded_protocol_payload(
+    value: Any, model_type: type[ProtocolModel], *, max_array_items: int
+) -> Any:
+    if isinstance(value, model_type):
+        return value
+    if not isinstance(value, Mapping):
+        raise ValueError("protocol object must be a JSON object")
+    return _freeze_json(
+        dict(value),
+        freeze_mapping=False,
+        max_array_items=max_array_items,
+    )
+
+
+def population_contract_id(
+    contract: PopulationContractV05 | Mapping[str, object],
+) -> str:
+    return _jcs_digest(
+        {
+            "domain": "openworkproof/population-contract/v0.5",
+            "payload": _identity_payload(contract, "contract_id"),
+        }
+    )
+
+
+def population_member_digest(member_ids: Sequence[str]) -> str:
+    if isinstance(member_ids, (str, bytes)):
+        raise ValueError("member ids must be a sequence of digests")
+    values = tuple(member_ids)
+    if len(values) > 4096:
+        raise ValueError("member ids exceed 4096 items")
+    for value in values:
+        _digest64(value)
+    if not _is_utf8_sorted_unique(values):
+        raise ValueError("member ids must be sorted and unique")
+    return _jcs_digest(
+        {
+            "domain": "openworkproof/population-members/v0.5",
+            "payload": values,
+        }
+    )
+
+
+class PopulationContractV05(ProtocolModel):
+    contract_id: Digest64
+    selector_rule_id: Digest64
+    member_kind: Literal["source_file", "test_case"]
+    selector_spec_digest: Digest64
+    selector_engine_digest: Digest64
+    declared_selected_member_ids: tuple[Digest64, ...]
+    minimum_eligible_count: SafeNonNegativeInt
+    minimum_selected_count: SafeNonNegativeInt
+    maximum_eligible_count: SafeNonNegativeInt
+    maximum_selected_count: SafeNonNegativeInt
+    minimum_capture_numerator: SafeNonNegativeInt
+    minimum_capture_denominator: SafePositiveInt
+    empty_population_policy: Literal["unknown"]
+    required_population_evidence_purposes: tuple[Identifier, ...]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_json_shape(cls, value: Any) -> Any:
+        return _freeze_bounded_protocol_payload(
+            value, cls, max_array_items=4096
+        )
+
+    @model_validator(mode="after")
+    def _closed_population_contract(self) -> PopulationContractV05:
+        if not self.declared_selected_member_ids or not _is_utf8_sorted_unique(
+            self.declared_selected_member_ids
+        ):
+            raise ValueError(
+                "declared_selected_member_ids must be non-empty sorted and unique"
+            )
+        if (
+            not self.required_population_evidence_purposes
+            or not _is_utf8_sorted_unique(
+                self.required_population_evidence_purposes
+            )
+        ):
+            raise ValueError(
+                "required_population_evidence_purposes must be non-empty sorted and unique"
+            )
+        if len(self.declared_selected_member_ids) > 4096:
+            raise ValueError(
+                "declared_selected_member_ids must not exceed 4096 items"
+            )
+        if len(self.required_population_evidence_purposes) > 256:
+            raise ValueError(
+                "required_population_evidence_purposes must not exceed 256 items"
+            )
+        if self.maximum_eligible_count > 4096 or self.maximum_selected_count > 4096:
+            raise ValueError("population maximums must not exceed 4096")
+        if self.maximum_selected_count > self.maximum_eligible_count:
+            raise ValueError("selected maximum must not exceed eligible maximum")
+        if self.minimum_eligible_count > self.maximum_eligible_count:
+            raise ValueError(
+                "minimum_eligible_count must not exceed maximum_eligible_count"
+            )
+        if self.minimum_selected_count > self.maximum_selected_count:
+            raise ValueError(
+                "minimum_selected_count must not exceed maximum_selected_count"
+            )
+        if self.minimum_capture_numerator > self.minimum_capture_denominator:
+            raise ValueError("minimum capture fraction is outside 0..1")
+        if self.minimum_capture_numerator == 0 and (
+            self.minimum_capture_denominator != 1
+        ):
+            raise ValueError("0/1 is the only zero minimum capture representation")
+        if self.contract_id != population_contract_id(self):
+            raise ValueError("contract_id does not match population contract")
+        return self
+
+
+class PopulationObservationV05(ProtocolModel):
+    contract_id: Digest64
+    selector_rule_id: Digest64
+    selector_spec_digest: Digest64
+    selector_engine_digest: Digest64
+    eligible_seen: SafeNonNegativeInt
+    eligible_population_digest: Digest64
+    selected_count: SafeNonNegativeInt
+    selected_population_digest: Digest64
+    capture_numerator: SafeNonNegativeInt
+    capture_denominator: SafePositiveInt
+    observed_at: CanonicalUTCTime
+    evidence_refs: tuple[EvidenceRef, ...]
+
+    @model_validator(mode="after")
+    def _closed_population_observation(self) -> PopulationObservationV05:
+        if self.eligible_seen > 4096 or self.selected_count > 4096:
+            raise ValueError("population observation counts must not exceed 4096")
+        if self.selected_count > self.eligible_seen:
+            raise ValueError("selected_count must not exceed eligible_seen")
+        paths = tuple(reference.path for reference in self.evidence_refs)
+        if not _is_utf8_sorted_unique(paths):
+            raise ValueError("evidence refs must be path sorted and unique")
+        if self.eligible_seen == 0:
+            empty_digest = population_member_digest(())
+            if (
+                self.selected_count != 0
+                or (self.capture_numerator, self.capture_denominator) != (0, 1)
+                or self.eligible_population_digest != empty_digest
+                or self.selected_population_digest != empty_digest
+            ):
+                raise ValueError("empty population requires zero counts, 0/1, and empty digests")
+            return self
+        if math.gcd(self.capture_numerator, self.capture_denominator) != 1:
+            raise ValueError("non-empty capture fraction must be reduced")
+        if (
+            self.capture_numerator * self.eligible_seen
+            != self.selected_count * self.capture_denominator
+        ):
+            raise ValueError("capture fraction must exactly equal selected/eligible")
+        return self
+
+
+class FailureSignatureV05(ProtocolModel):
+    execution_status: VerificationArmExecutionStatus
+    exit_codes: tuple[SafeNonNegativeInt, ...]
+    reason_codes: tuple[VerificationReasonCodeV03, ...]
+    predicate_ids: tuple[Identifier, ...]
+    required_evidence_purposes: tuple[Identifier, ...]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_json_shape(cls, value: Any) -> Any:
+        return _freeze_bounded_protocol_payload(
+            value, cls, max_array_items=256
+        )
+
+    @model_validator(mode="after")
+    def _closed_failure_signature(self) -> FailureSignatureV05:
+        for values, maximum, label in (
+            (self.exit_codes, 64, "exit_codes"),
+            (self.reason_codes, 256, "reason_codes"),
+            (self.predicate_ids, 256, "predicate_ids"),
+            (
+                self.required_evidence_purposes,
+                256,
+                "required_evidence_purposes",
+            ),
+        ):
+            if not values:
+                raise ValueError(f"{label} must be non-empty")
+            if len(values) > maximum:
+                raise ValueError(f"{label} must not exceed {maximum} items")
+            if tuple(values) != tuple(sorted(set(values))):
+                raise ValueError(f"{label} must be sorted and unique")
+        return self
+
+
+def failure_signature_digest(
+    signature: FailureSignatureV05 | Mapping[str, object],
+) -> str:
+    if isinstance(signature, FailureSignatureV05):
+        payload: object = signature.model_dump(mode="json")
+    elif isinstance(signature, Mapping):
+        payload = dict(signature)
+    else:
+        raise ValueError("failure signature must be a model or mapping")
+    return _jcs_digest(
+        {
+            "domain": "openworkproof/failure-signature/v0.5",
+            "payload": payload,
+        }
+    )
+
+
+def control_contract_id(
+    contract: ControlContractV05 | Mapping[str, object],
+) -> str:
+    return _jcs_digest(
+        {
+            "domain": "openworkproof/control-contract/v0.5",
+            "payload": _identity_payload(contract, "control_id"),
+        }
+    )
+
+
+class ControlContractV05(ProtocolModel):
+    control_id: Digest64
+    arm_id: Digest64
+    control_target: Literal["semantic_regression", "required_target_coverage"]
+    fixture_digest: Digest64
+    provocation_digest: Digest64
+    expected_failure_signature: FailureSignatureV05
+    expected_failure_signature_digest: Digest64
+    valid_from: CanonicalUTCTime
+    expires_at: CanonicalUTCTime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_json_shape(cls, value: Any) -> Any:
+        return _freeze_bounded_protocol_payload(
+            value, cls, max_array_items=256
+        )
+
+    @model_validator(mode="after")
+    def _closed_control_contract(self) -> ControlContractV05:
+        if self.expected_failure_signature_digest != failure_signature_digest(
+            self.expected_failure_signature
+        ):
+            raise ValueError("expected failure signature digest does not match")
+        if self.expected_failure_signature.execution_status != "completed":
+            raise ValueError("expected failure signature must be completed")
+        if not self.valid_from < self.expires_at:
+            raise ValueError("control contract times are not ordered")
+        if self.control_id != control_contract_id(self):
+            raise ValueError("control_id does not match control contract")
+        return self
+
+
+class ControlObservationV05(ProtocolModel):
+    control_id: Digest64
+    fixture_digest: Digest64
+    provocation_digest: Digest64
+    observed_failure_signature: FailureSignatureV05
+    observed_failure_signature_digest: Digest64
+    control_status: Literal["proven", "survived", "mismatched", "unavailable"]
+    evidence_refs: tuple[EvidenceRef, ...]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_json_shape(cls, value: Any) -> Any:
+        return _freeze_bounded_protocol_payload(
+            value, cls, max_array_items=256
+        )
+
+    @model_validator(mode="after")
+    def _closed_control_observation(self) -> ControlObservationV05:
+        if self.observed_failure_signature_digest != failure_signature_digest(
+            self.observed_failure_signature
+        ):
+            raise ValueError("observed failure signature digest does not match")
+        paths = tuple(reference.path for reference in self.evidence_refs)
+        if not _is_utf8_sorted_unique(paths):
+            raise ValueError("evidence refs must be path sorted and unique")
+        if self.control_status in {"proven", "survived"} and (
+            self.observed_failure_signature.execution_status != "completed"
+        ):
+            raise ValueError(f"{self.control_status} control must be completed")
+        if self.control_status in {"proven", "survived", "mismatched"} and (
+            not self.evidence_refs
+        ):
+            raise ValueError(f"{self.control_status} control requires evidence")
+        return self
+
+
+class VerificationIntegrityAssessmentV05(ProtocolModel):
+    population_status: Literal[
+        "matched", "empty", "capture_failed", "drifted", "unavailable"
+    ]
+    control_status: Literal["proven", "survived", "mismatched", "unavailable"]
+    reason_codes: tuple[VerificationIntegrityReasonCode, ...]
+
+    @model_validator(mode="after")
+    def _closed_integrity_assessment(self) -> VerificationIntegrityAssessmentV05:
+        if not _is_utf8_sorted_unique(self.reason_codes):
+            raise ValueError("integrity reason codes must be sorted and unique")
+        reasons = set(self.reason_codes)
+        population_reasons = reasons & _POPULATION_INTEGRITY_CODES
+        control_reasons = reasons & _CONTROL_INTEGRITY_CODES
+        allowed_population = {
+            "matched": frozenset(),
+            "empty": frozenset({"NO_ELIGIBLE_POPULATION"}),
+            "capture_failed": frozenset({"POPULATION_CAPTURE_FAILED"}),
+            "drifted": _POPULATION_DRIFT_CODES,
+            "unavailable": frozenset({"POPULATION_EVIDENCE_MISSING"}),
+        }[self.population_status]
+        allowed_control = {
+            "proven": frozenset(),
+            "survived": frozenset({"CONTROL_SURVIVED"}),
+            "mismatched": _CONTROL_MISMATCH_CODES,
+            "unavailable": frozenset(
+                {"CONTROL_CONTRACT_EXPIRED", "CONTROL_EVIDENCE_MISSING"}
+            ),
+        }[self.control_status]
+        if not population_reasons <= allowed_population or (
+            self.population_status != "matched" and not population_reasons
+        ):
+            raise ValueError("population reason codes do not match status")
+        if not control_reasons <= allowed_control or (
+            self.control_status != "proven" and not control_reasons
+        ):
+            raise ValueError("control reason codes do not match status")
+        return self
+
+
+class VerificationProfileV05(VerificationProfileV03):
+    _signed_version = "0.5"
+
+    schema_version: Literal["openworkproof-verification-profile/0.5"]
+    population_contracts: tuple[PopulationContractV05, ...]
+    control_contracts: tuple[ControlContractV05, ...]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_json_shape(cls, value: Any) -> Any:
+        return _freeze_bounded_protocol_payload(
+            value, cls, max_array_items=4096
+        )
+
+    @model_validator(mode="after")
+    def _closed_v05_profile(self) -> VerificationProfileV05:
+        population_ids = tuple(
+            contract.contract_id for contract in self.population_contracts
+        )
+        if not population_ids or not _is_utf8_sorted_unique(population_ids):
+            raise ValueError("population contracts must be non-empty sorted and unique")
+        selector_ids = tuple(
+            contract.selector_rule_id for contract in self.population_contracts
+        )
+        if len(selector_ids) != len(set(selector_ids)):
+            raise ValueError("population contracts must have unique selector rules")
+        control_ids = tuple(contract.control_id for contract in self.control_contracts)
+        if not control_ids or not _is_utf8_sorted_unique(control_ids):
+            raise ValueError("control contracts must be non-empty sorted and unique")
+        controlled_arm_ids = tuple(
+            contract.arm_id for contract in self.control_contracts
+        )
+        if len(controlled_arm_ids) != len(set(controlled_arm_ids)):
+            raise ValueError("control contracts must have unique arm ids")
+        if self.positive_arm.arm_id in set(controlled_arm_ids):
+            raise ValueError("positive arm cannot have a control contract")
+        negative_by_id = {arm.arm_id: arm for arm in self.negative_arms}
+        if set(controlled_arm_ids) != set(negative_by_id):
+            raise ValueError("every negative arm requires exactly one control contract")
+        for contract in self.control_contracts:
+            if contract.fixture_digest != negative_by_id[contract.arm_id].mutant_patch_digest:
+                raise ValueError("control fixture_digest must equal arm mutant_patch_digest")
+        return self
+
+
+class VerificationArmResultV05(VerificationArmResultV03):
+    _signed_version = "0.5"
+
+    schema_version: Literal["openworkproof-verification-arm-result/0.5"]
+    population_observations: tuple[PopulationObservationV05, ...]
+    control_observation: ControlObservationV05 | None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_json_shape(cls, value: Any) -> Any:
+        return _freeze_bounded_protocol_payload(
+            value, cls, max_array_items=4096
+        )
+
+    @model_validator(mode="after")
+    def _closed_v05_result(self) -> VerificationArmResultV05:
+        contract_ids = tuple(
+            observation.contract_id for observation in self.population_observations
+        )
+        if not contract_ids or not _is_utf8_sorted_unique(contract_ids):
+            raise ValueError(
+                "population observations must be non-empty sorted and unique"
+            )
+        if self.arm_kind == "positive" and self.control_observation is not None:
+            raise ValueError("positive arm forbids a control observation")
+        if self.arm_kind == "negative" and self.control_observation is None:
+            raise ValueError("negative arm requires a control observation")
+        return self
+
+
+def _validate_v05_decision_status(
+    decision: str, assessment: VerificationIntegrityAssessmentV05
+) -> None:
+    if assessment.population_status != "matched":
+        if decision != "UNKNOWN":
+            raise ValueError("non-matched population requires UNKNOWN")
+        return
+    if assessment.control_status == "survived":
+        if decision != "REFUTED":
+            raise ValueError("survived control with matched population requires REFUTED")
+    elif assessment.control_status in {"mismatched", "unavailable"} and (
+        decision != "UNKNOWN"
+    ):
+        raise ValueError("mismatched or unavailable control requires UNKNOWN")
+
+
+class VerificationDecisionDraftV05(VerificationDecisionDraftV03):
+    reason_codes: tuple[VerificationReasonCodeV05, ...]
+    integrity_assessment: VerificationIntegrityAssessmentV05
+
+    @model_validator(mode="after")
+    def _closed_v05_draft(self) -> VerificationDecisionDraftV05:
+        _validate_v05_decision_status(self.decision, self.integrity_assessment)
+        return self
+
+
+class VerificationDecisionV05(VerificationDecisionV03):
+    _signed_version = "0.5"
+
+    schema_version: Literal["openworkproof-verification-decision/0.5"]
+    reason_codes: tuple[VerificationReasonCodeV05, ...]
+    integrity_assessment: VerificationIntegrityAssessmentV05
+
+    @model_validator(mode="after")
+    def _closed_decision(self) -> VerificationDecisionV05:
+        _validate_verification_decision_content(
+            arm_results=self.arm_results,
+            reason_codes=self.reason_codes,
+            supersedes_decision_id=self.supersedes_decision_id,
+            supersedes_decision_digest=self.supersedes_decision_digest,
+            causal_parent_receipt_ids=self.causal_parent_receipt_ids,
+            causal_parent_decision_ids=self.causal_parent_decision_ids,
+        )
+        if self.scope_assessment.scope_status != "satisfied" and (
+            self.decision != "UNKNOWN"
+        ):
+            raise ValueError("non-satisfied scope requires UNKNOWN")
+        _validate_v05_decision_status(self.decision, self.integrity_assessment)
+        expected_signatures = 2 if self.assurance_level == "high_risk" else 1
+        if len(self.verifier_signatures) != expected_signatures:
+            raise ValueError("decision signature set has the wrong size")
+        signature_keys = tuple(
+            signature.verifier_key_id for signature in self.verifier_signatures
+        )
+        if signature_keys != tuple(
+            sorted(set(signature_keys), key=lambda value: value.encode("utf-8"))
+        ):
+            raise ValueError("decision signatures must be key-sorted and unique")
+        payload = self.model_dump(
+            mode="json", exclude={"digest", "verifier_signatures"}
+        )
+        expected_digest = _jcs_digest(
+            {
+                "domain": "openworkproof/verification-decision/v0.5",
                 "payload": payload,
             }
         )
@@ -4980,10 +5536,13 @@ __all__ = [
     "Command",
     "CommitmentAnchor",
     "CompositionReport",
+    "ControlContractV05",
+    "ControlObservationV05",
     "CorrelationFactors",
     "EvidencePolicy",
     "EvidenceRef",
     "FixedTestSource",
+    "FailureSignatureV05",
     "GrantConsumedReceipt",
     "GrantIssuedReceipt",
     "GrantRevokedReceipt",
@@ -4999,6 +5558,8 @@ __all__ = [
     "POLICY_ERROR_CODES_V04",
     "PredicateResult",
     "PredicateSpec",
+    "PopulationContractV05",
+    "PopulationObservationV05",
     "ProtocolModel",
     "PublicKeyB64Url",
     "QuotaCharge",
@@ -5024,14 +5585,25 @@ __all__ = [
     "TransitionDecision",
     "VerificationArm",
     "VerificationArmResult",
+    "VerificationArmResultV05",
+    "VerificationDecisionDraftV05",
+    "VerificationDecisionV05",
+    "VerificationIntegrityAssessmentV05",
+    "VerificationIntegrityReasonCode",
     "VerificationProfileV02",
+    "VerificationProfileV05",
     "VerificationReasonCode",
+    "VerificationReasonCodeV05",
     "VerifierBinding",
     "WorkOrder",
     "request_arguments_digest",
+    "control_contract_id",
+    "failure_signature_digest",
     "parse_agent_request",
     "parse_action_receipt",
     "parse_action_receipt_json",
+    "population_contract_id",
+    "population_member_digest",
     "validate_receipt_or_error",
     "validate_fixed_test_source_bytes",
 ]
