@@ -2643,7 +2643,12 @@ def population_member_digest(member_ids: list[str] | tuple[str, ...]) -> str:
     )
 
 
+_V05_MODEL_CONFIG = ConfigDict(revalidate_instances="subclass-instances")
+
+
 class PopulationContractV05(ProtocolModel):
+    model_config = _V05_MODEL_CONFIG
+
     contract_id: Digest64
     selector_rule_id: Digest64
     member_kind: Literal["source_file", "test_case"]
@@ -2715,6 +2720,8 @@ class PopulationContractV05(ProtocolModel):
 
 
 class PopulationObservationV05(ProtocolModel):
+    model_config = _V05_MODEL_CONFIG
+
     contract_id: Digest64
     selector_rule_id: Digest64
     selector_spec_digest: Digest64
@@ -2765,6 +2772,8 @@ class PopulationObservationV05(ProtocolModel):
 
 
 class FailureSignatureV05(ProtocolModel):
+    model_config = _V05_MODEL_CONFIG
+
     execution_status: VerificationArmExecutionStatus
     exit_codes: tuple[SafeNonNegativeInt, ...]
     reason_codes: tuple[VerificationReasonCodeV03, ...]
@@ -2835,6 +2844,8 @@ def control_contract_id(
 
 
 class ControlContractV05(ProtocolModel):
+    model_config = _V05_MODEL_CONFIG
+
     control_id: Digest64
     arm_id: Digest64
     control_target: Literal["semantic_regression", "required_target_coverage"]
@@ -2868,6 +2879,8 @@ class ControlContractV05(ProtocolModel):
 
 
 class ControlObservationV05(ProtocolModel):
+    model_config = _V05_MODEL_CONFIG
+
     control_id: Digest64
     fixture_digest: Digest64
     provocation_digest: Digest64
@@ -2904,6 +2917,8 @@ class ControlObservationV05(ProtocolModel):
 
 
 class VerificationIntegrityAssessmentV05(ProtocolModel):
+    model_config = _V05_MODEL_CONFIG
+
     population_status: Literal[
         "matched", "empty", "capture_failed", "drifted", "unavailable"
     ]
@@ -2951,6 +2966,8 @@ class VerificationIntegrityAssessmentV05(ProtocolModel):
 
 
 class VerificationProfileV05(VerificationProfileV03):
+    model_config = _V05_MODEL_CONFIG
+
     _signed_version = "0.5"
 
     schema_version: Literal["openworkproof-verification-profile/0.5"]
@@ -2996,6 +3013,8 @@ class VerificationProfileV05(VerificationProfileV03):
 
 
 class VerificationArmResultV05(VerificationArmResultV03):
+    model_config = _V05_MODEL_CONFIG
+
     _signed_version = "0.5"
 
     schema_version: Literal["openworkproof-verification-arm-result/0.5"]
@@ -3053,6 +3072,8 @@ def _validate_v05_decision_reason_codes(
 
 
 class VerificationDecisionDraftV05(VerificationDecisionDraftV03):
+    model_config = _V05_MODEL_CONFIG
+
     reason_codes: tuple[VerificationReasonCodeV05, ...]
     integrity_assessment: VerificationIntegrityAssessmentV05
 
@@ -3073,6 +3094,8 @@ class VerificationDecisionDraftV05(VerificationDecisionDraftV03):
 
 
 class VerificationDecisionV05(VerificationDecisionV03):
+    model_config = _V05_MODEL_CONFIG
+
     schema_version: Literal["openworkproof-verification-decision/0.5"]
     reason_codes: tuple[VerificationReasonCodeV05, ...]
     integrity_assessment: VerificationIntegrityAssessmentV05

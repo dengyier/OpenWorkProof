@@ -947,6 +947,106 @@ def _decision_reason_payload(
     return payload
 
 
+def _valid_v05_model_instances(
+    frozen_verification_profile_v03: VerificationProfileV03,
+    frozen_verification_arm_result_v03: VerificationArmResultV03,
+    frozen_verification_decision_v03: VerificationDecisionV03,
+    frozen_role_keys_v05: dict[str, tuple[Ed25519PrivateKey, dict[str, str]]],
+) -> tuple[Any, ...]:
+    verifier_key = frozen_role_keys_v05["Verifier"][0]
+    population_contract = PopulationContractV05.model_validate(
+        _population_contract_payload()
+    )
+    population_observation = PopulationObservationV05.model_validate(
+        _population_observation_payload()
+    )
+    failure_signature = FailureSignatureV05.model_validate(
+        _failure_signature_payload()
+    )
+    control_contract = ControlContractV05.model_validate(
+        _control_contract_payload()
+    )
+    control_observation = ControlObservationV05.model_validate(
+        _control_observation_payload()
+    )
+    integrity_assessment = VerificationIntegrityAssessmentV05.model_validate(
+        _integrity()
+    )
+    profile = _signed_profile_v05(
+        frozen_verification_profile_v03,
+        frozen_role_keys_v05["Manager"][0],
+    )
+    arm_result = _signed_arm_result_v05(
+        frozen_verification_arm_result_v03, verifier_key
+    )
+    draft = _draft_v05(frozen_verification_decision_v03)
+    decision = VerificationDecisionV05.model_validate(
+        _decision_payload_v05(
+            draft,
+            frozen_verification_decision_v03,
+            verifier_key,
+        )
+    )
+    return (
+        population_contract,
+        population_observation,
+        failure_signature,
+        control_contract,
+        control_observation,
+        integrity_assessment,
+        profile,
+        arm_result,
+        draft,
+        decision,
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_index", "field", "invalid_value"),
+    (
+        (0, "member_kind", "invalid-member-kind"),
+        (1, "selector_rule_id", "not-a-digest"),
+        (2, "execution_status", "invalid-execution"),
+        (3, "control_target", "invalid-target"),
+        (4, "control_status", "invalid-status"),
+        (5, "population_status", "invalid-status"),
+        (6, "schema_version", "openworkproof-verification-profile/invalid"),
+        (7, "schema_version", "openworkproof-verification-arm-result/invalid"),
+        (8, "decision", "INVALID"),
+        (9, "digest", "f" * 64),
+    ),
+)
+def test_v05_models_revalidate_malicious_subclass_instances(
+    frozen_verification_profile_v03: VerificationProfileV03,
+    frozen_verification_arm_result_v03: VerificationArmResultV03,
+    frozen_verification_decision_v03: VerificationDecisionV03,
+    frozen_role_keys_v05: dict[str, tuple[Ed25519PrivateKey, dict[str, str]]],
+    model_index: int,
+    field: str,
+    invalid_value: Any,
+) -> None:
+    valid = _valid_v05_model_instances(
+        frozen_verification_profile_v03,
+        frozen_verification_arm_result_v03,
+        frozen_verification_decision_v03,
+        frozen_role_keys_v05,
+    )[model_index]
+    model_type = type(valid)
+    assert model_type.model_validate(valid) is valid
+    assert model_type.model_validate(valid.model_dump(mode="json")) == valid
+
+    malicious_type = type(
+        f"_Malicious{model_type.__name__}",
+        (model_type,),
+        {},
+    )
+    malicious_payload = valid.model_dump(mode="python")
+    malicious_payload[field] = invalid_value
+    malicious = malicious_type.model_construct(**malicious_payload)
+    with pytest.raises(ValidationError):
+        model_type.model_validate(malicious)
+
+
 def test_v05_profile_is_signed_only_in_v05_domain(
     frozen_verification_profile_v03: VerificationProfileV03,
     frozen_role_keys_v05: dict[str, tuple[Ed25519PrivateKey, dict[str, str]]],
