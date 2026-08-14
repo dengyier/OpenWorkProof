@@ -191,3 +191,22 @@ python tests/evidence-bundles/verify_evidence_bundle.py \
 ```
 
 CLI：`owp package replay --binding <package>`。
+
+## v0.5 包离线验证（verification integrity）
+
+v0.5 交付包通过 `verify_delivery_package` 离线验证。客户私有视图除 v0.3
+对象外还携带：selector 规格证据（`scope/selectors/*`）、eligible/selected
+总体证据（`evidence/populations/<arm>/<path>`）、负控证据
+（`evidence/controls/<arm>/<path>`）与 settlement-readiness。
+
+离线验证只读取包内字节：重放每条总体证据（sha256/size 精确比对）、从包内
+selector 规格证据重放 rule-output witness、重算 population 与 control 评估，
+并要求与签名决策中的 `integrity_assessment` 逐字段一致，再完整重放决策草案
+（签名字节一致）。篡改任一 contract、observation、证据、签名或关系即
+`DeliveryPackageError`。diagnostic/public 视图仅携带派生报告，不含任何
+客户、路径或总体证据内容。
+
+派生视图：`explain_integrity_package` 输出 eligible/selected 计数、capture
+比例、population/control 状态、各负控 target 与状态、reason codes 与边界
+声明（验证证据不证明付款或客户验收）；`compare_integrity_packages` 识别
+rule/engine/population/fixture/provocation/failure-signature 变化。

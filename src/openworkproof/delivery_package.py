@@ -102,7 +102,7 @@ class DeliveryManifest(ProtocolModel):
     work_order_digest: Digest64
     subject_claim_digest: Digest64
     verification_decision_digest: Digest64
-    verification_protocol_version: Literal["0.2", "0.3"] | None = Field(
+    verification_protocol_version: Literal["0.2", "0.3", "0.5"] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
     scope_manifest_digest: Digest64 | None = Field(
@@ -145,9 +145,11 @@ class DeliveryManifest(ProtocolModel):
             for entry in self.entries
         ):
             raise ValueError("manifest contains an entry outside its privacy view")
-        if self.verification_protocol_version == "0.3":
+        if self.verification_protocol_version in {"0.3", "0.5"}:
             if self.scope_manifest_digest is None or self.full_offline_replay is None:
-                raise ValueError("v0.3 manifest requires scope and replay metadata")
+                raise ValueError(
+                    "v0.3/v0.5 manifest requires scope and replay metadata"
+                )
             if self.full_offline_replay != (
                 self.privacy_view == "customer_private"
             ):
@@ -1392,6 +1394,8 @@ def verify_delivery_package(package_root: Path) -> DeliveryVerificationResult:
         return _verify_v04_delivery_package(Path(package_root), manifest)
     if manifest.verification_protocol_version == "0.3":
         return _verify_v03_delivery_package(Path(package_root), manifest)
+    if manifest.verification_protocol_version == "0.5":
+        return _verify_v05_delivery_package(Path(package_root), manifest)
     anchors = load_and_verify_anchors(package_root, manifest)
     history = load_signed_history(package_root, manifest, anchors)
     decision = replay_verification(history)
@@ -1758,7 +1762,7 @@ def _cleanup_temporary(path: Path) -> None:
         raise DeliveryPackageError("delivery package cleanup failed") from cleanup_error
 
 
-def _ledger_delivery_protocol(ledger: Path) -> Literal["0.2", "0.3"]:
+def _ledger_delivery_protocol(ledger: Path) -> Literal["0.2", "0.3", "0.5"]:
     connection = evidence.connect_ledger(ledger)
     try:
         v02 = connection.execute(
@@ -1767,12 +1771,17 @@ def _ledger_delivery_protocol(ledger: Path) -> Literal["0.2", "0.3"]:
         v03 = connection.execute(
             "SELECT COUNT(*) FROM verification_profiles_v03"
         ).fetchone()[0]
+        v05 = connection.execute(
+            "SELECT COUNT(*) FROM verification_profiles_v05"
+        ).fetchone()[0]
     finally:
         connection.close()
-    if (v02, v03) == (1, 0):
+    if (v02, v03, v05) == (1, 0, 0):
         return "0.2"
-    if (v02, v03) == (0, 1):
+    if (v02, v03, v05) == (0, 1, 0):
         return "0.3"
+    if (v02, v03, v05) == (0, 0, 1):
+        return "0.5"
     raise DeliveryPackageError("delivery verification protocol is ambiguous")
 
 
@@ -2145,8 +2154,13 @@ def export_delivery_package(
     if output_path.exists() or output_path.is_symlink():
         raise DeliveryPackageError("delivery package output already exists")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if _ledger_delivery_protocol(ledger_path) == "0.3":
+    protocol = _ledger_delivery_protocol(ledger_path)
+    if protocol == "0.3":
         return _export_delivery_package_v03(
+            ledger_path, output_path, privacy_view=privacy_view
+        )
+    if protocol == "0.5":
+        return _export_delivery_package_v05(
             ledger_path, output_path, privacy_view=privacy_view
         )
     if privacy_view == "diagnostic":
@@ -2338,3 +2352,725 @@ __all__ = [
     "replay_verification",
     "verify_delivery_package",
 ]
+
+
+# ---------------------------------------------------------------------------
+# v0.5 verification-integrity delivery packages.
+# ---------------------------------------------------------------------------
+
+def _load_v05_objects_and_evidence(root: Path, manifest: DeliveryManifest):
+    """Load the packaged v0.5 protocol objects and replayable evidence."""
+    from openworkproof import integrity, verification  # noqa: PLC0415
+    from openworkproof.models import (  # noqa: PLC0415
+        DecisionDraftRequest,
+        EvaluationScopeManifest,
+        SubjectClaim,
+        VerificationArmResultV05,
+        VerificationDecisionV05,
+        VerificationProfileV05,
+        WorkOrder,
+    )
+
+    work_order = WorkOrder.model_validate(
+        _load_canonical_json(root, manifest, "work-order.json")
+    )
+    claim = SubjectClaim.model_validate(
+        _load_canonical_json(root, manifest, "subject-claim.json")
+    )
+    scope_manifest = EvaluationScopeManifest.model_validate(
+        _load_canonical_json(root, manifest, "evaluation-scope.json")
+    )
+    profile = VerificationProfileV05.model_validate(
+        _load_canonical_json(root, manifest, "verification-profile.json")
+    )
+    decision = VerificationDecisionV05.model_validate(
+        _load_canonical_json(root, manifest, "verification-decision.json")
+    )
+    if (
+        claim.work_order_digest != work_order.digest
+        or profile.evaluation_scope_id != scope_manifest.scope_id
+        or decision.profile_digest != profile.digest
+        or decision.scope_manifest_digest != scope_manifest.digest
+    ):
+        raise DeliveryPackageError("v0.5 package object digests do not bind")
+    integrity.validate_population_contracts(
+        profile,
+        scope_manifest,
+        rule_outputs=_packaged_rule_outputs(root, manifest, profile, scope_manifest),
+    )
+    integrity.validate_control_contracts(profile)
+    verification.validate_verification_decision_v05(
+        profile=profile, manifest=scope_manifest, decision=decision
+    )
+    results: list[VerificationArmResultV05] = []
+    inventory: dict[str, bytes] = {}
+    for reference in decision.arm_results:
+        result = VerificationArmResultV05.model_validate(
+            _load_canonical_json(
+                root, manifest, f"evidence/arms/{reference.arm_result_id}.json"
+            )
+        )
+        if (
+            result.arm_result_id != reference.arm_result_id
+            or result.digest != reference.arm_result_digest
+        ):
+            raise DeliveryPackageError("v0.5 arm result binding failed")
+        for observation in result.population_observations:
+            for ref in observation.evidence_refs:
+                payload = _read_bound(
+                    root,
+                    manifest,
+                    f"evidence/populations/{result.arm_kind}/{ref.path}",
+                )
+                if (
+                    len(payload) != ref.size_bytes
+                    or hashlib.sha256(payload).hexdigest() != ref.sha256
+                ):
+                    raise DeliveryPackageError(
+                        "v0.5 population evidence integrity failed"
+                    )
+                inventory[ref.sha256] = payload
+        if result.control_observation is not None:
+            for ref in result.control_observation.evidence_refs:
+                payload = _read_bound(
+                    root,
+                    manifest,
+                    f"evidence/controls/{result.arm_kind}/{ref.path}",
+                )
+                if (
+                    len(payload) != ref.size_bytes
+                    or hashlib.sha256(payload).hexdigest() != ref.sha256
+                ):
+                    raise DeliveryPackageError(
+                        "v0.5 control evidence integrity failed"
+                    )
+        results.append(result)
+    population = integrity.assess_population_integrity(
+        profile,
+        scope_manifest,
+        tuple(results),
+        rule_outputs=_packaged_rule_outputs(root, manifest, profile, scope_manifest),
+        evidence_inventory=inventory,
+    )
+    control = integrity.assess_control_integrity(profile, tuple(results))
+    if (
+        population.status != decision.integrity_assessment.population_status
+        or control.status != decision.integrity_assessment.control_status
+        or set(population.reason_codes) | set(control.reason_codes)
+        != set(decision.integrity_assessment.reason_codes)
+    ):
+        raise DeliveryPackageError("v0.5 integrity assessment replay failed")
+    draft = integrity.compose_verification_decision_v05(
+        profile=profile,
+        manifest=scope_manifest,
+        arm_results=tuple(results),
+        request=DecisionDraftRequest(
+            decision_id=decision.decision_id,
+            decided_at=decision.model_dump(mode="json")["decided_at"],
+            nonce=decision.nonce,
+        ),
+        rule_outputs=_packaged_rule_outputs(root, manifest, profile, scope_manifest),
+        evidence_inventory=inventory,
+    )
+    if verification.verification_decision_signing_bytes_v05(
+        draft
+    ) != verification.verification_decision_signing_bytes_v05(decision):
+        raise DeliveryPackageError("v0.5 decision replay failed")
+    return work_order, claim, scope_manifest, profile, decision, results, inventory
+
+
+def _packaged_rule_outputs(root, manifest, profile, scope_manifest):
+    """Replay rule outputs from the packaged selector specification files."""
+    members_by_locator = {
+        member.locator: member.member_id for member in scope_manifest.members
+    }
+    kind_partition = {
+        kind: tuple(
+            sorted(
+                member.member_id
+                for member in scope_manifest.members
+                if member.member_kind == kind
+            )
+        )
+        for kind in ("source_file", "test_case")
+    }
+    outputs: dict[str, tuple[str, ...]] = {}
+    for rule in scope_manifest.selector_rules:
+        matched = None
+        for relative in rule.required_evidence_paths:
+            payload = _read_bound(
+                root, manifest, f"scope/selectors/{relative}"
+            )
+            if hashlib.sha256(payload).hexdigest() == rule.selector_spec_digest:
+                matched = payload
+                break
+        if matched is None:
+            raise DeliveryPackageError("v0.5 selector specification is unavailable")
+        import json as _json
+
+        document = _json.loads(matched.decode("utf-8"))
+        kind = document.get("selector_kind")
+        if kind in {"git_diff_closure", "pytest_collection"}:
+            outputs[rule.rule_id] = kind_partition[
+                "source_file" if kind == "git_diff_closure" else "test_case"
+            ]
+        elif kind == "explicit":
+            locators = set(document.get("locators") or [])
+            outputs[rule.rule_id] = tuple(
+                sorted(
+                    member_id
+                    for locator, member_id in members_by_locator.items()
+                    if locator in locators
+                )
+            )
+        else:
+            raise DeliveryPackageError("v0.5 selector kind is unsupported")
+    return outputs
+
+
+def _ledger_export_read_v05(ledger: Path):
+    from openworkproof import settlement, verification  # noqa: PLC0415
+
+    lock_descriptor: int | None = None
+    connection = None
+    try:
+        lock_descriptor, _ = evidence._borrow_or_acquire_target_lock(ledger, None)
+        connection = evidence.connect_ledger(ledger)
+        connection.execute("BEGIN")
+        rows = tuple(
+            connection.execute(
+                "SELECT profile_digest FROM verification_profiles_v05"
+            )
+        )
+        if len(rows) != 1:
+            raise DeliveryPackageError("v0.5 package export requires one profile")
+        work_order, claim, scope_manifest, profile = (
+            verification._load_profile_context_v05(
+                connection, profile_digest=rows[0][0], path=ledger
+            )
+        )
+        decision = verification._load_current_decision_v05(
+            connection, profile=profile, manifest=scope_manifest
+        )
+        if decision is None:
+            raise DeliveryPackageError("v0.5 package export requires a decision")
+        if decision.supersedes_decision_id is not None:
+            raise DeliveryPackageError("v0.5 decision-chain export is not yet closed")
+        arm_results = verification._load_arm_results_v05(
+            connection,
+            path=ledger,
+            work_order=work_order,
+            profile=profile,
+            manifest=scope_manifest,
+            selected_ids=tuple(
+                item.arm_result_id for item in decision.arm_results
+            ),
+        )
+        receipts = tuple(
+            evidence.parse_action_receipt_json(row[0])
+            for row in connection.execute(
+                "SELECT receipt_json FROM receipts ORDER BY sequence"
+            )
+        )
+        parent_rows = [
+            {"child_receipt_id": child, "parent_receipt_id": parent}
+            for child, parent in connection.execute(
+                "SELECT child_receipt_id, parent_receipt_id FROM receipt_parents "
+                "ORDER BY child_receipt_id, parent_receipt_id"
+            )
+        ]
+        acceptances = evidence._validated_acceptance_receipts(
+            connection, work_order
+        )
+        rejections = evidence._validated_acceptance_rejections(
+            connection, work_order
+        )
+        history = settlement.AcceptanceHistory.model_validate(
+            {
+                "acceptance": (
+                    None
+                    if not acceptances
+                    else acceptances[0].model_dump(mode="json")
+                ),
+                "rejection": (
+                    None if not rejections else rejections[0].model_dump(mode="json")
+                ),
+                "withdrawal": None,
+                "supersession": None,
+                "current_decision": __import__("json").loads(
+                    __import__("json").dumps(decision.model_dump(mode="json"))
+                ),
+            }
+        )
+        spec_files: dict[str, bytes] = {}
+        for rule in scope_manifest.selector_rules:
+            for relative in rule.required_evidence_paths:
+                target = ledger.parent / relative
+                payload = target.read_bytes()
+                if hashlib.sha256(payload).hexdigest() == rule.selector_spec_digest:
+                    spec_files[relative] = payload
+        population_files: dict[str, bytes] = {}
+        control_files: dict[str, bytes] = {}
+        for result in arm_results:
+            for observation in result.population_observations:
+                for ref in observation.evidence_refs:
+                    target = ledger.parent / ref.path
+                    payload = target.read_bytes()
+                    if (
+                        hashlib.sha256(payload).hexdigest() != ref.sha256
+                        or len(payload) != ref.size_bytes
+                    ):
+                        raise DeliveryPackageError(
+                            "v0.5 population evidence is unavailable"
+                        )
+                    population_files[
+                        f"evidence/populations/{result.arm_kind}/{ref.path}"
+                    ] = payload
+            if result.control_observation is not None:
+                for ref in result.control_observation.evidence_refs:
+                    target = ledger.parent / ref.path
+                    payload = target.read_bytes()
+                    if (
+                        hashlib.sha256(payload).hexdigest() != ref.sha256
+                        or len(payload) != ref.size_bytes
+                    ):
+                        raise DeliveryPackageError(
+                            "v0.5 control evidence is unavailable"
+                        )
+                    control_files[
+                        f"evidence/controls/{result.arm_kind}/{ref.path}"
+                    ] = payload
+        return (
+            work_order,
+            claim,
+            scope_manifest,
+            profile,
+            decision,
+            arm_results,
+            receipts,
+            parent_rows,
+            history,
+            spec_files,
+            population_files,
+            control_files,
+        )
+    except DeliveryPackageError:
+        evidence._best_effort_rollback(connection)
+        raise
+    except Exception as error:
+        evidence._best_effort_rollback(connection)
+        raise DeliveryPackageError("v0.5 package export failed") from error
+    finally:
+        close_error = evidence._best_effort_close(connection)
+        _, release_errors = evidence._release_target_lock(lock_descriptor)
+        cleanup = tuple(
+            item
+            for item in (close_error, *release_errors)
+            if item is not None
+        )
+        if cleanup:
+            raise DeliveryPackageError("v0.5 package export cleanup failed") from cleanup[0]
+
+
+def _export_delivery_package_v05(
+    ledger: Path,
+    output: Path,
+    *,
+    privacy_view: PrivacyView,
+) -> DeliveryManifest:
+    from openworkproof import settlement  # noqa: PLC0415
+
+    temporary = output.parent / f".{output.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        (
+            work_order,
+            claim,
+            scope_manifest,
+            profile,
+            decision,
+            arm_results,
+            receipts,
+            parent_rows,
+            history,
+            spec_files,
+            population_files,
+            control_files,
+        ) = _ledger_export_read_v05(ledger)
+        temporary.mkdir(mode=0o700)
+        report = {
+            "schema_version": "openworkproof-scope-coverage-report/0.5",
+            "privacy_view": privacy_view,
+            "scope_manifest_digest": scope_manifest.digest,
+            "full_offline_replay": privacy_view == "customer_private",
+            "decision": decision.decision,
+            "population_status": decision.integrity_assessment.population_status,
+            "control_status": decision.integrity_assessment.control_status,
+            "integrity_reason_codes": list(
+                decision.integrity_assessment.reason_codes
+            ),
+        }
+        files: dict[str, tuple[bytes, PrivacyClass]] = {
+            "scope-coverage-report.json": (_canonical_bytes(report), "public"),
+        }
+        if privacy_view == "diagnostic":
+            files["scope-diagnostics.json"] = (
+                _canonical_bytes(
+                    {
+                        "arm_statuses": [
+                            {
+                                "arm_kind": result.arm_kind,
+                                "expectation_status": result.expectation_status,
+                            }
+                            for result in arm_results
+                        ],
+                        "decision_reason_codes": list(decision.reason_codes),
+                        "population_status": decision.integrity_assessment.population_status,
+                        "control_status": decision.integrity_assessment.control_status,
+                    }
+                ),
+                "diagnostic",
+            )
+        if privacy_view == "customer_private":
+            files.update(
+                {
+                    "work-order.json": (
+                        _canonical_bytes(work_order.model_dump(mode="json")),
+                        "customer_private",
+                    ),
+                    "subject-claim.json": (
+                        _canonical_bytes(claim.model_dump(mode="json")),
+                        "customer_private",
+                    ),
+                    "evaluation-scope.json": (
+                        _canonical_bytes(scope_manifest.model_dump(mode="json")),
+                        "customer_private",
+                    ),
+                    "verification-profile.json": (
+                        _canonical_bytes(profile.model_dump(mode="json")),
+                        "customer_private",
+                    ),
+                    "verification-decision.json": (
+                        _canonical_bytes(decision.model_dump(mode="json")),
+                        "customer_private",
+                    ),
+                    "scope/selector-rules.json": (
+                        _canonical_bytes(
+                            [
+                                item.model_dump(mode="json")
+                                for item in scope_manifest.selector_rules
+                            ]
+                        ),
+                        "customer_private",
+                    ),
+                    "scope/members.json": (
+                        _canonical_bytes(
+                            [
+                                item.model_dump(mode="json")
+                                for item in scope_manifest.members
+                            ]
+                        ),
+                        "customer_private",
+                    ),
+                    "execution-ledger/receipts.json": (
+                        _canonical_bytes(
+                            [item.model_dump(mode="json") for item in receipts]
+                        ),
+                        "customer_private",
+                    ),
+                    "execution-ledger/receipt-parents.json": (
+                        _canonical_bytes(parent_rows),
+                        "customer_private",
+                    ),
+                    "verify.sh": (_VERIFY_SCRIPT, "customer_private"),
+                }
+            )
+            for relative, payload in spec_files.items():
+                files[f"scope/selectors/{relative}"] = (payload, "customer_private")
+            files.update(
+                {
+                    relative: (payload, "customer_private")
+                    for relative, payload in population_files.items()
+                }
+            )
+            files.update(
+                {
+                    relative: (payload, "customer_private")
+                    for relative, payload in control_files.items()
+                }
+            )
+            for result in arm_results:
+                files[f"evidence/arms/{result.arm_result_id}.json"] = (
+                    _canonical_bytes(result.model_dump(mode="json")),
+                    "customer_private",
+                )
+                for ref in result.evidence_refs:
+                    target = ledger.parent / ref.path
+                    payload = target.read_bytes()
+                    if (
+                        len(payload) != ref.size_bytes
+                        or hashlib.sha256(payload).hexdigest() != ref.sha256
+                    ):
+                        raise DeliveryPackageError(
+                            "v0.5 arm result evidence is unavailable"
+                        )
+                    files[f"evidence/results/{result.arm_kind}/{ref.path}"] = (
+                        payload,
+                        "customer_private",
+                    )
+                scope_ref = result.scope_evidence_refs[0]
+                files[f"evidence/scope/{result.arm_kind}/{scope_ref.path}"] = (
+                    (ledger.parent / scope_ref.path).read_bytes(),
+                    "customer_private",
+                )
+            effective = settlement.effective_acceptance(history)
+            readiness = settlement.settlement_readiness(
+                decision=decision,
+                acceptance=effective,
+                rejection=history.rejection,
+            )
+            files["settlement-readiness.json"] = (
+                _canonical_bytes(
+                    {
+                        "current_decision_id": decision.decision_id,
+                        "effective_acceptance": effective.value,
+                        "settlement_readiness": readiness.value,
+                    }
+                ),
+                "customer_private",
+            )
+        entries = []
+        for relative in sorted(files, key=lambda value: value.encode("utf-8")):
+            payload, privacy_class = files[relative]
+            target = temporary / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+            entries.append(
+                DeliveryManifestEntry(
+                    path=relative,
+                    sha256=hashlib.sha256(payload).hexdigest(),
+                    media_type=_media_type(relative),
+                    size_bytes=len(payload),
+                    privacy_class=privacy_class,
+                    required=True,
+                )
+            )
+        manifest = DeliveryManifest.model_validate(
+            {
+                "schema_version": "openworkproof-delivery-manifest/0.1",
+                "privacy_view": privacy_view,
+                "work_order_digest": work_order.digest,
+                "subject_claim_digest": claim.digest,
+                "verification_decision_digest": decision.digest,
+                "verification_protocol_version": "0.5",
+                "scope_manifest_digest": scope_manifest.digest,
+                "full_offline_replay": privacy_view == "customer_private",
+                "entries": [
+                    entry.model_dump(mode="json") for entry in entries
+                ],
+            }
+        )
+        (temporary / "manifest.json").write_bytes(
+            _canonical_bytes(manifest.model_dump(mode="json"))
+        )
+        temporary.replace(output)
+        return manifest
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+
+
+def _verify_v05_delivery_package(
+    root: Path,
+    manifest: DeliveryManifest,
+) -> DeliveryVerificationResult:
+    report = _load_canonical_json(root, manifest, "scope-coverage-report.json")
+    if not isinstance(report, dict) or (
+        report.get("schema_version")
+        != "openworkproof-scope-coverage-report/0.5"
+        or report.get("privacy_view") != manifest.privacy_view
+        or report.get("scope_manifest_digest") != manifest.scope_manifest_digest
+        or report.get("full_offline_replay") != manifest.full_offline_replay
+        or report.get("decision") not in {"VERIFIED", "REFUTED", "UNKNOWN"}
+    ):
+        raise DeliveryPackageError("v0.5 scope report binding failed")
+    if manifest.privacy_view == "public":
+        if set(_entry_map(manifest)) != {"scope-coverage-report.json"}:
+            raise DeliveryPackageError("public v0.5 package is not aggregate-only")
+        return DeliveryVerificationResult(
+            current_decision=report["decision"],
+            effective_acceptance="NONE",
+            settlement_readiness=(
+                "READY_FOR_ACCEPTANCE"
+                if report["decision"] == "VERIFIED"
+                else "NOT_READY"
+            ),
+            manifest_digest=digest_manifest(manifest),
+            full_offline_replay=False,
+        )
+    if manifest.privacy_view == "diagnostic":
+        if set(_entry_map(manifest)) != {
+            "scope-coverage-report.json",
+            "scope-diagnostics.json",
+        }:
+            raise DeliveryPackageError("diagnostic v0.5 package is not redacted")
+        return DeliveryVerificationResult(
+            current_decision=report["decision"],
+            effective_acceptance="NONE",
+            settlement_readiness=(
+                "READY_FOR_ACCEPTANCE"
+                if report["decision"] == "VERIFIED"
+                else "NOT_READY"
+            ),
+            manifest_digest=digest_manifest(manifest),
+            full_offline_replay=False,
+        )
+    _load_v05_objects_and_evidence(root, manifest)
+    report_decision = report["decision"]
+    return DeliveryVerificationResult(
+        current_decision=report_decision,
+        effective_acceptance="NONE",
+        settlement_readiness=(
+            "READY_FOR_ACCEPTANCE"
+            if report_decision == "VERIFIED"
+            else "NOT_READY"
+        ),
+        manifest_digest=digest_manifest(manifest),
+        full_offline_replay=True,
+    )
+
+
+def explain_integrity_package(package_root: Path) -> dict[str, object]:
+    """Derive the human-readable v0.5 integrity explanation from package bytes."""
+    from openworkproof.models import (  # noqa: PLC0415
+        VerificationArmResultV05,
+        VerificationDecisionV05,
+        VerificationProfileV05,
+    )
+
+    root = Path(package_root)
+    manifest = load_and_verify_manifest(root)
+    if manifest.verification_protocol_version != "0.5":
+        raise DeliveryPackageError("explain_integrity_package requires a v0.5 package")
+    (
+        _work_order,
+        _claim,
+        scope_manifest,
+        profile,
+        decision,
+        results,
+        _inventory,
+    ) = _load_v05_objects_and_evidence(root, manifest)
+    return {
+        "decision": decision.decision,
+        "population_status": decision.integrity_assessment.population_status,
+        "control_status": decision.integrity_assessment.control_status,
+        "reason_codes": list(decision.reason_codes),
+        "contracts": [
+            {
+                "member_kind": contract.member_kind,
+                "minimum_capture": f"{contract.minimum_capture_numerator}/"
+                f"{contract.minimum_capture_denominator}",
+                "eligible_seen": next(
+                    (
+                        observation.eligible_seen
+                        for result in results
+                        for observation in result.population_observations
+                        if observation.contract_id == contract.contract_id
+                    ),
+                    None,
+                ),
+                "selected_count": next(
+                    (
+                        observation.selected_count
+                        for result in results
+                        for observation in result.population_observations
+                        if observation.contract_id == contract.contract_id
+                    ),
+                    None,
+                ),
+                "capture": next(
+                    (
+                        f"{observation.capture_numerator}/"
+                        f"{observation.capture_denominator}"
+                        for result in results
+                        for observation in result.population_observations
+                        if observation.contract_id == contract.contract_id
+                    ),
+                    None,
+                ),
+            }
+            for contract in profile.population_contracts
+        ],
+        "controls": [
+            {
+                "control_target": contract.control_target,
+                "arm_id": contract.arm_id,
+                "control_status": next(
+                    (
+                        result.control_observation.control_status
+                        for result in results
+                        if result.arm_id == contract.arm_id
+                        and result.control_observation is not None
+                    ),
+                    None,
+                ),
+            }
+            for contract in profile.control_contracts
+        ],
+        "boundary": (
+            "verification evidence does not prove payment or customer acceptance"
+        ),
+    }
+
+
+def compare_integrity_packages(
+    left_root: Path, right_root: Path
+) -> dict[str, object]:
+    """Compare two v0.5 packages on rule, engine, population, and control axes."""
+    from openworkproof.models import VerificationProfileV05  # noqa: PLC0415
+
+    def profile_of(root: Path):
+        manifest = load_and_verify_manifest(root)
+        _load_v05_objects_and_evidence(root, manifest)
+        return VerificationProfileV05.model_validate(
+            _load_canonical_json(root, manifest, "verification-profile.json")
+        )
+
+    left = profile_of(Path(left_root))
+    right = profile_of(Path(right_root))
+    left_rules = {item.selector_rule_id: item for item in left.population_contracts}
+    right_rules = {item.selector_rule_id: item for item in right.population_contracts}
+    rule_changes = [
+        rule_id
+        for rule_id in set(left_rules) | set(right_rules)
+        if left_rules.get(rule_id) is None
+        or right_rules.get(rule_id) is None
+        or left_rules[rule_id].selector_spec_digest
+        != right_rules[rule_id].selector_spec_digest
+        or left_rules[rule_id].selector_engine_digest
+        != right_rules[rule_id].selector_engine_digest
+    ]
+    left_controls = {item.arm_id: item for item in left.control_contracts}
+    right_controls = {item.arm_id: item for item in right.control_contracts}
+    control_changes = [
+        arm_id
+        for arm_id in set(left_controls) | set(right_controls)
+        if left_controls.get(arm_id) is None
+        or right_controls.get(arm_id) is None
+        or left_controls[arm_id].fixture_digest
+        != right_controls[arm_id].fixture_digest
+        or left_controls[arm_id].provocation_digest
+        != right_controls[arm_id].provocation_digest
+        or left_controls[arm_id].expected_failure_signature_digest
+        != right_controls[arm_id].expected_failure_signature_digest
+    ]
+    return {
+        "selector_rule_changes": rule_changes,
+        "control_changes": control_changes,
+        "population_status_left": _load_v05_objects_and_evidence(
+            Path(left_root), load_and_verify_manifest(Path(left_root))
+        )[4].integrity_assessment.population_status,
+        "population_status_right": _load_v05_objects_and_evidence(
+            Path(right_root), load_and_verify_manifest(Path(right_root))
+        )[4].integrity_assessment.population_status,
+    }
