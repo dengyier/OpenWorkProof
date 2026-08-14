@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from enum import Enum
 from pathlib import Path
 import sqlite3
@@ -19,6 +20,7 @@ from openworkproof.models import (
     ProtocolModel,
     VerificationDecision,
     VerificationDecisionV03,
+    VerificationDecisionV05,
 )
 import openworkproof.evidence as evidence
 from openworkproof.signing import decode_and_verify_key_binding, verify_payload
@@ -51,7 +53,7 @@ class AcceptanceHistory(ProtocolModel):
     rejection: AcceptanceRejectionReceipt | None
     withdrawal: AcceptanceTransitionReceipt | None
     supersession: AcceptanceTransitionReceipt | None
-    current_decision: VerificationDecision | VerificationDecisionV03 | None
+    current_decision: VerificationDecision | VerificationDecisionV03 | VerificationDecisionV05 | None
 
     @model_validator(mode="after")
     def _closed_history(self) -> AcceptanceHistory:
@@ -103,7 +105,7 @@ def effective_acceptance(
 
 def settlement_readiness(
     *,
-    decision: VerificationDecision | VerificationDecisionV03 | None,
+    decision: VerificationDecision | VerificationDecisionV03 | VerificationDecisionV05 | None,
     acceptance: EffectiveAcceptance,
     rejection: AcceptanceRejectionReceipt | None,
 ) -> SettlementReadiness:
@@ -127,7 +129,7 @@ def _load_transition(
     work_order,
     acceptance: AcceptanceReceipt | None,
     protocol_version: str | None,
-    decision: VerificationDecision | VerificationDecisionV03 | None,
+    decision: VerificationDecision | VerificationDecisionV03 | VerificationDecisionV05 | None,
 ) -> AcceptanceTransitionReceipt | None:
     v02_rows = tuple(
         connection.execute(
@@ -147,22 +149,34 @@ def _load_transition(
             """
         )
     )
-    if len(v02_rows) + len(v03_rows) > 1:
+    v05_rows = tuple(
+        connection.execute(
+            """
+            SELECT transition_id, target_acceptance_id,
+                   verification_decision_id, transition_json
+            FROM acceptance_transitions_v05 ORDER BY transition_id
+            """
+        )
+    )
+    if len(v02_rows) + len(v03_rows) + len(v05_rows) > 1:
         raise SettlementReadError("multiple acceptance transitions are invalid")
-    if not v02_rows and not v03_rows:
+    if not v02_rows and not v03_rows and not v05_rows:
         return None
     if acceptance is None or decision is None or protocol_version is None:
         raise SettlementReadError("acceptance transition has no acceptance")
     if (v02_rows and protocol_version != "0.2") or (
         v03_rows and protocol_version != "0.3"
-    ):
+    ) or (v05_rows and protocol_version != "0.5"):
         raise SettlementReadError("acceptance transition protocol is mismatched")
-    rows = v02_rows if protocol_version == "0.2" else v03_rows
-    parent_table = (
-        "acceptance_transition_parents"
-        if protocol_version == "0.2"
-        else "acceptance_transition_parents_v03"
-    )
+    if v02_rows:
+        rows = v02_rows
+        parent_table = "acceptance_transition_parents"
+    elif v03_rows:
+        rows = v03_rows
+        parent_table = "acceptance_transition_parents_v03"
+    else:
+        rows = v05_rows
+        parent_table = "acceptance_transition_parents_v05"
     transition_id, target_id, decision_id, raw = rows[0]
     try:
         transition = AcceptanceTransitionReceipt.model_validate_json(raw)
@@ -284,7 +298,9 @@ def read_settlement_snapshot(ledger: Path) -> SettlementSnapshot:
                 "current_decision": (
                     None
                     if current_decision is None
-                    else current_decision.model_dump(mode="json")
+                    else json.loads(
+                        json.dumps(current_decision.model_dump(mode="json"))
+                    )
                 ),
             }
         )
@@ -315,7 +331,7 @@ def read_settlement_snapshot(ledger: Path) -> SettlementSnapshot:
 
 def settlement_readiness_v04(
     *,
-    verification: VerificationDecisionV03 | None,
+    verification: VerificationDecisionV03 | VerificationDecisionV05 | None,
     binding_decision: BindingDecision | None,
     acceptance: EffectiveAcceptance,
     commercial_evidence_refs: tuple[str, ...] | None = None,

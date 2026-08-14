@@ -1392,7 +1392,7 @@ def _latest_proof_composed_trigger(
 
 @dataclass(frozen=True, slots=True)
 class CurrentVerificationRecord:
-    protocol_version: Literal["0.2", "0.3"]
+    protocol_version: Literal["0.2", "0.3", "0.5"]
     decision_id: str
     decision_digest: str
     decision: Literal["VERIFIED", "REFUTED", "UNKNOWN"]
@@ -1402,6 +1402,11 @@ def _load_current_verification_decision(
     connection: sqlite3.Connection,
 ):
     from openworkproof import verification  # noqa: PLC0415
+    from openworkproof.models import (  # noqa: PLC0415
+        EvaluationScopeManifest,
+        VerificationDecisionV05,
+        VerificationProfileV05,
+    )
 
     v02_count = connection.execute(
         "SELECT COUNT(*) FROM verification_profiles_v02"
@@ -1409,13 +1414,23 @@ def _load_current_verification_decision(
     v03_count = connection.execute(
         "SELECT COUNT(*) FROM verification_profiles_v03"
     ).fetchone()
-    if v02_count == (0,) and v03_count == (0,):
+    v05_count = connection.execute(
+        "SELECT COUNT(*) FROM verification_profiles_v05"
+    ).fetchone()
+    if v02_count == (0,) and v03_count == (0,) and v05_count == (0,):
         return None
-    if v02_count not in {(0,), (1,)} or v03_count not in {(0,), (1,)}:
+    if (
+        v02_count not in {(0,), (1,)}
+        or v03_count not in {(0,), (1,)}
+        or v05_count not in {(0,), (1,)}
+    ):
         raise AcceptanceTransactionError(
             "acceptance requires exactly one verification profile"
         )
-    if v02_count == (1,) and v03_count == (1,):
+    active_families = sum(
+        1 for count in (v02_count, v03_count, v05_count) if count == (1,)
+    )
+    if active_families != 1:
         raise AcceptanceTransactionError(
             "acceptance verification protocol is ambiguous"
         )
@@ -1424,8 +1439,8 @@ def _load_current_verification_decision(
         decision = verification._load_current_decision(
             connection, profile=profile
         )
-        version: Literal["0.2", "0.3"] = "0.2"
-    else:
+        version: Literal["0.2", "0.3", "0.5"] = "0.2"
+    elif v03_count == (1,):
         _, _, manifest, profile = verification._load_single_profile_v03(
             connection
         )
@@ -1433,6 +1448,60 @@ def _load_current_verification_decision(
             connection, profile=profile, manifest=manifest
         )
         version = "0.3"
+    else:
+        profile_row = connection.execute(
+            "SELECT profile_id, profile_json FROM verification_profiles_v05"
+        ).fetchone()
+        raw = profile_row[1]
+        profile = VerificationProfileV05.model_validate_json(raw)
+        if profile.profile_id != profile_row[0] or (
+            rfc8785.dumps(profile.model_dump(mode="json"))
+            != (raw.encode("utf-8") if isinstance(raw, str) else raw)
+        ):
+            raise AcceptanceTransactionError(
+                "v0.5 verification profile row is not canonical"
+            )
+        scope_row = connection.execute(
+            "SELECT scope_json FROM evaluation_scopes_v03 WHERE scope_id = ?",
+            (profile.evaluation_scope_id,),
+        ).fetchone()
+        if scope_row is None:
+            raise AcceptanceTransactionError(
+                "v0.5 verification scope is unavailable"
+            )
+        scope_raw = scope_row[0]
+        manifest = EvaluationScopeManifest.model_validate_json(scope_raw)
+        if manifest.scope_id != profile.evaluation_scope_id or (
+            rfc8785.dumps(manifest.model_dump(mode="json"))
+            != (scope_raw.encode("utf-8") if isinstance(scope_raw, str) else scope_raw)
+        ):
+            raise AcceptanceTransactionError(
+                "v0.5 evaluation scope row is not canonical"
+            )
+        previous: VerificationDecisionV05 | None = None
+        decision: VerificationDecisionV05 | None = None
+        for decision_id, digest, predecessor_id, decision_raw in connection.execute(
+            """
+            SELECT decision_id, decision_digest, predecessor_id, decision_json
+            FROM verification_decisions_v05 ORDER BY rowid
+            """
+        ):
+            parsed = VerificationDecisionV05.model_validate_json(decision_raw)
+            if (
+                parsed.decision_id != decision_id
+                or parsed.digest != digest
+                or predecessor_id
+                != (None if previous is None else previous.decision_id)
+            ):
+                raise AcceptanceTransactionError(
+                    "v0.5 verification decision chain is invalid"
+                )
+            verification.validate_verification_decision_v05(
+                profile=profile, manifest=manifest, decision=parsed
+            )
+            previous = parsed
+        decision = previous
+        version = "0.5"
     if decision is None:
         raise AcceptanceTransactionError(
             "acceptance requires a current verification decision"
@@ -1450,7 +1519,11 @@ def _resolve_current_verification_record(
         )
     version, decision = current
     matches = 0
-    for table in ("verification_decisions", "verification_decisions_v03"):
+    for table in (
+        "verification_decisions",
+        "verification_decisions_v03",
+        "verification_decisions_v05",
+    ):
         matches += connection.execute(
             f"SELECT COUNT(*) FROM {table} WHERE decision_id = ?",
             (decision.decision_id,),
@@ -1479,8 +1552,11 @@ def _require_current_verified_decision_if_v02(
         connection.execute(
             "SELECT COUNT(*) FROM verification_profiles_v03"
         ).fetchone(),
+        connection.execute(
+            "SELECT COUNT(*) FROM verification_profiles_v05"
+        ).fetchone(),
     )
-    if counts == ((0,), (0,)):
+    if counts == ((0,), (0,), (0,)):
         return None
     try:
         current = _resolve_current_verification_record(connection)
@@ -3162,8 +3238,16 @@ def _exact_acceptance_transition_readback(
                     rfc8785.dumps(transition.model_dump(mode="json")),
                 )
             else:
-                transition_table = "acceptance_transitions_v03"
-                parent_table = "acceptance_transition_parents_v03"
+                transition_table = (
+                    "acceptance_transitions_v05"
+                    if current.protocol_version == "0.5"
+                    else "acceptance_transitions_v03"
+                )
+                parent_table = (
+                    "acceptance_transition_parents_v05"
+                    if current.protocol_version == "0.5"
+                    else "acceptance_transition_parents_v03"
+                )
                 row = connection.execute(
                     f"""
                     SELECT transition_digest, target_acceptance_id,
@@ -3330,8 +3414,16 @@ def commit_acceptance_transition(
                 rfc8785.dumps(parsed.model_dump(mode="json")),
             )
         else:
-            transition_table = "acceptance_transitions_v03"
-            parent_table = "acceptance_transition_parents_v03"
+            transition_table = (
+                "acceptance_transitions_v05"
+                if protocol_version == "0.5"
+                else "acceptance_transitions_v03"
+            )
+            parent_table = (
+                "acceptance_transition_parents_v05"
+                if protocol_version == "0.5"
+                else "acceptance_transition_parents_v03"
+            )
             existing = connection.execute(
                 f"""
                 SELECT transition_digest, target_acceptance_id,
@@ -3378,15 +3470,33 @@ def commit_acceptance_transition(
                 (parsed.transition_id, *expected),
             )
         else:
-            connection.execute(
-                f"""
-                INSERT INTO {transition_table} (
-                    transition_id, transition_digest, target_acceptance_id,
-                    verification_decision_id, transition_json
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (parsed.transition_id, *expected),
+            columns = (
+                "transition_id, transition_digest, target_acceptance_id, "
+                "verification_decision_id, transition_json"
             )
+            if protocol_version == "0.5":
+                columns += ", committed_at"
+                connection.execute(
+                    f"""
+                    INSERT INTO {transition_table} ({columns})
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        parsed.transition_id,
+                        *expected,
+                        datetime.now(timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%SZ"
+                        ),
+                    ),
+                )
+            else:
+                connection.execute(
+                    f"""
+                    INSERT INTO {transition_table} ({columns})
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (parsed.transition_id, *expected),
+                )
         for ordinal, parent_id in enumerate(parsed.causal_parent_ids):
             connection.execute(
                 """

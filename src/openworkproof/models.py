@@ -2602,12 +2602,13 @@ def _freeze_bounded_protocol_payload(
 ) -> Any:
     if type(value) is model_type:
         return value
-    if type(value) is not dict:
+    if type(value) is not dict and not isinstance(value, FrozenDict):
         raise ValueError(
             "protocol object must be the exact model or exact built-in dict"
         )
+    thawed = _thaw_frozen_mappings(value)
     return _thaw_frozen_mappings(
-        _freeze_exact_json_payload(value, max_array_items=max_array_items)
+        _freeze_exact_json_payload(thawed, max_array_items=max_array_items)
     )
 
 
