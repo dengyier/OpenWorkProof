@@ -939,8 +939,18 @@ def observe_git_population(
     required_members = tuple(
         member for member in eligible if member.locator in set(required)
     )
+    selected_members = {
+        member.member_id: member for member in (*filtered, *required_members)
+    }
     selected = tuple(
-        _sorted_members((*filtered, *required_members))
+        sorted(
+            selected_members.values(),
+            key=lambda member: (
+                member.member_kind,
+                member.locator_digest,
+                member.member_id,
+            ),
+        )
     )
     return _adapter_observation(
         contract,
@@ -1084,26 +1094,29 @@ def observe_pytest_population(
         ]
         if missing_required:
             reasons.append("SCOPE_REQUIRED_TARGET_MISSING")
-        eligible_members = tuple(
-            _git_blob_member(
-                root,
-                commit=candidate_commit,
-                source_revision=source_revision,
-                locator=node_id,
-                member_kind="test_case",
+        try:
+            eligible_members = tuple(
+                _git_blob_member(
+                    root,
+                    commit=candidate_commit,
+                    source_revision=source_revision,
+                    locator=node_id,
+                    member_kind="test_case",
+                )
+                for node_id in eligible_nodes
             )
-            for node_id in eligible_nodes
-        )
-        selected_members = tuple(
-            _git_blob_member(
-                root,
-                commit=candidate_commit,
-                source_revision=source_revision,
-                locator=node_id,
-                member_kind="test_case",
+            selected_members = tuple(
+                _git_blob_member(
+                    root,
+                    commit=candidate_commit,
+                    source_revision=source_revision,
+                    locator=node_id,
+                    member_kind="test_case",
+                )
+                for node_id in selected_nodes
             )
-            for node_id in selected_nodes
-        )
+        except subprocess.CalledProcessError as error:
+            raise ValueError("pytest member resolution failed") from error
         return _adapter_observation(
             contract,
             eligible_members,

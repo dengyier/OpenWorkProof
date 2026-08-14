@@ -890,3 +890,32 @@ def test_adapter_observed_at_injection_makes_replay_byte_identical(
     assert first.observation.model_dump(mode="json") == second.observation.model_dump(
         mode="json"
     )
+
+
+def test_git_adapter_required_overlapping_selection_does_not_crash(
+    tmp_path: Path,
+) -> None:
+    repo = _git_repo(tmp_path)
+    source = _commit(repo, {"src/a.py": "a"}, "baseline")
+    candidate = _commit(repo, {"src/b.py": "b", "src/c.py": "c"}, "changes")
+    b_id = scope_member_id("source_file", "src/b.py")
+    c_id = scope_member_id("source_file", "src/c.py")
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="git_diff_closure",
+        member_kind="source_file",
+        spec_payload={
+            "source_revision": source,
+            "candidate_commit": candidate,
+            "git_diff_mode": "name-status-z-find-renames",
+        },
+        declared_ids=[b_id, c_id],
+    )
+    result = observe_git_population(
+        repo,
+        contract=contract,
+        source_revision=source,
+        candidate_commit=candidate,
+        required_locators=["src/b.py"],
+    )
+    _replay_check(result, [b_id, c_id], [b_id, c_id])
