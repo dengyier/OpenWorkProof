@@ -24,7 +24,7 @@
 
 - Source specification: `docs/superpowers/specs/2026-08-15-openworkproof-verification-integrity-v05-design.md` at or after commit `16f9de6`.
 - v0.5 reuses the committed v0.3 `EvaluationScopeManifest`; there is no v0.5 scope sibling.
-- New signed domains are only `verification-profile`, `verification-arm-result`, and `verification-decision` at version `0.5`. Nested contracts and observations are covered by their parent signatures and cannot be signed independently.
+- The v0.5 canonical domains are `verification-profile`, `verification-arm-result`, and `verification-decision`. Profile and Arm Result use the generic single-signer helper; Decision retains the existing dedicated multi-Verifier signature set over v0.5 canonical bytes. Nested contracts and observations are covered by their parent signatures and cannot be signed independently.
 - Empty population always maps to `UNKNOWN`, never `VERIFIED` and never an invented infrastructure failure.
 - `CONTROL_SURVIVED` can produce `REFUTED` only when population integrity is `matched`; mismatched or unavailable controls produce `UNKNOWN`.
 - The initial `control_target` set is exactly `semantic_regression` and `required_target_coverage`.
@@ -274,7 +274,6 @@ class VerificationArmResultV05(VerificationArmResultV03):
     control_observation: ControlObservationV05 | None
 
 class VerificationDecisionV05(VerificationDecisionV03):
-    _signed_version = "0.5"
     schema_version: Literal["openworkproof-verification-decision/0.5"]
     integrity_assessment: VerificationIntegrityAssessmentV05
 ```
@@ -283,15 +282,15 @@ The corresponding draft has no signature envelope. Profiles require exactly one 
 
 - [ ] **Step 5: Add version `0.5` to signing helpers**
 
-Extend the version literal and closed maps in `signing.py`. Only these signed domains are allowed at v0.5:
+Extend the version literal and closed maps in `signing.py`. The v0.5 generic single-signer domains are exactly:
 
 ```python
 _V05_SIGNED_DOMAINS = frozenset(
-    {"verification-profile", "verification-arm-result", "verification-decision"}
+    {"verification-profile", "verification-arm-result"}
 )
 ```
 
-Tests must prove nested contract domains cannot be signed directly, v0.5 siblings verify only with version 0.5, and Task 1's v0.1-v0.4 golden values remain byte-identical.
+Keep `verification-decision` in `_V05_CANONICAL_DOMAINS`; its dedicated Verifier signatures cover those canonical bytes and must not route through `sign_payload`. Tests must prove nested contract domains and generic Decision signing are rejected, Profile/Result verify only with version 0.5, a real v0.5 Decision signature verifies against its v0.5 canonical bytes, and Task 1's v0.1-v0.4 golden values remain byte-identical.
 
 - [ ] **Step 6: Run focused model and compatibility GREEN**
 
