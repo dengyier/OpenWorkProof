@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
+import rfc8785
 
 import openworkproof.evidence as evidence
 from openworkproof.delivery_package import (
+    DeliveryManifest,
+    DeliveryManifestEntry,
     DeliveryPackageError,
     DeliveryVerificationResult,
     compare_integrity_packages,
@@ -86,7 +90,9 @@ def test_v05_public_and_diagnostic_views_are_aggregate_only(
     assert {entry.path for entry in manifest.entries} == {
         "scope-coverage-report.json"
     }
-    assert verify_delivery_package(public_root).current_decision == "VERIFIED"
+    result = verify_delivery_package(public_root)
+    assert result.current_decision == "UNAUTHENTICATED"
+    assert result.settlement_readiness == "NOT_READY"
     diagnostic_root = case["tmp_path"] / "diagnostic-package"
     diagnostic = export_delivery_package(
         case["ledger"], diagnostic_root, privacy_view="diagnostic"
@@ -95,7 +101,86 @@ def test_v05_public_and_diagnostic_views_are_aggregate_only(
         "scope-coverage-report.json",
         "scope-diagnostics.json",
     }
-    assert verify_delivery_package(diagnostic_root).current_decision == "VERIFIED"
+    result = verify_delivery_package(diagnostic_root)
+    assert result.current_decision == "UNAUTHENTICATED"
+    assert result.settlement_readiness == "NOT_READY"
+
+
+def _rewrite_report_and_sync_manifest(root: Path, decision: str) -> None:
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    report_path = root / "scope-coverage-report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["decision"] = decision
+    report_path.write_bytes(rfc8785.dumps(report))
+    payload = report_path.read_bytes()
+    for entry in manifest["entries"]:
+        if entry["path"] == "scope-coverage-report.json":
+            entry["sha256"] = hashlib.sha256(payload).hexdigest()
+            entry["size_bytes"] = len(payload)
+    manifest_path.write_bytes(rfc8785.dumps(manifest))
+
+
+def test_v05_customer_private_rejects_forged_report_decision(
+    v05_transaction_case,
+) -> None:
+    """Audit C1: the replayed signed Decision is the only decision truth."""
+    case = _full_case(v05_transaction_case)
+    output = case["tmp_path"] / "customer-package"
+    export_delivery_package(
+        case["ledger"], output, privacy_view="customer_private"
+    )
+    _rewrite_report_and_sync_manifest(output, "REFUTED")
+    with pytest.raises(DeliveryPackageError, match="diverges"):
+        verify_delivery_package(output)
+
+
+def test_v05_public_forged_package_is_unauthenticated_not_ready(
+    v05_transaction_case,
+) -> None:
+    """Audit C1: a public package carries no signed attestation, so a
+    from-zero forged VERIFIED report must never read back as verified."""
+    root = v05_transaction_case["tmp_path"] / "forged-public"
+    root.mkdir()
+    report = {
+        "schema_version": "openworkproof-scope-coverage-report/0.5",
+        "privacy_view": "public",
+        "scope_manifest_digest": "1" * 64,
+        "full_offline_replay": False,
+        "decision": "VERIFIED",
+        "population_status": "matched",
+        "control_status": "proven",
+        "integrity_reason_codes": [],
+    }
+    report_path = root / "scope-coverage-report.json"
+    report_path.write_bytes(rfc8785.dumps(report))
+    payload = report_path.read_bytes()
+    manifest = DeliveryManifest(
+        schema_version="openworkproof-delivery-manifest/0.1",
+        privacy_view="public",
+        work_order_digest="2" * 64,
+        subject_claim_digest="3" * 64,
+        verification_decision_digest="4" * 64,
+        verification_protocol_version="0.5",
+        scope_manifest_digest="1" * 64,
+        full_offline_replay=False,
+        entries=[
+            {
+                "path": "scope-coverage-report.json",
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size_bytes": len(payload),
+                "media_type": "application/json",
+                "privacy_class": "public",
+                "required": True,
+            }
+        ],
+    )
+    (root / "manifest.json").write_bytes(
+        rfc8785.dumps(manifest.model_dump(mode="json"))
+    )
+    result = verify_delivery_package(root)
+    assert result.current_decision == "UNAUTHENTICATED"
+    assert result.settlement_readiness == "NOT_READY"
 
 
 def test_v05_package_bytes_do_not_leak_private_material(

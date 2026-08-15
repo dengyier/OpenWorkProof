@@ -190,7 +190,7 @@ class DeliveryManifest(ProtocolModel):
 
 
 class DeliveryVerificationResult(ProtocolModel):
-    current_decision: Literal["VERIFIED", "REFUTED", "UNKNOWN"]
+    current_decision: Literal["VERIFIED", "REFUTED", "UNKNOWN", "UNAUTHENTICATED"]
     effective_acceptance: Literal[
         "NONE", "ACTIVE", "SUSPENDED", "WITHDRAWN", "SUPERSEDED"
     ]
@@ -3018,14 +3018,13 @@ def _verify_v05_delivery_package(
     if manifest.privacy_view == "public":
         if set(_entry_map(manifest)) != {"scope-coverage-report.json"}:
             raise DeliveryPackageError("public v0.5 package is not aggregate-only")
+        # The public report is plain JSON with no signed redacted
+        # attestation; its decision claims are unauthenticated and must
+        # never surface as READY_FOR_ACCEPTANCE.
         return DeliveryVerificationResult(
-            current_decision=report["decision"],
+            current_decision="UNAUTHENTICATED",
             effective_acceptance="NONE",
-            settlement_readiness=(
-                "READY_FOR_ACCEPTANCE"
-                if report["decision"] == "VERIFIED"
-                else "NOT_READY"
-            ),
+            settlement_readiness="NOT_READY",
             manifest_digest=digest_manifest(manifest),
             full_offline_replay=False,
         )
@@ -3036,24 +3035,33 @@ def _verify_v05_delivery_package(
         }:
             raise DeliveryPackageError("diagnostic v0.5 package is not redacted")
         return DeliveryVerificationResult(
-            current_decision=report["decision"],
+            current_decision="UNAUTHENTICATED",
             effective_acceptance="NONE",
-            settlement_readiness=(
-                "READY_FOR_ACCEPTANCE"
-                if report["decision"] == "VERIFIED"
-                else "NOT_READY"
-            ),
+            settlement_readiness="NOT_READY",
             manifest_digest=digest_manifest(manifest),
             full_offline_replay=False,
         )
-    _load_v05_objects_and_evidence(root, manifest)
-    report_decision = report["decision"]
+    _work_order, _claim, _scope, _profile, decision, _results, _inventory = (
+        _load_v05_objects_and_evidence(root, manifest)
+    )
+    replayed = {
+        "decision": decision.decision,
+        "population_status": decision.integrity_assessment.population_status,
+        "control_status": decision.integrity_assessment.control_status,
+        "integrity_reason_codes": list(
+            decision.integrity_assessment.reason_codes
+        ),
+    }
+    if any(report.get(key) != replayed[key] for key in replayed):
+        raise DeliveryPackageError(
+            "v0.5 scope report diverges from the replayed decision"
+        )
     return DeliveryVerificationResult(
-        current_decision=report_decision,
+        current_decision=decision.decision,
         effective_acceptance="NONE",
         settlement_readiness=(
             "READY_FOR_ACCEPTANCE"
-            if report_decision == "VERIFIED"
+            if decision.decision == "VERIFIED"
             else "NOT_READY"
         ),
         manifest_digest=digest_manifest(manifest),
