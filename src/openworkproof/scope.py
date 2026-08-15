@@ -474,8 +474,11 @@ _COLLECTOR_CHANNEL_FD = 3
 _COLLECTOR_CHANNEL_MODEL = "host-static-enumeration-with-child-corroboration"
 # If a collected module leaks the pipe write end to a surviving descendant,
 # the read end never reaches EOF; the drain then fails closed after this
-# grace period instead of hanging the verifier indefinitely.
+# grace period instead of hanging the verifier indefinitely. The drain is
+# also size-bounded so a module flooding the pipe cannot exhaust the
+# verifier's memory.
 _COLLECTOR_DRAIN_GRACE_SECONDS = 5.0
+_COLLECTOR_DOCUMENT_MAX_BYTES = 8 * 1024 * 1024
 
 
 def _static_pytest_node_ids(checkout: Path) -> tuple[str, ...]:
@@ -510,7 +513,11 @@ def _static_pytest_node_ids(checkout: Path) -> tuple[str, ...]:
             continue
         try:
             tree = ast.parse(path.read_bytes().decode("utf-8"))
-        except (UnicodeDecodeError, SyntaxError) as error:
+        except (UnicodeDecodeError, SyntaxError, RecursionError, MemoryError, OSError) as error:
+            # Deep subscript/attribute chains raise RecursionError and deep
+            # unary chains raise MemoryError from ast.parse; read_bytes can
+            # raise OSError. All must close the observation as indeterminate
+            # instead of escaping the caller's ValueError boundary.
             raise ValueError("pytest static enumeration failed") from error
         prefix = relative.as_posix()
         for node in tree.body:
@@ -1326,8 +1333,11 @@ def observe_pytest_population(
                 raise ValueError("pytest collection pipe unavailable") from error
             chunks: list[bytes] = []
             stop = threading.Event()
+            overflow = False
 
             def _drain() -> None:
+                nonlocal overflow
+                total = 0
                 while not stop.is_set():
                     try:
                         chunk = os.read(read_fd, 65536)
@@ -1338,6 +1348,19 @@ def observe_pytest_population(
                         return
                     if not chunk:
                         return
+                    if overflow:
+                        # Keep draining (and discarding) so a flooding
+                        # child never blocks on a full pipe until timeout.
+                        continue
+                    total += len(chunk)
+                    if total > _COLLECTOR_DOCUMENT_MAX_BYTES:
+                        # A collected module can write arbitrarily many
+                        # bytes to the pipe; the drain must be size-bounded
+                        # so candidate-controlled output cannot exhaust the
+                        # verifier's memory. Overflow fails closed.
+                        overflow = True
+                        chunks.clear()
+                        continue
                     chunks.append(chunk)
 
             reader = threading.Thread(target=_drain, daemon=True)
@@ -1358,7 +1381,7 @@ def observe_pytest_population(
                     stop.set()
                     drain_failed = True
                 os.close(read_fd)
-            if drain_failed:
+            if drain_failed or overflow:
                 raise ValueError("canonical pytest collection output is unavailable")
             del stderr
             if process.returncode not in {0, 5}:
@@ -1366,7 +1389,7 @@ def observe_pytest_population(
             data = b"".join(chunks)
             try:
                 document = json.loads(data)
-            except ValueError as error:
+            except (ValueError, RecursionError) as error:
                 raise ValueError(
                     "canonical pytest collection output is unavailable"
                 ) from error

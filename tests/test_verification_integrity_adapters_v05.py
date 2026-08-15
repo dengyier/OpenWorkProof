@@ -2045,3 +2045,107 @@ def test_pytest_adapter_tracked_symlink_test_fails_closed(tmp_path: Path) -> Non
     )
     assert result.status == "indeterminate"
     assert "SCOPE_SELECTOR_MISMATCH" in result.reason_codes
+
+
+def test_pytest_adapter_deep_nesting_static_parse_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """A candidate test source whose deep subscript chain makes the host
+    static enumeration raise RecursionError must close the observation as
+    indeterminate instead of leaking the raw exception."""
+    python = _requires_venv()
+    repo = _git_repo(tmp_path)
+    head = _commit(
+        repo,
+        {
+            "tests/test_a.py": "def test_a1():\n    assert True\n",
+            "tests/test_deep.py": "x = a" + (".b" * 11000) + "\n",
+        },
+        "deep nesting",
+    )
+    declared = [scope_member_id("test_case", "tests/test_a.py::test_a1")]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "timeout_seconds": 120,
+        },
+        python=python,
+        declared_ids=declared,
+    )
+    result = observe_pytest_population(
+        repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=python,
+        selector_args=[],
+        timeout_seconds=120,
+    )
+    assert result.status == "indeterminate"
+    assert "SCOPE_SELECTOR_MISMATCH" in result.reason_codes
+
+
+def test_pytest_adapter_flooded_collector_output_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """A collected module flooding the collector pipe beyond the size bound
+    must close the observation as indeterminate instead of exhausting the
+    verifier's memory."""
+    python = _requires_venv()
+    repo = _git_repo(tmp_path)
+    head = _commit(
+        repo,
+        {
+            "tests/test_a.py": "def test_a1():\n    assert True\n",
+            "tests/test_b.py": (
+                "import atexit\n"
+                "import os\n"
+                "\n"
+                "\n"
+                "def _flood():\n"
+                "    try:\n"
+                "        os.write(3, b'x' * (9 * 1024 * 1024))\n"
+                "    except OSError:\n"
+                "        pass\n"
+                "\n"
+                "\n"
+                "atexit.register(_flood)\n"
+                "\n"
+                "\n"
+                "def test_b1():\n"
+                "    assert True\n"
+            ),
+        },
+        "flooding module",
+    )
+    declared = [
+        scope_member_id("test_case", node)
+        for node in ("tests/test_a.py::test_a1", "tests/test_b.py::test_b1")
+    ]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "timeout_seconds": 120,
+        },
+        python=python,
+        declared_ids=declared,
+    )
+    result = observe_pytest_population(
+        repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=python,
+        selector_args=[],
+        timeout_seconds=120,
+    )
+    assert result.status == "indeterminate"
+    assert "SCOPE_SELECTOR_MISMATCH" in result.reason_codes

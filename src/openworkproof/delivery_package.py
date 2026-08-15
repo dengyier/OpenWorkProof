@@ -2567,11 +2567,17 @@ def _load_v05_objects_and_evidence(root: Path, manifest: DeliveryManifest):
                 inventory[ref.sha256] = payload
                 try:
                     document = json.loads(payload)
-                except (UnicodeDecodeError, ValueError) as error:
+                except (UnicodeDecodeError, ValueError, RecursionError) as error:
                     raise DeliveryPackageError(
                         "v0.5 control evidence is invalid JSON"
                     ) from error
-                if rfc8785.dumps(document) != payload:
+                try:
+                    canonical = rfc8785.dumps(document)
+                except RecursionError as error:
+                    raise DeliveryPackageError(
+                        "v0.5 control evidence is not canonical"
+                    ) from error
+                if canonical != payload:
                     raise DeliveryPackageError(
                         "v0.5 control evidence is not canonical"
                     )

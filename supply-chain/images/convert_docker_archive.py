@@ -95,8 +95,10 @@ def _config_platform(members: dict, manifest: dict) -> dict:
     relabeling. The blob must first replay the manifest descriptor exactly
     (digest and size); a tampered or mislabeled blob fails closed before
     any content is trusted."""
-    config_descriptor = manifest["config"]
-    config_digest = config_descriptor["digest"]
+    config_descriptor = manifest.get("config")
+    if not isinstance(config_descriptor, dict):
+        raise ValueError("image config descriptor is missing")
+    config_digest = config_descriptor.get("digest")
     if (
         type(config_digest) is not str
         or not config_digest.startswith("sha256:")

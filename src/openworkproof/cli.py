@@ -247,9 +247,16 @@ def cli_audit_compare(old_package: str | Path, new_package: str | Path) -> dict:
         )
     except LegacyPackageError as error:
         # Only the explicitly supported legacy case may use the controlled
-        # fallback; any other v0.5 derived-view failure is operational.
+        # fallback; any other v0.5 derived-view failure is operational. The
+        # fallback reports a replay-dict field diff (not a v0.5 derived
+        # view) and is explicitly tagged.
+        changed = tuple(
+            key
+            for key in sorted(set(old) | set(new))
+            if old.get(key) != new.get(key)
+        )
         comparison = {
-            "changed_fields": [],
+            "changed_fields": list(changed),
             "fallback": "legacy",
         }
     except Exception as error:
