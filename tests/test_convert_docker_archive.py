@@ -160,3 +160,20 @@ def test_converter_rejects_config_blob_size_mismatch(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="config blob size does not replay"):
         _rewrite(archive)
+
+
+def test_converter_rejects_malformed_config_digest(tmp_path: Path) -> None:
+    """Audit G: a config descriptor whose digest is not a valid sha256:
+    reference must fail closed with ValueError, never an IndexError."""
+    archive = tmp_path / "malformed-digest.tar"
+    _make_oci_archive(
+        archive,
+        config_bytes=_CONFIG,
+        config_descriptor={
+            "mediaType": DOCKER_CONFIG,
+            "digest": "not-a-digest",
+            "size": len(_CONFIG),
+        },
+    )
+    with pytest.raises(ValueError, match="image config descriptor digest is invalid"):
+        _rewrite(archive)

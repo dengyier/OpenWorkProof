@@ -97,9 +97,17 @@ def _config_platform(members: dict, manifest: dict) -> dict:
     any content is trusted."""
     config_descriptor = manifest["config"]
     config_digest = config_descriptor["digest"]
-    if type(config_digest) is not str:
+    if (
+        type(config_digest) is not str
+        or not config_digest.startswith("sha256:")
+        or len(config_digest) != 71
+        or any(
+            character not in "0123456789abcdef"
+            for character in config_digest[7:]
+        )
+    ):
         raise ValueError("image config descriptor digest is invalid")
-    config_hex = config_digest.split(":", 1)[1]
+    config_hex = config_digest[7:]
     config_key = f"blobs/sha256/{config_hex}"
     config_bytes = members.get(config_key)
     if config_bytes is None or config_bytes[1] is None:
