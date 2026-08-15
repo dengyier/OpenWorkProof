@@ -9,7 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-import uuid
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -419,17 +419,41 @@ import os
 
 
 def pytest_collection_finish(session):
-    target = os.environ.get("OWP_COLLECT_OUTPUT")
-    if not target:
-        return
     node_ids = sorted({item.nodeid for item in session.items})
-    with open(target, "w", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps(
-                {"node_ids": node_ids}, sort_keys=True, separators=(",", ":")
-            )
-        )
+    payload = json.dumps(
+        {"node_ids": node_ids}, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    view = memoryview(payload)
+    while view:
+        written = os.write(3, view)
+        view = view[written:]
 """
+
+# Frozen canonical pytest configuration. -c pins the ini file explicitly, so
+# pytest never walks ancestor directories for pytest.ini/pyproject.toml/
+# tox.ini/setup.cfg: host or candidate config cannot feed addopts, markers,
+# or testpaths into the collection. testpaths keeps the closed population
+# model deterministic (the checkout tests/ tree).
+_CANONICAL_COLLECT_INI = "[pytest]\ntestpaths = tests\n"
+
+# Closed, frozen child environment for pytest collection. Anything not in
+# this dict is absent from the child, so PYTEST_ADDOPTS, PYTEST_PLUGINS, and
+# any other selection/loading variable inherited from the host can never
+# affect the observed population. The dict is bound into the selector spec.
+_CANONICAL_PYTEST_ENVIRONMENT = {
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    "LC_ALL": "C.UTF-8",
+    "TZ": "UTC",
+}
+
+# The authoritative node-id channel is a pipe inherited as fd 3. Collected
+# test modules share the process and could in principle write to the same
+# fd, but a pipe cannot be cleanly overwritten: any module write appends
+# bytes to the collector's single JSON document, the strict single-document
+# parse fails, and the observation closes as indeterminate. A module can
+# sabotage, never forge.
+_COLLECTOR_CHANNEL_FD = 3
+_COLLECTOR_CHANNEL_MODEL = "pipe-fd-3-single-document"
 
 
 def _selector_spec_bytes(selector_kind: str, payload: Mapping[str, object]) -> bytes:
@@ -1002,11 +1026,16 @@ def observe_pytest_population(
 ) -> "PopulationObservationBuildResult":
     """Observe the pytest eligible population (the full pre-selector
     collection) and the selected population (the selector-applied
-    collection). Both phases run with plugin autoload disabled in a frozen,
-    conftest-free checkout of the candidate commit. The frozen selector spec
-    extends the v0.3 rule encoding with the closed selector parameter fields
-    (selector_args, required_node_ids, and the canonical collector digest);
-    node ids come exclusively from the canonical collector output file."""
+    collection). Collection runs in a closed, frozen child environment
+    (plugin autoload disabled, no PYTEST_ADDOPTS/PYTEST_PLUGINS/ini
+    passthrough), pinned to a frozen canonical ini so ancestor/host
+    configuration can never leak in. Node ids come exclusively from the
+    canonical collector writing a single JSON document to a pipe on fd 3;
+    any collected-module write to the channel poisons the document and
+    closes the observation. The eligible population is collected twice and
+    must reproduce byte-identically, and the selected population must be a
+    subset of it, so the same digest can never admit different actual
+    eligible populations."""
 
     from openworkproof.models import PopulationContractV05
 
@@ -1066,8 +1095,18 @@ def observe_pytest_population(
     # -I keeps the collection fully isolated: the candidate checkout is not
     # on sys.path, so a hostile top-level pytest.py cannot shadow the real
     # pytest module. The venv launcher resolves its site-packages through
-    # its own invocation path even under -I.
-    base_command = (str(invocation), "-I", "-m", "pytest", "--collect-only", "-q")
+    # its own invocation path even under -I. -c pins the frozen canonical
+    # ini, closing the ancestor ini discovery walk.
+    base_command = (
+        str(invocation),
+        "-I",
+        "-m",
+        "pytest",
+        "--collect-only",
+        "-q",
+        "-c",
+        "owp-collect.ini",
+    )
     spec = _selector_spec_bytes(
         "pytest_collection",
         {
@@ -1080,9 +1119,14 @@ def observe_pytest_population(
             "timeout_seconds": timeout_seconds,
             "selector_args": list(selector_args),
             "required_node_ids": list(required_nodes),
+            "environment": dict(_CANONICAL_PYTEST_ENVIRONMENT),
+            "collector_ini_digest": hashlib.sha256(
+                _CANONICAL_COLLECT_INI.encode("utf-8")
+            ).hexdigest(),
             "collector_conftest_digest": hashlib.sha256(
                 _CANONICAL_COLLECT_CONFTEST.encode("utf-8")
             ).hexdigest(),
+            "collector_channel": _COLLECTOR_CHANNEL_MODEL,
         },
     )
     reasons: list[str] = []
@@ -1100,14 +1144,7 @@ def observe_pytest_population(
             reason_codes=tuple(dict.fromkeys(reasons)),
         )
 
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
-            "LC_ALL": "C.UTF-8",
-            "TZ": "UTC",
-        }
-    )
+    environment = dict(_CANONICAL_PYTEST_ENVIRONMENT)
     temporary_parent = Path(tempfile.mkdtemp(prefix="owp-observe-pytest-"))
     checkout = temporary_parent / "checkout"
     added = False
@@ -1141,11 +1178,8 @@ def observe_pytest_population(
         ]
         if conftest_paths:
             # A nested candidate conftest.py runs arbitrary code during
-            # collection and can overwrite the canonical plugin output
-            # (trylast hooks, hookwrappers). Collection must be
-            # conftest-free; this is a closed protocol boundary. A test
-            # module's own atexit/thread code is the documented residual:
-            # the verifier runtime is trusted, OS sandboxing is deferred.
+            # collection; collection must be conftest-free. This is a
+            # closed protocol boundary.
             raise ValueError(
                 "candidate checkout contains conftest files; "
                 "pytest collection must be conftest-free"
@@ -1157,26 +1191,80 @@ def observe_pytest_population(
         (checkout / "conftest.py").write_text(
             _CANONICAL_COLLECT_CONFTEST, encoding="utf-8"
         )
+        (checkout / "owp-collect.ini").write_text(
+            _CANONICAL_COLLECT_INI, encoding="utf-8"
+        )
 
         def collect(extra_args: Sequence[str]) -> list[str]:
-            output_path = temporary_parent / (
-                f"collect-{uuid.uuid4().hex}.json"
-            )
-            environment["OWP_COLLECT_OUTPUT"] = str(output_path)
-            completed = subprocess.run(
-                [*base_command, *list(extra_args)],
-                cwd=checkout,
-                env=environment,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-            )
-            if completed.returncode not in {0, 5}:
-                raise ValueError("pytest collection failed")
+            read_fd, write_fd = os.pipe()
+            saved_channel: int | None = None
             try:
-                document = json.loads(output_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, ValueError) as error:
+                # The frozen collector conftest writes to fd 3, so the pipe
+                # write end is placed at fd 3 before spawn. The host process
+                # fd table is restored immediately after spawn: the verifier
+                # runtime may itself run under pytest, whose capture
+                # machinery can own fd 3.
+                if read_fd == _COLLECTOR_CHANNEL_FD:
+                    read_fd = os.dup(read_fd)
+                    os.close(_COLLECTOR_CHANNEL_FD)
+                if write_fd != _COLLECTOR_CHANNEL_FD:
+                    try:
+                        saved_channel = os.dup(_COLLECTOR_CHANNEL_FD)
+                    except OSError:
+                        saved_channel = None
+                    os.dup2(write_fd, _COLLECTOR_CHANNEL_FD)
+                    os.close(write_fd)
+                    write_fd = _COLLECTOR_CHANNEL_FD
+                process = subprocess.Popen(
+                    [*base_command, *list(extra_args)],
+                    cwd=checkout,
+                    env=environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    pass_fds=(write_fd,),
+                )
+            except OSError as error:
+                os.close(read_fd)
+                os.close(write_fd)
+                if saved_channel is not None:
+                    os.dup2(saved_channel, _COLLECTOR_CHANNEL_FD)
+                    os.close(saved_channel)
+                raise ValueError("pytest collection spawn failed") from error
+            # Close the pipe write end BEFORE restoring the host fd: when
+            # write_fd was remapped onto fd 3, closing it after the restore
+            # would destroy the restored host descriptor.
+            os.close(write_fd)
+            if saved_channel is not None:
+                os.dup2(saved_channel, _COLLECTOR_CHANNEL_FD)
+                os.close(saved_channel)
+            chunks: list[bytes] = []
+
+            def _drain() -> None:
+                while True:
+                    chunk = os.read(read_fd, 65536)
+                    if not chunk:
+                        return
+                    chunks.append(chunk)
+
+            reader = threading.Thread(target=_drain, daemon=True)
+            reader.start()
+            try:
+                stdout, stderr = process.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+                raise
+            finally:
+                reader.join()
+                os.close(read_fd)
+            del stdout, stderr
+            if process.returncode not in {0, 5}:
+                raise ValueError("pytest collection failed")
+            data = b"".join(chunks)
+            try:
+                document = json.loads(data)
+            except (UnicodeDecodeError, ValueError) as error:
                 raise ValueError(
                     "canonical pytest collection output is unavailable"
                 ) from error
@@ -1197,6 +1285,7 @@ def observe_pytest_population(
 
         try:
             eligible_nodes = collect(())
+            replayed_eligible = collect(())
             selected_nodes = collect(selector_args)
         except (ValueError, subprocess.TimeoutExpired):
             reasons.append("SCOPE_SELECTOR_MISMATCH")
@@ -1208,6 +1297,13 @@ def observe_pytest_population(
                 status="indeterminate",
                 reason_codes=tuple(dict.fromkeys(reasons)),
             )
+        if replayed_eligible != eligible_nodes:
+            # The same digest must reproduce the same eligible population;
+            # a candidate whose collection is not deterministic is not
+            # observable and closes as indeterminate.
+            reasons.append("SCOPE_SELECTOR_MISMATCH")
+        if set(selected_nodes) - set(eligible_nodes):
+            reasons.append("SCOPE_SELECTOR_MISMATCH")
         missing_required = [
             node_id
             for node_id in required_nodes

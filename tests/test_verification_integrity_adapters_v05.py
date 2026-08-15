@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -20,6 +21,8 @@ from openworkproof.models import (
 )
 from openworkproof.scope import (
     _CANONICAL_COLLECT_CONFTEST,
+    _CANONICAL_COLLECT_INI,
+    _CANONICAL_PYTEST_ENVIRONMENT,
     _selector_engine_digest,
     _selector_spec_bytes,
     observe_git_population,
@@ -29,6 +32,9 @@ from openworkproof.scope import (
 
 _COLLECT_CONFTEST_DIGEST = hashlib.sha256(
     _CANONICAL_COLLECT_CONFTEST.encode("utf-8")
+).hexdigest()
+_COLLECT_INI_DIGEST = hashlib.sha256(
+    _CANONICAL_COLLECT_INI.encode("utf-8")
 ).hexdigest()
 
 
@@ -71,10 +77,21 @@ def _contract(
                     if (python.parent.parent / "pyvenv.cfg").is_file()
                     else None
                 ),
-                "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
+                "argv": [
+                    "-I",
+                    "-m",
+                    "pytest",
+                    "--collect-only",
+                    "-q",
+                    "-c",
+                    "owp-collect.ini",
+                ],
                 "selector_args": list(selector_args or []),
                 "required_node_ids": sorted(set(required_node_ids or [])),
+                "environment": dict(_CANONICAL_PYTEST_ENVIRONMENT),
+                "collector_ini_digest": _COLLECT_INI_DIGEST,
                 "collector_conftest_digest": _COLLECT_CONFTEST_DIGEST,
+                "collector_channel": "pipe-fd-3-single-document",
             }
         )
     elif selector_kind == "git_diff_closure":
@@ -198,10 +215,12 @@ test "$2" = "-m"
 test "$3" = "pytest"
 test "$4" = "--collect-only"
 test "$5" = "-q"
+test "$6" = "-c"
+test "$7" = "owp-collect.ini"
 test "$PYTEST_DISABLE_PLUGIN_AUTOLOAD" = "1"
 test "$LC_ALL" = "C.UTF-8"
 test "$TZ" = "UTC"
-test -n "$OWP_COLLECT_OUTPUT"
+test -z "${{OWP_COLLECT_OUTPUT:-}}"
 {extra_body}
 """
 
@@ -209,12 +228,12 @@ test -n "$OWP_COLLECT_OUTPUT"
         document = _json.dumps(
             {"node_ids": sorted(nodes)}, sort_keys=True, separators=(",", ":")
         )
-        return f"printf '%s\\n' '{document}' > \"$OWP_COLLECT_OUTPUT\"\n"
+        return f"printf '%s\\n' '{document}' >&3\n"
 
     if selection is None:
         body += emit(list(PYTEST_NODES))
     else:
-        body += 'if [ "$#" -eq 5 ]; then\n'
+        body += 'if [ "$#" -eq 7 ]; then\n'
         body += emit(list(PYTEST_NODES))
         body += "else\n"
         body += emit(selection)
@@ -374,7 +393,7 @@ def test_pytest_adapter_no_eligible_nodes(tmp_path: Path) -> None:
     head = _commit(repo, {"README.md": "no tests"}, "empty")
     python = _fake_python(
         tmp_path / "fake-python",
-        '\nprintf \'{"node_ids":[]}\' > "$OWP_COLLECT_OUTPUT"\nexit 5\n',
+        '\nprintf \'{"node_ids":[]}\' >&3\nexit 5\n',
     )
     declared = [scope_member_id("test_case", "tests/test_c.py::test_c1")]
     contract = _contract(
@@ -1265,3 +1284,454 @@ def test_pytest_adapter_candidate_pytest_shadow_cannot_fabricate(
     )
     eligible = [scope_member_id("test_case", "tests/test_a.py::test_a1")]
     _replay_check(result, eligible, eligible)
+
+
+# ---------------------------------------------------------------------------
+# Third-round audit A: pytest selector environment closure + trusted
+# collector isolation. Each test is attack-shaped and must be RED against
+# the audited baseline.
+# ---------------------------------------------------------------------------
+
+_VENV_PYTHON = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python"
+
+_SLOW_A = (
+    "import pytest\n"
+    "\n"
+    "\n"
+    "@pytest.mark.slow\n"
+    "def test_a1():\n"
+    "    assert True\n"
+)
+
+_PLAIN_B = "def test_b1():\n    assert True\n"
+
+
+def _requires_venv() -> Path:
+    if not _VENV_PYTHON.is_file():
+        pytest.skip("repository venv is unavailable")
+    return _VENV_PYTHON
+
+
+def test_pytest_adapter_env_addopts_cannot_alter_population(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit A: PYTEST_ADDOPTS must not alter the observed population under
+    an unchanged selector spec digest. The polluted run must reproduce the
+    honest eligible/selected populations exactly."""
+    python = _requires_venv()
+    repo = _git_repo(tmp_path)
+    head = _commit(
+        repo,
+        {
+            "tests/test_a.py": _SLOW_A,
+            "tests/test_b.py": _PLAIN_B,
+            "pyproject.toml": (
+                "[tool.pytest.ini_options]\nmarkers = [\"slow: slow tests\"]\n"
+            ),
+        },
+        "marked tests",
+    )
+    declared = [
+        scope_member_id("test_case", node)
+        for node in ("tests/test_a.py::test_a1", "tests/test_b.py::test_b1")
+    ]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "timeout_seconds": 120,
+        },
+        python=python,
+        declared_ids=declared,
+    )
+    kwargs = dict(
+        repo=repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=python,
+        selector_args=[],
+        timeout_seconds=120,
+    )
+    honest = observe_pytest_population(**kwargs)
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-m slow")
+    polluted = observe_pytest_population(**kwargs)
+    eligible_ids = declared
+    _replay_check(honest, eligible_ids, eligible_ids)
+    assert polluted.status == "satisfied"
+    assert polluted.observation is not None
+    assert (
+        polluted.observation.eligible_population_digest
+        == honest.observation.eligible_population_digest
+    )
+    assert (
+        polluted.observation.selected_population_digest
+        == honest.observation.selected_population_digest
+    )
+
+
+def test_pytest_adapter_env_plugins_cannot_alter_population(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit A: PYTEST_PLUGINS must not inject a selection-altering plugin."""
+    python = _requires_venv()
+    plugin = tmp_path / "hostile_plugin.py"
+    plugin.write_text(
+        "def pytest_collection_modifyitems(items):\n"
+        "    items[:] = [i for i in items if 'test_b' not in i.nodeid]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PYTEST_PLUGINS", str(plugin))
+    repo = _git_repo(tmp_path)
+    head = _commit(
+        repo,
+        {"tests/test_a.py": _SLOW_A, "tests/test_b.py": _PLAIN_B},
+        "plugin attack",
+    )
+    declared = [
+        scope_member_id("test_case", node)
+        for node in ("tests/test_a.py::test_a1", "tests/test_b.py::test_b1")
+    ]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "timeout_seconds": 120,
+        },
+        python=python,
+        declared_ids=declared,
+    )
+    result = observe_pytest_population(
+        repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=python,
+        selector_args=[],
+        timeout_seconds=120,
+    )
+    _replay_check(result, declared, declared)
+
+
+def test_pytest_adapter_host_ini_pollution_cannot_alter_population(
+    tmp_path: Path,
+) -> None:
+    """Audit A: a pytest.ini in an ancestor directory of the checkout must
+    not feed addopts/markers into the collection (the ini discovery walk is
+    closed by the frozen collector ini). Runs in a fresh child process so a
+    clean TMPDIR reaches tempfile (gettempdir is cached in-process)."""
+    python = _requires_venv()
+    host = tmp_path / "host"
+    host.mkdir()
+    (host / "pytest.ini").write_text(
+        "[pytest]\naddopts = -m \"not slow\"\nmarkers = slow: slow tests\n",
+        encoding="utf-8",
+    )
+    repo = _git_repo(tmp_path)
+    head = _commit(
+        repo,
+        {"tests/test_a.py": _SLOW_A, "tests/test_b.py": _PLAIN_B},
+        "ini attack",
+    )
+    declared = [
+        scope_member_id("test_case", node)
+        for node in ("tests/test_a.py::test_a1", "tests/test_b.py::test_b1")
+    ]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "timeout_seconds": 120,
+        },
+        python=python,
+        declared_ids=declared,
+    )
+    contract_path = tmp_path / "contract.json"
+    contract_path.write_text(
+        contract.model_dump_json(), encoding="utf-8"
+    )
+    child = tmp_path / "observe_child.py"
+    child.write_text(
+        "import json\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "\n"
+        "sys.path.insert(0, " + repr(str(Path(__file__).resolve().parents[1] / "src")) + ")\n"
+        "from openworkproof.models import PopulationContractV05\n"
+        "from openworkproof.scope import observe_pytest_population\n"
+        "\n"
+        "contract = PopulationContractV05.model_validate(\n"
+        "    json.loads(Path(sys.argv[1]).read_text(encoding='utf-8')))\n"
+        "repo, head, python_path = Path(sys.argv[2]), sys.argv[3], Path(sys.argv[4])\n"
+        "result = observe_pytest_population(\n"
+        "    repo, contract=contract, source_revision=head,\n"
+        "    candidate_commit=head, python_executable=python_path,\n"
+        "    selector_args=[], timeout_seconds=120)\n"
+        "print(json.dumps({\n"
+        "    'status': result.status,\n"
+        "    'reasons': list(result.reason_codes),\n"
+        "    'eligible': list(result.eligible_member_ids),\n"
+        "}))\n",
+        encoding="utf-8",
+    )
+    environment = dict(os.environ)
+    environment["TMPDIR"] = str(host)
+    environment["PYTEST_ADDOPTS"] = ""
+    completed = subprocess.run(
+        [str(python), str(child), str(contract_path), str(repo), head, str(python)],
+        cwd=repo,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert completed.returncode == 0, completed.stderr
+    outcome = json.loads(completed.stdout)
+    assert outcome["status"] == "satisfied", completed.stderr
+    assert sorted(outcome["eligible"]) == sorted(declared), completed.stderr
+
+
+def test_pytest_adapter_collection_environment_is_closed(
+    pytest_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit A: the collection child must see a closed environment — no
+    PYTEST_ADDOPTS/PLUGINS passthrough and no OWP_COLLECT_OUTPUT channel."""
+    repo, head = pytest_repo
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-m slow")
+    monkeypatch.setenv("PYTEST_PLUGINS", "hostile.plugin")
+    full_doc = '{"node_ids":["tests/test_a.py::test_a1","tests/test_b.py::test_b1","tests/test_b.py::test_b2","tests/test_c.py::test_c1","tests/test_d.py::test_d1"]}'
+    python = _fake_python(
+        tmp_path / "fake-python-closed",
+        "\n"
+        "test -z \"${PYTEST_ADDOPTS:-}\"\n"
+        "test -z \"${PYTEST_PLUGINS:-}\"\n"
+        "test -z \"${OWP_COLLECT_OUTPUT:-}\"\n"
+        "test \"$PYTEST_DISABLE_PLUGIN_AUTOLOAD\" = \"1\"\n"
+        "test \"$LC_ALL\" = \"C.UTF-8\"\n"
+        "test \"$TZ\" = \"UTC\"\n"
+        "printf '%s\\n' '" + full_doc + "' >&3\n",
+    )
+    declared = [
+        scope_member_id("test_case", node) for node in PYTEST_NODES
+    ]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "python_executable_digest": hashlib.sha256(
+                python.read_bytes()
+            ).hexdigest(),
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
+            "timeout_seconds": 60,
+        },
+        python=python,
+        declared_ids=declared,
+    )
+    result = observe_pytest_population(
+        repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=python,
+        selector_args=[],
+        timeout_seconds=60,
+    )
+    eligible_ids = [
+        scope_member_id("test_case", node) for node in PYTEST_NODES
+    ]
+    _replay_check(result, eligible_ids, eligible_ids)
+
+
+def test_pytest_adapter_collected_module_cannot_forge_collector_output(
+    tmp_path: Path,
+) -> None:
+    """Audit A: a collected module registering an atexit writer must not be
+    able to overwrite the authoritative node-id output."""
+    python = _requires_venv()
+    repo = _git_repo(tmp_path)
+    head = _commit(
+        repo,
+        {
+            "tests/test_a.py": "def test_a1():\n    assert True\n",
+            "tests/test_b.py": (
+                "import atexit\n"
+                "import json\n"
+                "import os\n"
+                "\n"
+                "\n"
+                "def _forge():\n"
+                "    out = os.environ.get('OWP_COLLECT_OUTPUT')\n"
+                "    if not out:\n"
+                "        return\n"
+                "    with open(out, 'w', encoding='utf-8') as handle:\n"
+                "        handle.write(json.dumps(\n"
+                "            {'node_ids': ['tests/test_a.py::test_a1']},\n"
+                "            sort_keys=True, separators=(',', ':')))\n"
+                "\n"
+                "\n"
+                "atexit.register(_forge)\n"
+                "\n"
+                "\n"
+                "def test_b1():\n"
+                "    assert True\n"
+            ),
+        },
+        "forging module",
+    )
+    declared = [
+        scope_member_id("test_case", node)
+        for node in ("tests/test_a.py::test_a1", "tests/test_b.py::test_b1")
+    ]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "timeout_seconds": 120,
+        },
+        python=python,
+        declared_ids=declared,
+    )
+    result = observe_pytest_population(
+        repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=python,
+        selector_args=[],
+        timeout_seconds=120,
+    )
+    _replay_check(result, declared, declared)
+
+
+def test_pytest_adapter_fd3_interference_fails_closed(tmp_path: Path) -> None:
+    """Audit A: any collected-module write to the collector channel must
+    poison the single-document output and fail closed — a module can never
+    forge the authoritative node ids."""
+    python = _requires_venv()
+    repo = _git_repo(tmp_path)
+    head = _commit(
+        repo,
+        {
+            "tests/test_a.py": "def test_a1():\n    assert True\n",
+            "tests/test_b.py": (
+                "import atexit\n"
+                "import os\n"
+                "\n"
+                "\n"
+                "def _poison():\n"
+                "    try:\n"
+                "        os.write(3, b'garbage')\n"
+                "    except OSError:\n"
+                "        pass\n"
+                "\n"
+                "\n"
+                "atexit.register(_poison)\n"
+                "\n"
+                "\n"
+                "def test_b1():\n"
+                "    assert True\n"
+            ),
+        },
+        "poisoning module",
+    )
+    declared = [
+        scope_member_id("test_case", node)
+        for node in ("tests/test_a.py::test_a1", "tests/test_b.py::test_b1")
+    ]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "timeout_seconds": 120,
+        },
+        python=python,
+        declared_ids=declared,
+    )
+    result = observe_pytest_population(
+        repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=python,
+        selector_args=[],
+        timeout_seconds=120,
+    )
+    assert result.status == "indeterminate"
+    assert "SCOPE_SELECTOR_MISMATCH" in result.reason_codes
+
+
+def test_pytest_adapter_selected_outside_eligible_rejected(tmp_path: Path) -> None:
+    """Audit A: the same digest must reproduce the same eligible population;
+    a module that grows its test set between the eligible and selected
+    phases makes selected ⊄ eligible and must be rejected."""
+    python = _requires_venv()
+    repo = _git_repo(tmp_path)
+    head = _commit(
+        repo,
+        {
+            "tests/test_a.py": (
+                "from pathlib import Path\n"
+                "\n"
+                "\n"
+                "MARKER = Path('owp-flip.marker')\n"
+                "if MARKER.exists():\n"
+                "    def test_phantom():  # noqa: E306\n"
+                "        assert True\n"
+                "MARKER.write_text('flipped', encoding='utf-8')\n"
+                "\n"
+                "\n"
+                "def test_a1():\n"
+                "    assert True\n"
+            ),
+        },
+        "flipping module",
+    )
+    declared = [
+        scope_member_id("test_case", node)
+        for node in (
+            "tests/test_a.py::test_a1",
+            "tests/test_a.py::test_phantom",
+        )
+    ]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "timeout_seconds": 120,
+        },
+        python=python,
+        declared_ids=declared,
+    )
+    result = observe_pytest_population(
+        repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=python,
+        selector_args=[],
+        timeout_seconds=120,
+    )
+    assert result.status == "indeterminate"
+    assert "SCOPE_SELECTOR_MISMATCH" in result.reason_codes
