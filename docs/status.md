@@ -23,29 +23,30 @@ A–H 发现经攻击测试 RED→最小修复→逐批独立双审→total 复�
 修订重建，下方数字为第三轮 HEAD fresh 测量。
 
 - candidate source revision（**当前 = 第三轮最终修订**）：
-  `66d242eb31b312368ada4ce55159c9e313a62e71`；审计基线为
-  `d460c876a7f3046fd1d338951d964bce6d1a6be1`（被本轮源码变更取代，库存保留原字节）：
+  `a305f7204053f08312613dddb3a0ce7533ce4806`（final 硬化后）；此前绑定
+  `66d242e…`（硬化前）；审计基线为 `d460c876a7f3046fd1d338951d964bce6d1a6be1`
+  （被本轮源码变更取代，库存保留原字节）：
   （2 Critical + 5 Important + 终审 leap-second Minor 全部闭环的最终实现
   提交）；不可变库存：
   `supply-chain/images/candidates/d460c876a7f3046fd1d338951d964bce6d1a6be1.json`；
   更早的 `18732766…`/`ca9c911…`/`ca5df6c3…` 库存保持原字节、不再匹配当前定义；
 - Python 分发版本 `1.1.1`；冻结协议 Schema `0.1`–`0.5`；
 - v0.5 focused 套件（10 个文件）：**第三轮 HEAD fresh（2026-08-16）
-  `402 passed、0 failed`**（审计基线 fresh 371 → 402 = 31 个新增攻击/证明
-  测试：Batch A +9、B +6、C +5、D +8、E 无测试变更）；
+  `405 passed、0 failed`**（审计基线 fresh 371 → 405 = 34 个新增攻击/证明
+  测试：Batch A +9、B +6、C +5、D +8、E 无测试变更、final 硬化 +2）；
 - 冻结兼容（v0.2/v0.3/v0.4 models/schema/delivery/settlement/acceptance）：
   `216 passed、0 failed`（审计基线 fresh，本轮未触碰 v0.1–v0.4 冻结面；
   亦随 required-live 全量一并复跑）；
 - 便携全量（`pytest -q --ignore=tests/test_candidate_supplychain_integration.py`）：
-  **第三轮 HEAD fresh `3382 passed、0 failed、6 skipped`**（6 分 32 秒；
+  **第三轮 HEAD fresh `3386 passed、0 failed、6 skipped`**（6 分 10 秒；
   审计基线 fresh 3350；skip 均为未设 live-Docker 环境变量所致平台边界）；
 - candidate 两套件（live Docker + artifact root + 全限定镜像引用）：
-  **第三轮 HEAD fresh `174 passed、0 failed`**（含 live Docker 与上下文
-  重建身份链；新库存 `66d242e…`）；
+  **第三轮 HEAD fresh `175 passed、0 failed`**（含 live Docker 与上下文
+  重建身份链；新库存 `a305f72…`）；
 - **required-live 全量**（live Docker + 全限定
-  `docker.io/openworkproof/execution-test@sha256:f29684fc…2cf6` +
+  `docker.io/openworkproof/execution-test@sha256:bc35711b…7abb` +
   `-W 'error::pytest.PytestUnhandledThreadExceptionWarning'`）：
-  **第三轮 HEAD fresh `3489 passed、0 failed、0 skipped`**（11 分 59 秒，
+  **第三轮 HEAD fresh `3492 passed、0 failed、0 skipped`**（13 分 46 秒，
   零 warning）；审计基线 fresh 为 3456；
 - Rich #4196 v0.5 交付包离线重放：`VERIFICATION PASSED / VERIFIED /
   READY_FOR_ACCEPTANCE`（无网络、无原始账本；本轮 demo/M2 套件 8 passed
