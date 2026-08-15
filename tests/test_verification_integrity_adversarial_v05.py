@@ -685,3 +685,100 @@ def test_attack_15_public_package_leaks_no_locator_fixture_or_absolute_path(
         assert b"scope/" not in content
         assert absolute not in content
         assert fixture_bytes not in content
+
+
+def _row_committed_at(case, table: str, column: str, *, where: str, who: str) -> str:
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        return connection.execute(
+            f"SELECT {column} FROM {table} WHERE {where} = ?", (who,)
+        ).fetchone()[0]
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("family", ("profile", "arm_result", "decision"))
+def test_attack_13_tampered_committed_at_breaks_exact_truth_readback(
+    v05_transaction_case, family: str
+) -> None:
+    """Spec attack 13: an inverted committed_at must break exact-truth replay.
+
+    The committed_at column is the append-only ordering witness consulted by
+    every v0.5 readback; tampering it must make the exact-truth readback for
+    the affected row fail, never silently accept the row as committed truth.
+    """
+    case = v05_transaction_case
+    from openworkproof.verification import (
+        _exact_arm_result_v05_readback,
+        _exact_decision_v05_readback,
+        _exact_profile_v05_readback,
+    )
+
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    for result in case["results"]:
+        commit_verification_arm_result_v05(case["ledger"], result)
+    decision = _signed_decision_v05(
+        case,
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    commit_verification_decision_v05(case["ledger"], decision)
+
+    if family == "profile":
+        table, column, who = (
+            "verification_profiles_v05",
+            "committed_at",
+            case["profile"].profile_id,
+        )
+        original = _row_committed_at(
+            case, table, column, where="profile_id", who=who
+        )
+        _corrupt_row(
+            case, table, column, "2020-01-01T00:00:00Z",
+            where="profile_id", who=who,
+        )
+        assert (
+            _exact_profile_v05_readback(
+                case["ledger"], profile=case["profile"], committed_at=original
+            )
+            is False
+        )
+    elif family == "arm_result":
+        table, column, who = (
+            "verification_arm_results_v05",
+            "committed_at",
+            case["results"][0].arm_result_id,
+        )
+        original = _row_committed_at(
+            case, table, column, where="arm_result_id", who=who
+        )
+        _corrupt_row(
+            case, table, column, "2020-01-01T00:00:00Z",
+            where="arm_result_id", who=who,
+        )
+        assert (
+            _exact_arm_result_v05_readback(
+                case["ledger"], case["results"][0], original
+            )
+            is False
+        )
+    else:
+        table, column, who = (
+            "verification_decisions_v05",
+            "committed_at",
+            decision.decision_id,
+        )
+        original = _row_committed_at(
+            case, table, column, where="decision_id", who=who
+        )
+        _corrupt_row(
+            case, table, column, "2020-01-01T00:00:00Z",
+            where="decision_id", who=who,
+        )
+        assert (
+            _exact_decision_v05_readback(case["ledger"], decision, original)
+            is False
+        )
