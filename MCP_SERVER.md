@@ -63,7 +63,7 @@ Add to `.cursor/mcp.json` or VS Code MCP settings:
 After adding the server, verify it's running:
 
 ```bash
-# Quick smoke test — should list 21 tools
+# Quick smoke test — should list 27 tools
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | owp-mcp
 ```
@@ -88,8 +88,8 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 | `owp_control_observation_validate` | Replay one v0.5 control observation set against its contracts (read-only) |
 | `owp_scope_validate` | Intrinsically validate a v0.3 scope without asserting signer authority |
 | `owp_scope_compare` | Compare a signed v0.3 scope with observed coverage |
-| `owp_run_verification` | Dispatch a v0.2/v0.3 arm or decision operation by closed schema version |
-| `owp_get_decision` | Prepare an unsigned v0.2/v0.3 verification decision draft from the ledger family |
+| `owp_run_verification` | Dispatch a v0.2/v0.3/v0.5 arm or decision operation by closed schema version |
+| `owp_get_decision` | Prepare an unsigned v0.2/v0.3/v0.5 verification decision draft from the ledger family |
 | `owp_build_delivery_package` | Export a public, diagnostic, or customer-private offline delivery package |
 | `owp_get_settlement_readiness` | Derive the current acceptance and settlement-readiness snapshot |
 | `owp_get_schema` | Get an authoritative JSON Schema |
@@ -126,6 +126,8 @@ owp verify-positive ledger.sqlite3 positive-result.json
 owp verify-negative ledger.sqlite3 negative-result.json
 owp verify-compose ledger.sqlite3 request-or-decision.json --mode prepare
 owp verify-compose ledger.sqlite3 signed-decision.json --mode commit
+owp integrity-observation validate population.json
+owp control-observation validate control.json
 owp delivery-build ledger.sqlite3 delivery-package --privacy-view public
 owp audit-replay delivery-package
 owp audit-explain delivery-package
@@ -141,6 +143,14 @@ Manager-signed. CLI comparison exits `0` when satisfied, `3` when
 indeterminate, `4` when contradicted, and `1` for invalid input or another
 failed operation. Non-zero comparison output retains the status and reason
 codes.
+
+`integrity-observation` and `control-observation` are read-only assessments:
+they derive a status from signed inputs and replayed evidence and report
+signer authority as `not_checked`, never as authorized. Population assessment
+exits `0` for `matched` and `3` for `empty`, `capture_failed`, `drifted`, or
+`unavailable`. Control assessment exits `0` for `proven`, `4` for `survived`,
+`3` for `mismatched` or `unavailable`, and `1` for malformed input. `UNKNOWN`
+is a safe outcome, not a system crash.
 
 ## v0.4 只读绑定工具
 

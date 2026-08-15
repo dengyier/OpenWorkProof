@@ -337,7 +337,7 @@ def build_parser() -> argparse.ArgumentParser:
     profile_validate.add_argument("payload", help="path to profile JSON")
 
     for name, help_text in (
-        ("integrity-observation", "validate one population observation"),
+        ("integrity-observation", "assess one population observation set"),
         ("control-observation", "validate one control observation set"),
     ):
         command = sub.add_parser(name, help=help_text)
@@ -590,6 +590,8 @@ def app(argv: Sequence[str] | None = None) -> int:
             "mismatched": 3,
             "unavailable": 3,
         }[result["control_status"]]
+    if args.command == "integrity-observation" and "population_status" in result:
+        return 0 if result["population_status"] == "matched" else 3
     return 0
 
 

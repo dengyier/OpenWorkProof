@@ -31,7 +31,6 @@ from openworkproof.models import (
     VerificationProfileV03,
     VerificationProfileV05,
 )
-import openworkproof.evidence as evidence
 from openworkproof.binding import (
     BindingDecisionDraftRequest,
     compose_binding_decision,
@@ -98,10 +97,26 @@ def _decode_public_key(value: object):
     return Ed25519PublicKey.from_public_bytes(raw)
 
 
-def _b64url_decode(value: str) -> bytes:
+def _b64url_decode(value: object) -> bytes:
     import base64 as _b64m
 
-    return _b64m.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    if type(value) is not str:
+        raise ValueError("evidence inventory value is not unpadded base64url")
+    padded = value + "=" * (-len(value) % 4)
+    try:
+        raw = _b64m.urlsafe_b64decode(padded)
+    except (ValueError, _b64m.binascii.Error) as error:
+        raise ValueError("evidence inventory value is not valid base64url") from error
+    if _b64m.urlsafe_b64encode(raw).decode("ascii").rstrip("=") != value:
+        raise ValueError("evidence inventory value is not unpadded base64url")
+    return raw
+
+
+def _require(payload: Mapping[str, object], key: str) -> object:
+    try:
+        return payload[key]
+    except (KeyError, TypeError):
+        raise ValueError(f"payload is missing a required field: {key}") from None
 
 
 class OpenWorkProofServices:
@@ -311,39 +326,82 @@ class OpenWorkProofServices:
     def validate_population_observation(
         self, payload: Mapping[str, object]
     ) -> dict:
-        """Replay one v0.5 population observation against its contract."""
-        profile = VerificationProfileV05.model_validate(payload["profile"])
-        manifest = EvaluationScopeManifest.model_validate(payload["manifest"])
-        result = VerificationArmResultV05.model_validate(payload["result"])
-        rule_outputs = {
-            str(key): tuple(value)
-            for key, value in dict(payload["rule_outputs"]).items()
-        }
-        inventory = {
-            str(key): _b64url_decode(str(value))
-            for key, value in dict(payload["evidence_inventory"]).items()
-        }
-        integrity.validate_population_observation(
+        """Assess v0.5 population observations without checking authority.
+
+        The population status is derived from the signed inputs and replayed
+        evidence only; signer authority is reported as ``not_checked``, never
+        as validly authorized.
+        """
+        profile = VerificationProfileV05.model_validate(
+            _require(payload, "profile")
+        )
+        manifest = EvaluationScopeManifest.model_validate(
+            _require(payload, "manifest")
+        )
+        raw_results = _require(payload, "results")
+        if not isinstance(raw_results, list):
+            raise ValueError("results must be a JSON array of v0.5 arm results")
+        results = tuple(
+            VerificationArmResultV05.model_validate(item)
+            for item in raw_results
+        )
+        raw_outputs = payload.get("rule_outputs")
+        rule_outputs: dict[str, tuple[str, ...]] | None = None
+        if raw_outputs is not None:
+            if not isinstance(raw_outputs, Mapping):
+                raise ValueError("rule_outputs must be a JSON object")
+            rule_outputs = {}
+            for key, value in raw_outputs.items():
+                if type(value) not in {list, tuple}:
+                    raise ValueError("rule output entries must be arrays")
+                if any(type(item) is not str for item in value):
+                    raise ValueError("rule output entries must be strings")
+                rule_outputs[str(key)] = tuple(value)
+        raw_inventory = payload.get("evidence_inventory")
+        inventory: dict[str, bytes] | None = None
+        if raw_inventory is not None:
+            if not isinstance(raw_inventory, Mapping):
+                raise ValueError("evidence_inventory must be a JSON object")
+            inventory = {
+                str(key): _b64url_decode(value)
+                for key, value in raw_inventory.items()
+            }
+        assessment = integrity.assess_population_integrity(
             profile,
             manifest,
-            result,
+            results,
             rule_outputs=rule_outputs,
             evidence_inventory=inventory,
         )
-        return {"valid": True, "schema_version": result.schema_version}
+        return {
+            "valid": True,
+            "authority": "not_checked",
+            "population_status": assessment.status,
+            "reason_codes": list(assessment.reason_codes),
+        }
 
     def validate_control_observation(
         self, payload: Mapping[str, object]
     ) -> dict:
-        """Replay one v0.5 control observation set against its contracts."""
-        profile = VerificationProfileV05.model_validate(payload["profile"])
+        """Assess v0.5 control observations without checking authority.
+
+        The control status is derived from the signed inputs only; signer
+        authority is reported as ``not_checked``, never as validly authorized.
+        """
+        profile = VerificationProfileV05.model_validate(
+            _require(payload, "profile")
+        )
+        raw_results = _require(payload, "results")
+        if not isinstance(raw_results, list):
+            raise ValueError("results must be a JSON array of v0.5 arm results")
         results = tuple(
             VerificationArmResultV05.model_validate(item)
-            for item in payload["results"]
+            for item in raw_results
         )
         assessment = integrity.assess_control_integrity(profile, results)
         return {
             "valid": True,
+            "authority": "not_checked",
             "control_status": assessment.status,
             "reason_codes": list(assessment.reason_codes),
         }

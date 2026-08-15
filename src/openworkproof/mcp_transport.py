@@ -453,9 +453,10 @@ def owp_validate_profile(profile_json: str) -> dict[str, Any]:
 
 @mcp.tool()
 def owp_integrity_observation_validate(payload_json: str) -> dict[str, Any]:
-    """Replay one v0.5 population observation against its contract.
+    """Assess one v0.5 population observation set against its contracts.
 
     This read-only tool never signs, commits, accepts, or settles anything.
+    Signer authority is reported as ``not_checked``, never as authorized.
     """
     try:
         payload = _json_object(payload_json, field="payload_json")
@@ -468,9 +469,10 @@ def owp_integrity_observation_validate(payload_json: str) -> dict[str, Any]:
 
 @mcp.tool()
 def owp_control_observation_validate(payload_json: str) -> dict[str, Any]:
-    """Replay one v0.5 control observation set against its contracts.
+    """Assess one v0.5 control observation set against its contracts.
 
     This read-only tool never signs, commits, accepts, or settles anything.
+    Signer authority is reported as ``not_checked``, never as authorized.
     """
     try:
         payload = _json_object(payload_json, field="payload_json")
