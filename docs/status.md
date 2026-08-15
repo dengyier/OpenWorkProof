@@ -30,15 +30,18 @@ Task 15 发布门已重建候选并复测，最终测量（2026-08-15，独立�
   `supply-chain/images/candidates/d460c876a7f3046fd1d338951d964bce6d1a6be1.json`；
   更早的 `18732766…`/`ca9c911…`/`ca5df6c3…` 库存保持原字节、不再匹配当前定义；
 - Python 分发版本 `1.1.1`；冻结协议 Schema `0.1`–`0.5`；
-- v0.5 focused 套件（10 个文件）：**审计基线** `370 passed`；
-  **第三轮 fresh（2026-08-16，Batch A–D 后）`402 passed`**（含 19 个新增
-  攻击/证明测试），最终以候选重建后 fresh 为准；
+- v0.5 focused 套件（10 个文件）：**审计基线 fresh** `371 passed`（文档旧值
+  370 为审计所指的过时数）；**第三轮 HEAD fresh（2026-08-16，Batch A–E 后）
+  `402 passed`**（基线 371 → 402 = 31 个新增攻击/证明测试：Batch A +9、
+  B +6、C +5、D +8、E 无测试变更），最终以候选重建后 fresh 为准；
 - 冻结兼容（v0.2/v0.3/v0.4 models/schema/delivery/settlement/acceptance）：
-  `216 passed、0 failed`（本轮未触碰 v0.1–v0.4 冻结面，final fresh 复核）；
+  **审计基线 fresh** `216 passed、0 failed`（本轮未触碰 v0.1–v0.4 冻结面，
+  final fresh 复核）；
 - 便携全量（`pytest -q --ignore=tests/test_candidate_supplychain_integration.py`）：
-  **审计基线** `3348 passed、0 failed、6 skipped`；**第三轮 fresh
-  `3373 passed、0 failed、6 skipped`**（6 分 07 秒；skip 均为
-  live-Docker/镜像引用缺环境变量所致平台边界，final fresh 复核）；
+  **审计基线 fresh** `3350 passed、0 failed、6 skipped`（文档旧值 3348 为
+  过时数）；**第三轮 HEAD fresh `3373 passed、0 failed、6 skipped`**
+  （6 分 07 秒；+23 测试，skip 均为 live-Docker/镜像引用缺环境变量所致
+  平台边界，final fresh 复核）；
 - candidate 两套件（live Docker + artifact root + 全限定镜像引用）：
   **审计基线** `173 passed、0 failed`（含 live Docker 与上下文重建身份链）；
   候选重建后 fresh 重测；
@@ -484,7 +487,7 @@ commit）已实现并验证。独立结果执行 episode 与五维 recomposition
   已完成；外部个人复核属线下事件，不由本仓库保证）；
 - 正式赛事提交、入围或获奖。
 
-> required-live 最终门已通过（2293 passed、0 failed、0 skipped，
+> required-live 最终门历史测量已通过（2293 passed、0 failed、0 skipped，
 > 候选库存已为本轮冻结定义闭包生成），不再列入未完成。
 
 ## 许可证状态
