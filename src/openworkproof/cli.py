@@ -197,15 +197,22 @@ def cli_audit_replay(package: str | Path) -> dict:
 
 def cli_audit_explain(package: str | Path) -> dict:
     result = cli_audit_replay(package)
-    return {
-        "audit": result,
-        "explanation": {
+    explanation: dict[str, object]
+    try:
+        from openworkproof.delivery_package import (
+            DeliveryPackageError,
+            explain_integrity_package,
+        )
+
+        explanation = explain_integrity_package(Path(package))
+    except DeliveryPackageError:
+        explanation = {
             "current_decision": result["current_decision"],
             "effective_acceptance": result["effective_acceptance"],
             "settlement_readiness": result["settlement_readiness"],
             "boundary": "readiness is not payment or completed settlement",
-        },
-    }
+        }
+    return {**result, "explanation": explanation}
 
 
 def cli_integrity_observation(payload: dict[str, object]) -> dict:
@@ -223,10 +230,29 @@ def cli_control_observation(payload: dict[str, object]) -> dict:
 def cli_audit_compare(old_package: str | Path, new_package: str | Path) -> dict:
     old = cli_audit_replay(old_package)
     new = cli_audit_replay(new_package)
-    changed = tuple(
-        key for key in sorted(set(old) | set(new)) if old.get(key) != new.get(key)
-    )
-    return {"old": old, "new": new, "changed_fields": list(changed)}
+    comparison: dict[str, object]
+    try:
+        from openworkproof.delivery_package import (
+            DeliveryPackageError,
+            compare_integrity_packages,
+        )
+
+        comparison = compare_integrity_packages(
+            Path(old_package), Path(new_package)
+        )
+    except DeliveryPackageError:
+        changed = tuple(
+            key
+            for key in sorted(set(old) | set(new))
+            if old.get(key) != new.get(key)
+        )
+        comparison = {"changed_fields": list(changed)}
+    return {
+        "old": old,
+        "new": new,
+        "current_decision": new.get("current_decision"),
+        **comparison,
+    }
 
 
 def cli_settlement_status(ledger_path: str | Path) -> dict:
@@ -592,6 +618,20 @@ def app(argv: Sequence[str] | None = None) -> int:
         }[result["control_status"]]
     if args.command == "integrity-observation" and "population_status" in result:
         return 0 if result["population_status"] == "matched" else 3
+    decision_exit = {
+        "VERIFIED": 0,
+        "UNKNOWN": 3,
+        "REFUTED": 4,
+        "UNAUTHENTICATED": 3,
+    }
+    if args.command == "verify-compose" and "decision" in result:
+        return decision_exit.get(str(result["decision"]), 0)
+    if args.command in {
+        "audit-replay",
+        "audit-explain",
+        "audit-compare",
+    } and "current_decision" in result:
+        return decision_exit.get(str(result["current_decision"]), 0)
     return 0
 
 

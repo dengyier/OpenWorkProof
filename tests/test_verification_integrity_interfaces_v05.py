@@ -17,9 +17,12 @@ from openworkproof.services import OpenWorkProofServices
 from openworkproof.signing import key_id
 from openworkproof.verification import verification_decision_signing_bytes_v05
 
+from openworkproof.models import DecisionDraftRequest
 from test_verification_integrity_transactions_v05 import (
     _resign_arm_result_v05,
+    _sign_decision_draft_v05,
     _v05_control_observation,
+    _v05_population_observation,
     commit_verification_arm_result_v05,
     commit_verification_decision_v05,
     commit_verification_profile_v05,
@@ -311,3 +314,121 @@ def test_operator_docs_cover_v05_observation_commands() -> None:
         assert code in offline
     assert "是安全结论" in offline
     assert "不是系统崩溃" in offline
+
+
+def _export_decision_package(case, results) -> Path:
+    from openworkproof.delivery_package import export_delivery_package
+    from openworkproof.verification import (
+        prepare_verification_decision_v05,
+        commit_verification_decision_v05,
+    )
+
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    for result in results:
+        commit_verification_arm_result_v05(case["ledger"], result)
+    draft = prepare_verification_decision_v05(
+        case["ledger"],
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    decision = _sign_decision_draft_v05(case, draft)
+    commit_verification_decision_v05(case["ledger"], decision)
+    output = case["tmp_path"] / "decision-package"
+    export_delivery_package(
+        case["ledger"], output, privacy_view="customer_private"
+    )
+    return output, draft.decision
+
+
+@pytest.mark.parametrize(
+    ("blind_selection", "control_overrides", "expected_exit"),
+    (
+        (False, None, 0),
+        (True, None, 3),
+        (False, {"control_status": "survived", "exit_codes": [0]}, 4),
+    ),
+)
+def test_cli_decision_exit_codes_cover_every_verdict(
+    service_case, blind_selection, control_overrides, expected_exit
+) -> None:
+    """Audit I4: verify-compose commit and audit-replay must exit 0 only for
+    VERIFIED; UNKNOWN -> 3 and REFUTED -> 4."""
+    case = service_case
+    if blind_selection:
+        results = []
+        for kind, result in zip(
+            ("positive", "negative"), case["results"], strict=True
+        ):
+            observations = [
+                _v05_population_observation(
+                    case["tmp_path"],
+                    contract,
+                    suffix=f"exit-{kind}-{contract.member_kind}",
+                    eligible_seen=2,
+                    selected_count=0,
+                )
+                for contract in case["profile"].population_contracts
+            ]
+            results.append(
+                _resign_arm_result_v05(
+                    case, result, population_observations=observations
+                )
+            )
+        results = tuple(results)
+    else:
+        results = list(case["results"])
+        if control_overrides is not None:
+            contract = case["profile"].control_contracts[0]
+            expected = contract.expected_failure_signature.model_dump(
+                mode="json"
+            )
+            overrides = dict(control_overrides)
+            if overrides.get("control_status") == "survived":
+                overrides["signature"] = {
+                    **expected,
+                    "exit_codes": [0],
+                    "reason_codes": ["MUTATION_SURVIVED"],
+                }
+            control = _v05_control_observation(
+                case["tmp_path"],
+                contract,
+                arm_kind="negative",
+                **overrides,
+            )
+            results[1] = _resign_arm_result_v05(
+                case, case["results"][1], control_observation=control
+            )
+        results = tuple(results)
+    package, decision = _export_decision_package(case, results)
+    assert decision == {0: "VERIFIED", 3: "UNKNOWN", 4: "REFUTED"}[expected_exit]
+    assert cli_app(["audit-replay", str(package)]) == expected_exit
+
+
+def test_cli_audit_explain_and_compare_use_v05_derived_views(
+    service_case,
+) -> None:
+    """Audit I4: explain/compare must reuse the v0.5 derived functions."""
+    case = service_case
+    package, decision = _export_decision_package(case, case["results"])
+    assert decision == "VERIFIED"
+    exit_code = cli_app(["audit-explain", str(package)])
+    assert exit_code == 0
+    from openworkproof.delivery_package import explain_integrity_package
+
+    expected = explain_integrity_package(package)
+    assert "population_status" in expected
+    second = case["tmp_path"] / "second-package"
+    from openworkproof.delivery_package import export_delivery_package
+
+    export_delivery_package(
+        case["ledger"], second, privacy_view="customer_private"
+    )
+    assert cli_app(["audit-compare", str(package), str(second)]) == 0
+    from openworkproof.delivery_package import compare_integrity_packages
+
+    comparison = compare_integrity_packages(package, second)
+    assert comparison["selector_rule_changes"] == []
+    assert comparison["control_changes"] == []
