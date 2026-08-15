@@ -8,7 +8,7 @@
 `openworkproof-image-candidate-inventory/0.2`。只有项目 lock、execution 的
 Dockerfile、requirements lock、`run_tests_runner.py`、`verifier_test.py`、helper
 的 Dockerfile、requirements lock、Debian lock、source allowlist，以及
-`SOURCE_ALLOWLIST` 指向的四份 helper 源码 blob 全部逐字节匹配时，清单才可被
+`SOURCE_ALLOWLIST` 指向的全部 helper 源码 blob 逐字节匹配时，清单才可被
 唯一选择为 current。v0.2 的 `build_inputs.execution` 除 v0.1 的三个字段外，
 还必须恰好同时记录 `runner_sha256` 与 `fixed_test_source_sha256`；任何跨版本字段
 混用均拒绝。清单绑定构建
@@ -35,7 +35,7 @@ candidate inventory 将前两个哈希记录在闭合的 `build_inputs.global` �
 root:root、`0444` 烘焙到不可写的 `/fixed-tests/verifier_test.py`；测试代码显式
 把只读 `/workspace` 插入 `sys.path[0]` 后再 import Rich。镜像不使用 `.pth` 或
 `sitecustomize.py` 隐式执行 workspace 内容。`trusted-helper-candidate` 仅复制
-`SOURCE_ALLOWLIST` 中的四个 OpenWorkProof 文件及其 Python 运行闭包，并从
+`SOURCE_ALLOWLIST` 中的 OpenWorkProof 文件及其 Python 运行闭包，并从
 仓库外精确 `.deb` closure 离线安装 `/usr/bin/git`；Dockerfile 中没有 apt
 更新或下载。
 
@@ -59,7 +59,7 @@ execution 根 `SHA256SUMS` 精确绑定 Dockerfile、requirements lock、runner 
 Verifier test，Dockerfile 在安装前复核；`wheels/SHA256SUMS` 只列上下文内 wheel，
 `debs/SHA256SUMS` 只列上下文内 `.deb`。helper 源文件按 `SOURCE_ALLOWLIST`
 从指定 Git revision 的 blob 提取，禁止从 working tree 复制，也禁止复制整个
-`src/openworkproof`；`helper-src/SHA256SUMS` 必须按构建 revision 的四份精确
+`src/openworkproof`；`helper-src/SHA256SUMS` 必须按构建 revision 的精确
 bytes 生成，Dockerfile 在 COPY 后再次校验并删除该清单。
 
 `prepare_context.py` 是生成这两个 context 的唯一标准入口；不得手工拼装或使用
