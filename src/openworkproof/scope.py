@@ -1135,13 +1135,17 @@ def observe_pytest_population(
             text=True,
         ).stdout.splitlines()
         conftest_paths = [
-            relative for relative in tracked_paths if relative.endswith("conftest.py")
+            relative
+            for relative in tracked_paths
+            if Path(relative).name == "conftest.py"
         ]
         if conftest_paths:
             # A nested candidate conftest.py runs arbitrary code during
             # collection and can overwrite the canonical plugin output
-            # (trylast hooks, atexit handlers). Collection must be
-            # conftest-free; this is a closed protocol boundary.
+            # (trylast hooks, hookwrappers). Collection must be
+            # conftest-free; this is a closed protocol boundary. A test
+            # module's own atexit/thread code is the documented residual:
+            # the verifier runtime is trusted, OS sandboxing is deferred.
             raise ValueError(
                 "candidate checkout contains conftest files; "
                 "pytest collection must be conftest-free"
