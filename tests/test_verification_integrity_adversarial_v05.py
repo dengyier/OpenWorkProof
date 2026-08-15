@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from typing import Any
 
@@ -1138,3 +1139,576 @@ def test_audit_i1_decision_load_rejects_leap_second_committed_at(
                 nonce="f" * 64,
             ),
         )
+
+
+# ---------------------------------------------------------------------------
+# Third-round audit B/C: per-rule output witness and canonical RFC 8785
+# population evidence. Every test is attack-shaped and must be RED against
+# the audited baseline.
+# ---------------------------------------------------------------------------
+
+
+def _population_observation_with_evidence(
+    case,
+    *,
+    observation_index: int,
+    ref_index: int,
+    evidence_bytes: bytes,
+) -> VerificationArmResultV05:
+    """Re-sign an arm result whose target population observation points at
+    attacker-supplied evidence bytes (sha256/size recomputed)."""
+    result = case["results"][0]
+    observations = [
+        observation.model_dump(mode="json")
+        for observation in result.population_observations
+    ]
+    target = observations[observation_index]
+    ref = target["evidence_refs"][ref_index]
+    (case["tmp_path"] / ref["path"]).write_bytes(evidence_bytes)
+    target["evidence_refs"] = [
+        (
+            {
+                **item,
+                "sha256": hashlib.sha256(evidence_bytes).hexdigest(),
+                "size_bytes": len(evidence_bytes),
+            }
+            if index == ref_index
+            else item
+        )
+        for index, item in enumerate(target["evidence_refs"])
+    ]
+    observations[observation_index] = target
+    return _resign_arm_result_v05(
+        case,
+        result,
+        population_observations=observations,
+    )
+
+
+def _eligible_evidence_bytes(case, observation_index: int = 0) -> bytes:
+    from openworkproof.models import PopulationObservationV05
+
+    result = case["results"][0]
+    observation = result.population_observations[observation_index]
+    ref = observation.evidence_refs[0]
+    return (case["tmp_path"] / ref.path).read_bytes()
+
+
+def _assert_population_evidence_rejected(case, evidence_bytes: bytes) -> None:
+    from openworkproof.verification import VerificationTransactionError
+
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    tampered = _population_observation_with_evidence(
+        case,
+        observation_index=0,
+        ref_index=0,
+        evidence_bytes=evidence_bytes,
+    )
+    with pytest.raises(VerificationTransactionError):
+        commit_verification_arm_result_v05(case["ledger"], tampered)
+
+
+def test_audit_c_whitespace_padded_population_evidence_is_rejected(
+    v05_transaction_case,
+) -> None:
+    """Audit C: population evidence must be canonical RFC 8785 bytes;
+    whitespace-padded JSON that parses to the closed schema is not
+    canonical and must fail closed."""
+    import json as _json
+
+    case = v05_transaction_case
+    canonical = _eligible_evidence_bytes(case)
+    document = _json.loads(canonical)
+    padded = _json.dumps(document, indent=2, sort_keys=True).encode("utf-8")
+    _assert_population_evidence_rejected(case, padded)
+
+
+def test_audit_c_key_reordered_population_evidence_is_rejected(
+    v05_transaction_case,
+) -> None:
+    """Audit C: evidence with the same keys in non-canonical order must
+    fail closed."""
+    case = v05_transaction_case
+    canonical = _eligible_evidence_bytes(case)
+    document = json.loads(canonical)
+    reordered = json.dumps(
+        {
+            "purpose": document["purpose"],
+            "member_ids": document["member_ids"],
+            "schema_version": document["schema_version"],
+        },
+        sort_keys=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    _assert_population_evidence_rejected(case, reordered)
+
+
+def test_audit_c_duplicate_key_population_evidence_is_rejected(
+    v05_transaction_case,
+) -> None:
+    """Audit C: a document with a duplicated key parses last-wins but is
+    not canonical bytes and must fail closed."""
+    case = v05_transaction_case
+    canonical = _eligible_evidence_bytes(case)
+    document = json.loads(canonical)
+    serialized = json.dumps(
+        document, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    marker = b'"purpose":"' + document["purpose"].encode("utf-8") + b'"'
+    duplicated = serialized.replace(
+        marker,
+        marker + b',' + marker,
+        1,
+    )
+    _assert_population_evidence_rejected(case, duplicated)
+
+
+def test_audit_c_escape_equivalent_population_evidence_is_rejected(
+    v05_transaction_case,
+) -> None:
+    """Audit C: escape-equivalent JSON (e.g. \\u escapes) parses to the
+    same value but is not canonical bytes and must fail closed."""
+    case = v05_transaction_case
+    canonical = _eligible_evidence_bytes(case)
+    escaped = canonical.replace(b"-population", b"-\\u0070opulation", 1)
+    _assert_population_evidence_rejected(case, escaped)
+
+
+def _two_pytest_rule_case(
+    tmp_path,
+    signed_work_order,
+    signed_subject_claim,
+    evaluation_scope_payload_v03,
+    scope_members_v03,
+    verification_profile_v03,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+):
+    """Build a fresh v0.5 case whose manifest has TWO same-kind
+    (pytest_collection) selector rules with disjoint declared selections
+    over two test_case members."""
+    import copy as _copy
+
+    from openworkproof.models import ScopeMember, VerificationProfileV05
+    from openworkproof.scope import (
+        ObservedScope,
+        population_digest,
+        scope_member_id as _smid,
+    )
+    from openworkproof.signing import sign_payload as _sign_payload
+    from openworkproof.verification import commit_evaluation_scope
+    from test_control_integrity_v05 import _control_contract
+    from test_population_integrity_v05 import _contract
+    from test_verification_integrity_transactions_v05 import (
+        _insert_transaction_receipt,
+        _transaction_manifest,
+        _v05_arm_result,
+        _v05_control_observation,
+        _write_json_evidence,
+    )
+
+    ledger = tmp_path / "audit-b.sqlite3"
+    evidence.initialize_ledger(ledger, signed_work_order)
+    selector_parent = tmp_path / "scope/selectors"
+    selector_parent.mkdir(parents=True, exist_ok=True)
+    source_revision = scope_members_v03[0].source_revision
+    extra_member = ScopeMember.model_validate(
+        {
+            "member_id": _smid(
+                "test_case", "tests/test_widget.py::test_widget_extra"
+            ),
+            "member_kind": "test_case",
+            "locator": "tests/test_widget.py::test_widget_extra",
+            "locator_digest": hashlib.sha256(
+                b"tests/test_widget.py::test_widget_extra"
+            ).hexdigest(),
+            "content_digest": hashlib.sha256(b"test").hexdigest(),
+            "source_revision": source_revision,
+        }
+    )
+    members = sorted(
+        [
+            member.model_dump(mode="json") for member in scope_members_v03
+        ]
+        + [extra_member.model_dump(mode="json")],
+        key=lambda member: (
+            member["member_kind"].encode("utf-8"),
+            member["locator_digest"],
+            member["member_id"],
+        ),
+    )
+    spec_source = rfc8785.dumps(
+        {
+            "schema_version": "openworkproof-scope-selector/0.3",
+            "selector_kind": "explicit",
+            "locators": ["src/widget.py"],
+        }
+    )
+    spec_a = rfc8785.dumps(
+        {
+            "schema_version": "openworkproof-scope-selector/0.3",
+            "selector_kind": "pytest_collection",
+            "selector_args": ["tests/test_a.py"],
+        }
+    )
+    spec_b = rfc8785.dumps(
+        {
+            "schema_version": "openworkproof-scope-selector/0.3",
+            "selector_kind": "pytest_collection",
+            "selector_args": ["tests/test_b.py"],
+        }
+    )
+    (selector_parent / "source.json").write_bytes(spec_source)
+    (selector_parent / "a.json").write_bytes(spec_a)
+    (selector_parent / "b.json").write_bytes(spec_b)
+    scope_payload = _copy.deepcopy(evaluation_scope_payload_v03)
+    scope_payload["selector_rules"] = [
+        {
+            "rule_id": "0" * 64,
+            "selector_kind": "explicit",
+            "selector_spec_digest": hashlib.sha256(spec_source).hexdigest(),
+            "selector_engine_digest": "4" * 64,
+            "required_evidence_paths": ["scope/selectors/source.json"],
+        },
+        {
+            "rule_id": "1" * 64,
+            "selector_kind": "pytest_collection",
+            "selector_spec_digest": hashlib.sha256(spec_a).hexdigest(),
+            "selector_engine_digest": "5" * 64,
+            "required_evidence_paths": ["scope/selectors/a.json"],
+        },
+        {
+            "rule_id": "2" * 64,
+            "selector_kind": "pytest_collection",
+            "selector_spec_digest": hashlib.sha256(spec_b).hexdigest(),
+            "selector_engine_digest": "6" * 64,
+            "required_evidence_paths": ["scope/selectors/b.json"],
+        },
+    ]
+    scope_payload["members"] = members
+    scope_payload["member_count"] = len(members)
+    scope_payload["population_digest"] = population_digest(
+        tuple(ScopeMember.model_validate(member) for member in members)
+    )
+    manifest = _transaction_manifest(
+        scope_payload,
+        work_order=signed_work_order,
+        claim=signed_subject_claim,
+        manager_key=ephemeral_role_keys["Manager"][0],
+    )
+    raw = verification_profile_v03.model_dump(
+        mode="json",
+        exclude={"digest", "signature_alg", "signer_key_id", "signature"},
+    )
+    raw["schema_version"] = "openworkproof-verification-profile/0.5"
+    raw.update(
+        {
+            "work_order_digest": manifest.work_order_digest,
+            "subject_claim_digest": manifest.subject_claim_digest,
+            "evaluation_scope_id": manifest.scope_id,
+            "evaluation_scope_digest": manifest.digest,
+        }
+    )
+    for arm in (raw["positive_arm"], *raw["negative_arms"]):
+        arm.update(
+            {
+                "source_commit": manifest.source_revision,
+                "candidate_commit": manifest.candidate_commit,
+                "workspace_manifest_digest": manifest.workspace_manifest_digest,
+            }
+        )
+    source_id = next(
+        member["member_id"]
+        for member in members
+        if member["member_kind"] == "source_file"
+    )
+    test_ids = sorted(
+        member["member_id"]
+        for member in members
+        if member["member_kind"] == "test_case"
+    )
+    raw["population_contracts"] = sorted(
+        [
+            _contract(
+                manifest.selector_rules[0].model_dump(mode="json"),
+                [source_id],
+                "source_file",
+            ),
+            _contract(
+                manifest.selector_rules[1].model_dump(mode="json"),
+                [test_ids[0]],
+                "test_case",
+            ),
+            _contract(
+                manifest.selector_rules[2].model_dump(mode="json"),
+                [test_ids[1]],
+                "test_case",
+            ),
+        ],
+        key=lambda item: item["contract_id"],
+    )
+    negative_arm = raw["negative_arms"][0]
+    control = _control_contract(
+        negative_arm["arm_id"], negative_arm["mutant_patch_digest"]
+    )
+    raw["control_contracts"] = [control]
+    profile = VerificationProfileV05.model_validate(
+        _sign_payload(
+            "verification-profile", raw, ephemeral_role_keys["Manager"][0], version="0.5"
+        )
+    )
+    commit_evaluation_scope(ledger, signed_subject_claim, manifest)
+    receipt = sidecar_receipt_factory(
+        state_before="locally_verified",
+        state_after="evidence_incomplete",
+        event_type="system_event",
+        event_name="proof_composed",
+        sequence=1,
+    )
+    _insert_transaction_receipt(ledger, receipt)
+    observed = ObservedScope(
+        member_ids=tuple(member["member_id"] for member in members),
+        member_count=len(members),
+        population_digest=scope_payload["population_digest"],
+        required_target_ids=tuple(manifest.required_target_ids),
+        source_revision=manifest.source_revision,
+        workspace_manifest_digest=manifest.workspace_manifest_digest,
+        selector_engine_digests=tuple(
+            sorted(
+                rule.selector_engine_digest for rule in manifest.selector_rules
+            )
+        ),
+        evidence_complete=True,
+    )
+    results = []
+    for kind in ("positive", "negative"):
+        result_ref = _write_json_evidence(
+            tmp_path, f"results/{kind}.json", {"arm": kind, "passed": True}
+        )
+        scope_ref = _write_json_evidence(
+            tmp_path,
+            f"scope/{kind}.json",
+            observed.model_dump(mode="json"),
+        )
+        control_observation = (
+            _v05_control_observation(
+                tmp_path,
+                profile.control_contracts[0],
+                arm_kind=kind,
+            )
+            if kind == "negative"
+            else None
+        )
+        placeholder = [
+            _v05_population_observation(
+                tmp_path,
+                contract,
+                suffix=f"{kind}-init-{index}",
+            )
+            for index, contract in enumerate(profile.population_contracts)
+        ]
+        results.append(
+            _v05_arm_result(
+                profile=profile,
+                manifest=manifest,
+                keys=ephemeral_role_keys,
+                arm_kind=kind,
+                observations=placeholder,
+                control_observation=control_observation,
+                action_receipt_id=receipt.receipt_id,
+                evidence_ref=result_ref,
+                scope_evidence_ref=scope_ref,
+            )
+        )
+    return {
+        "ledger": ledger,
+        "manifest": manifest,
+        "profile": profile,
+        "results": tuple(results),
+        "keys": ephemeral_role_keys,
+        "tmp_path": tmp_path,
+    }
+
+
+def _observation_with_eligible(
+    tmp_path: Path,
+    contract,
+    *,
+    suffix: str,
+    eligible_ids: list[str],
+    selected_ids: list[str],
+) -> dict[str, Any]:
+    from openworkproof.integrity import population_observation_payload
+
+    payload, inventory = population_observation_payload(
+        contract=contract,
+        eligible_member_ids=eligible_ids,
+        selected_member_ids=selected_ids,
+        observed_at="2026-01-01T00:10:00Z",
+        eligible_path=f"evidence/{suffix}/eligible-population.json",
+        selected_path=f"evidence/{suffix}/selected-population.json",
+    )
+    for ref in payload["evidence_refs"]:
+        content = inventory[ref["sha256"]]
+        target = tmp_path / ref["path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    return payload
+
+
+def _fill_observations(case, *, eligible_b_extra: bool) -> list:
+    from openworkproof.models import PopulationObservationV05
+
+    contracts = case["profile"].population_contracts
+    source_contract = next(
+        contract
+        for contract in contracts
+        if contract.member_kind == "source_file"
+    )
+    pytest_contracts = sorted(
+        (
+            contract
+            for contract in contracts
+            if contract.member_kind == "test_case"
+        ),
+        key=lambda contract: contract.selector_rule_id,
+    )
+    source_id = source_contract.declared_selected_member_ids[0]
+    test_ids = [
+        contract.declared_selected_member_ids[0]
+        for contract in pytest_contracts
+    ]
+    eligible_all = sorted(set(test_ids))
+    extra = f"e{0:063x}" if eligible_b_extra else None
+    eligible_b = sorted(set(test_ids) | {extra}) if extra else eligible_all
+    results = []
+    for result in case["results"]:
+        observations = [
+            _observation_with_eligible(
+                case["tmp_path"],
+                source_contract,
+                suffix=f"{result.arm_kind}-source",
+                eligible_ids=[source_id],
+                selected_ids=[source_id],
+            ),
+            _observation_with_eligible(
+                case["tmp_path"],
+                pytest_contracts[0],
+                suffix=f"{result.arm_kind}-a",
+                eligible_ids=eligible_all,
+                selected_ids=[test_ids[0]],
+            ),
+            _observation_with_eligible(
+                case["tmp_path"],
+                pytest_contracts[1],
+                suffix=f"{result.arm_kind}-b",
+                eligible_ids=eligible_b,
+                selected_ids=[test_ids[1]],
+            ),
+        ]
+        raw = result.model_dump(
+            mode="json",
+            exclude={"digest", "signature_alg", "signer_key_id", "signature"},
+        )
+        raw["population_observations"] = sorted(
+            [
+                PopulationObservationV05.model_validate(item).model_dump(mode="json")
+                for item in observations
+            ],
+            key=lambda item: item["contract_id"],
+        )
+        results.append(
+            VerificationArmResultV05.model_validate(
+                sign_payload(
+                    "verification-arm-result",
+                    raw,
+                    case["keys"]["Verifier"][0],
+                    version="0.5",
+                )
+            )
+        )
+    return results
+
+
+def _commit_two_rule_chain(case, results) -> None:
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    for result in results:
+        commit_verification_arm_result_v05(case["ledger"], result)
+
+
+def test_audit_b_same_kind_different_eligible_sets_fail_closed(
+    tmp_path,
+    signed_work_order,
+    signed_subject_claim,
+    evaluation_scope_payload_v03,
+    scope_members_v03,
+    verification_profile_v03,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+) -> None:
+    """Audit B: two same-kind selector rules in one arm must witness the
+    SAME eligible population; differing eligible evidence (both containing
+    the kind partition) must fail closed instead of interchanging."""
+    from openworkproof.verification import (
+        VerificationTransactionError,
+        prepare_verification_decision_v05,
+    )
+
+    case = _two_pytest_rule_case(
+        tmp_path,
+        signed_work_order,
+        signed_subject_claim,
+        evaluation_scope_payload_v03,
+        scope_members_v03,
+        verification_profile_v03,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+    )
+    results = _fill_observations(case, eligible_b_extra=True)
+    with pytest.raises(VerificationTransactionError):
+        _commit_two_rule_chain(case, results)
+        prepare_verification_decision_v05(
+            case["ledger"],
+            DecisionDraftRequest(
+                decision_id="e" * 64,
+                decided_at="2026-01-01T00:21:00Z",
+                nonce="f" * 64,
+            ),
+        )
+
+
+def test_audit_b_same_kind_consistent_eligible_is_accepted(
+    tmp_path,
+    signed_work_order,
+    signed_subject_claim,
+    evaluation_scope_payload_v03,
+    scope_members_v03,
+    verification_profile_v03,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+) -> None:
+    """Audit B: same-kind rules whose eligible evidence is identical still
+    verify — the consistency check must not over-reject."""
+    from openworkproof.verification import prepare_verification_decision_v05
+
+    case = _two_pytest_rule_case(
+        tmp_path,
+        signed_work_order,
+        signed_subject_claim,
+        evaluation_scope_payload_v03,
+        scope_members_v03,
+        verification_profile_v03,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+    )
+    results = _fill_observations(case, eligible_b_extra=False)
+    _commit_two_rule_chain(case, results)
+    decision = prepare_verification_decision_v05(
+        case["ledger"],
+        DecisionDraftRequest(
+            decision_id="e" * 64,
+            decided_at="2026-01-01T00:21:00Z",
+            nonce="f" * 64,
+        ),
+    )
+    assert decision is not None

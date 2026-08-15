@@ -396,6 +396,12 @@ def _parse_population_evidence(
         "member_ids",
     }:
         raise ValueError("population evidence document must have a closed schema")
+    if rfc8785.dumps(document) != content:
+        # Evidence is bound by its signed reference to the exact canonical
+        # RFC 8785 bytes; whitespace, key reordering, duplicated keys, or
+        # escape-equivalent encodings parse to the same value but are not
+        # canonical bytes and must fail closed.
+        raise ValueError("population evidence is not canonical RFC 8785 bytes")
     if document["schema_version"] != POPULATION_EVIDENCE_SCHEMA_VERSION:
         raise ValueError("population evidence schema version is not 0.5")
     purpose = document["purpose"]
@@ -506,6 +512,7 @@ def assess_population_integrity(
     observations_by_contract: dict[str, list[tuple[int, str, int, str]]] = {
         contract_id: [] for contract_id in contracts_by_id
     }
+    eligible_by_arm_kind: dict[tuple[str, str], tuple[str, ...]] = {}
 
     for result in validated_results:
         if (
@@ -549,6 +556,19 @@ def assess_population_integrity(
 
             eligible_ids = evidence_purposes.get("eligible-population", ())
             selected_ids = evidence_purposes.get("selected-population", ())
+            rule = rules_by_id.get(observation.selector_rule_id)
+            if (
+                rule is not None
+                and rule.selector_kind in {"git_diff_closure", "pytest_collection"}
+            ):
+                # Audit B: same-kind first-adapter rules in one arm must
+                # witness the same eligible population.
+                arm_kind_key = (result.arm_id, contract.member_kind)
+                previous_eligible = eligible_by_arm_kind.get(arm_kind_key)
+                if previous_eligible is None:
+                    eligible_by_arm_kind[arm_kind_key] = eligible_ids
+                elif previous_eligible != eligible_ids:
+                    drift_reasons.add("POPULATION_RULE_DRIFT")
             if (
                 len(eligible_ids) != observation.eligible_seen
                 or population_member_digest(eligible_ids)
@@ -952,6 +972,8 @@ def validate_population_observation(
             rule_outputs, {rule.rule_id: rule for rule in manifest.selector_rules}
         ).items()
     }
+    rules_by_id = {rule.rule_id: rule for rule in manifest.selector_rules}
+    eligible_by_kind: dict[str, tuple[str, ...]] = {}
     for observation in result.population_observations:
         contract = contracts_by_id[observation.contract_id]
         if (
@@ -968,6 +990,23 @@ def validate_population_observation(
         ):
             raise ValueError("population observation evidence purposes are missing")
         eligible_ids = evidence_purposes.get("eligible-population", ())
+        rule = rules_by_id.get(observation.selector_rule_id)
+        if (
+            rule is not None
+            and rule.selector_kind in {"git_diff_closure", "pytest_collection"}
+        ):
+            # Audit B: same-kind first-adapter selector rules observe the
+            # SAME eligible population in the same arm; per-rule eligible
+            # witnesses that differ are interchangeable and must fail
+            # closed.
+            previous_eligible = eligible_by_kind.get(contract.member_kind)
+            if previous_eligible is None:
+                eligible_by_kind[contract.member_kind] = eligible_ids
+            elif previous_eligible != eligible_ids:
+                raise ValueError(
+                    "same-kind selector rules witness different "
+                    "eligible populations"
+                )
         selected_ids = evidence_purposes.get("selected-population", ())
         if (
             len(eligible_ids) != observation.eligible_seen
