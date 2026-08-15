@@ -502,6 +502,12 @@ def _static_pytest_node_ids(checkout: Path) -> tuple[str, ...]:
         name = relative.name
         if not (name.startswith("test_") or name.endswith("_test.py")):
             continue
+        if path.is_symlink():
+            # A tracked symlink test file follows a target outside the
+            # source tree; the host must not read through it. The child
+            # (pytest) does follow symlinks, so the divergence closes the
+            # observation as indeterminate.
+            continue
         try:
             tree = ast.parse(path.read_bytes().decode("utf-8"))
         except (UnicodeDecodeError, SyntaxError) as error:
@@ -517,7 +523,8 @@ def _static_pytest_node_ids(checkout: Path) -> tuple[str, ...]:
                         item, (ast.FunctionDef, ast.AsyncFunctionDef)
                     ) and item.name.startswith("test"):
                         node_ids.append(f"{prefix}::{node.name}::{item.name}")
-    return tuple(sorted(node_ids))
+    # Deduplicate like pytest does (a redefined name collects once).
+    return tuple(sorted(set(node_ids)))
 
 
 def _selector_spec_bytes(selector_kind: str, payload: Mapping[str, object]) -> bytes:
@@ -1458,7 +1465,11 @@ def observe_pytest_population(
                 )
                 for node_id in selected_nodes
             )
-        except subprocess.CalledProcessError as error:
+        except (subprocess.CalledProcessError, ValueError) as error:
+            # A selector locator may resolve to a symlink or non-file Git
+            # entry (mode 120000), which raises ValueError instead of a
+            # CalledProcessError; both must close the observation instead
+            # of leaking a raw exception.
             raise ValueError("pytest member resolution failed") from error
         return _adapter_observation(
             contract,

@@ -2000,3 +2000,48 @@ def test_pytest_adapter_conftest_and_reporter_patch_cannot_forge(
     assert result.status == "indeterminate"
     assert "SCOPE_SELECTOR_MISMATCH" in result.reason_codes
     assert result.observation is None
+
+
+def test_pytest_adapter_tracked_symlink_test_fails_closed(tmp_path: Path) -> None:
+    """A tracked symlink test file must close the observation as
+    indeterminate: the host refuses to read through the link for the
+    static enumeration, the child (pytest) does follow it, and the
+    divergence fails closed instead of leaking a raw ValueError."""
+    python = _requires_venv()
+    repo = _git_repo(tmp_path)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_real.py").write_text(
+        "def test_real():\n    assert True\n", encoding="utf-8"
+    )
+    os.symlink("test_real.py", repo / "tests" / "test_link.py")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "symlink test"], cwd=repo, check=True, capture_output=True
+    )
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    declared = [scope_member_id("test_case", "tests/test_real.py::test_real")]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "timeout_seconds": 120,
+        },
+        python=python,
+        declared_ids=declared,
+    )
+    result = observe_pytest_population(
+        repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=python,
+        selector_args=[],
+        timeout_seconds=120,
+    )
+    assert result.status == "indeterminate"
+    assert "SCOPE_SELECTOR_MISMATCH" in result.reason_codes
