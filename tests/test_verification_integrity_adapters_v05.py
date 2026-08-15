@@ -71,7 +71,7 @@ def _contract(
                     if (python.parent.parent / "pyvenv.cfg").is_file()
                     else None
                 ),
-                "argv": ["-E", "-s", "-m", "pytest", "--collect-only", "-q"],
+                "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
                 "selector_args": list(selector_args or []),
                 "required_node_ids": sorted(set(required_node_ids or [])),
                 "collector_conftest_digest": _COLLECT_CONFTEST_DIGEST,
@@ -193,12 +193,11 @@ def _collect_fake(
     import json as _json
 
     body = f"""
-test "$1" = "-E"
-test "$2" = "-s"
-test "$3" = "-m"
-test "$4" = "pytest"
-test "$5" = "--collect-only"
-test "$6" = "-q"
+test "$1" = "-I"
+test "$2" = "-m"
+test "$3" = "pytest"
+test "$4" = "--collect-only"
+test "$5" = "-q"
 test "$PYTEST_DISABLE_PLUGIN_AUTOLOAD" = "1"
 test "$LC_ALL" = "C.UTF-8"
 test "$TZ" = "UTC"
@@ -215,7 +214,7 @@ test -n "$OWP_COLLECT_OUTPUT"
     if selection is None:
         body += emit(list(PYTEST_NODES))
     else:
-        body += 'if [ "$#" -eq 6 ]; then\n'
+        body += 'if [ "$#" -eq 5 ]; then\n'
         body += emit(list(PYTEST_NODES))
         body += "else\n"
         body += emit(selection)
@@ -261,7 +260,7 @@ def test_pytest_adapter_observes_eligible_and_selected(
             "python_executable_digest": hashlib.sha256(
                 python.read_bytes()
             ).hexdigest(),
-            "argv": ["-E", "-s", "-m", "pytest", "--collect-only", "-q"],
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
             "timeout_seconds": 60,
         },
         python=python,
@@ -296,7 +295,7 @@ def test_pytest_adapter_deterministic_replay(pytest_repo, tmp_path: Path) -> Non
         "source_revision": head,
         "candidate_commit": head,
         "python_executable_digest": hashlib.sha256(python.read_bytes()).hexdigest(),
-        "argv": ["-E", "-s", "-m", "pytest", "--collect-only", "-q"],
+        "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
         "timeout_seconds": 60,
     }
     contract = _contract(
@@ -350,7 +349,7 @@ def test_pytest_adapter_selector_yielding_zero_is_mismatched(
             "source_revision": head,
             "candidate_commit": head,
             "python_executable_digest": hashlib.sha256(python.read_bytes()).hexdigest(),
-            "argv": ["-E", "-s", "-m", "pytest", "--collect-only", "-q"],
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
             "timeout_seconds": 60,
         },
         python=python,
@@ -386,7 +385,7 @@ def test_pytest_adapter_no_eligible_nodes(tmp_path: Path) -> None:
             "source_revision": head,
             "candidate_commit": head,
             "python_executable_digest": hashlib.sha256(python.read_bytes()).hexdigest(),
-            "argv": ["-E", "-s", "-m", "pytest", "--collect-only", "-q"],
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
             "timeout_seconds": 60,
         },
         python=python,
@@ -421,7 +420,7 @@ def test_pytest_adapter_collection_error(pytest_repo, tmp_path: Path) -> None:
             "source_revision": head,
             "candidate_commit": head,
             "python_executable_digest": hashlib.sha256(python.read_bytes()).hexdigest(),
-            "argv": ["-E", "-s", "-m", "pytest", "--collect-only", "-q"],
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
             "timeout_seconds": 60,
         },
         python=python,
@@ -452,7 +451,7 @@ def test_pytest_adapter_timeout(pytest_repo, tmp_path: Path) -> None:
             "source_revision": head,
             "candidate_commit": head,
             "python_executable_digest": hashlib.sha256(python.read_bytes()).hexdigest(),
-            "argv": ["-E", "-s", "-m", "pytest", "--collect-only", "-q"],
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
             "timeout_seconds": 1,
         },
         python=python,
@@ -482,7 +481,7 @@ def test_pytest_adapter_engine_drift(pytest_repo, tmp_path: Path) -> None:
             "source_revision": head,
             "candidate_commit": head,
             "python_executable_digest": hashlib.sha256(python.read_bytes()).hexdigest(),
-            "argv": ["-E", "-s", "-m", "pytest", "--collect-only", "-q"],
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
             "timeout_seconds": 60,
         },
         python=python,
@@ -841,7 +840,7 @@ def test_pytest_adapter_required_node_omission(pytest_repo, tmp_path: Path) -> N
             "source_revision": head,
             "candidate_commit": head,
             "python_executable_digest": hashlib.sha256(python.read_bytes()).hexdigest(),
-            "argv": ["-E", "-s", "-m", "pytest", "--collect-only", "-q"],
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
             "timeout_seconds": 60,
         },
         python=python,
@@ -935,7 +934,7 @@ def test_adapter_observed_at_injection_makes_replay_byte_identical(
             "source_revision": head,
             "candidate_commit": head,
             "python_executable_digest": hashlib.sha256(python.read_bytes()).hexdigest(),
-            "argv": ["-E", "-s", "-m", "pytest", "--collect-only", "-q"],
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
             "timeout_seconds": 60,
         },
         python=python,
@@ -1066,7 +1065,7 @@ def test_pytest_adapter_binds_selector_args_into_selector_spec(
             "python_executable_digest": hashlib.sha256(
                 python.read_bytes()
             ).hexdigest(),
-            "argv": ["-E", "-s", "-m", "pytest", "--collect-only", "-q"],
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
             "timeout_seconds": 60,
         },
         python=python,
@@ -1113,7 +1112,7 @@ def test_pytest_adapter_ignores_stdout_summary_lines(
             "python_executable_digest": hashlib.sha256(
                 python.read_bytes()
             ).hexdigest(),
-            "argv": ["-E", "-s", "-m", "pytest", "--collect-only", "-q"],
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
             "timeout_seconds": 60,
         },
         python=python,
@@ -1164,7 +1163,7 @@ def test_pytest_adapter_refuses_candidate_conftest_files(tmp_path: Path) -> None
             "python_executable_digest": hashlib.sha256(
                 python.read_bytes()
             ).hexdigest(),
-            "argv": ["-E", "-s", "-m", "pytest", "--collect-only", "-q"],
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
             "timeout_seconds": 60,
         },
         python=python,
@@ -1194,6 +1193,53 @@ def test_pytest_adapter_real_venv_collection(tmp_path: Path) -> None:
         repo,
         {"tests/test_a.py": "def test_a1():\n    assert True\n"},
         "baseline",
+    )
+    declared = [scope_member_id("test_case", "tests/test_a.py::test_a1")]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "timeout_seconds": 120,
+        },
+        python=venv_python,
+        declared_ids=declared,
+    )
+    result = observe_pytest_population(
+        repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=venv_python,
+        selector_args=[],
+        timeout_seconds=120,
+    )
+    eligible = [scope_member_id("test_case", "tests/test_a.py::test_a1")]
+    _replay_check(result, eligible, eligible)
+
+
+def test_pytest_adapter_candidate_pytest_shadow_cannot_fabricate(
+    tmp_path: Path,
+) -> None:
+    """A candidate commit containing a top-level pytest.py must not shadow
+    the real pytest module: -I keeps the checkout off sys.path, so the
+    shadow never imports and the canonical collector output wins."""
+    venv_python = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python"
+    if not venv_python.is_file():
+        pytest.skip("repository venv is unavailable")
+    repo = _git_repo(tmp_path)
+    head = _commit(
+        repo,
+        {
+            "tests/test_a.py": "def test_a1():\n    assert True\n",
+            "pytest.py": (
+                "import os\n"
+                "raise RuntimeError('shadow pytest module was imported')\n"
+            ),
+        },
+        "hostile shadow",
     )
     declared = [scope_member_id("test_case", "tests/test_a.py::test_a1")]
     contract = _contract(

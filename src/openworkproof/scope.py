@@ -1063,15 +1063,11 @@ def observe_pytest_population(
         if pyvenv_cfg.is_file()
         else None
     )
-    base_command = (
-        str(invocation),
-        "-E",
-        "-s",
-        "-m",
-        "pytest",
-        "--collect-only",
-        "-q",
-    )
+    # -I keeps the collection fully isolated: the candidate checkout is not
+    # on sys.path, so a hostile top-level pytest.py cannot shadow the real
+    # pytest module. The venv launcher resolves its site-packages through
+    # its own invocation path even under -I.
+    base_command = (str(invocation), "-I", "-m", "pytest", "--collect-only", "-q")
     spec = _selector_spec_bytes(
         "pytest_collection",
         {
