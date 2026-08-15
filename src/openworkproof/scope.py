@@ -829,9 +829,10 @@ def observe_git_population(
 ) -> "PopulationObservationBuildResult":
     """Observe the Git eligible population (the committed diff closure) and
     the selected population (the closure after allowlist, exclusions, and
-    required targets). The frozen selector spec uses the exact v0.3 rule
-    encoding; any revision or engine drift closes the observation as
-    indeterminate."""
+    required targets). The frozen selector spec extends the v0.3 rule
+    encoding with the closed selector parameter fields (allowlist, excluded,
+    and required locators); any revision or engine drift closes the
+    observation as indeterminate."""
 
     from openworkproof.models import PopulationContractV05
 
@@ -1001,10 +1002,11 @@ def observe_pytest_population(
 ) -> "PopulationObservationBuildResult":
     """Observe the pytest eligible population (the full pre-selector
     collection) and the selected population (the selector-applied
-    collection). Both phases run with plugin autoload disabled in a frozen
-    checkout of the candidate commit. The frozen selector spec uses the
-    exact v0.3 rule encoding; the selector arguments are bound through the
-    declared members."""
+    collection). Both phases run with plugin autoload disabled in a frozen,
+    conftest-free checkout of the candidate commit. The frozen selector spec
+    extends the v0.3 rule encoding with the closed selector parameter fields
+    (selector_args, required_node_ids, and the canonical collector digest);
+    node ids come exclusively from the canonical collector output file."""
 
     from openworkproof.models import PopulationContractV05
 
@@ -1098,6 +1100,27 @@ def observe_pytest_population(
         except subprocess.CalledProcessError as error:
             raise ValueError("pytest checkout failed") from error
         added = True
+        tracked_paths = subprocess.run(
+            [
+                "git", "ls-tree", "-r", "--name-only", candidate_commit,
+            ],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        conftest_paths = [
+            relative for relative in tracked_paths if relative.endswith("conftest.py")
+        ]
+        if conftest_paths:
+            # A nested candidate conftest.py runs arbitrary code during
+            # collection and can overwrite the canonical plugin output
+            # (trylast hooks, atexit handlers). Collection must be
+            # conftest-free; this is a closed protocol boundary.
+            raise ValueError(
+                "candidate checkout contains conftest files; "
+                "pytest collection must be conftest-free"
+            )
         if (checkout / "conftest.py").exists():
             raise ValueError(
                 "candidate checkout already contains a root conftest.py"

@@ -1098,3 +1098,50 @@ def test_pytest_adapter_ignores_stdout_summary_lines(
         scope_member_id("test_case", node) for node in PYTEST_NODES
     ]
     _replay_check(result, eligible_ids, eligible_ids)
+
+
+def test_pytest_adapter_refuses_candidate_conftest_files(tmp_path: Path) -> None:
+    """A nested candidate conftest.py runs arbitrary code during collection
+    and can overwrite the canonical plugin output; collection must be
+    conftest-free (fail closed)."""
+    repo = _git_repo(tmp_path)
+    head = _commit(
+        repo,
+        {
+            "tests/test_a.py": "def test_a1():\n    assert True\n",
+            "tests/conftest.py": (
+                "def pytest_collection_finish(session):\n"
+                "    import os\n"
+                "    with open(os.environ['OWP_COLLECT_OUTPUT'], 'w') as f:\n"
+                "        f.write('{\"node_ids\": [\"tests/test_fake.py::test_x\"]}')\n"
+            ),
+        },
+        "malicious conftest",
+    )
+    python = _collect_fake(tmp_path, name="fake-python")
+    declared = [scope_member_id("test_case", "tests/test_a.py::test_a1")]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "python_executable_digest": hashlib.sha256(
+                python.read_bytes()
+            ).hexdigest(),
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
+            "timeout_seconds": 60,
+        },
+        declared_ids=declared,
+    )
+    with pytest.raises(ValueError, match="conftest-free"):
+        observe_pytest_population(
+            repo,
+            contract=contract,
+            source_revision=head,
+            candidate_commit=head,
+            python_executable=python,
+            selector_args=[],
+            timeout_seconds=60,
+        )
