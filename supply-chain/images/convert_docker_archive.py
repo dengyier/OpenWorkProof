@@ -155,9 +155,20 @@ def _rewrite(path: Path) -> dict:
         }
     elif parsed.get("mediaType") == DOCKER_MANIFEST:
         # Idempotent pass: keep the existing manifest digest, only normalize
-        # the descriptor keys.
+        # the descriptor to the exact three-key annotation contract. Buildx
+        # docker outputs may carry extra descriptor annotations (e.g. a wall
+        # clock ``org.opencontainers.image.created``) and omit
+        # ``config.digest``; both break the closed identity chain, so the
+        # annotations are rebuilt from the manifest blob and the legacy
+        # RepoTags rather than preserved verbatim.
         new_digest = descriptor["digest"]
-        annotations = dict(descriptor.get("annotations", {}))
+        candidate_name = legacy[0]["RepoTags"][0]
+        tag = candidate_name.rsplit(":", 1)[1]
+        annotations = {
+            "config.digest": parsed["config"]["digest"],
+            "io.containerd.image.name": f"docker.io/{candidate_name}",
+            "org.opencontainers.image.ref.name": tag,
+        }
         descriptor = {
             "mediaType": DOCKER_MANIFEST,
             "digest": new_digest,
