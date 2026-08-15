@@ -693,7 +693,11 @@ def _derived_control_status(
     drift and any failing signature that differs from the expected signature
     -> ``mismatched``; an exact expected-signature match -> ``proven``; a
     completed non-failing execution -> ``survived``. A target failure is
-    derived from a non-zero exit code or a ``MUTATION_CAUGHT`` reason code,
+    derived from a non-zero exit code, a ``MUTATION_CAUGHT`` reason code, or
+    one of the closed execution-failure codes
+    (``EXEC_COMMAND_FAILED``, ``EXEC_TIMEOUT``, ``EXEC_CRASHED``,
+    ``EXEC_RESOURCE_EXHAUSTED``, ``EXEC_OUTPUT_LIMIT``) — infrastructure
+    drift codes such as ``EXEC_DEPENDENCY_DRIFT`` are deliberately excluded —
     so contradictory signatures cannot silently derive survived. A signed
     observation whose claimed status contradicts this derivation is invalid
     input.
