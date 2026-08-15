@@ -1040,17 +1040,46 @@ def observe_pytest_population(
             or node_id.startswith("/")
         ):
             raise ValueError("required_node_ids entries are not valid node ids")
-    python = Path(python_executable).resolve(strict=True)
-    if not python.is_file():
+    requested = Path(python_executable)
+    if not requested.is_absolute():
+        raise ValueError("python_executable must be an absolute path")
+    if not requested.is_file():
         raise ValueError("python_executable must be a file")
-    python_digest = hashlib.sha256(python.read_bytes()).hexdigest()
-    base_command = (str(python), "-I", "-m", "pytest", "--collect-only", "-q")
+    # Bind the invocation path WITHOUT resolving the final symlink: a venv
+    # launcher (.venv/bin/python) resolves its site-packages through its own
+    # path, so dereferencing it would silently collect with the base Python
+    # and lose pytest. The parent directory is resolved, the final name kept.
+    invocation = requested.parent.resolve(strict=True) / requested.name
+    try:
+        target = Path(os.path.realpath(invocation))
+    except OSError as error:
+        raise ValueError("python_executable target is unavailable") from error
+    if not target.is_file():
+        raise ValueError("python_executable target must be a file")
+    python_digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    pyvenv_cfg = invocation.parent.parent / "pyvenv.cfg"
+    pyvenv_cfg_digest = (
+        hashlib.sha256(pyvenv_cfg.read_bytes()).hexdigest()
+        if pyvenv_cfg.is_file()
+        else None
+    )
+    base_command = (
+        str(invocation),
+        "-E",
+        "-s",
+        "-m",
+        "pytest",
+        "--collect-only",
+        "-q",
+    )
     spec = _selector_spec_bytes(
         "pytest_collection",
         {
             "source_revision": source_revision,
             "candidate_commit": candidate_commit,
+            "python_invocation": str(invocation),
             "python_executable_digest": python_digest,
+            "pyvenv_cfg_digest": pyvenv_cfg_digest,
             "argv": list(base_command[1:]),
             "timeout_seconds": timeout_seconds,
             "selector_args": list(selector_args),
