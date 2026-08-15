@@ -92,12 +92,27 @@ def _load_archive(path: Path):
 
 def _config_platform(members: dict, manifest: dict) -> dict:
     """Derive the image platform from the real image config blob, never by
-    relabeling."""
-    config_hex = manifest["config"]["digest"].split(":", 1)[1]
+    relabeling. The blob must first replay the manifest descriptor exactly
+    (digest and size); a tampered or mislabeled blob fails closed before
+    any content is trusted."""
+    config_descriptor = manifest["config"]
+    config_digest = config_descriptor["digest"]
+    if type(config_digest) is not str:
+        raise ValueError("image config descriptor digest is invalid")
+    config_hex = config_digest.split(":", 1)[1]
     config_key = f"blobs/sha256/{config_hex}"
     config_bytes = members.get(config_key)
     if config_bytes is None or config_bytes[1] is None:
         raise ValueError(f"config blob is missing: {config_key}")
+    if _sha256_bytes(config_bytes[1]) != config_digest:
+        raise ValueError(
+            "config blob digest does not replay the manifest descriptor"
+        )
+    size = config_descriptor.get("size")
+    if type(size) is not int or size != len(config_bytes[1]):
+        raise ValueError(
+            "config blob size does not replay the manifest descriptor"
+        )
     config = json.loads(config_bytes[1])
     architecture = config.get("architecture")
     operating_system = config.get("os")

@@ -2000,3 +2000,172 @@ def test_v05_arm_same_id_conflicting_concurrency_one_wins(
         ).fetchone() == (1,)
     finally:
         connection.close()
+
+
+# ---------------------------------------------------------------------------
+# Third-round audit F: first-commit boundary faults and same-id concurrency
+# for v0.5 verification profiles.
+# ---------------------------------------------------------------------------
+
+
+def _fresh_profile(case) -> VerificationProfileV05:
+    raw = case["profile"].model_dump(
+        mode="json",
+        exclude={"digest", "signature_alg", "signer_key_id", "signature"},
+    )
+    raw["profile_id"] = "7" * 64
+    return VerificationProfileV05.model_validate(
+        sign_payload(
+            "verification-profile",
+            raw,
+            case["keys"]["Manager"][0],
+            version="0.5",
+        )
+    )
+
+
+def test_v05_profile_first_commit_ack_loss_is_committed_truth(
+    v05_transaction_case,
+) -> None:
+    """Audit F: a profile whose COMMIT executed but whose acknowledgement
+    was lost is committed truth — one row and a committed error, and an
+    idempotent retry of the exact profile is also committed truth."""
+    case = v05_transaction_case
+    fresh = _fresh_profile(case)
+    with pytest.raises(VerificationCommittedError):
+        commit_verification_profile_v05(
+            case["ledger"], fresh, fault="commit_ack_loss"
+        )
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM verification_profiles_v05 "
+            "WHERE profile_id = ?",
+            (fresh.profile_id,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert count == 1
+    with pytest.raises(VerificationCommittedError):
+        commit_verification_profile_v05(case["ledger"], fresh)
+
+
+def test_v05_profile_first_commit_precommit_failure_is_zero_write(
+    v05_transaction_case,
+) -> None:
+    """Audit F: a profile whose COMMIT fails before the commit point is a
+    zero-write transaction error."""
+    case = v05_transaction_case
+    fresh = _fresh_profile(case)
+    with pytest.raises(VerificationTransactionError):
+        commit_verification_profile_v05(
+            case["ledger"], fresh, fault="commit_failure"
+        )
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM verification_profiles_v05 "
+            "WHERE profile_id = ?",
+            (fresh.profile_id,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert count == 0
+
+
+def test_v05_profile_readback_unavailable_is_indeterminate_truth(
+    v05_transaction_case,
+) -> None:
+    """Audit F: a profile whose readback is unavailable after COMMIT is
+    indeterminate truth — one row and an indeterminate error."""
+    case = v05_transaction_case
+    fresh = _fresh_profile(case)
+    with pytest.raises(VerificationCommitIndeterminateError):
+        commit_verification_profile_v05(
+            case["ledger"], fresh, fault="readback_failure"
+        )
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM verification_profiles_v05 "
+            "WHERE profile_id = ?",
+            (fresh.profile_id,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert count == 1
+
+
+def test_v05_profile_same_id_same_payload_concurrency_one_wins(
+    v05_transaction_case,
+) -> None:
+    """Audit F: two threads committing the exact same profile: one commits,
+    the other reports committed-truth, and exactly one row exists."""
+    case = v05_transaction_case
+    fresh = _fresh_profile(case)
+    outcomes = []
+
+    def commit_once():
+        try:
+            commit_verification_profile_v05(case["ledger"], fresh)
+            outcomes.append("committed")
+        except Exception as error:
+            outcomes.append(type(error).__name__)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        tuple(pool.map(lambda _: commit_once(), (None, None)))
+    assert sorted(outcomes) == ["VerificationCommittedError", "committed"]
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM verification_profiles_v05 "
+            "WHERE profile_id = ?",
+            (fresh.profile_id,),
+        ).fetchone() == (1,)
+    finally:
+        connection.close()
+
+
+def test_v05_profile_same_id_conflicting_concurrency_one_wins(
+    v05_transaction_case,
+) -> None:
+    """Audit F: two threads committing the same profile id with different
+    payloads: exactly one commits and one is rejected, one row exists."""
+    case = v05_transaction_case
+    first = _fresh_profile(case)
+    raw = first.model_dump(
+        mode="json",
+        exclude={"digest", "signature_alg", "signer_key_id", "signature"},
+    )
+    raw["nonce"] = "e" * 64
+    second = VerificationProfileV05.model_validate(
+        sign_payload(
+            "verification-profile",
+            raw,
+            case["keys"]["Manager"][0],
+            version="0.5",
+        )
+    )
+    assert first.profile_id == second.profile_id
+    assert first.digest != second.digest
+    outcomes = []
+
+    def commit_once(profile):
+        try:
+            commit_verification_profile_v05(case["ledger"], profile)
+            outcomes.append("committed")
+        except Exception as error:
+            outcomes.append(type(error).__name__)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        tuple(pool.map(commit_once, (first, second)))
+    assert sorted(outcomes) == ["VerificationTransactionError", "committed"]
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM verification_profiles_v05 "
+            "WHERE profile_id = ?",
+            (first.profile_id,),
+        ).fetchone() == (1,)
+    finally:
+        connection.close()

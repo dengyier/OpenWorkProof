@@ -240,9 +240,13 @@ def _resolve_control_observation_evidence(
             )
         try:
             document = json.loads(content)
-        except (UnicodeDecodeError, ValueError) as error:
+        except (UnicodeDecodeError, ValueError, RecursionError) as error:
             raise ValueError("control evidence is invalid JSON") from error
-        if rfc8785.dumps(document) != content:
+        try:
+            canonical = rfc8785.dumps(document)
+        except RecursionError as error:
+            raise ValueError("control evidence is not canonical RFC 8785 bytes") from error
+        if canonical != content:
             raise ValueError("control evidence is not canonical RFC 8785 bytes")
         try:
             facts = resolve_control_evidence(document, contract)
@@ -444,7 +448,11 @@ def _parse_population_evidence(
         "member_ids",
     }:
         raise ValueError("population evidence document must have a closed schema")
-    if rfc8785.dumps(document) != content:
+    try:
+        canonical = rfc8785.dumps(document)
+    except RecursionError as error:
+        raise ValueError("population evidence is not canonical RFC 8785 bytes") from error
+    if canonical != content:
         # Evidence is bound by its signed reference to the exact canonical
         # RFC 8785 bytes; whitespace, key reordering, duplicated keys, or
         # escape-equivalent encodings parse to the same value but are not
