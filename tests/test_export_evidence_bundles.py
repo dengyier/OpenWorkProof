@@ -328,6 +328,43 @@ def export_v03_delivery_package_envelope(
     output_path.write_bytes(rfc8785.dumps(envelope) + b"\n")
 
 
+def export_v05_delivery_package_envelope(
+    *,
+    package_root: Path,
+    output_path: Path,
+    metadata: dict[str, object],
+) -> None:
+    """Freeze one already-verified v0.5 package as a closed JSON envelope."""
+    replay = verify_delivery_package(package_root)
+    if not replay.full_offline_replay:
+        raise ValueError("v0.5 frozen envelope requires full offline replay")
+    files = []
+    for path in sorted(
+        (item for item in package_root.rglob("*") if item.is_file()),
+        key=lambda item: item.relative_to(package_root).as_posix().encode("utf-8"),
+    ):
+        payload = path.read_bytes()
+        files.append(
+            {
+                "path": path.relative_to(package_root).as_posix(),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "payload_b64": base64.b64encode(payload).decode("ascii"),
+            }
+        )
+    envelope = {
+        "schema_version": "openworkproof/delivery-package-envelope/0.5",
+        "metadata": {
+            **metadata,
+            "current_decision": replay.current_decision,
+            "current_readiness": replay.settlement_readiness,
+            "full_offline_replay": replay.full_offline_replay,
+        },
+        "files": files,
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(rfc8785.dumps(envelope) + b"\n")
+
+
 def _export_v02_issue_package(
     *,
     tmp_path: Path,
