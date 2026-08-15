@@ -646,6 +646,15 @@ _CONTROL_UNAVAILABLE_CODES = frozenset(
         "CONTROL_EVIDENCE_MISSING",
     }
 )
+_CONTROL_EXEC_FAILURE_CODES = frozenset(
+    {
+        "EXEC_COMMAND_FAILED",
+        "EXEC_TIMEOUT",
+        "EXEC_CRASHED",
+        "EXEC_RESOURCE_EXHAUSTED",
+        "EXEC_OUTPUT_LIMIT",
+    }
+)
 
 
 def validate_control_contracts(profile: VerificationProfileV05) -> None:
@@ -715,7 +724,10 @@ def _derived_control_status(
     observed = observation.observed_failure_signature
     target_failed = any(
         exit_code != 0 for exit_code in observed.exit_codes
-    ) or "MUTATION_CAUGHT" in observed.reason_codes
+    ) or bool(
+        {"MUTATION_CAUGHT", *_CONTROL_EXEC_FAILURE_CODES}
+        & set(observed.reason_codes)
+    )
     if target_failed:
         return "mismatched", "CONTROL_FAILURE_SIGNATURE_MISMATCH"
     return "survived", "CONTROL_SURVIVED"
