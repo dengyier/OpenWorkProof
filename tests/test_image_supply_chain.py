@@ -777,6 +777,7 @@ def test_trusted_helper_source_allowlist_is_the_exact_repo_read_closure() -> Non
     assert source_allowlist == (
         "src/openworkproof/__init__.py\n"
         "src/openworkproof/acceptance.py\n"
+        "src/openworkproof/adapters/__init__.py\n"
         "src/openworkproof/adapters/code_delivery_github.py\n"
         "src/openworkproof/authority.py\n"
         "src/openworkproof/binding.py\n"
@@ -789,6 +790,7 @@ def test_trusted_helper_source_allowlist_is_the_exact_repo_read_closure() -> Non
         "src/openworkproof/policy.py\n"
         "src/openworkproof/predicates.py\n"
         "src/openworkproof/repo_tools.py\n"
+        "src/openworkproof/runtime_context.py\n"
         "src/openworkproof/scope.py\n"
         "src/openworkproof/settlement.py\n"
         "src/openworkproof/signing.py\n"
