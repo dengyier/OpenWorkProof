@@ -18,27 +18,37 @@ selected 分离）、负控契约/失败签名、`VERIFIED / REFUTED / UNKNOWN` 
 冻结交付包离线重放为 `VERIFICATION PASSED`。
 
 Task 15 发布门已重建候选并复测，最终测量（2026-08-15，独立总审修复与终审 Minor
-闭环后的最终重建）：
+闭环后的最终重建）。**第三轮独立审计（2026-08-16，Batch A–E）在途**：源码
+变更（`scope.py`/`integrity.py`/`services.py`/`cli.py`/`verification.py`/
+`delivery_package.py`/converter）会失效旧候选，最终候选重建、required-live
+与 candidate 数字将在全部批次闭环与 total 复审后以 fresh 结果重测更新；
+下方非 fresh 数字标注来源与状态。
 
-- candidate source revision：`d460c876a7f3046fd1d338951d964bce6d1a6be1`
+- candidate source revision（**审计基线**）：`d460c876a7f3046fd1d338951d964bce6d1a6be1`
   （2 Critical + 5 Important + 终审 leap-second Minor 全部闭环的最终实现
   提交）；不可变库存：
   `supply-chain/images/candidates/d460c876a7f3046fd1d338951d964bce6d1a6be1.json`；
   更早的 `18732766…`/`ca9c911…`/`ca5df6c3…` 库存保持原字节、不再匹配当前定义；
 - Python 分发版本 `1.1.1`；冻结协议 Schema `0.1`–`0.5`；
-- v0.5 focused 套件（10 个文件）：`370 passed、0 failed`；
+- v0.5 focused 套件（10 个文件）：**审计基线** `370 passed`；
+  **第三轮 fresh（2026-08-16，Batch A–D 后）`402 passed`**（含 19 个新增
+  攻击/证明测试），最终以候选重建后 fresh 为准；
 - 冻结兼容（v0.2/v0.3/v0.4 models/schema/delivery/settlement/acceptance）：
-  `216 passed、0 failed`；
+  `216 passed、0 failed`（本轮未触碰 v0.1–v0.4 冻结面，final fresh 复核）；
 - 便携全量（`pytest -q --ignore=tests/test_candidate_supplychain_integration.py`）：
-  `3348 passed、0 failed、6 skipped`（约 5 分钟）；
+  **审计基线** `3348 passed、0 failed、6 skipped`；**第三轮 fresh
+  `3373 passed、0 failed、6 skipped`**（6 分 07 秒；skip 均为
+  live-Docker/镜像引用缺环境变量所致平台边界，final fresh 复核）；
 - candidate 两套件（live Docker + artifact root + 全限定镜像引用）：
-  `173 passed、0 failed`（含 live Docker 与上下文重建身份链）；
+  **审计基线** `173 passed、0 failed`（含 live Docker 与上下文重建身份链）；
+  候选重建后 fresh 重测；
 - **required-live 全量**（live Docker + 全限定
   `docker.io/openworkproof/execution-test@sha256:2acf4820…61d8` +
   `-W 'error::pytest.PytestUnhandledThreadExceptionWarning'`）：
-  **`3456 passed、0 failed、0 skipped`**（10 分 57 秒，零 warning）；
+  **审计基线** **`3456 passed、0 failed、0 skipped`**（10 分 57 秒，零 warning）；
+  候选重建后 fresh 重测；
 - Rich #4196 v0.5 交付包离线重放：`VERIFICATION PASSED / VERIFIED /
-  READY_FOR_ACCEPTANCE`（无网络、无原始账本）；
+  READY_FOR_ACCEPTANCE`（无网络、无原始账本；候选重建后以新包 fresh 重放）；
 - Docker 残留：本任务零残留容器/卷；本机另有 5 个运行中的 agentteams
   容器与 9 个既有数据卷（非本任务创建，未清理）；
 - 归档哈希（`d460c876…`）：execution docker

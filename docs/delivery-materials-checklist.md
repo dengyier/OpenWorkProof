@@ -2,6 +2,9 @@
 
 > 对应交付验证计划环节 4(5.2 材料清单 + 5.3 质量检查标准)。
 > 状态时间:2026-08-07;冻结 HEAD:`14fd7d6c4047a4a6d5782e23499180eab9ed7b07`。
+> 第三轮独立审计(2026-08-16)后复核:候选库存目录现有 **19** 份不可变库存
+> (含当前 `d460c876…` 最终候选与更早历史候选);required-live 全量以
+> 最终 fresh 复核为准(审计基线实测 3456 passed、0 failed、0 skip)。
 
 ## 1. 材料清单(8 类)核对结果
 
@@ -9,8 +12,8 @@
 |---|---|---|---|---|
 | 1 | 项目说明 | README / 30 秒理解 / 市场定位 | `README.md`(30 秒理解 §、为什么是现在 §、愿景 §) | ✅ 已审校更新 |
 | 2 | 协议文档 | specs 设计(6)+ 实施计划(8)+ schema(6)+ 离线验签说明 | `docs/superpowers/specs/`、`docs/superpowers/plans/`、`specs/v0.1/`、`docs/offline-verification.md` | ✅ 齐备(离线验签说明本轮补齐) |
-| 3 | 代码 | 源码(27)+ requirements-lock + 候选库存(11) | `src/openworkproof/`、`requirements-lock.txt`、`supply-chain/images/candidates/` | ✅ 齐备(含当前 HEAD 候选) |
-| 4 | 验证 | 全量测试报告 + focused/candidate/full 计数 | `docs/status.md` §当前验证快照 | ✅ required-live 全量 2281 passed、0 failed、0 skip |
+| 3 | 代码 | 源码(27)+ requirements-lock + 候选库存(19) | `src/openworkproof/`、`requirements-lock.txt`、`supply-chain/images/candidates/` | ✅ 齐备(含当前 HEAD 候选) |
+| 4 | 验证 | 全量测试报告 + focused/candidate/full 计数 | `docs/status.md` §当前验证快照 | ⏳ 第三轮审计在途;最终 fresh 复核后更新 |
 | 5 | 演示 | 环节 2 证据链 + 记录 | `tests/test_delivery_m2.py`、`docs/superpowers/2026-08-07-rich-4196-demo-log.md` | ✅ 已完成(M2) |
 | 6 | 签署 | 环节 3 签名单 + 哈希 | `docs/delivery-signoff/`(MANIFEST/SHA256SUMS/owner+witness.signature) | ✅ 已完成(M3) |
 | 7 | 法律 | Apache-2.0 LICENSE + 版权主体声明 | `LICENSE`、`README.md` §项目主体、`docs/status.md` §项目主体说明 | ✅ 齐备 |
@@ -26,8 +29,9 @@
   个人真实姓名;独立见证人仅以 key_id 记录,不出现姓名;
 - [x] **可复现性**:`git clone` + `pip install -r requirements-lock.txt` +
   `pytest -q`(required-live)可复跑;M2 演示 `test_delivery_m2.py` 本地闭环;
-- [x] **一致性**:README/status 计数与 required-live 全量一致
-  (2281 passed、0 failed、0 skip),候选库存已为当前 HEAD 生成;
+- [ ] **一致性**:README/status 计数与 required-live 全量一致
+  (审计基线实测 3456 passed、0 failed、0 skip);第三轮审计批次的
+  fresh 全量门与候选重建完成后重新核对并勾选;
 - [x] **边界诚实**:全材料不宣称"独立外部人类验收完成"——明确标注
   外部 Acceptor 人类签署属线下事件、交付验证签署与赛事结果不由本仓库保证。
 
@@ -47,5 +51,6 @@
 - **真实外部人类签署**:M3 已用协议工具完成 Owner/见证人 Ed25519 签署
   并离线验签通过,但外部真实个人复核属线下事件,不由本仓库保证;
 - **赛事提交**:材料齐备不代表入围或获奖,正式提交由 Owner 执行。
-- **required-live 最终门**:已通过(2281 passed、0 failed、0 skip),
-  本次为候选库存对齐当前 HEAD 后的首次全绿确认。
+- **required-live 最终门**:审计基线实测 3456 passed、0 failed、0 skip;
+  第三轮审计涉及的源码变更将重建候选并重跑 required-live,数字以最终
+  fresh 复核为准,不先于真实闭环勾选。
