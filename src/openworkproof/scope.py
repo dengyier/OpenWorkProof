@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -422,7 +423,10 @@ import os
 # modules are imported before any collected test module, so nothing
 # candidate-controlled has executed yet. A collected module can later
 # monkeypatch json.dumps, builtins.sorted, or os.write, but the collector
-# only reaches these frozen references.
+# only reaches these frozen references. This document is CORROBORATING
+# evidence only: the trusted host derives the authoritative population by
+# static enumeration and rejects any divergence, so no in-process forgery
+# of this channel (or of the reporter) can pass verification.
 _DUMPS = json.dumps
 _SORTED = sorted
 _WRITE = os.write
@@ -458,22 +462,62 @@ _CANONICAL_PYTEST_ENVIRONMENT = {
     "TZ": "UTC",
 }
 
-# The authoritative node-id channel is a pipe inherited as fd 3. Collected
-# test modules share the process and could in principle write to the same
-# fd, but a pipe cannot be cleanly overwritten: any module write appends
-# bytes to the collector's single JSON document, the strict single-document
-# parse fails, and the observation closes as indeterminate. Serialization
-# primitives are captured at conftest import time (before candidate code
-# runs) and node ids are read from the core-computed internal id, so
-# in-process monkeypatching cannot forge the document; the host additionally
-# cross-checks the document against pytest's own stdout report. A module can
-# sabotage, never forge.
+# The authoritative eligible population is derived by the trusted host via
+# static AST enumeration of the frozen tests/ tree — NO candidate code is
+# executed to produce it. The pytest child (which does execute candidate
+# code) only corroborates: its fd-3 document and stdout report must both
+# equal the host-computed truth exactly, and any in-process monkeypatching
+# of the collector, of pytest internals, or of the reporter therefore
+# diverges from the static truth and fails closed. A module can sabotage,
+# never forge.
 _COLLECTOR_CHANNEL_FD = 3
-_COLLECTOR_CHANNEL_MODEL = "pipe-fd-3-single-document-stdout-crosscheck"
+_COLLECTOR_CHANNEL_MODEL = "host-static-enumeration-with-child-corroboration"
 # If a collected module leaks the pipe write end to a surviving descendant,
 # the read end never reaches EOF; the drain then fails closed after this
 # grace period instead of hanging the verifier indefinitely.
 _COLLECTOR_DRAIN_GRACE_SECONDS = 5.0
+
+
+def _static_pytest_node_ids(checkout: Path) -> tuple[str, ...]:
+    """Statically enumerate the eligible pytest population.
+
+    Walks the frozen ``tests/`` tree and applies pytest's default
+    collection patterns (python_files ``test_*.py`` / ``*_test.py``,
+    python_functions ``test*``, python_classes ``Test*``) on the source
+    AST without executing any candidate code. This is the trusted-host
+    ground truth for the eligible population; the collected pytest child
+    must reproduce it exactly. Dynamic or generated tests (parametrize,
+    runtime-defined functions, nested Test classes) therefore close the
+    observation as indeterminate.
+    """
+
+    node_ids: list[str] = []
+    tests_root = checkout / "tests"
+    if not tests_root.is_dir():
+        return ()
+    for path in sorted(tests_root.rglob("*.py")):
+        relative = path.relative_to(checkout)
+        if any(part.startswith(".") for part in relative.parts):
+            continue
+        name = relative.name
+        if not (name.startswith("test_") or name.endswith("_test.py")):
+            continue
+        try:
+            tree = ast.parse(path.read_bytes().decode("utf-8"))
+        except (UnicodeDecodeError, SyntaxError) as error:
+            raise ValueError("pytest static enumeration failed") from error
+        prefix = relative.as_posix()
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name.startswith("test"):
+                    node_ids.append(f"{prefix}::{node.name}")
+            elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+                for item in node.body:
+                    if isinstance(
+                        item, (ast.FunctionDef, ast.AsyncFunctionDef)
+                    ) and item.name.startswith("test"):
+                        node_ids.append(f"{prefix}::{node.name}::{item.name}")
+    return tuple(sorted(node_ids))
 
 
 def _selector_spec_bytes(selector_kind: str, payload: Mapping[str, object]) -> bytes:
@@ -1049,13 +1093,13 @@ def observe_pytest_population(
     collection). Collection runs in a closed, frozen child environment
     (plugin autoload disabled, no PYTEST_ADDOPTS/PYTEST_PLUGINS/ini
     passthrough), pinned to a frozen canonical ini so ancestor/host
-    configuration can never leak in. Node ids come exclusively from the
-    canonical collector writing a single JSON document to a pipe on fd 3;
-    any collected-module write to the channel poisons the document and
-    closes the observation. The eligible population is collected twice and
-    must reproduce byte-identically, and the selected population must be a
-    subset of it, so the same digest can never admit different actual
-    eligible populations."""
+    configuration can never leak in. The AUTHORITATIVE eligible population
+    is derived by the trusted host from static AST enumeration of the
+    frozen tests/ tree — no candidate code executes to produce it — and the
+    collected pytest child (fd-3 document plus pytest's own stdout report)
+    must reproduce it exactly; the selected population must be a subset of
+    it. Any in-process forgery diverges from the static truth and closes
+    the observation."""
 
     from openworkproof.models import PopulationContractV05
 
@@ -1218,7 +1262,11 @@ def observe_pytest_population(
             _CANONICAL_COLLECT_INI, encoding="utf-8"
         )
 
-        def collect(extra_args: Sequence[str]) -> list[str]:
+        def collect(
+            extra_args: Sequence[str],
+            *,
+            expect_static: tuple[str, ...] | None = None,
+        ) -> list[str]:
             try:
                 read_fd, write_fd = os.pipe()
             except OSError as error:
@@ -1355,11 +1403,20 @@ def observe_pytest_population(
                     "canonical pytest collection output diverges "
                     "from the reported collection"
                 )
+            if expect_static is not None and tuple(node_ids) != expect_static:
+                # The trusted host derives the eligible population from the
+                # candidate source AST without executing it; the collected
+                # child must reproduce that truth exactly. Any in-process
+                # forgery — collector patches, pytest-internal patches,
+                # reporter patches — diverges here and fails closed.
+                raise ValueError(
+                    "pytest collection diverges from the host static enumeration"
+                )
             return node_ids
 
         try:
-            eligible_nodes = collect(())
-            replayed_eligible = collect(())
+            static_eligible = _static_pytest_node_ids(checkout)
+            eligible_nodes = collect((), expect_static=static_eligible)
             selected_nodes = collect(selector_args)
         except (ValueError, subprocess.TimeoutExpired):
             reasons.append("SCOPE_SELECTOR_MISMATCH")
@@ -1371,11 +1428,6 @@ def observe_pytest_population(
                 status="indeterminate",
                 reason_codes=tuple(dict.fromkeys(reasons)),
             )
-        if replayed_eligible != eligible_nodes:
-            # The same digest must reproduce the same eligible population;
-            # a candidate whose collection is not deterministic is not
-            # observable and closes as indeterminate.
-            reasons.append("SCOPE_SELECTOR_MISMATCH")
         if set(selected_nodes) - set(eligible_nodes):
             reasons.append("SCOPE_SELECTOR_MISMATCH")
         missing_required = [

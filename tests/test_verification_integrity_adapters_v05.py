@@ -91,7 +91,7 @@ def _contract(
                 "environment": dict(_CANONICAL_PYTEST_ENVIRONMENT),
                 "collector_ini_digest": _COLLECT_INI_DIGEST,
                 "collector_conftest_digest": _COLLECT_CONFTEST_DIGEST,
-                "collector_channel": "pipe-fd-3-single-document-stdout-crosscheck",
+                "collector_channel": "host-static-enumeration-with-child-corroboration",
             }
         )
     elif selector_kind == "git_diff_closure":
@@ -1868,10 +1868,9 @@ def test_pytest_adapter_in_process_monkeypatch_cannot_forge_collector_output(
     tmp_path: Path,
 ) -> None:
     """Audit A / spec-review PoC: a collected module that monkeypatches
-    json.dumps, builtins.sorted, and os.write at import time must not be
-    able to forge the canonical document — serialization primitives are
-    captured at conftest import time, before candidate code runs, and the
-    host cross-checks pytest's own stdout report."""
+    json.dumps, builtins.sorted, and os.write at import time cannot reach
+    the collector (frozen references) — the observation replays the honest
+    population, and the phantom never appears."""
     python = _requires_venv()
     repo = _git_repo(tmp_path)
     head = _commit(
@@ -1925,3 +1924,79 @@ def test_pytest_adapter_in_process_monkeypatch_cannot_forge_collector_output(
     _replay_check(result, declared, declared)
     phantom = scope_member_id("test_case", "tests/test_a.py::test_phantom")
     assert phantom not in result.eligible_member_ids
+
+
+def test_pytest_adapter_conftest_and_reporter_patch_cannot_forge(
+    tmp_path: Path,
+) -> None:
+    """Audit A / spec-review forge-2: a module that walks sys.modules,
+    reassigns the conftest's captured serializer globals, and patches the
+    terminal reporter to print the forged line must still diverge from the
+    host's static enumeration and fail closed."""
+    python = _requires_venv()
+    repo = _git_repo(tmp_path)
+    head = _commit(
+        repo,
+        {
+            "tests/test_a.py": "def test_real():\n    assert True\n",
+            "tests/test_b.py": (
+                "import sys\n"
+                "import json as _json\n"
+                "import _pytest.terminal as _terminal\n"
+                "\n"
+                "\n"
+                "for _module in list(sys.modules.values()):\n"
+                "    try:\n"
+                "        _file = _module.__file__\n"
+                "    except Exception:\n"
+                "        _file = None\n"
+                "    if isinstance(_file, str) and _file.endswith('conftest.py'):\n"
+                "        _module._DUMPS = (\n"
+                "            lambda document, **kwargs: _json.dumps(\n"
+                "                {'node_ids': ['tests/test_a.py::test_phantom']},\n"
+                "                **kwargs)\n"
+                "        )\n"
+                "        break\n"
+                "\n"
+                "\n"
+                "def _forge_print(self, items):\n"
+                "    self._tw.line('tests/test_a.py::test_phantom')\n"
+                "\n"
+                "\n"
+                "_terminal.TerminalReporter._printcollecteditems = _forge_print\n"
+                "\n"
+                "\n"
+                "def test_b1():\n"
+                "    assert True\n"
+            ),
+        },
+        "conftest-and-reporter forging module",
+    )
+    # The auditor's PoC contract declares the forged phantom test; the
+    # forged child channels must still diverge from the host's static
+    # enumeration and fail closed instead of satisfying it.
+    declared = [scope_member_id("test_case", "tests/test_a.py::test_phantom")]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "timeout_seconds": 120,
+        },
+        python=python,
+        declared_ids=declared,
+    )
+    result = observe_pytest_population(
+        repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=python,
+        selector_args=[],
+        timeout_seconds=120,
+    )
+    assert result.status == "indeterminate"
+    assert "SCOPE_SELECTOR_MISMATCH" in result.reason_codes
+    assert result.observation is None
