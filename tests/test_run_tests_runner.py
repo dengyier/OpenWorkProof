@@ -1827,12 +1827,17 @@ def test_execute_rejects_invalid_fixed_test_before_started_or_process(
         process_called = True
         raise AssertionError("fixed-test rejection must precede process execution")
 
-    result = runner.main(
-        ("execute",),
-        workspace_root=workspace,
-        output_root=output,
-        process_runner=unexpected_process,
-    )
+    try:
+        result = runner.main(
+            ("execute",),
+            workspace_root=workspace,
+            output_root=output,
+            process_runner=unexpected_process,
+        )
+    finally:
+        # Restore write access so pytest's tmp cleanup can remove the
+        # read-only fixed-tests tree (avoids the known rm_rf warnings).
+        fixed_root.chmod(0o755)
 
     assert result != 0
     assert not process_called

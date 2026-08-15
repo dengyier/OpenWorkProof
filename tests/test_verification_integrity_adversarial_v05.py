@@ -1043,3 +1043,73 @@ def test_audit_i2_missing_control_evidence_is_rejected(
     )
     with pytest.raises(VerificationTransactionError, match="unavailable"):
         commit_verification_arm_result_v05(case["ledger"], negative)
+
+
+def _committed_v05_transition(case, signed_acceptance_receipt):
+    from openworkproof import acceptance as acceptance_module
+    from openworkproof.settlement import read_settlement_snapshot
+
+    from test_acceptance_v05 import _commit_acceptance_fixture, _transition_for_v05
+
+    decision = _full_chain_with_decision(case)
+    _commit_acceptance_fixture(case["ledger"], signed_acceptance_receipt)
+    receipt = _transition_for_v05(
+        case=case,
+        decision=decision,
+        signed_acceptance_receipt=signed_acceptance_receipt,
+        transition="withdrawn",
+    )
+    acceptance_module.commit_acceptance_transition(case["ledger"], receipt)
+    return read_settlement_snapshot, receipt
+
+
+def test_audit_i5_transition_row_tamper_fails_closed(
+    v05_transaction_case, signed_acceptance_receipt
+) -> None:
+    """Audit I5: tampering a v0.5 acceptance transition row must fail the
+    settlement/acceptance load path."""
+    from openworkproof.settlement import SettlementReadError
+
+    case = v05_transaction_case
+    read_settlement_snapshot, receipt = _committed_v05_transition(
+        case, signed_acceptance_receipt
+    )
+    _corrupt_row(
+        case,
+        "acceptance_transitions_v05",
+        "transition_json",
+        sqlite3.Binary(b"\x00"),
+        where="transition_id",
+        who=receipt.transition_id,
+    )
+    with pytest.raises(SettlementReadError):
+        read_settlement_snapshot(case["ledger"])
+
+
+def test_audit_i5_transition_parent_row_delete_fails_closed(
+    v05_transaction_case, signed_acceptance_receipt
+) -> None:
+    """Audit I5: deleting a v0.5 acceptance transition parent row must fail
+    the settlement/acceptance load path."""
+    from openworkproof.settlement import SettlementReadError
+
+    case = v05_transaction_case
+    read_settlement_snapshot, receipt = _committed_v05_transition(
+        case, signed_acceptance_receipt
+    )
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "DROP TRIGGER acceptance_transition_parents_v05_are_immutable_delete"
+        )
+        connection.execute(
+            "DELETE FROM acceptance_transition_parents_v05 "
+            "WHERE transition_id = ?",
+            (receipt.transition_id,),
+        )
+        connection.execute("COMMIT")
+    finally:
+        connection.close()
+    with pytest.raises(SettlementReadError):
+        read_settlement_snapshot(case["ledger"])

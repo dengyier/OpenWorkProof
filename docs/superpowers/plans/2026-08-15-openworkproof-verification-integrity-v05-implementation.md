@@ -751,7 +751,7 @@ Across every public package file assert absence of repository absolute paths, pr
 
 - [x] **Step 2: Add explicit v0.5 protocol detection**
 
-`_ledger_delivery_protocol` must return exactly one of `0.2`, `0.3`, `0.4`, or `0.5`; dual-family ambiguity is an error. Do not infer v0.5 from optional metadata.
+`_ledger_delivery_protocol` must return exactly one of `0.2`, `0.3`, or `0.5`; dual-family ambiguity is an error. Do not infer v0.5 from optional metadata. (v0.4 is the judgment-to-action binding protocol, not a delivery-package protocol.)
 
 - [x] **Step 3: Implement offline v0.5 export and verification**
 
@@ -1052,7 +1052,6 @@ REV="$(git rev-parse HEAD)"
 ./.venv/bin/python -m pip check
 ./.venv/bin/python -m compileall -q src tests
 ./.venv/bin/python -m pytest -q \
-  --ignore=tests/test_candidate_images.py \
   --ignore=tests/test_candidate_supplychain_integration.py
 git diff --check
 ```
@@ -1090,7 +1089,7 @@ Do not rewrite a historical inventory.
 - [x] **Step 6: Run candidate and required-live gates**
 
 ```bash
-./.venv/bin/python -m pytest tests/test_candidate_images.py -q
+./.venv/bin/python -m pytest tests/test_image_supply_chain.py -q
 ./.venv/bin/python -m pytest tests/test_candidate_supplychain_integration.py -q
 ./.venv/bin/python -m pytest -q \
   -W 'error::pytest.PytestUnhandledThreadExceptionWarning'

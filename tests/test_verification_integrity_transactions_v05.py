@@ -1167,6 +1167,8 @@ def test_v05_arm_remaining_faults_are_closed(
 @pytest.mark.parametrize(
     ("fault", "expected", "rows"),
     (
+        ("insert_failure", (VerificationTransactionError,), 0),
+        ("before_commit", (VerificationTransactionError,), 0),
         ("readback_failure", (VerificationCommitIndeterminateError,), 1),
         ("cleanup_failure", (VerificationCommittedError,), 1),
     ),
@@ -1910,6 +1912,85 @@ def test_v05_decision_conflicting_concurrency_one_wins(
     try:
         assert connection.execute(
             "SELECT COUNT(*) FROM verification_decisions_v05"
+        ).fetchone() == (1,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    ("fault", "expected", "rows"),
+    (
+        ("insert_failure", (VerificationTransactionError,), 0),
+        ("before_commit", (VerificationTransactionError,), 0),
+        ("readback_failure", (VerificationCommitIndeterminateError,), 1),
+    ),
+)
+def test_v05_decision_remaining_faults_are_closed(
+    v05_transaction_case, fault: str, expected, rows: int
+) -> None:
+    case = v05_transaction_case
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    for result in case["results"]:
+        commit_verification_arm_result_v05(case["ledger"], result)
+    decision = _signed_decision_v05(
+        case,
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    with pytest.raises(expected):
+        commit_verification_decision_v05(
+            case["ledger"], decision, fault=fault
+        )
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM verification_decisions_v05"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert count == rows
+
+
+def test_v05_arm_same_id_conflicting_concurrency_one_wins(
+    v05_transaction_case,
+) -> None:
+    """Same arm result id with conflicting payloads from two threads:
+    exactly one commit succeeds and one is rejected."""
+    case = v05_transaction_case
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    first = _resign_arm_result_v05(
+        case, case["results"][0], arm_result_id="a" * 64
+    )
+    second = _resign_arm_result_v05(
+        case,
+        case["results"][0],
+        arm_result_id="a" * 64,
+        created_at="2026-01-01T00:11:00Z",
+    )
+    assert first.arm_result_id == second.arm_result_id
+    assert first.digest != second.digest
+
+    outcomes = []
+
+    def commit_once(result):
+        try:
+            commit_verification_arm_result_v05(case["ledger"], result)
+            outcomes.append("committed")
+        except Exception as error:
+            outcomes.append(type(error).__name__)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        tuple(pool.map(commit_once, (first, second)))
+    assert sorted(outcomes) == ["VerificationTransactionError", "committed"]
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM verification_arm_results_v05 "
+            "WHERE arm_result_id = ?",
+            ("a" * 64,),
         ).fetchone() == (1,)
     finally:
         connection.close()

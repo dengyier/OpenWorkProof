@@ -57,6 +57,15 @@ def _load_archive(path: Path):
     members: dict[str, tuple[tarfile.TarInfo, bytes | None]] = {}
     with tarfile.open(path, "r") as archive:
         for member in archive.getmembers():
+            name = member.name
+            if (
+                name.startswith("/")
+                or "\\" in name
+                or any(part in {"", ".", ".."} for part in name.split("/"))
+            ):
+                raise ValueError(f"unsafe archive member: {name}")
+            if name in members:
+                raise ValueError(f"duplicate archive member: {name}")
             if member.isdir():
                 data = None
             elif member.isreg() and not member.issym() and not member.islnk():
@@ -81,6 +90,27 @@ def _load_archive(path: Path):
     return members, index, legacy
 
 
+def _config_platform(members: dict, manifest: dict) -> dict:
+    """Derive the image platform from the real image config blob, never by
+    relabeling."""
+    config_hex = manifest["config"]["digest"].split(":", 1)[1]
+    config_key = f"blobs/sha256/{config_hex}"
+    config_bytes = members.get(config_key)
+    if config_bytes is None or config_bytes[1] is None:
+        raise ValueError(f"config blob is missing: {config_key}")
+    config = json.loads(config_bytes[1])
+    architecture = config.get("architecture")
+    operating_system = config.get("os")
+    if (
+        type(architecture) is not str
+        or not architecture
+        or type(operating_system) is not str
+        or not operating_system
+    ):
+        raise ValueError("image config platform is invalid")
+    return {"architecture": architecture, "os": operating_system}
+
+
 def _rewrite(path: Path) -> dict:
     """Rewrite one archive in place; returns the new manifest digest."""
     members, index, legacy = _load_archive(path)
@@ -99,14 +129,11 @@ def _rewrite(path: Path) -> dict:
         # digest, size, platform, annotations).
         new_digest = descriptor["digest"]
         annotations = dict(descriptor.get("annotations", {}))
-        # The Buildx target is fixed to linux/arm64 for this supply chain;
-        # restore the platform descriptor deterministically even when an
-        # earlier pass already stripped it.
         descriptor = {
             "mediaType": OCI_MANIFEST,
             "digest": new_digest,
             "size": descriptor["size"],
-            "platform": {"architecture": "arm64", "os": "linux"},
+            "platform": _config_platform(members, parsed),
             "annotations": annotations,
         }
     elif parsed.get("mediaType") == OCI_MANIFEST:
