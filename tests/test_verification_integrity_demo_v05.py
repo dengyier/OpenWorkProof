@@ -11,6 +11,7 @@ and commercial metadata is declared ``not_evidenced``.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -531,14 +532,12 @@ def test_rich_4196_v05_integrity_demo(
         if path.is_file() and "eligible-population" in path.name
     ]
     profile_file = package / "verification-profile.json"
-    import json as _json
-
     arm_files = [
         path
         for path in package.rglob("*")
         if path.is_file()
         and "evidence/arms/" in path.relative_to(package).as_posix()
-        and _json.loads(path.read_text(encoding="utf-8")).get(
+        and json.loads(path.read_text(encoding="utf-8")).get(
             "control_observation"
         )
         is not None
