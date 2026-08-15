@@ -1131,19 +1131,19 @@ The checkpoint must distinguish local release-candidate completion from remote p
 - Modify only for demonstrated defects: files changed by Tasks 2-15
 - Modify: this plan, checking only completed steps after evidence exists
 
-- [ ] **Step 1: Run an independent specification review**
+- [x] **Step 1: Run an independent specification review**
 
 Review every section of the approved design against code, tests, schemas, package bytes, docs, and release evidence. Report findings with file/line references and Critical/Important/Minor severity. Do not accept the implementer's summary as proof.
 
-- [ ] **Step 2: Run an independent quality/security review**
+- [x] **Step 2: Run an independent quality/security review**
 
 Recheck authority, exact history, COMMIT truth, concurrency, selector blindness, control rot, schema compatibility, privacy leakage, and claim boundaries. Independently rerun at least the focused suite, frozen schema suite, candidate tests, and one offline bundle.
 
-- [ ] **Step 3: Fix findings through new RED tests**
+- [x] **Step 3: Fix findings through new RED tests**
 
 For every accepted defect, add the smallest deterministic failing test, observe RED, implement a surgical fix, and rerun the affected and prescribed gates. Commit follow-ups without rewriting prior commits.
 
-- [ ] **Step 4: Complete the plan truthfully**
+- [x] **Step 4: Complete the plan truthfully**
 
 Check a step only after its evidence exists. Run:
 
@@ -1164,19 +1164,19 @@ git status --short --branch
 
 Expected: no unchecked implementation step, no placeholder phrase, and a clean worktree.
 
-- [ ] **Step 5: Present remote integration as a separate choice**
+- [x] **Step 5: Present remote integration as a separate choice**
 
 Report final local HEAD, origin/main, ahead/behind, commits, exact test counts, inventory, package verification, remaining warnings, and all `not_evidenced` external states. Do not push automatically. Ask the user whether to push `main` only after all reviews pass.
 
 ## Plan Self-Review Gate
 
-- [ ] Every v0.5 type and reason code in the design appears in an implementation or test task.
-- [ ] Every one of the fifteen threat cases has an explicit adversarial test.
-- [ ] Every signed object has canonical model, schema, signing, authority, transaction, history, package, and tamper coverage.
-- [ ] Every transaction has pre-COMMIT zero-write, COMMIT-ACK, cleanup, exact replay, immutable row, and concurrency coverage.
-- [ ] Git and pytest adapters distinguish eligible from selected populations.
-- [ ] `VERIFIED / REFUTED / UNKNOWN` precedence is explicit and tested.
-- [ ] v0.1-v0.4 schemas, registries, golden bytes, packages, and version routers remain covered.
-- [ ] Public package privacy and commercial claim boundaries are executable tests, not prose only.
-- [ ] Candidate inventory is generated only after all source changes are committed.
-- [ ] No task implements dynamic streams, Merkle infrastructure, LLM judging, payment, settlement execution, EvidenceRequirementBinding, or a maturity dashboard.
+- [x] Every v0.5 type and reason code in the design appears in an implementation or test task.
+- [x] Every one of the fifteen threat cases has an explicit adversarial test.
+- [x] Every signed object has canonical model, schema, signing, authority, transaction, history, package, and tamper coverage.
+- [x] Every transaction has pre-COMMIT zero-write, COMMIT-ACK, cleanup, exact replay, immutable row, and concurrency coverage.
+- [x] Git and pytest adapters distinguish eligible from selected populations.
+- [x] `VERIFIED / REFUTED / UNKNOWN` precedence is explicit and tested.
+- [x] v0.1-v0.4 schemas, registries, golden bytes, packages, and version routers remain covered.
+- [x] Public package privacy and commercial claim boundaries are executable tests, not prose only.
+- [x] Candidate inventory is generated only after all source changes are committed.
+- [x] No task implements dynamic streams, Merkle infrastructure, LLM judging, payment, settlement execution, EvidenceRequirementBinding, or a maturity dashboard.
