@@ -782,3 +782,33 @@ def test_attack_13_tampered_committed_at_breaks_exact_truth_readback(
             _exact_decision_v05_readback(case["ledger"], decision, original)
             is False
         )
+
+
+def test_hardening_boundary_infra_drift_with_zero_exit_still_derives_survived(
+    control_case,
+) -> None:
+    """Guard: infra-only failure codes are NOT target failures.
+
+    EXEC_DEPENDENCY_DRIFT with a zero exit code derives survived (the fixture
+    did not fail; the run drifted for infrastructure reasons), so the
+    hardening must never classify it as mismatched. Pinned for regression.
+    """
+    case = control_case
+    contract = case["profile"].control_contracts[0]
+    expected = contract.expected_failure_signature.model_dump(mode="json")
+    drifted = _control_observation_payload(
+        contract,
+        control_status="survived",
+        exit_codes=[0],
+        signature={
+            **expected,
+            "exit_codes": [0],
+            "reason_codes": ["EXEC_DEPENDENCY_DRIFT"],
+        },
+    )
+    assessment = _assess_control(
+        case,
+        _negative_results(case, control_observation=drifted),
+    )
+    assert assessment.status == "survived"
+    assert "CONTROL_SURVIVED" in assessment.reason_codes
