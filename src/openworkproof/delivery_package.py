@@ -38,13 +38,6 @@ from openworkproof.models import (
     WorkOrder,
 )
 from openworkproof.scope import ObservedScope, compare_observed_scope
-from openworkproof.adapters import (
-    CodeDeliveryAdapterProfile,
-    CodeDeliveryJudgmentInput,
-    CodeDeliveryReplayInput,
-    ObservedAction,
-    replay_code_delivery_binding,
-)
 from openworkproof.settlement import (
     AcceptanceHistory,
     EffectiveAcceptance,
@@ -1053,6 +1046,14 @@ def _verify_v04_delivery_package(
             root, manifest, "binding-replay-inputs.json"
         )
         try:
+            from openworkproof.adapters import (  # noqa: PLC0415
+                CodeDeliveryAdapterProfile,
+                CodeDeliveryJudgmentInput,
+                CodeDeliveryReplayInput,
+                ObservedAction,
+                replay_code_delivery_binding,
+            )
+
             replay = replay_code_delivery_binding(
                 CodeDeliveryReplayInput(
                     judgment=CodeDeliveryJudgmentInput(

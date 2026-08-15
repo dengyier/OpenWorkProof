@@ -1815,7 +1815,6 @@ def test_candidate_inventory_selector_covers_every_tracked_definition() -> None:
     assert allowlist == (
         "src/openworkproof/__init__.py",
         "src/openworkproof/acceptance.py",
-        "src/openworkproof/adapters/__init__.py",
         "src/openworkproof/adapters/code_delivery_github.py",
         "src/openworkproof/authority.py",
         "src/openworkproof/binding.py",

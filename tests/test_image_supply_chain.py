@@ -777,7 +777,6 @@ def test_trusted_helper_source_allowlist_is_the_exact_repo_read_closure() -> Non
     assert source_allowlist == (
         "src/openworkproof/__init__.py\n"
         "src/openworkproof/acceptance.py\n"
-        "src/openworkproof/adapters/__init__.py\n"
         "src/openworkproof/adapters/code_delivery_github.py\n"
         "src/openworkproof/authority.py\n"
         "src/openworkproof/binding.py\n"
@@ -798,6 +797,36 @@ def test_trusted_helper_source_allowlist_is_the_exact_repo_read_closure() -> Non
         "src/openworkproof/trusted_helper.py\n"
         "src/openworkproof/verification.py\n"
     )
+
+
+def test_helper_allowlist_top_level_imports_are_closed() -> None:
+    """Every allowlisted module's top-level openworkproof imports must resolve
+    inside the helper image: the target module must itself be allowlisted
+    (or be the package root shipped via __init__.py)."""
+    import ast
+
+    source_allowlist = _read("trusted-helper/SOURCE_ALLOWLIST").splitlines()
+    allowed = {
+        path.rsplit("/", 1)[-1].removesuffix(".py") for path in source_allowlist
+    }
+    root = Path(__file__).resolve().parents[1]
+    for relative_path in source_allowlist:
+        tree = ast.parse((root / relative_path).read_text(encoding="utf-8"))
+        for node in tree.body:
+            modules = []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                modules.append(node.module)
+            elif isinstance(node, ast.Import):
+                modules.extend(alias.name for alias in node.names)
+            for module in modules:
+                if not module.startswith("openworkproof"):
+                    continue
+                if module == "openworkproof":
+                    continue
+                target = module.split("openworkproof.", 1)[1].split(".", 1)[0]
+                assert target in allowed, (
+                    f"{relative_path} imports unallowlisted {target}"
+                )
 
 
 def test_helper_debian_lock_is_an_exact_sha256_closure() -> None:
