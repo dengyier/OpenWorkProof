@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from openworkproof import evidence
+from openworkproof import evidence, integrity
 from openworkproof.delivery_package import (
     export_delivery_package,
     verify_delivery_package,
@@ -23,10 +23,13 @@ from openworkproof.models import (
     SubjectClaim,
     VerificationArmResult,
     VerificationArmResultV03,
+    VerificationArmResultV05,
     VerificationDecision,
     VerificationDecisionV03,
+    VerificationDecisionV05,
     VerificationProfileV02,
     VerificationProfileV03,
+    VerificationProfileV05,
 )
 import openworkproof.evidence as evidence
 from openworkproof.binding import (
@@ -60,10 +63,13 @@ from openworkproof.verification import (
     commit_evaluation_scope,
     commit_verification_arm_result,
     commit_verification_arm_result_v03,
+    commit_verification_arm_result_v05,
     commit_verification_decision,
     commit_verification_decision_v03,
+    commit_verification_decision_v05,
     prepare_verification_decision,
     prepare_verification_decision_v03,
+    prepare_verification_decision_v05,
 )
 
 
@@ -92,6 +98,12 @@ def _decode_public_key(value: object):
     return Ed25519PublicKey.from_public_bytes(raw)
 
 
+def _b64url_decode(value: str) -> bytes:
+    import base64 as _b64m
+
+    return _b64m.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
 class OpenWorkProofServices:
     """Parse inputs, invoke one domain operation, and return JSON data."""
 
@@ -101,6 +113,8 @@ class OpenWorkProofServices:
             model = VerificationProfileV02
         elif schema == "openworkproof-verification-profile/0.3":
             model = VerificationProfileV03
+        elif schema == "openworkproof-verification-profile/0.5":
+            model = VerificationProfileV05
         else:
             raise ValueError("verification profile schema_version is unsupported")
         profile = model.model_validate(payload)
@@ -223,6 +237,9 @@ class OpenWorkProofServices:
         elif schema == "openworkproof-verification-arm-result/0.3":
             result = VerificationArmResultV03.model_validate(payload)
             committed = commit_verification_arm_result_v03(ledger, result)
+        elif schema == "openworkproof-verification-arm-result/0.5":
+            result = VerificationArmResultV05.model_validate(payload)
+            committed = commit_verification_arm_result_v05(ledger, result)
         else:
             raise ValueError("verification arm result schema_version is unsupported")
         return committed.model_dump(mode="json")
@@ -241,12 +258,17 @@ class OpenWorkProofServices:
             v03 = connection.execute(
                 "SELECT COUNT(*) FROM verification_profiles_v03"
             ).fetchone()[0]
+            v05 = connection.execute(
+                "SELECT COUNT(*) FROM verification_profiles_v05"
+            ).fetchone()[0]
         finally:
             connection.close()
-        if (v02, v03) == (1, 0):
+        if (v02, v03, v05) == (1, 0, 0):
             draft = prepare_verification_decision(ledger, request)
-        elif (v02, v03) == (0, 1):
+        elif (v02, v03, v05) == (0, 1, 0):
             draft = prepare_verification_decision_v03(ledger, request)
+        elif (v02, v03, v05) == (0, 0, 1):
+            draft = prepare_verification_decision_v05(ledger, request)
         else:
             raise ValueError("verification protocol is ambiguous")
         return draft.model_dump(mode="json")
@@ -263,6 +285,9 @@ class OpenWorkProofServices:
         elif schema == "openworkproof-verification-decision/0.3":
             decision = VerificationDecisionV03.model_validate(payload)
             committed = commit_verification_decision_v03(ledger, decision)
+        elif schema == "openworkproof-verification-decision/0.5":
+            decision = VerificationDecisionV05.model_validate(payload)
+            committed = commit_verification_decision_v05(ledger, decision)
         else:
             raise ValueError("verification decision schema_version is unsupported")
         return committed.model_dump(mode="json")
@@ -282,6 +307,52 @@ class OpenWorkProofServices:
 
     def audit_delivery(self, package: Path) -> dict:
         return verify_delivery_package(package).model_dump(mode="json")
+
+    def validate_population_observation(
+        self, payload: Mapping[str, object]
+    ) -> dict:
+        """Replay one v0.5 population observation against its contract."""
+        profile = VerificationProfileV05.model_validate(payload["profile"])
+        manifest = EvaluationScopeManifest.model_validate(payload["manifest"])
+        result = VerificationArmResultV05.model_validate(payload["result"])
+        rule_outputs = {
+            str(key): tuple(value)
+            for key, value in dict(payload["rule_outputs"]).items()
+        }
+        inventory = {
+            str(key): _b64url_decode(str(value))
+            for key, value in dict(payload["evidence_inventory"]).items()
+        }
+        integrity.validate_population_observation(
+            profile,
+            manifest,
+            result,
+            rule_outputs=rule_outputs,
+            evidence_inventory=inventory,
+        )
+        return {"valid": True, "schema_version": result.schema_version}
+
+    def validate_control_observation(
+        self, payload: Mapping[str, object]
+    ) -> dict:
+        """Replay one v0.5 control observation set against its contracts."""
+        profile = VerificationProfileV05.model_validate(payload["profile"])
+        results = tuple(
+            VerificationArmResultV05.model_validate(item)
+            for item in payload["results"]
+        )
+        assessment = integrity.assess_control_integrity(profile, results)
+        return {
+            "valid": True,
+            "control_status": assessment.status,
+            "reason_codes": list(assessment.reason_codes),
+        }
+
+    def explain_integrity_package(self, package: Path) -> dict:
+        """Derive the v0.5 integrity explanation from package bytes."""
+        from openworkproof.delivery_package import explain_integrity_package
+
+        return explain_integrity_package(package)
 
     def get_settlement_readiness(self, ledger: Path) -> dict:
         return read_settlement_snapshot(ledger).model_dump(mode="json")

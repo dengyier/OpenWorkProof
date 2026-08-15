@@ -83,7 +83,9 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 | `owp_status` | Replay a ledger and return its state |
 | `owp_run_tests` | Forward a run-tests execution |
 | `owp_repo_read` | Forward a repo-read execution |
-| `owp_validate_profile` | Validate a signed Evidence Lifecycle v0.2 or v0.3 profile |
+| `owp_validate_profile` | Validate a signed Evidence Lifecycle v0.2, v0.3, or v0.5 profile |
+| `owp_integrity_observation_validate` | Replay one v0.5 population observation against its contract (read-only) |
+| `owp_control_observation_validate` | Replay one v0.5 control observation set against its contracts (read-only) |
 | `owp_scope_validate` | Intrinsically validate a v0.3 scope without asserting signer authority |
 | `owp_scope_compare` | Compare a signed v0.3 scope with observed coverage |
 | `owp_run_verification` | Dispatch a v0.2/v0.3 arm or decision operation by closed schema version |

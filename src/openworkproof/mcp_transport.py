@@ -443,12 +443,42 @@ def owp_list_domains() -> dict[str, Any]:
 
 @mcp.tool()
 def owp_validate_profile(profile_json: str) -> dict[str, Any]:
-    """Validate a signed Evidence Lifecycle v0.2 or v0.3 profile."""
+    """Validate a signed Evidence Lifecycle v0.2, v0.3, or v0.5 profile."""
     try:
         payload = _json_object(profile_json, field="profile_json")
     except ValueError as error:
         return _err(str(error))
     return _service_call(OpenWorkProofServices().validate_profile, payload)
+
+
+@mcp.tool()
+def owp_integrity_observation_validate(payload_json: str) -> dict[str, Any]:
+    """Replay one v0.5 population observation against its contract.
+
+    This read-only tool never signs, commits, accepts, or settles anything.
+    """
+    try:
+        payload = _json_object(payload_json, field="payload_json")
+    except ValueError as error:
+        return _err(str(error))
+    return _service_call(
+        OpenWorkProofServices().validate_population_observation, payload
+    )
+
+
+@mcp.tool()
+def owp_control_observation_validate(payload_json: str) -> dict[str, Any]:
+    """Replay one v0.5 control observation set against its contracts.
+
+    This read-only tool never signs, commits, accepts, or settles anything.
+    """
+    try:
+        payload = _json_object(payload_json, field="payload_json")
+    except ValueError as error:
+        return _err(str(error))
+    return _service_call(
+        OpenWorkProofServices().validate_control_observation, payload
+    )
 
 
 @mcp.tool()
@@ -532,7 +562,7 @@ def owp_run_verification(
     payload: str,
     operation: str,
 ) -> dict[str, Any]:
-    """Run exactly one explicit v0.2 or v0.3 verification operation.
+    """Run exactly one explicit v0.2, v0.3, or v0.5 verification operation.
 
     ``operation`` must be ``commit_arm``, ``prepare_decision``, or
     ``commit_decision``.  The tool never retries an indeterminate commit.

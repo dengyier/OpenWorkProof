@@ -208,6 +208,18 @@ def cli_audit_explain(package: str | Path) -> dict:
     }
 
 
+def cli_integrity_observation(payload: dict[str, object]) -> dict:
+    return _service_result(
+        OpenWorkProofServices().validate_population_observation, payload
+    )
+
+
+def cli_control_observation(payload: dict[str, object]) -> dict:
+    return _service_result(
+        OpenWorkProofServices().validate_control_observation, payload
+    )
+
+
 def cli_audit_compare(old_package: str | Path, new_package: str | Path) -> dict:
     old = cli_audit_replay(old_package)
     new = cli_audit_replay(new_package)
@@ -320,9 +332,19 @@ def build_parser() -> argparse.ArgumentParser:
     repo_read.add_argument("payload", help="path to the repo-read payload JSON")
 
     profile_validate = sub.add_parser(
-        "profile-validate", help="validate a signed v0.2/v0.3 verification profile"
+        "profile-validate", help="validate a signed v0.2/v0.3/v0.5 verification profile"
     )
     profile_validate.add_argument("payload", help="path to profile JSON")
+
+    for name, help_text in (
+        ("integrity-observation", "validate one population observation"),
+        ("control-observation", "validate one control observation set"),
+    ):
+        command = sub.add_parser(name, help=help_text)
+        command.add_argument(
+            "action", choices=("validate",), help="observation action"
+        )
+        command.add_argument("payload", help="path to observation JSON")
 
     for name, help_text in (
         ("verify-positive", "commit a positive-arm verification result"),
@@ -464,6 +486,10 @@ def app(argv: Sequence[str] | None = None) -> int:
             result = cli_repo_read(args.ledger, _load_payload(args.payload))
         elif args.command == "profile-validate":
             result = cli_profile_validate(_load_payload(args.payload))
+        elif args.command == "integrity-observation":
+            result = cli_integrity_observation(_load_payload(args.payload))
+        elif args.command == "control-observation":
+            result = cli_control_observation(_load_payload(args.payload))
         elif args.command == "scope-build":
             result = cli_scope_build(
                 _load_payload(args.claim),
@@ -557,6 +583,13 @@ def app(argv: Sequence[str] | None = None) -> int:
             "indeterminate": 3,
             "contradicted": 4,
         }[result["scope_status"]]
+    if args.command == "control-observation" and "control_status" in result:
+        return {
+            "proven": 0,
+            "survived": 4,
+            "mismatched": 3,
+            "unavailable": 3,
+        }[result["control_status"]]
     return 0
 
 
