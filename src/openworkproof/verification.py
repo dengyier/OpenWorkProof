@@ -2923,7 +2923,32 @@ def _validate_single_arm_result_v05(
                 "v0.5 control observation does not bind its contract"
             )
         for ref in observation.evidence_refs:
-            _read_evidence_ref(path, ref, canonical_json=False)
+            raw = _read_evidence_ref(path, ref, canonical_json=True)
+            try:
+                document = json.loads(raw)
+            except (UnicodeDecodeError, ValueError) as error:
+                raise VerificationTransactionError(
+                    "v0.5 control evidence is invalid JSON"
+                ) from error
+            if rfc8785.dumps(document) != raw:
+                raise VerificationTransactionError(
+                    "v0.5 control evidence is not canonical"
+                )
+            try:
+                facts = integrity.resolve_control_evidence(document, contract)
+            except integrity.ControlEvidenceError as error:
+                raise VerificationTransactionError(
+                    f"v0.5 control evidence is unprovable: {error}"
+                ) from error
+            if (
+                facts.fixture_digest != observation.fixture_digest
+                or facts.provocation_digest != observation.provocation_digest
+                or facts.failure_signature
+                != observation.observed_failure_signature
+            ):
+                raise VerificationTransactionError(
+                    "v0.5 control evidence contradicts the signed observation"
+                )
         try:
             derived, code = integrity._derived_control_status(contract, result)
         except ValueError as error:

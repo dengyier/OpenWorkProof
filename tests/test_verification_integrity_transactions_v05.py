@@ -388,10 +388,20 @@ def _v05_control_observation(
     **overrides: Any,
 ) -> dict[str, Any]:
     payload = _control_observation_payload(contract, **overrides)
+    observed = payload["observed_failure_signature"]
+    evidence = {
+        "schema_version": "openworkproof-control-evidence/0.5",
+        "control_id": contract.control_id,
+        "fixture_digest": payload["fixture_digest"],
+        "provocation_digest": payload["provocation_digest"],
+        "execution_status": observed["execution_status"],
+        "exit_codes": observed["exit_codes"],
+        "reason_codes": observed["reason_codes"],
+        "predicate_ids": observed["predicate_ids"],
+        "required_evidence_purposes": observed["required_evidence_purposes"],
+    }
     payload["evidence_refs"] = [
-        _write_json_evidence(
-            root, f"control/{arm_kind}.json", {"arm": arm_kind}
-        )
+        _write_json_evidence(root, f"control/{arm_kind}.json", evidence)
     ]
     return payload
 

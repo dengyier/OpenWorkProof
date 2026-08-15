@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from typing import Any
 
 import pytest
+import rfc8785
 
 from openworkproof import evidence
 from openworkproof.delivery_package import export_delivery_package
@@ -950,3 +952,94 @@ def test_audit_i1_decision_load_rejects_swapped_arm_rows(v05_transaction_case) -
                 nonce="f" * 64,
             ),
         )
+
+
+def _control_observation_with_evidence(
+    case,
+    *,
+    evidence_document,
+    control_status="proven",
+) -> VerificationArmResultV05:
+    from openworkproof.verification import VerificationTransactionError
+
+    contract = case["profile"].control_contracts[0]
+    payload = _v05_control_observation(
+        case["tmp_path"], contract, arm_kind="negative"
+    )
+    ref_path = payload["evidence_refs"][0]["path"]
+    raw = rfc8785.dumps(evidence_document)
+    (case["tmp_path"] / ref_path).write_bytes(raw)
+    payload["evidence_refs"] = [
+        {
+            "path": ref_path,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "media_type": "application/json",
+            "size_bytes": len(raw),
+        }
+    ]
+    return _resign_arm_result_v05(
+        case, case["results"][1], control_observation=payload
+    )
+
+
+def test_audit_i2_noncanonical_control_evidence_cannot_be_proven(
+    v05_transaction_case,
+) -> None:
+    """Audit I2: a bare ``{"arm": "negative"}`` control-evidence blob must
+    never resolve to proven — the closed evidence resolver rejects it."""
+    case = v05_transaction_case
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    negative = _control_observation_with_evidence(
+        case, evidence_document={"arm": "negative"}
+    )
+    with pytest.raises(VerificationTransactionError, match="unprovable"):
+        commit_verification_arm_result_v05(case["ledger"], negative)
+
+
+def test_audit_i2_control_evidence_contradiction_is_rejected(
+    v05_transaction_case,
+) -> None:
+    """Audit I2: canonical evidence whose failure facts diverge from the
+    signed observation must be rejected as a contradiction."""
+    case = v05_transaction_case
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    contract = case["profile"].control_contracts[0]
+    observed = contract.expected_failure_signature.model_dump(mode="json")
+    evidence_document = {
+        "schema_version": "openworkproof-control-evidence/0.5",
+        "control_id": contract.control_id,
+        "fixture_digest": contract.fixture_digest,
+        "provocation_digest": contract.provocation_digest,
+        "execution_status": "completed",
+        "exit_codes": [2],
+        "reason_codes": observed["reason_codes"],
+        "predicate_ids": observed["predicate_ids"],
+        "required_evidence_purposes": observed["required_evidence_purposes"],
+    }
+    negative = _control_observation_with_evidence(
+        case, evidence_document=evidence_document
+    )
+    with pytest.raises(
+        VerificationTransactionError, match="contradicts the signed observation"
+    ):
+        commit_verification_arm_result_v05(case["ledger"], negative)
+
+
+def test_audit_i2_missing_control_evidence_is_rejected(
+    v05_transaction_case,
+) -> None:
+    """Audit I2: a signed observation whose control evidence file is missing
+    must fail closed at commit."""
+    case = v05_transaction_case
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    contract = case["profile"].control_contracts[0]
+    payload = _v05_control_observation(
+        case["tmp_path"], contract, arm_kind="negative"
+    )
+    ref_path = payload["evidence_refs"][0]["path"]
+    (case["tmp_path"] / ref_path).unlink()
+    negative = _resign_arm_result_v05(
+        case, case["results"][1], control_observation=payload
+    )
+    with pytest.raises(VerificationTransactionError, match="unavailable"):
+        commit_verification_arm_result_v05(case["ledger"], negative)

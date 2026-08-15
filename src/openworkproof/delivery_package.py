@@ -2533,7 +2533,20 @@ def _load_v05_objects_and_evidence(root: Path, manifest: DeliveryManifest):
                     )
                 inventory[ref.sha256] = payload
         if result.control_observation is not None:
-            for ref in result.control_observation.evidence_refs:
+            contract = next(
+                (
+                    item
+                    for item in profile.control_contracts
+                    if item.arm_id == result.arm_id
+                ),
+                None,
+            )
+            if contract is None:
+                raise DeliveryPackageError(
+                    "v0.5 control contract is unavailable"
+                )
+            observation = result.control_observation
+            for ref in observation.evidence_refs:
                 payload = _read_bound(
                     root,
                     manifest,
@@ -2545,6 +2558,31 @@ def _load_v05_objects_and_evidence(root: Path, manifest: DeliveryManifest):
                 ):
                     raise DeliveryPackageError(
                         "v0.5 control evidence integrity failed"
+                    )
+                try:
+                    document = json.loads(payload)
+                except (UnicodeDecodeError, ValueError) as error:
+                    raise DeliveryPackageError(
+                        "v0.5 control evidence is invalid JSON"
+                    ) from error
+                if rfc8785.dumps(document) != payload:
+                    raise DeliveryPackageError(
+                        "v0.5 control evidence is not canonical"
+                    )
+                try:
+                    facts = integrity.resolve_control_evidence(document, contract)
+                except integrity.ControlEvidenceError as error:
+                    raise DeliveryPackageError(
+                        f"v0.5 control evidence is unprovable: {error}"
+                    ) from error
+                if (
+                    facts.fixture_digest != observation.fixture_digest
+                    or facts.provocation_digest != observation.provocation_digest
+                    or facts.failure_signature
+                    != observation.observed_failure_signature
+                ):
+                    raise DeliveryPackageError(
+                        "v0.5 control evidence contradicts the signed observation"
                     )
         results.append(result)
     population = integrity.assess_population_integrity(

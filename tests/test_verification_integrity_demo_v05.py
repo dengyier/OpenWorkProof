@@ -69,7 +69,7 @@ FROZEN_BUNDLE = (
 )
 ISSUE_URL = "https://github.com/Textualize/rich/issues/4196"
 FROZEN_BUNDLE_SHA256 = (
-    "88c39c10761354cc3030c912a98984f10fe06f6b350f03f0f2a632d786dafee0"
+    "812c4831310e6d653698db7ef93b10a808525d9c30a802ee9c7bc0060020e301"
 )
 
 
@@ -353,6 +353,16 @@ def _demo_results(
                 arm_kind="negative",
                 **(control_overrides or {}),
             )
+            # Stage-unique evidence path: later stages rewrite
+            # control/negative.json, and the hardened loader revalidates every
+            # committed result, so each stage must own its file.
+            original_ref = control["evidence_refs"][0]
+            staged_path = f"control/{suffix}-negative.json"
+            staged_bytes = (root / original_ref["path"]).read_bytes()
+            staged_ref = _write_json_evidence(
+                root, staged_path, json.loads(staged_bytes)
+            )
+            control["evidence_refs"] = [staged_ref]
         result_ref = _write_json_evidence(
             root,
             f"results/{kind}.json",

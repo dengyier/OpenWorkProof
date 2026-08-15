@@ -656,6 +656,89 @@ _CONTROL_EXEC_FAILURE_CODES = frozenset(
     }
 )
 
+_CONTROL_EVIDENCE_SCHEMA = "openworkproof-control-evidence/0.5"
+_CONTROL_EVIDENCE_KEYS = frozenset(
+    {
+        "schema_version",
+        "control_id",
+        "fixture_digest",
+        "provocation_digest",
+        "execution_status",
+        "exit_codes",
+        "reason_codes",
+        "predicate_ids",
+        "required_evidence_purposes",
+    }
+)
+
+
+class ControlEvidenceError(ValueError):
+    """A control-evidence document cannot prove its observation."""
+
+
+@dataclass(frozen=True)
+class ControlEvidenceFacts:
+    """Facts resolved from one closed control-evidence document."""
+
+    fixture_digest: str
+    provocation_digest: str
+    failure_signature: FailureSignatureV05
+
+
+def resolve_control_evidence(
+    document: object,
+    contract: ControlContractV05,
+) -> ControlEvidenceFacts:
+    """Resolve one closed control-evidence document into execution facts.
+
+    The document is the only authoritative source of what the negative arm
+    execution observed: execution status, exit codes, reason codes,
+    predicate ids, evidence purposes, and the fixture/provocation digests the
+    run applied. Drift against the signed contract is a legitimate
+    observation outcome (it derives ``mismatched`` at assessment time); this
+    resolver returns the facts so the caller can demand they equal the
+    signed observation exactly. Missing, malformed, or unbindable documents
+    raise :class:`ControlEvidenceError`; the ledger and the offline package
+    share this resolver so a non-canonical blob can never be treated as
+    ``proven``.
+    """
+
+    if type(document) is not dict:
+        raise ControlEvidenceError("control evidence is not a JSON object")
+    if set(document) != _CONTROL_EVIDENCE_KEYS:
+        raise ControlEvidenceError("control evidence fields are not closed")
+    if document["schema_version"] != _CONTROL_EVIDENCE_SCHEMA:
+        raise ControlEvidenceError("control evidence schema_version is unsupported")
+    if type(document["control_id"]) is not str or (
+        document["control_id"] != contract.control_id
+    ):
+        raise ControlEvidenceError("control evidence does not bind its contract")
+    if type(document["fixture_digest"]) is not str or type(
+        document["provocation_digest"]
+    ) is not str:
+        raise ControlEvidenceError("control evidence digests are invalid")
+    try:
+        signature = FailureSignatureV05.model_validate(
+            {
+                "execution_status": document["execution_status"],
+                "exit_codes": document["exit_codes"],
+                "reason_codes": document["reason_codes"],
+                "predicate_ids": document["predicate_ids"],
+                "required_evidence_purposes": document[
+                    "required_evidence_purposes"
+                ],
+            }
+        )
+    except Exception as error:
+        raise ControlEvidenceError(
+            "control evidence failure facts are invalid"
+        ) from error
+    return ControlEvidenceFacts(
+        fixture_digest=document["fixture_digest"],
+        provocation_digest=document["provocation_digest"],
+        failure_signature=signature,
+    )
+
 
 def validate_control_contracts(profile: VerificationProfileV05) -> None:
     """Reject a signed profile whose control contracts do not match its arms.
