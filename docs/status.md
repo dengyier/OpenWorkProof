@@ -17,18 +17,41 @@ selected 分离）、负控契约/失败签名、`VERIFIED / REFUTED / UNKNOWN` 
 （`CONTROL_FAILURE_SIGNATURE_MISMATCH`）与修复后完整链 `VERIFIED`，其
 冻结交付包离线重放为 `VERIFICATION PASSED`。
 
-本节写作时的本地测量（Task 15 发布门将复测并更新最终数字）：
+Task 15 发布门已重建候选并复测，最终测量（2026-08-15）：
 
-- source revision：`012c248`（docs 更新提交紧随其后）；
+- candidate source revision：`18732766cf87976208acfb020aa4f6652fb6a1cf`
+  （allowlist 扩展后的实现提交）；不可变库存：
+  `supply-chain/images/candidates/18732766cf87976208acfb020aa4f6652fb6a1cf.json`；
 - Python 分发版本 `1.1.1`；冻结协议 Schema `0.1`–`0.5`；
 - v0.5 focused 套件（models/population/control/transactions/adapters/
   acceptance/delivery/interfaces/adversarial/demo，10 个文件）：
-  `342 passed、0 failed、9 warnings`；
-- 便携全量（除 2 个候选库存用例）：`3398 passed、0 failed、7 skipped、
-  9 warnings`（本次 docs 更新后计数将再增长，以 Task 15 复测为准）；
-- 候选状态：`test_candidate_supplychain_integration.py` 的两个
-  candidate-inventory 绑定用例在既有候选库存上失败
-  （candidate inventory drift），Task 15 重建库存后复测；
+  `342 passed、0 failed`（约 18 秒）；
+- 便携全量（`pytest -q --ignore=tests/test_candidate_supplychain_integration.py`）：
+  `3317 passed、0 failed、6 skipped`（约 5 分钟；skip 为真实 Landlock 与
+  live Docker 未启用）；
+- candidate 两套件（`OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1` + artifact root +
+  immutable 镜像引用）：`168 passed、0 failed`（含 live Docker 与
+  上下文重建身份链）；
+- **required-live 全量**（live Docker + immutable 镜像 +
+  `-W 'error::pytest.PytestUnhandledThreadExceptionWarning'`）：
+  **`3422 passed、0 failed、0 skipped`**（9 分 15 秒）；
+- Rich #4196 v0.5 交付包离线重放：`VERIFICATION PASSED / VERIFIED /
+  READY_FOR_ACCEPTANCE`（无网络、无原始账本）；
+- Docker 残留：本任务零残留容器/卷；本机另有 5 个运行中的 agentteams
+  容器与 9 个既有数据卷（非本任务创建，未清理）；
+- 归档哈希：execution docker
+  `55f9e0fd86589db2ec83d3a8a1040bc0f359321b9a7e79405540e43b27219a91`、
+  execution OCI
+  `9ac9bd087b5d86c6a7cd95140cb5e7d9fb52533f5dbc0a71a8ffcef4e741c1fb`、
+  trusted-helper docker
+  `100036b76b47806acea29cfbc1322e01cdb539c1311151eb456c479f53a7ed8a`、
+  trusted-helper OCI
+  `f534c0644099c143d2182071ea8e855e7ce452b005ae463717b6cc7d5d3b9f39`；
+- 修复记录：Docker 29.5.2 buildx 的 docker 归档 descriptor 附带 wall-clock
+  `org.opencontainers.image.created` 且缺 `config.digest`，违反 docker-v2
+  契约；`convert_docker_archive.py` 幂等分支改为从 manifest blob 与
+  RepoTags 重建精确三键 annotation（提交 `e5704d4`），归档重新转换后
+  artifact chain 全绿；
 - 9 项 warning 均为既有 pytest 临时根 `rm_rf` 清理噪声
   （`test_execute_rejects_invalid_f1` 只读目录），不含未处理线程异常。
 
