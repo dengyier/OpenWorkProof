@@ -289,3 +289,25 @@ def test_malformed_observation_payloads_fail_closed(service_case) -> None:
     control_result = owp_control_observation_validate(json.dumps(missing_profile))
     assert control_result["ok"] is False
     assert "profile" in control_result["error"]
+
+
+def test_operator_docs_cover_v05_observation_commands() -> None:
+    root = Path(__file__).parent.parent
+    mcp = (root / "MCP_SERVER.md").read_text(encoding="utf-8")
+    assert "owp_integrity_observation_validate" in mcp
+    assert "owp_control_observation_validate" in mcp
+    assert "not_checked" in mcp
+    offline = (root / "docs/offline-verification.md").read_text(encoding="utf-8")
+    for command in (
+        "owp integrity-observation validate",
+        "owp control-observation validate",
+    ):
+        assert command in offline
+    for code in (
+        "POPULATION_CAPTURE_FAILED",
+        "CONTROL_FAILURE_SIGNATURE_MISMATCH",
+        "POPULATION_CROSS_ARM_MISMATCH",
+    ):
+        assert code in offline
+    assert "是安全结论" in offline
+    assert "不是系统崩溃" in offline

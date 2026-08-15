@@ -210,3 +210,69 @@ selector 规格证据重放 rule-output witness、重算 population 与 control 
 比例、population/control 状态、各负控 target 与状态、reason codes 与边界
 声明（验证证据不证明付款或客户验收）；`compare_integrity_packages` 识别
 rule/engine/population/fixture/provocation/failure-signature 变化。
+
+### 操作命令与退出码
+
+```bash
+# 只读评估：重放人口观察（population assessment）
+owp integrity-observation validate population.json
+# 只读评估：重放负控观察（control assessment）
+owp control-observation validate control.json
+```
+
+两份评估都只依据已签名输入与重放的证据派生结论，签名者权威一律报告为
+`authority: not_checked`，绝不冒充已授权。退出码：
+
+| 命令 | 结论 | 退出码 |
+|---|---|---|
+| `integrity-observation` | `population_status: matched` | `0` |
+| `integrity-observation` | `empty` / `capture_failed` / `drifted` / `unavailable` | `3` |
+| `control-observation` | `control_status: proven` | `0` |
+| `control-observation` | `control_status: survived` | `4` |
+| `control-observation` | `mismatched` / `unavailable` | `3` |
+| 任意 | 输入不合法或操作失败 | `1` |
+
+### 人口与负控原因码表（v0.5）
+
+| 状态 | 原因码 | 含义 |
+|---|---|---|
+| `empty` | `NO_ELIGIBLE_POPULATION` | 合格人口为零；契约要求按
+`empty_population_policy=unknown` 处理 |
+| `capture_failed` | `POPULATION_CAPTURE_FAILED` | 合格人口非零但选择数低于
+契约阈值，或选择为零——人口盲区 |
+| `drifted` | `POPULATION_CROSS_ARM_MISMATCH` | 正负臂对同一契约观察的
+合格/选择人口不一致 |
+| `drifted` | `POPULATION_DIGEST_MISMATCH` | 计数不变但成员摘要漂移 |
+| `drifted` | `POPULATION_RULE_DRIFT` / `POPULATION_ENGINE_DRIFT` | 规则或
+引擎摘要漂移 |
+| `unavailable` | `POPULATION_EVIDENCE_MISSING` | 人口证据缺失或不可重放 |
+| `mismatched` | `CONTROL_FIXTURE_DRIFT` | fixture 已替换但复用了 control id |
+| `mismatched` | `CONTROL_PROVOCATION_DRIFT` | provocation 摘要漂移 |
+| `mismatched` | `CONTROL_FAILURE_SIGNATURE_MISMATCH` | fixture 仍失败，但
+错误码或 predicate 与注册签名不一致——负控腐化 |
+| `unavailable` | `CONTROL_CONTRACT_EXPIRED` | 负控契约窗口过期 |
+| `unavailable` | `CONTROL_EVIDENCE_MISSING` | provocation 未应用、执行未
+完成或证据缺失 |
+| `survived` | `CONTROL_SURVIVED` | 负控执行完成但变异体存活 |
+
+### 恢复边界
+
+`UNKNOWN` 是安全结论，不是系统崩溃：它表示“按协议无法得出有边界的
+`VERIFIED`/`REFUTED`”，修复方向是补齐人口证据、修正选择器配置或重新注册
+负控失败签名，然后提交新的双臂结果与新决定（决策链 supersede），而不是
+重放旧决定。`REFUTED` 表示注册负控存活，候选被驳斥。任何旧 Result/旧
+Decision 都不能在修复后复用；每张 v0.5 权威表的 canonical JSON、relation、
+签名与 committed_at 被人工修改后，重放与提交都会失败关闭。
+
+自包含 v0.5 演示包（Rich #4196，人口盲区 → 负控腐化 → 修复后 VERIFIED）：
+
+```bash
+env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+  ./.venv/bin/python tests/evidence-bundles/verify_evidence_bundle.py \
+  tests/evidence-bundles/rich-4196-integrity-v05-delivery-package.json
+```
+
+预期输出包含 `VERIFICATION PASSED` 与
+`v0.5 integrity: blind capture_failed -> rot mismatched -> repaired VERIFIED`。
+该包由 OpenWorkProof 构造，`upstream_adoption`、`customer_case`、
+`commercial_validation` 均为 `not_evidenced`。

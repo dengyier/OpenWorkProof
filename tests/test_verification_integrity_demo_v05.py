@@ -574,3 +574,44 @@ def test_frozen_integrity_demo_bundle_is_offline_verifiable() -> None:
     assert completed.returncode == 0, completed.stderr
     assert "VERIFICATION PASSED" in completed.stdout
     assert "v0.5 integrity" in completed.stdout
+
+
+def test_readmes_describe_v05_integrity_and_honest_boundaries() -> None:
+    root = Path(__file__).parent.parent
+    cases = (
+        (
+            "README.md",
+            "验证完整性",
+            (
+                "支持自动付款",
+                "支持自动结算",
+                "保证正确",
+                "保证零缺陷",
+                "客户已经采用",
+                "客户已采用",
+                "上游已经采用",
+                "已被上游采用",
+            ),
+        ),
+        (
+            "README_en.md",
+            "Verification Integrity",
+            (
+                "automatic payment",
+                "guaranteed correct",
+                "guaranteed correctness",
+                "customers have adopted",
+                "adopted by customers",
+                "upstream has adopted",
+            ),
+        ),
+    )
+    for name, section_marker, forbidden in cases:
+        text = (root / name).read_text(encoding="utf-8")
+        assert section_marker in text
+        assert "POPULATION_CAPTURE_FAILED" in text
+        assert "CONTROL_FAILURE_SIGNATURE_MISMATCH" in text
+        assert "REFUTED" in text
+        assert "not evidenced" in text
+        for phrase in forbidden:
+            assert phrase not in text

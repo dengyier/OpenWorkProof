@@ -196,6 +196,49 @@ and the buyer-facing [Scope Coverage Report example](docs/pilot/scope-coverage-r
 External payment, customer acceptance, upstream adoption, and production
 deployment are currently `not evidenced`.
 
+### Verification Integrity v0.5
+
+v0.5 extends v0.3's declared-versus-observed scope with two facts frozen into
+the signed protocol: the **eligible population before selection** and the
+**reason a negative control failed**. v0.3 proves that what was selected was
+verified; v0.5 additionally proves what was eligible before selection, what
+the selector actually chose, and whether a negative control failed for the
+registered reason. It closes two blind spots earlier versions could not see:
+
+- **Population blind spot**: the execution engine can see multiple eligible
+  tests, but the selector chooses zero of them. The run itself finishes
+  cleanly, yet v0.5 derives `UNKNOWN / POPULATION_CAPTURE_FAILED` — never a
+  full-delivery claim from a local green check.
+- **Control rot**: the registered mutant still fails, but the failure cause
+  (error codes / predicate signature) does not match the registered
+  signature. v0.5 derives `UNKNOWN / CONTROL_FAILURE_SIGNATURE_MISMATCH` —
+  "failed by coincidence" never counts as "failed as intended".
+
+The three-state boundary stays monotonic: `VERIFIED` (population matched +
+control proven + positive arm satisfied), `REFUTED` (control survived),
+`UNKNOWN` (population empty/capture_failed/drifted/unavailable or control
+mismatched/unavailable). `UNKNOWN` is a safe outcome, not a crash and not a
+failure.
+
+```bash
+owp integrity-observation validate population.json
+owp control-observation validate control.json
+owp delivery-build --privacy-view customer_private pilot.sqlite3 delivery-package/
+owp audit-replay delivery-package/
+```
+
+Exit codes: population `matched` → `0`, every other population status → `3`;
+control `proven` → `0`, `survived` → `4`, `mismatched/unavailable` → `3`;
+malformed input → `1`.
+
+See [offline verification](docs/offline-verification.md) for the replay
+commands, reason-code table, and recovery boundaries, and
+`tests/integrity-demo/rich-4196/README.md` for the self-owned Rich #4196 demo.
+That demo declares `upstream_adoption`, `customer_case`, and
+`commercial_validation` as `not_evidenced`; it is not evidence of customer
+adoption, payment, fund release, automatic settlement, universal correctness,
+or regulatory compliance.
+
 ### Evidence Lifecycle v0.2 Compatibility Entry Points
 
 The current release candidate exposes v0.2 profile validation, positive and

@@ -3,9 +3,48 @@
 > 本文档是项目实现状态的权威记录。README 只保留概览，
 > 「已经完成什么」和「尚未完成什么」的完整清单以本文为准。
 
-当前分发版本：1.1.1；当前开发分支支持的冻结协议 Schema：0.1、0.2 与
-0.3。分发版本
+当前分发版本：1.1.1；当前开发分支支持的冻结协议 Schema：0.1、0.2、0.3、
+0.4 与 0.5。分发版本
 和协议版本分别记录，不得把 Python 分发版本解释成协议版本。
+
+## Verification Integrity v0.5 本地开发状态
+
+`main` 分支已实现 v0.5 验证完整性协议：人口契约/观察（eligible 与
+selected 分离）、负控契约/失败签名、`VERIFIED / REFUTED / UNKNOWN` 三态
+决策矩阵、追加式账本事务层、三种隐私视图的离线交付包、只读 CLI/MCP
+评估入口，以及规格 §12 全部 15 类攻击的对抗测试矩阵。Rich #4196 自建
+演示覆盖人口盲区（`POPULATION_CAPTURE_FAILED`）、负控腐化
+（`CONTROL_FAILURE_SIGNATURE_MISMATCH`）与修复后完整链 `VERIFIED`，其
+冻结交付包离线重放为 `VERIFICATION PASSED`。
+
+本节写作时的本地测量（Task 15 发布门将复测并更新最终数字）：
+
+- source revision：`012c248`（docs 更新提交紧随其后）；
+- Python 分发版本 `1.1.1`；冻结协议 Schema `0.1`–`0.5`；
+- v0.5 focused 套件（models/population/control/transactions/adapters/
+  acceptance/delivery/interfaces/adversarial/demo，10 个文件）：
+  `342 passed、0 failed、9 warnings`；
+- 便携全量（除 2 个候选库存用例）：`3398 passed、0 failed、7 skipped、
+  9 warnings`（本次 docs 更新后计数将再增长，以 Task 15 复测为准）；
+- 候选状态：`test_candidate_images.py` 与
+  `test_candidate_supplychain_integration.py` 在既有候选库存上失败
+  （candidate inventory drift），Task 15 重建库存后复测；
+- 9 项 warning 均为既有 pytest 临时根 `rm_rf` 清理噪声
+  （`test_execute_rejects_invalid_f1` 只读目录），不含未处理线程异常。
+
+外部状态边界：
+
+```yaml
+customer_adoption: not_evidenced
+paid_sow: not_evidenced
+deposit: not_evidenced
+upstream_adoption: not_evidenced
+commercial_validation: not_evidenced
+```
+
+绿色测试与离线重放是本地协议能力证据，不表示客户愿意付费、已获得第三方
+认证、已减少验收争议、已被上游项目采用或已部署。以上是本地开发状态，不是
+发布、推送或验收声明。
 
 ## Judgment-to-Action Binding v0.4 稳定性前置修复
 

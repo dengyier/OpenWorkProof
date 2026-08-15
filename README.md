@@ -189,6 +189,42 @@ OpenWorkProof 作为补充层，把一次工作的授权、范围证据和验收
 买方交付样例见 [Scope Coverage Report](docs/pilot/scope-coverage-report.example.md)。
 当前外部付费、客户验收、上游采用与正式部署均为 `not evidenced`。
 
+### 验证完整性 Verification Integrity v0.5
+
+v0.5 在 v0.3 的“声明范围与观察范围一致”之上，把**选择前的合格人口**与
+**负控失败原因**一并冻结进签名协议。v0.3 只能证明“被选中的部分被验证了”；
+v0.5 额外证明“选择之前存在哪些合格人口、选择器实际选中了什么，以及负向
+控制失败是否来自注册的原因”，从而堵住两类此前测不到的盲区：
+
+- **人口盲区**：执行引擎能看到多个合格测试，但选择器选出了零个。运行本身
+  正常结束，v0.5 得出 `UNKNOWN / POPULATION_CAPTURE_FAILED`，不会把局部
+  绿灯当成完整交付。
+- **负控腐化**：注册的变异体仍然失败，但失败原因（错误码 / predicate 签名）
+  与注册签名不一致。v0.5 得出 `UNKNOWN / CONTROL_FAILURE_SIGNATURE_MISMATCH`，
+  不会把“碰巧失败”当成“按预期失败”。
+
+三态边界保持单调：`VERIFIED`（人口 matched + 负控 proven + 正臂满足）、
+`REFUTED`（负控 survived）、`UNKNOWN`（人口 empty/capture_failed/drifted/
+unavailable 或负控 mismatched/unavailable）。`UNKNOWN` 是安全结论，不是系统
+崩溃，也不是失败。
+
+```bash
+owp integrity-observation validate population.json
+owp control-observation validate control.json
+owp delivery-build --privacy-view customer_private pilot.sqlite3 delivery-package/
+owp audit-replay delivery-package/
+```
+
+退出码：人口 `matched` 为 `0`，其余人口状态为 `3`；负控 `proven` 为 `0`、
+`survived` 为 `4`、`mismatched/unavailable` 为 `3`；输入不合法为 `1`。
+
+离线验证、原因码表与恢复边界见
+[离线验签说明](docs/offline-verification.md)。真实 Issue 演示见
+`tests/integrity-demo/rich-4196/README.md`（Rich #4196）。该演示由
+OpenWorkProof 自建，`upstream_adoption`、`customer_case`、
+`commercial_validation` 均为 `not_evidenced`；它不证明任何客户采用、已经
+付款、资金已释放、自动结算、普遍正确性或法规合规。
+
 ### Evidence Lifecycle v0.2 兼容入口
 
 当前发布候选提供 v0.2 的 Profile 校验、正负证据提交、验证决定、Delivery
