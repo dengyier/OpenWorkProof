@@ -3212,7 +3212,11 @@ def _validate_committed_at(value: object) -> str:
         raise VerificationTransactionError(
             "v0.5 committed_at is not canonical"
         ) from error
-    if parsed.tzinfo is not None or value != parsed.strftime("%Y-%m-%dT%H:%M:%SZ"):
+    if (
+        parsed.tzinfo is not None
+        or parsed.second == 60
+        or value != parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+    ):
         raise VerificationTransactionError("v0.5 committed_at is not canonical")
     return value
 

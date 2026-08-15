@@ -1113,3 +1113,28 @@ def test_audit_i5_transition_parent_row_delete_fails_closed(
         connection.close()
     with pytest.raises(SettlementReadError):
         read_settlement_snapshot(case["ledger"])
+
+
+def test_audit_i1_decision_load_rejects_leap_second_committed_at(
+    v05_transaction_case,
+) -> None:
+    """A leap-second committed_at is not a canonical UTC second."""
+    case = v05_transaction_case
+    decision = _full_chain_with_decision(case)
+    _corrupt_row(
+        case,
+        "verification_decisions_v05",
+        "committed_at",
+        "2026-01-01T00:00:60Z",
+        where="decision_id",
+        who=decision.decision_id,
+    )
+    with pytest.raises(VerificationTransactionError, match="committed_at"):
+        prepare_verification_decision_v05(
+            case["ledger"],
+            DecisionDraftRequest(
+                decision_id="e" * 64,
+                decided_at="2026-01-01T00:21:00Z",
+                nonce="f" * 64,
+            ),
+        )
