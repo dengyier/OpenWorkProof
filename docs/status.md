@@ -26,8 +26,8 @@ selected 分离）、负控契约/失败签名、`VERIFIED / REFUTED / UNKNOWN` 
   `342 passed、0 failed、9 warnings`；
 - 便携全量（除 2 个候选库存用例）：`3398 passed、0 failed、7 skipped、
   9 warnings`（本次 docs 更新后计数将再增长，以 Task 15 复测为准）；
-- 候选状态：`test_candidate_images.py` 与
-  `test_candidate_supplychain_integration.py` 在既有候选库存上失败
+- 候选状态：`test_candidate_supplychain_integration.py` 的两个
+  candidate-inventory 绑定用例在既有候选库存上失败
   （candidate inventory drift），Task 15 重建库存后复测；
 - 9 项 warning 均为既有 pytest 临时根 `rm_rf` 清理噪声
   （`test_execute_rejects_invalid_f1` 只读目录），不含未处理线程异常。

@@ -236,23 +236,17 @@ owp control-observation validate control.json
 
 | 状态 | 原因码 | 含义 |
 |---|---|---|
-| `empty` | `NO_ELIGIBLE_POPULATION` | 合格人口为零；契约要求按
-`empty_population_policy=unknown` 处理 |
-| `capture_failed` | `POPULATION_CAPTURE_FAILED` | 合格人口非零但选择数低于
-契约阈值，或选择为零——人口盲区 |
-| `drifted` | `POPULATION_CROSS_ARM_MISMATCH` | 正负臂对同一契约观察的
-合格/选择人口不一致 |
+| `empty` | `NO_ELIGIBLE_POPULATION` | 合格人口为零；契约按 `empty_population_policy=unknown` 处理 |
+| `capture_failed` | `POPULATION_CAPTURE_FAILED` | 合格人口非零但选择数低于契约阈值，或选择为零——人口盲区 |
+| `drifted` | `POPULATION_CROSS_ARM_MISMATCH` | 正负臂对同一契约观察的合格/选择人口不一致 |
 | `drifted` | `POPULATION_DIGEST_MISMATCH` | 计数不变但成员摘要漂移 |
-| `drifted` | `POPULATION_RULE_DRIFT` / `POPULATION_ENGINE_DRIFT` | 规则或
-引擎摘要漂移 |
+| `drifted` | `POPULATION_RULE_DRIFT` / `POPULATION_ENGINE_DRIFT` | 规则或引擎摘要漂移 |
 | `unavailable` | `POPULATION_EVIDENCE_MISSING` | 人口证据缺失或不可重放 |
 | `mismatched` | `CONTROL_FIXTURE_DRIFT` | fixture 已替换但复用了 control id |
 | `mismatched` | `CONTROL_PROVOCATION_DRIFT` | provocation 摘要漂移 |
-| `mismatched` | `CONTROL_FAILURE_SIGNATURE_MISMATCH` | fixture 仍失败，但
-错误码或 predicate 与注册签名不一致——负控腐化 |
+| `mismatched` | `CONTROL_FAILURE_SIGNATURE_MISMATCH` | fixture 仍失败，但错误码或 predicate 与注册签名不一致——负控腐化 |
 | `unavailable` | `CONTROL_CONTRACT_EXPIRED` | 负控契约窗口过期 |
-| `unavailable` | `CONTROL_EVIDENCE_MISSING` | provocation 未应用、执行未
-完成或证据缺失 |
+| `unavailable` | `CONTROL_EVIDENCE_MISSING` | provocation 未应用、执行未完成或证据缺失 |
 | `survived` | `CONTROL_SURVIVED` | 负控执行完成但变异体存活 |
 
 ### 恢复边界

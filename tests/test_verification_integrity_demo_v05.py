@@ -521,26 +521,32 @@ def test_rich_4196_v05_integrity_demo(
     )
 
     # Step 5: single-byte tamper probes — one population identity, one
-    # control fixture byte, and one failure-signature byte all fail closed.
+    # control fixture digest, and one failure-signature byte all fail
+    # closed. The fixture digest and the expected failure signature live
+    # authoritatively in verification-profile.json; the observed failure
+    # signature lives in the negative arm result object.
     population_files = [
         path
         for path in package.rglob("*")
         if path.is_file() and "eligible-population" in path.name
     ]
-    control_files = [
-        path
-        for path in package.rglob("*")
-        if path.is_file() and "control" in path.relative_to(package).as_posix()
-    ]
+    profile_file = package / "verification-profile.json"
+    import json as _json
+
     arm_files = [
         path
         for path in package.rglob("*")
-        if path.is_file() and "evidence/arms/" in path.relative_to(package).as_posix()
+        if path.is_file()
+        and "evidence/arms/" in path.relative_to(package).as_posix()
+        and _json.loads(path.read_text(encoding="utf-8")).get(
+            "control_observation"
+        )
+        is not None
     ]
-    assert population_files and control_files and arm_files
+    assert population_files and profile_file.is_file() and arm_files
     for label, target in (
         ("population-identity", population_files[0]),
-        ("control-fixture", control_files[0]),
+        ("control-fixture-digest", profile_file),
         ("failure-signature", arm_files[0]),
     ):
         tampered = tmp_path / f"tampered-{label}"
