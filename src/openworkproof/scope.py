@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -407,6 +409,27 @@ def compare_observed_scope(
 
 def _selector_engine_digest() -> str:
     return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
+_CANONICAL_COLLECT_CONFTEST = """# -*- coding: utf-8 -*-
+\"\"\"OpenWorkProof canonical pytest collection hook (frozen).\"\"\"
+
+import json
+import os
+
+
+def pytest_collection_finish(session):
+    target = os.environ.get("OWP_COLLECT_OUTPUT")
+    if not target:
+        return
+    node_ids = sorted({item.nodeid for item in session.items})
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {"node_ids": node_ids}, sort_keys=True, separators=(",", ":")
+            )
+        )
+"""
 
 
 def _selector_spec_bytes(selector_kind: str, payload: Mapping[str, object]) -> bytes:
@@ -835,6 +858,9 @@ def observe_git_population(
             "source_revision": source_revision,
             "candidate_commit": candidate_commit,
             "git_diff_mode": "name-status-z-find-renames",
+            "allowlist_locators": list(allowlist),
+            "excluded_locators": list(excluded),
+            "required_locators": list(required),
         },
     )
     reasons: list[str] = []
@@ -993,10 +1019,25 @@ def observe_pytest_population(
         type(item) is not str for item in selector_args
     ):
         raise ValueError("selector_args must be an exact list or tuple of strings")
+    if len(selector_args) > 64 or any(
+        not item or len(item.encode("utf-8")) > 256 or "\x00" in item
+        or item != item.strip()
+        for item in selector_args
+    ):
+        raise ValueError("selector_args entries are outside the closed bounds")
     if type(required_node_ids) not in {list, tuple} or any(
         type(item) is not str for item in required_node_ids
     ):
         raise ValueError("required_node_ids must be an exact list or tuple of strings")
+    required_nodes = tuple(sorted(set(required_node_ids)))
+    for node_id in required_nodes:
+        if (
+            not node_id
+            or "::" not in node_id
+            or "\\" in node_id
+            or node_id.startswith("/")
+        ):
+            raise ValueError("required_node_ids entries are not valid node ids")
     python = Path(python_executable).resolve(strict=True)
     if not python.is_file():
         raise ValueError("python_executable must be a file")
@@ -1010,6 +1051,11 @@ def observe_pytest_population(
             "python_executable_digest": python_digest,
             "argv": list(base_command[1:]),
             "timeout_seconds": timeout_seconds,
+            "selector_args": list(selector_args),
+            "required_node_ids": list(required_nodes),
+            "collector_conftest_digest": hashlib.sha256(
+                _CANONICAL_COLLECT_CONFTEST.encode("utf-8")
+            ).hexdigest(),
         },
     )
     reasons: list[str] = []
@@ -1052,8 +1098,19 @@ def observe_pytest_population(
         except subprocess.CalledProcessError as error:
             raise ValueError("pytest checkout failed") from error
         added = True
+        if (checkout / "conftest.py").exists():
+            raise ValueError(
+                "candidate checkout already contains a root conftest.py"
+            )
+        (checkout / "conftest.py").write_text(
+            _CANONICAL_COLLECT_CONFTEST, encoding="utf-8"
+        )
 
         def collect(extra_args: Sequence[str]) -> list[str]:
+            output_path = temporary_parent / (
+                f"collect-{uuid.uuid4().hex}.json"
+            )
+            environment["OWP_COLLECT_OUTPUT"] = str(output_path)
             completed = subprocess.run(
                 [*base_command, *list(extra_args)],
                 cwd=checkout,
@@ -1065,12 +1122,24 @@ def observe_pytest_population(
             )
             if completed.returncode not in {0, 5}:
                 raise ValueError("pytest collection failed")
+            try:
+                document = json.loads(output_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, ValueError) as error:
+                raise ValueError(
+                    "canonical pytest collection output is unavailable"
+                ) from error
+            if (
+                type(document) is not dict
+                or set(document) != {"node_ids"}
+                or type(document["node_ids"]) is not list
+                or any(
+                    type(item) is not str or "::" not in item
+                    for item in document["node_ids"]
+                )
+            ):
+                raise ValueError("canonical pytest collection output is invalid")
             return sorted(
-                {
-                    line.strip()
-                    for line in completed.stdout.splitlines()
-                    if "::" in line.strip()
-                },
+                set(document["node_ids"]),
                 key=lambda item: item.encode("utf-8"),
             )
 
@@ -1089,7 +1158,7 @@ def observe_pytest_population(
             )
         missing_required = [
             node_id
-            for node_id in required_node_ids
+            for node_id in required_nodes
             if node_id not in set(eligible_nodes)
         ]
         if missing_required:

@@ -19,12 +19,17 @@ from openworkproof.models import (
     population_member_digest,
 )
 from openworkproof.scope import (
+    _CANONICAL_COLLECT_CONFTEST,
     _selector_engine_digest,
     _selector_spec_bytes,
     observe_git_population,
     observe_pytest_population,
     scope_member_id,
 )
+
+_COLLECT_CONFTEST_DIGEST = hashlib.sha256(
+    _CANONICAL_COLLECT_CONFTEST.encode("utf-8")
+).hexdigest()
 
 
 def _contract(
@@ -35,8 +40,30 @@ def _contract(
     spec_payload: dict[str, Any],
     declared_ids: list[str],
     engine_digest: str | None = None,
+    selector_args: list[str] | None = None,
+    required_node_ids: list[str] | None = None,
+    allowlist_locators: list[str] | None = None,
+    excluded_locators: list[str] | None = None,
+    required_locators: list[str] | None = None,
 ) -> PopulationContractV05:
-    spec = _selector_spec_bytes(selector_kind, spec_payload)
+    payload_fields = dict(spec_payload)
+    if selector_kind == "pytest_collection":
+        payload_fields.update(
+            {
+                "selector_args": list(selector_args or []),
+                "required_node_ids": sorted(set(required_node_ids or [])),
+                "collector_conftest_digest": _COLLECT_CONFTEST_DIGEST,
+            }
+        )
+    elif selector_kind == "git_diff_closure":
+        payload_fields.update(
+            {
+                "allowlist_locators": sorted(set(allowlist_locators or [])),
+                "excluded_locators": sorted(set(excluded_locators or [])),
+                "required_locators": sorted(set(required_locators or [])),
+            }
+        )
+    spec = _selector_spec_bytes(selector_kind, payload_fields)
     payload = {
         "selector_rule_id": rule_id,
         "member_kind": member_kind,
@@ -141,6 +168,8 @@ def _collect_fake(
     selection: list[str] | None = None,
     extra_body: str = "",
 ) -> Path:
+    import json as _json
+
     body = f"""
 test "$1" = "-I"
 test "$2" = "-m"
@@ -150,20 +179,23 @@ test "$5" = "-q"
 test "$PYTEST_DISABLE_PLUGIN_AUTOLOAD" = "1"
 test "$LC_ALL" = "C.UTF-8"
 test "$TZ" = "UTC"
+test -n "$OWP_COLLECT_OUTPUT"
 {extra_body}
 """
+
+    def emit(nodes: list[str]) -> str:
+        document = _json.dumps(
+            {"node_ids": sorted(nodes)}, sort_keys=True, separators=(",", ":")
+        )
+        return f"printf '%s\\n' '{document}' > \"$OWP_COLLECT_OUTPUT\"\n"
+
     if selection is None:
-        body += "printf '%s\\n' " + " ".join(
-            f"'{node}'" for node in PYTEST_NODES
-        ) + "\n"
+        body += emit(list(PYTEST_NODES))
     else:
-        body += "if [ \"$#\" -eq 5 ]; then\n"
-        body += "printf '%s\\n' " + " ".join(
-            f"'{node}'" for node in PYTEST_NODES
-        ) + "\n"
+        body += 'if [ "$#" -eq 5 ]; then\n'
+        body += emit(list(PYTEST_NODES))
         body += "else\n"
-        for node in selection:
-            body += f"printf '%s\\n' '{node}'\n"
+        body += emit(selection)
         body += "fi\n"
     return _fake_python(tmp_path / name, body)
 
@@ -209,6 +241,7 @@ def test_pytest_adapter_observes_eligible_and_selected(
             "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
             "timeout_seconds": 60,
         },
+        selector_args=selector_args,
         declared_ids=declared,
     )
     result = observe_pytest_population(
@@ -247,6 +280,7 @@ def test_pytest_adapter_deterministic_replay(pytest_repo, tmp_path: Path) -> Non
         selector_kind="pytest_collection",
         member_kind="test_case",
         spec_payload=spec_payload,
+        selector_args=selector_args,
         declared_ids=declared,
     )
     kwargs = dict(
@@ -294,6 +328,7 @@ def test_pytest_adapter_selector_yielding_zero_is_mismatched(
             "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
             "timeout_seconds": 60,
         },
+        selector_args=selector_args,
         declared_ids=declared,
     )
     result = observe_pytest_population(
@@ -314,7 +349,7 @@ def test_pytest_adapter_no_eligible_nodes(tmp_path: Path) -> None:
     head = _commit(repo, {"README.md": "no tests"}, "empty")
     python = _fake_python(
         tmp_path / "fake-python",
-        '\nprintf ""\nexit 5\n',
+        '\nprintf \'{"node_ids":[]}\' > "$OWP_COLLECT_OUTPUT"\nexit 5\n',
     )
     declared = [scope_member_id("test_case", "tests/test_c.py::test_c1")]
     contract = _contract(
@@ -494,6 +529,7 @@ def test_git_adapter_allowlist_exclusion_and_required(tmp_path: Path) -> None:
         selector_kind="git_diff_closure",
         member_kind="source_file",
         spec_payload=spec_payload,
+        allowlist_locators=["src/b.py"],
         declared_ids=[b_id],
     )
     result = observe_git_population(
@@ -510,6 +546,7 @@ def test_git_adapter_allowlist_exclusion_and_required(tmp_path: Path) -> None:
         selector_kind="git_diff_closure",
         member_kind="source_file",
         spec_payload=spec_payload,
+        excluded_locators=["src/b.py"],
         declared_ids=[c_id],
     )
     excluded_result = observe_git_population(
@@ -526,6 +563,7 @@ def test_git_adapter_allowlist_exclusion_and_required(tmp_path: Path) -> None:
         selector_kind="git_diff_closure",
         member_kind="source_file",
         spec_payload=spec_payload,
+        required_locators=["src/zz.py"],
         declared_ids=[b_id],
     )
     missing = observe_git_population(
@@ -543,6 +581,8 @@ def test_git_adapter_allowlist_exclusion_and_required(tmp_path: Path) -> None:
         selector_kind="git_diff_closure",
         member_kind="source_file",
         spec_payload=spec_payload,
+        allowlist_locators=["src/b.py"],
+        required_locators=["src/c.py"],
         declared_ids=[b_id, c_id],
     )
     forced = observe_git_population(
@@ -774,6 +814,8 @@ def test_pytest_adapter_required_node_omission(pytest_repo, tmp_path: Path) -> N
             "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
             "timeout_seconds": 60,
         },
+        selector_args=selector_args,
+        required_node_ids=["tests/test_zz.py::test_zz"],
         declared_ids=declared,
     )
     result = observe_pytest_population(
@@ -817,16 +859,12 @@ def test_git_adapter_engine_drift(tmp_path: Path) -> None:
 
 
 def test_adapter_spec_digest_uses_v03_rule_encoding(tmp_path: Path) -> None:
-    """The v0.3 selector builder and the v0.5 adapter must share one spec
-    encoding so a contract bound to the rule digest is satisfiable."""
-    from openworkproof.scope import select_git_diff_closure
-
+    """The v0.5 adapter spec extends the frozen v0.3 rule encoding with the
+    closed selector parameter fields; a contract bound to the extended
+    encoding with empty parameters is satisfiable by the adapter."""
     repo = _git_repo(tmp_path)
     source = _commit(repo, {"src/a.py": "a"}, "baseline")
     candidate = _commit(repo, {"src/b.py": "b"}, "changes")
-    execution = select_git_diff_closure(
-        repo, source_revision=source, candidate_commit=candidate
-    )
     contract = _contract(
         rule_id="1" * 64,
         selector_kind="git_diff_closure",
@@ -838,9 +876,6 @@ def test_adapter_spec_digest_uses_v03_rule_encoding(tmp_path: Path) -> None:
         },
         declared_ids=[scope_member_id("source_file", "src/b.py")],
     )
-    assert contract.selector_spec_digest == hashlib.sha256(
-        execution.selector_spec_bytes
-    ).hexdigest()
     result = observe_git_population(
         repo,
         contract=contract,
@@ -872,6 +907,7 @@ def test_adapter_observed_at_injection_makes_replay_byte_identical(
             "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
             "timeout_seconds": 60,
         },
+        selector_args=selector_args,
         declared_ids=declared,
     )
     kwargs = dict(
@@ -909,6 +945,7 @@ def test_git_adapter_required_overlapping_selection_does_not_crash(
             "candidate_commit": candidate,
             "git_diff_mode": "name-status-z-find-renames",
         },
+        required_locators=["src/b.py"],
         declared_ids=[b_id, c_id],
     )
     result = observe_git_population(
@@ -919,3 +956,145 @@ def test_git_adapter_required_overlapping_selection_does_not_crash(
         required_locators=["src/b.py"],
     )
     _replay_check(result, [b_id, c_id], [b_id, c_id])
+
+
+def test_git_adapter_binds_allowlist_into_selector_spec(tmp_path: Path) -> None:
+    """Audit C2: a contract must not accept an allowlist it did not freeze."""
+    repo = _git_repo(tmp_path)
+    source = _commit(repo, {"src/a.py": "a"}, "baseline")
+    candidate = _commit(repo, {"src/b.py": "b"}, "changes")
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="git_diff_closure",
+        member_kind="source_file",
+        spec_payload={
+            "source_revision": source,
+            "candidate_commit": candidate,
+            "git_diff_mode": "name-status-z-find-renames",
+        },
+        declared_ids=[scope_member_id("source_file", "src/b.py")],
+    )
+    result = observe_git_population(
+        repo,
+        contract=contract,
+        source_revision=source,
+        candidate_commit=candidate,
+        allowlist_locators=["src/b.py"],
+    )
+    assert result.status == "indeterminate"
+    assert "SCOPE_SELECTOR_MISMATCH" in result.reason_codes
+
+
+def test_git_adapter_binds_required_into_selector_spec(tmp_path: Path) -> None:
+    """Audit C2: a contract must not accept required locators it did not freeze."""
+    repo = _git_repo(tmp_path)
+    source = _commit(repo, {"src/a.py": "a"}, "baseline")
+    candidate = _commit(repo, {"src/b.py": "b"}, "changes")
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="git_diff_closure",
+        member_kind="source_file",
+        spec_payload={
+            "source_revision": source,
+            "candidate_commit": candidate,
+            "git_diff_mode": "name-status-z-find-renames",
+        },
+        declared_ids=[scope_member_id("source_file", "src/b.py")],
+    )
+    result = observe_git_population(
+        repo,
+        contract=contract,
+        source_revision=source,
+        candidate_commit=candidate,
+        required_locators=["src/b.py"],
+    )
+    assert result.status == "indeterminate"
+    assert "SCOPE_SELECTOR_MISMATCH" in result.reason_codes
+
+
+def test_pytest_adapter_binds_selector_args_into_selector_spec(
+    pytest_repo, tmp_path: Path
+) -> None:
+    """Audit C2: selector_args must be frozen in the selector spec digest."""
+    repo, head = pytest_repo
+    selector_args = ["tests/test_a.py"]
+    python = _collect_fake(
+        tmp_path,
+        name="fake-python",
+        selection=["tests/test_a.py::test_a1"],
+    )
+    declared = [scope_member_id("test_case", "tests/test_a.py::test_a1")]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "python_executable_digest": hashlib.sha256(
+                python.read_bytes()
+            ).hexdigest(),
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
+            "timeout_seconds": 60,
+        },
+        declared_ids=declared,
+    )
+    result = observe_pytest_population(
+        repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=python,
+        selector_args=selector_args,
+        timeout_seconds=60,
+    )
+    assert result.status == "indeterminate"
+    assert "SCOPE_SELECTOR_MISMATCH" in result.reason_codes
+
+
+def test_pytest_adapter_ignores_stdout_summary_lines(
+    pytest_repo, tmp_path: Path
+) -> None:
+    """Audit C2: node ids come from the canonical plugin output only; any
+    ``::``-containing human summary line printed to stdout/stderr is not an
+    authoritative node id."""
+    repo, head = pytest_repo
+    python = _collect_fake(
+        tmp_path,
+        name="fake-python",
+        extra_body=(
+            "printf 'tests/test_fake.py::test_injected\\n'\n"
+            "printf 'tests/test_fake.py::test_injected\\n' >&2\n"
+        ),
+    )
+    declared = [
+        scope_member_id("test_case", node) for node in PYTEST_NODES
+    ]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "python_executable_digest": hashlib.sha256(
+                python.read_bytes()
+            ).hexdigest(),
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
+            "timeout_seconds": 60,
+        },
+        declared_ids=declared,
+    )
+    result = observe_pytest_population(
+        repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=python,
+        selector_args=[],
+        timeout_seconds=60,
+    )
+    eligible_ids = [
+        scope_member_id("test_case", node) for node in PYTEST_NODES
+    ]
+    _replay_check(result, eligible_ids, eligible_ids)
