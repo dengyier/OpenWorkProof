@@ -418,14 +418,26 @@ import json
 import os
 
 
+# Serialization primitives are captured at conftest import time: conftest
+# modules are imported before any collected test module, so nothing
+# candidate-controlled has executed yet. A collected module can later
+# monkeypatch json.dumps, builtins.sorted, or os.write, but the collector
+# only reaches these frozen references.
+_DUMPS = json.dumps
+_SORTED = sorted
+_WRITE = os.write
+
+
 def pytest_collection_finish(session):
-    node_ids = sorted({item.nodeid for item in session.items})
-    payload = json.dumps(
+    # Read the core-computed internal id (assigned by pytest during
+    # collection) instead of the monkeypatchable nodeid property.
+    node_ids = _SORTED({getattr(item, "_nodeid") for item in session.items})
+    payload = _DUMPS(
         {"node_ids": node_ids}, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     view = memoryview(payload)
     while view:
-        written = os.write(3, view)
+        written = _WRITE(3, view)
         view = view[written:]
 """
 
@@ -450,10 +462,18 @@ _CANONICAL_PYTEST_ENVIRONMENT = {
 # test modules share the process and could in principle write to the same
 # fd, but a pipe cannot be cleanly overwritten: any module write appends
 # bytes to the collector's single JSON document, the strict single-document
-# parse fails, and the observation closes as indeterminate. A module can
+# parse fails, and the observation closes as indeterminate. Serialization
+# primitives are captured at conftest import time (before candidate code
+# runs) and node ids are read from the core-computed internal id, so
+# in-process monkeypatching cannot forge the document; the host additionally
+# cross-checks the document against pytest's own stdout report. A module can
 # sabotage, never forge.
 _COLLECTOR_CHANNEL_FD = 3
-_COLLECTOR_CHANNEL_MODEL = "pipe-fd-3-single-document"
+_COLLECTOR_CHANNEL_MODEL = "pipe-fd-3-single-document-stdout-crosscheck"
+# If a collected module leaks the pipe write end to a surviving descendant,
+# the read end never reaches EOF; the drain then fails closed after this
+# grace period instead of hanging the verifier indefinitely.
+_COLLECTOR_DRAIN_GRACE_SECONDS = 5.0
 
 
 def _selector_spec_bytes(selector_kind: str, payload: Mapping[str, object]) -> bytes:
@@ -1191,12 +1211,18 @@ def observe_pytest_population(
         (checkout / "conftest.py").write_text(
             _CANONICAL_COLLECT_CONFTEST, encoding="utf-8"
         )
+        # Unlike conftest.py (arbitrary code), a tracked owp-collect.ini is
+        # inert data: overwriting it with the frozen canonical ini keeps the
+        # configuration closed and deterministic by construction.
         (checkout / "owp-collect.ini").write_text(
             _CANONICAL_COLLECT_INI, encoding="utf-8"
         )
 
         def collect(extra_args: Sequence[str]) -> list[str]:
-            read_fd, write_fd = os.pipe()
+            try:
+                read_fd, write_fd = os.pipe()
+            except OSError as error:
+                raise ValueError("pytest collection pipe unavailable") from error
             saved_channel: int | None = None
             try:
                 # The frozen collector conftest writes to fd 3, so the pipe
@@ -1238,17 +1264,30 @@ def observe_pytest_population(
             if saved_channel is not None:
                 os.dup2(saved_channel, _COLLECTOR_CHANNEL_FD)
                 os.close(saved_channel)
+            try:
+                os.set_blocking(read_fd, False)
+            except OSError as error:
+                os.close(read_fd)
+                raise ValueError("pytest collection pipe unavailable") from error
             chunks: list[bytes] = []
+            stop = threading.Event()
 
             def _drain() -> None:
-                while True:
-                    chunk = os.read(read_fd, 65536)
+                while not stop.is_set():
+                    try:
+                        chunk = os.read(read_fd, 65536)
+                    except BlockingIOError:
+                        stop.wait(0.01)
+                        continue
+                    except OSError:
+                        return
                     if not chunk:
                         return
                     chunks.append(chunk)
 
             reader = threading.Thread(target=_drain, daemon=True)
             reader.start()
+            drain_failed = False
             try:
                 stdout, stderr = process.communicate(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
@@ -1256,15 +1295,23 @@ def observe_pytest_population(
                 process.communicate()
                 raise
             finally:
-                reader.join()
+                reader.join(timeout=_COLLECTOR_DRAIN_GRACE_SECONDS)
+                if reader.is_alive():
+                    # A collected module leaked fd 3 to a surviving
+                    # descendant: the pipe can never reach EOF, so the
+                    # document is incomplete and must fail closed.
+                    stop.set()
+                    drain_failed = True
                 os.close(read_fd)
-            del stdout, stderr
+            if drain_failed:
+                raise ValueError("canonical pytest collection output is unavailable")
+            del stderr
             if process.returncode not in {0, 5}:
                 raise ValueError("pytest collection failed")
             data = b"".join(chunks)
             try:
                 document = json.loads(data)
-            except (UnicodeDecodeError, ValueError) as error:
+            except ValueError as error:
                 raise ValueError(
                     "canonical pytest collection output is unavailable"
                 ) from error
@@ -1278,10 +1325,37 @@ def observe_pytest_population(
                 )
             ):
                 raise ValueError("canonical pytest collection output is invalid")
-            return sorted(
+            node_ids = sorted(
                 set(document["node_ids"]),
                 key=lambda item: item.encode("utf-8"),
             )
+            # Second, independent channel: under -q --collect-only pytest's
+            # own terminal reporter prints each collected node id line to
+            # stdout. The reported lines must equal the canonical document
+            # exactly — extra, missing, or duplicated lines mean something
+            # interfered with collection reporting, so the observation
+            # fails closed.
+            try:
+                stdout_text = stdout.decode("utf-8")
+            except ValueError as error:
+                raise ValueError(
+                    "canonical pytest collection output diverges "
+                    "from the reported collection"
+                ) from error
+            reported = sorted(
+                (
+                    line.strip()
+                    for line in stdout_text.splitlines()
+                    if "::" in line.strip()
+                ),
+                key=lambda item: item.encode("utf-8"),
+            )
+            if reported != node_ids:
+                raise ValueError(
+                    "canonical pytest collection output diverges "
+                    "from the reported collection"
+                )
+            return node_ids
 
         try:
             eligible_nodes = collect(())

@@ -91,7 +91,7 @@ def _contract(
                 "environment": dict(_CANONICAL_PYTEST_ENVIRONMENT),
                 "collector_ini_digest": _COLLECT_INI_DIGEST,
                 "collector_conftest_digest": _COLLECT_CONFTEST_DIGEST,
-                "collector_channel": "pipe-fd-3-single-document",
+                "collector_channel": "pipe-fd-3-single-document-stdout-crosscheck",
             }
         )
     elif selector_kind == "git_diff_closure":
@@ -228,7 +228,11 @@ test -z "${{OWP_COLLECT_OUTPUT:-}}"
         document = _json.dumps(
             {"node_ids": sorted(nodes)}, sort_keys=True, separators=(",", ":")
         )
-        return f"printf '%s\\n' '{document}' >&3\n"
+        # Emulate pytest's own reporter: one node-id line per collected
+        # test on stdout, plus the canonical document on fd 3.
+        ordered = sorted(nodes)
+        lines = "".join(f"printf '%s\\n' '{node}'\n" for node in ordered)
+        return lines + f"printf '%s\\n' '{document}' >&3\n"
 
     if selection is None:
         body += emit(list(PYTEST_NODES))
@@ -1103,12 +1107,13 @@ def test_pytest_adapter_binds_selector_args_into_selector_spec(
     assert "SCOPE_SELECTOR_MISMATCH" in result.reason_codes
 
 
-def test_pytest_adapter_ignores_stdout_summary_lines(
+def test_pytest_adapter_stdout_divergence_fails_closed(
     pytest_repo, tmp_path: Path
 ) -> None:
-    """Audit C2: node ids come from the canonical plugin output only; any
-    ``::``-containing human summary line printed to stdout/stderr is not an
-    authoritative node id."""
+    """Audit A: pytest's own stdout report is a second, independent
+    channel for the canonical document. Extra ``::``-containing lines
+    (e.g. injected by a collected module) make the channels diverge and
+    must close the observation instead of being ignored."""
     repo, head = pytest_repo
     python = _collect_fake(
         tmp_path,
@@ -1146,10 +1151,8 @@ def test_pytest_adapter_ignores_stdout_summary_lines(
         selector_args=[],
         timeout_seconds=60,
     )
-    eligible_ids = [
-        scope_member_id("test_case", node) for node in PYTEST_NODES
-    ]
-    _replay_check(result, eligible_ids, eligible_ids)
+    assert result.status == "indeterminate"
+    assert "SCOPE_SELECTOR_MISMATCH" in result.reason_codes
 
 
 def test_pytest_adapter_refuses_candidate_conftest_files(tmp_path: Path) -> None:
@@ -1519,6 +1522,11 @@ def test_pytest_adapter_collection_environment_is_closed(
         "test \"$PYTEST_DISABLE_PLUGIN_AUTOLOAD\" = \"1\"\n"
         "test \"$LC_ALL\" = \"C.UTF-8\"\n"
         "test \"$TZ\" = \"UTC\"\n"
+        "printf '%s\\n' 'tests/test_a.py::test_a1'\n"
+        "printf '%s\\n' 'tests/test_b.py::test_b1'\n"
+        "printf '%s\\n' 'tests/test_b.py::test_b2'\n"
+        "printf '%s\\n' 'tests/test_c.py::test_c1'\n"
+        "printf '%s\\n' 'tests/test_d.py::test_d1'\n"
         "printf '%s\\n' '" + full_doc + "' >&3\n",
     )
     declared = [
@@ -1735,3 +1743,185 @@ def test_pytest_adapter_selected_outside_eligible_rejected(tmp_path: Path) -> No
     )
     assert result.status == "indeterminate"
     assert "SCOPE_SELECTOR_MISMATCH" in result.reason_codes
+
+
+def test_pytest_adapter_leaked_collector_fd_fails_closed(tmp_path: Path) -> None:
+    """A collected module that leaks the collector pipe to a surviving
+    descendant must fail closed within the drain grace period instead of
+    hanging the verifier forever."""
+    python = _requires_venv()
+    repo = _git_repo(tmp_path)
+    head = _commit(
+        repo,
+        {
+            "tests/test_a.py": "def test_a1():\n    assert True\n",
+            "tests/test_b.py": (
+                "import subprocess\n"
+                "import sys\n"
+                "\n"
+                "\n"
+                "subprocess.Popen(\n"
+                "    [sys.executable, '-c', 'import time; time.sleep(20)'],\n"
+                "    stdin=subprocess.DEVNULL,\n"
+                "    stdout=subprocess.DEVNULL,\n"
+                "    stderr=subprocess.DEVNULL,\n"
+                "    pass_fds=(3,),\n"
+                "    start_new_session=True,\n"
+                ")\n"
+                "\n"
+                "\n"
+                "def test_b1():\n"
+                "    assert True\n"
+            ),
+        },
+        "leaking module",
+    )
+    declared = [
+        scope_member_id("test_case", node)
+        for node in ("tests/test_a.py::test_a1", "tests/test_b.py::test_b1")
+    ]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "timeout_seconds": 120,
+        },
+        python=python,
+        declared_ids=declared,
+    )
+    import time as _time
+
+    started = _time.monotonic()
+    result = observe_pytest_population(
+        repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=python,
+        selector_args=[],
+        timeout_seconds=120,
+    )
+    elapsed = _time.monotonic() - started
+    assert result.status == "indeterminate"
+    assert "SCOPE_SELECTOR_MISMATCH" in result.reason_codes
+    assert elapsed < 15
+
+
+def test_pytest_adapter_pipe_unavailable_fails_closed(
+    pytest_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pipe allocation failure (e.g. EMFILE) must close the observation as
+    indeterminate instead of leaking a raw OSError out of the adapter."""
+    repo, head = pytest_repo
+    python = _collect_fake(tmp_path, name="fake-python")
+    declared = [
+        scope_member_id("test_case", node) for node in PYTEST_NODES
+    ]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "python_executable_digest": hashlib.sha256(
+                python.read_bytes()
+            ).hexdigest(),
+            "argv": ["-I", "-m", "pytest", "--collect-only", "-q"],
+            "timeout_seconds": 60,
+        },
+        python=python,
+        declared_ids=declared,
+    )
+    real_pipe = os.pipe
+    real_run = subprocess.run
+
+    def failing_pipe():
+        raise OSError(24, "Too many open files")
+
+    def guarded_run(*args, **kwargs):
+        os.pipe = real_pipe
+        try:
+            return real_run(*args, **kwargs)
+        finally:
+            os.pipe = failing_pipe
+
+    monkeypatch.setattr(os, "pipe", failing_pipe)
+    monkeypatch.setattr(subprocess, "run", guarded_run)
+    result = observe_pytest_population(
+        repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=python,
+        selector_args=[],
+        timeout_seconds=60,
+    )
+    assert result.status == "indeterminate"
+    assert "SCOPE_SELECTOR_MISMATCH" in result.reason_codes
+
+
+def test_pytest_adapter_in_process_monkeypatch_cannot_forge_collector_output(
+    tmp_path: Path,
+) -> None:
+    """Audit A / spec-review PoC: a collected module that monkeypatches
+    json.dumps, builtins.sorted, and os.write at import time must not be
+    able to forge the canonical document — serialization primitives are
+    captured at conftest import time, before candidate code runs, and the
+    host cross-checks pytest's own stdout report."""
+    python = _requires_venv()
+    repo = _git_repo(tmp_path)
+    head = _commit(
+        repo,
+        {
+            "tests/test_a.py": "def test_real():\n    assert True\n",
+            "tests/test_b.py": (
+                "import builtins\n"
+                "import json\n"
+                "import os\n"
+                "\n"
+                "\n"
+                "FORGED = ('{\"node_ids\":[\"tests/test_a.py::test_phantom\"]}'\n"
+                "          .encode('utf-8'))\n"
+                "json.dumps = lambda *a, **k: FORGED.decode('utf-8')\n"
+                "builtins.sorted = lambda items, *a, **k: list(items)\n"
+                "os.write = lambda fd, data: len(data)\n"
+                "\n"
+                "\n"
+                "def test_b1():\n"
+                "    assert True\n"
+            ),
+        },
+        "monkeypatching module",
+    )
+    declared = [
+        scope_member_id("test_case", node)
+        for node in ("tests/test_a.py::test_real", "tests/test_b.py::test_b1")
+    ]
+    contract = _contract(
+        rule_id="1" * 64,
+        selector_kind="pytest_collection",
+        member_kind="test_case",
+        spec_payload={
+            "source_revision": head,
+            "candidate_commit": head,
+            "timeout_seconds": 120,
+        },
+        python=python,
+        declared_ids=declared,
+    )
+    result = observe_pytest_population(
+        repo,
+        contract=contract,
+        source_revision=head,
+        candidate_commit=head,
+        python_executable=python,
+        selector_args=[],
+        timeout_seconds=120,
+    )
+    _replay_check(result, declared, declared)
+    phantom = scope_member_id("test_case", "tests/test_a.py::test_phantom")
+    assert phantom not in result.eligible_member_ids
