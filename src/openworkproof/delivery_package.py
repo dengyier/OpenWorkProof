@@ -2652,7 +2652,11 @@ def _ledger_export_read_v05(ledger: Path):
             )
         )
         decision = verification._load_current_decision_v05(
-            connection, profile=profile, manifest=scope_manifest
+            connection,
+            profile=profile,
+            manifest=scope_manifest,
+            path=ledger,
+            work_order=work_order,
         )
         if decision is None:
             raise DeliveryPackageError("v0.5 package export requires a decision")

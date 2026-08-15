@@ -1400,6 +1400,9 @@ class CurrentVerificationRecord:
 
 def _load_current_verification_decision(
     connection: sqlite3.Connection,
+    *,
+    path=None,
+    work_order=None,
 ):
     from openworkproof import verification  # noqa: PLC0415
     from openworkproof.models import (  # noqa: PLC0415
@@ -1479,7 +1482,11 @@ def _load_current_verification_decision(
             )
         try:
             decision = verification._load_current_decision_v05(
-                connection, profile=profile, manifest=manifest
+                connection,
+                profile=profile,
+                manifest=manifest,
+                path=path,
+                work_order=work_order,
             )
         except verification.VerificationTransactionError as error:
             raise AcceptanceTransactionError(str(error)) from error
@@ -1495,8 +1502,13 @@ def _load_current_verification_decision(
 
 def _resolve_current_verification_record(
     connection: sqlite3.Connection,
+    *,
+    path=None,
+    work_order=None,
 ) -> CurrentVerificationRecord:
-    current = _load_current_verification_decision(connection)
+    current = _load_current_verification_decision(
+        connection, path=path, work_order=work_order
+    )
     if current is None:
         raise AcceptanceTransactionError(
             "acceptance requires a current verification decision"
@@ -1526,6 +1538,9 @@ def _resolve_current_verification_record(
 
 def _require_current_verified_decision_if_v02(
     connection: sqlite3.Connection,
+    *,
+    path=None,
+    work_order=None,
 ):
     """Compatibility gate for no-profile, v0.2, and v0.3 ledgers."""
 
@@ -1543,7 +1558,9 @@ def _require_current_verified_decision_if_v02(
     if counts == ((0,), (0,), (0,)):
         return None
     try:
-        current = _resolve_current_verification_record(connection)
+        current = _resolve_current_verification_record(
+            connection, path=path, work_order=work_order
+        )
     except AcceptanceTransactionError as error:
         if "current verification decision" not in str(error):
             raise
@@ -1635,7 +1652,9 @@ def request_acceptance_transaction(
         work_order, receipts, _, _ = (
             evidence._replay_receipt_publication_ledger(connection)
         )
-        _require_current_verified_decision_if_v02(connection)
+        _require_current_verified_decision_if_v02(
+            connection, path=path, work_order=work_order
+        )
         state_row = connection.execute(
             "SELECT current_state, version FROM work_order_state WHERE singleton = 1"
         ).fetchone()
@@ -1857,7 +1876,14 @@ def prepare_acceptance(
             )
         verification_connection = evidence.connect_ledger(path)
         try:
-            _require_current_verified_decision_if_v02(verification_connection)
+            gate_work_order, _, _, _ = (
+                evidence._replay_receipt_publication_ledger(verification_connection)
+            )
+            _require_current_verified_decision_if_v02(
+                verification_connection,
+                path=path,
+                work_order=gate_work_order,
+            )
         finally:
             verification_connection.close()
         work_order, receipts, _, _ = evidence._replay_receipt_publication_ledger(
@@ -2072,7 +2098,9 @@ def commit_acceptance(
             )
         connection = evidence.connect_ledger(path)
         connection.execute("BEGIN IMMEDIATE")
-        _require_current_verified_decision_if_v02(connection)
+        _require_current_verified_decision_if_v02(
+            connection, path=path, work_order=work_order
+        )
         existing = connection.execute(
             "SELECT COUNT(*) FROM acceptance_receipts"
         ).fetchone()
@@ -3197,7 +3225,10 @@ def _exact_acceptance_transition_readback(
     try:
         connection = evidence.connect_ledger(ledger_path)
         try:
-            current = _resolve_current_verification_record(connection)
+            work_order = evidence.load_authoritative_work_order(connection)
+            current = _resolve_current_verification_record(
+                connection, path=ledger_path, work_order=work_order
+            )
             if (
                 current.decision_id != transition.verification_decision_id
                 or current.decision_digest
@@ -3349,7 +3380,9 @@ def commit_acceptance_transition(
             raise AcceptanceTransactionError(
                 "transition target acceptance is not current"
             )
-        current = _load_current_verification_decision(connection)
+        current = _load_current_verification_decision(
+            connection, path=path, work_order=work_order
+        )
         if current is None:
             raise AcceptanceTransactionError(
                 "transition verification decision is unavailable"

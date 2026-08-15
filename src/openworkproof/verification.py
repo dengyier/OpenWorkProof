@@ -3178,21 +3178,67 @@ def _load_arm_results_v05(
     )
 
 
+def _validate_committed_at(value: object) -> str:
+    if type(value) is not str:
+        raise VerificationTransactionError("v0.5 committed_at is not canonical")
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as error:
+        raise VerificationTransactionError(
+            "v0.5 committed_at is not canonical"
+        ) from error
+    if parsed.tzinfo is not None or value != parsed.strftime("%Y-%m-%dT%H:%M:%SZ"):
+        raise VerificationTransactionError("v0.5 committed_at is not canonical")
+    return value
+
+
 def _load_current_decision_v05(
     connection: sqlite3.Connection,
     *,
     profile: VerificationProfileV05,
     manifest: EvaluationScopeManifest,
+    path: Path | None = None,
+    work_order: WorkOrder | None = None,
 ) -> VerificationDecisionV05 | None:
-    previous: VerificationDecisionV05 | None = None
-    for decision_id, digest, predecessor_id, raw in connection.execute(
-        """
-        SELECT decision_id, decision_digest, predecessor_id, decision_json
-        FROM verification_decisions_v05
-        WHERE profile_id = ? ORDER BY rowid
-        """,
+    if path is None:
+        main = next(
+            (
+                row[2]
+                for row in connection.execute("PRAGMA database_list")
+                if row[1] == "main"
+            ),
+            "",
+        )
+        if not main:
+            raise VerificationTransactionError(
+                "v0.5 verification ledger path is unavailable"
+            )
+        path = Path(main)
+    if work_order is None:
+        work_order = evidence.load_authoritative_work_order(connection)
+    profile_row = connection.execute(
+        "SELECT committed_at FROM verification_profiles_v05 WHERE profile_id = ?",
         (profile.profile_id,),
+    ).fetchone()
+    if profile_row is None:
+        raise VerificationTransactionError(
+            "v0.5 verification profile row is unavailable"
+        )
+    profile_committed_at = _validate_committed_at(profile_row[0])
+    previous: VerificationDecisionV05 | None = None
+    previous_committed_at: str | None = None
+    for decision_id, digest, predecessor_id, raw, committed_at in (
+        connection.execute(
+            """
+            SELECT decision_id, decision_digest, predecessor_id,
+                   decision_json, committed_at
+            FROM verification_decisions_v05
+            WHERE profile_id = ? ORDER BY rowid
+            """,
+            (profile.profile_id,),
+        )
     ):
+        decision_committed_at = _validate_committed_at(committed_at)
         decision = _load_canonical_model(
             VerificationDecisionV05, raw, "v0.5 verification decision"
         )
@@ -3203,6 +3249,13 @@ def _load_current_decision_v05(
         ):
             raise VerificationTransactionError(
                 "v0.5 verification decision chain is invalid"
+            )
+        if (
+            previous_committed_at is not None
+            and decision_committed_at < previous_committed_at
+        ):
+            raise VerificationTransactionError(
+                "v0.5 decision committed_at order is not monotonic"
             )
         try:
             validate_verification_decision_v05(
@@ -3226,7 +3279,70 @@ def _load_current_decision_v05(
             raise VerificationTransactionError(
                 "v0.5 decision parents are invalid"
             )
+        results = _load_arm_results_v05(
+            connection,
+            path=path,
+            work_order=work_order,
+            profile=profile,
+            manifest=manifest,
+            selected_ids=parents,
+        )
+        result_committed_rows = tuple(
+            connection.execute(
+                """
+                SELECT arm_result_id, committed_at
+                FROM verification_arm_results_v05
+                WHERE arm_result_id IN ({})
+                """.format(",".join("?" for _ in parents)),
+                parents,
+            )
+        )
+        result_committed_by_id = {
+            row[0]: _validate_committed_at(row[1])
+            for row in result_committed_rows
+        }
+        if set(result_committed_by_id) != set(parents):
+            raise VerificationTransactionError(
+                "v0.5 decision arm result rows are unavailable"
+            )
+        if any(
+            committed < profile_committed_at
+            or committed > decision_committed_at
+            for committed in result_committed_by_id.values()
+        ):
+            raise VerificationTransactionError(
+                "v0.5 committed_at causal order is invalid"
+            )
+        rule_outputs = _derive_v05_rule_outputs(profile, manifest, path)
+        inventory: dict[str, bytes] = {}
+        for result in results:
+            inventory.update(_read_v05_population_inventory(path, result))
+        try:
+            draft = integrity.compose_verification_decision_v05(
+                profile=profile,
+                manifest=manifest,
+                arm_results=results,
+                request=DecisionDraftRequest(
+                    decision_id=decision.decision_id,
+                    decided_at=decision.model_dump(mode="json")["decided_at"],
+                    nonce=decision.nonce,
+                ),
+                previous_decision=previous,
+                rule_outputs=rule_outputs,
+                evidence_inventory=inventory,
+            )
+        except Exception as error:
+            raise VerificationTransactionError(
+                "v0.5 verification decision recomposition failed"
+            ) from error
+        if verification_decision_signing_bytes_v05(
+            draft
+        ) != verification_decision_signing_bytes_v05(decision):
+            raise VerificationTransactionError(
+                "v0.5 verification decision replay failed"
+            )
         previous = decision
+        previous_committed_at = decision_committed_at
     return previous
 
 
@@ -3266,7 +3382,11 @@ def prepare_verification_decision_v05(
             manifest=manifest,
         )
         previous = _load_current_decision_v05(
-            connection, profile=profile, manifest=manifest
+            connection,
+            profile=profile,
+            manifest=manifest,
+            path=path,
+            work_order=work_order,
         )
         rule_outputs = _derive_v05_rule_outputs(profile, manifest, path)
         inventory: dict[str, bytes] = {}
@@ -3391,7 +3511,11 @@ def commit_verification_decision_v05(
             connection, profile_digest=parsed.profile_digest, path=path
         )
         current = _load_current_decision_v05(
-            connection, profile=profile, manifest=manifest
+            connection,
+            profile=profile,
+            manifest=manifest,
+            path=path,
+            work_order=work_order,
         )
         if current is not None and current.decision_id == parsed.decision_id:
             if current == parsed and _exact_decision_v05_row(path, parsed):

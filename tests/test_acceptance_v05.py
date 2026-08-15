@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -92,7 +93,7 @@ def _insert_decision_row(case, decision) -> None:
                 case["manifest"].scope_id,
                 decision.supersedes_decision_id,
                 rfc8785.dumps(decision.model_dump(mode="json")),
-                "2026-01-01T00:20:00Z",
+                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             ),
         )
         for ordinal, reference in enumerate(decision.arm_results):
@@ -292,8 +293,12 @@ def test_v05_non_verified_decision_cannot_open_acceptance_gate(
     _insert_decision_row(case, mutated)
     connection = evidence.connect_ledger(case["ledger"])
     try:
+        # The gate must refuse: either the loader rejects the row outright
+        # (a mutated REFUTED/UNKNOWN row no longer recomposes), or the gate
+        # reports that only a VERIFIED decision may open acceptance.
         with pytest.raises(
-            acceptance.AcceptanceTransactionError, match="VERIFIED"
+            acceptance.AcceptanceTransactionError,
+            match="(VERIFIED|replay failed|chain)",
         ):
             acceptance._require_current_verified_decision_if_v02(connection)
     finally:

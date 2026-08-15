@@ -812,3 +812,141 @@ def test_hardening_boundary_infra_drift_with_zero_exit_still_derives_survived(
     )
     assert assessment.status == "survived"
     assert "CONTROL_SURVIVED" in assessment.reason_codes
+
+
+def _full_chain_with_decision(case):
+    _commit_full_chain(case)
+    decision = _signed_decision_v05(
+        case,
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    commit_verification_decision_v05(case["ledger"], decision)
+    return decision
+
+
+def test_audit_i1_decision_load_rejects_missing_arm_rows(v05_transaction_case) -> None:
+    """Audit I1: the current decision must not survive deletion of its arm
+    result rows — the loader must fail closed."""
+    case = v05_transaction_case
+    _full_chain_with_decision(case)
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "DROP TRIGGER verification_arm_results_v05_are_immutable_delete"
+        )
+        connection.execute("DELETE FROM verification_arm_results_v05")
+        connection.execute("COMMIT")
+    finally:
+        connection.close()
+    with pytest.raises(VerificationTransactionError, match="unavailable"):
+        prepare_verification_decision_v05(
+            case["ledger"],
+            DecisionDraftRequest(
+                decision_id="e" * 64,
+                decided_at="2026-01-01T00:21:00Z",
+                nonce="f" * 64,
+            ),
+        )
+
+
+def test_audit_i1_decision_load_rejects_noncanonical_committed_at(
+    v05_transaction_case,
+) -> None:
+    """Audit I1: a non-canonical committed_at on the decision row must be
+    rejected by the current-decision loader."""
+    case = v05_transaction_case
+    decision = _full_chain_with_decision(case)
+    _corrupt_row(
+        case,
+        "verification_decisions_v05",
+        "committed_at",
+        "2026-01-01",
+        where="decision_id",
+        who=decision.decision_id,
+    )
+    with pytest.raises(VerificationTransactionError, match="committed_at"):
+        prepare_verification_decision_v05(
+            case["ledger"],
+            DecisionDraftRequest(
+                decision_id="e" * 64,
+                decided_at="2026-01-01T00:21:00Z",
+                nonce="f" * 64,
+            ),
+        )
+
+
+def test_audit_i1_decision_load_rejects_inverted_committed_at(
+    v05_transaction_case,
+) -> None:
+    """Audit I1: a decision committed before its arm results violates the
+    causal order and must be rejected."""
+    case = v05_transaction_case
+    decision = _full_chain_with_decision(case)
+    _corrupt_row(
+        case,
+        "verification_decisions_v05",
+        "committed_at",
+        "2020-01-01T00:00:00Z",
+        where="decision_id",
+        who=decision.decision_id,
+    )
+    with pytest.raises(VerificationTransactionError, match="causal order"):
+        prepare_verification_decision_v05(
+            case["ledger"],
+            DecisionDraftRequest(
+                decision_id="e" * 64,
+                decided_at="2026-01-01T00:21:00Z",
+                nonce="f" * 64,
+            ),
+        )
+
+
+def test_audit_i1_decision_load_rejects_swapped_arm_rows(v05_transaction_case) -> None:
+    """Audit I1: swapping arm result row contents between ids is physically
+    blocked by the storage layer (UNIQUE arm_result_json), and any content
+    tamper that does land fails the current-decision loader."""
+    case = v05_transaction_case
+    _full_chain_with_decision(case)
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "DROP TRIGGER verification_arm_results_v05_are_immutable_update"
+        )
+        rows = connection.execute(
+            "SELECT arm_result_id, arm_result_json "
+            "FROM verification_arm_results_v05 ORDER BY arm_result_id"
+        ).fetchall()
+        assert len(rows) == 2
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE verification_arm_results_v05 SET arm_result_json = ? "
+                "WHERE arm_result_id = ?",
+                (rows[1][1], rows[0][0]),
+            )
+        connection.execute("ROLLBACK")
+    finally:
+        connection.close()
+    _corrupt_row(
+        case,
+        "verification_arm_results_v05",
+        "arm_result_json",
+        sqlite3.Binary(b"\x00"),
+        where="arm_result_id",
+        who=case["results"][0].arm_result_id,
+    )
+    with pytest.raises(VerificationTransactionError):
+        prepare_verification_decision_v05(
+            case["ledger"],
+            DecisionDraftRequest(
+                decision_id="e" * 64,
+                decided_at="2026-01-01T00:21:00Z",
+                nonce="f" * 64,
+            ),
+        )
