@@ -205,7 +205,7 @@ def cli_audit_explain(package: str | Path) -> dict:
         )
 
         explanation = explain_integrity_package(Path(package))
-    except DeliveryPackageError:
+    except Exception:
         explanation = {
             "current_decision": result["current_decision"],
             "effective_acceptance": result["effective_acceptance"],
@@ -240,7 +240,7 @@ def cli_audit_compare(old_package: str | Path, new_package: str | Path) -> dict:
         comparison = compare_integrity_packages(
             Path(old_package), Path(new_package)
         )
-    except DeliveryPackageError:
+    except Exception:
         changed = tuple(
             key
             for key in sorted(set(old) | set(new))
@@ -625,13 +625,13 @@ def app(argv: Sequence[str] | None = None) -> int:
         "UNAUTHENTICATED": 3,
     }
     if args.command == "verify-compose" and "decision" in result:
-        return decision_exit.get(str(result["decision"]), 0)
+        return decision_exit.get(str(result["decision"]), 3)
     if args.command in {
         "audit-replay",
         "audit-explain",
         "audit-compare",
     } and "current_decision" in result:
-        return decision_exit.get(str(result["current_decision"]), 0)
+        return decision_exit.get(str(result["current_decision"]), 3)
     return 0
 
 

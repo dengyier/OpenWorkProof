@@ -1947,7 +1947,9 @@ def test_v05_decision_remaining_faults_are_closed(
     connection = evidence.connect_ledger(case["ledger"])
     try:
         count = connection.execute(
-            "SELECT COUNT(*) FROM verification_decisions_v05"
+            "SELECT COUNT(*) FROM verification_decisions_v05 "
+            "WHERE decision_id = ?",
+            (decision.decision_id,),
         ).fetchone()[0]
     finally:
         connection.close()

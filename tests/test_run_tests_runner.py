@@ -36,7 +36,7 @@ FIXED_TEST_BYTES = VERIFIER_TEST_PATH.read_bytes()
 
 @pytest.fixture(autouse=True)
 def _fixed_test_seam(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:
     fixed_root = tmp_path / "fixed-tests"
     fixed_root.mkdir()
@@ -44,6 +44,19 @@ def _fixed_test_seam(
     fixed_path.write_bytes(FIXED_TEST_BYTES)
     fixed_path.chmod(0o444)
     fixed_root.chmod(0o555)
+
+    def restore_permissions() -> None:
+        try:
+            if fixed_path.is_symlink():
+                fixed_path.unlink()
+            if fixed_root.exists():
+                fixed_root.chmod(0o755)
+            if fixed_path.exists():
+                fixed_path.chmod(0o644)
+        except OSError:
+            pass  # the test may already have removed the fixed-tests tree
+
+    request.addfinalizer(restore_permissions)
     monkeypatch.setattr(runner, "FIXED_TEST_ROOT", fixed_root, raising=False)
     monkeypatch.setattr(runner, "FIXED_TEST_PATH", fixed_path, raising=False)
 
