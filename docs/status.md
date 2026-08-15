@@ -17,12 +17,14 @@ selected 分离）、负控契约/失败签名、`VERIFIED / REFUTED / UNKNOWN` 
 （`CONTROL_FAILURE_SIGNATURE_MISMATCH`）与修复后完整链 `VERIFIED`，其
 冻结交付包离线重放为 `VERIFICATION PASSED`。
 
-Task 15 发布门已重建候选并复测，最终测量（2026-08-15，独立总审修复后重建）：
+Task 15 发布门已重建候选并复测，最终测量（2026-08-15，独立总审修复与终审 Minor
+闭环后的最终重建）：
 
-- candidate source revision：`ca5df6c3fc1ee999d1c60a041b7e038e23ff4a4b`
-  （独立总审 2 Critical + 5 Important 全部闭环后的最终实现提交）；不可变库存：
-  `supply-chain/images/candidates/ca5df6c3fc1ee999d1c60a041b7e038e23ff4a4b.json`；
-  更早的 `18732766…`/`ca9c911…` 库存保持原字节、不再匹配当前定义；
+- candidate source revision：`d460c876a7f3046fd1d338951d964bce6d1a6be1`
+  （2 Critical + 5 Important + 终审 leap-second Minor 全部闭环的最终实现
+  提交）；不可变库存：
+  `supply-chain/images/candidates/d460c876a7f3046fd1d338951d964bce6d1a6be1.json`；
+  更早的 `18732766…`/`ca9c911…`/`ca5df6c3…` 库存保持原字节、不再匹配当前定义；
 - Python 分发版本 `1.1.1`；冻结协议 Schema `0.1`–`0.5`；
 - v0.5 focused 套件（10 个文件）：`370 passed、0 failed`；
 - 冻结兼容（v0.2/v0.3/v0.4 models/schema/delivery/settlement/acceptance）：
@@ -30,30 +32,32 @@ Task 15 发布门已重建候选并复测，最终测量（2026-08-15，独立�
 - 便携全量（`pytest -q --ignore=tests/test_candidate_supplychain_integration.py`）：
   `3348 passed、0 failed、6 skipped`（约 5 分钟）；
 - candidate 两套件（live Docker + artifact root + 全限定镜像引用）：
-  `172 passed、0 failed`（含 live Docker 与上下文重建身份链）；
+  `173 passed、0 failed`（含 live Docker 与上下文重建身份链）；
 - **required-live 全量**（live Docker + 全限定
-  `docker.io/openworkproof/execution-test@sha256:09634a43…71ea` +
+  `docker.io/openworkproof/execution-test@sha256:2acf4820…61d8` +
   `-W 'error::pytest.PytestUnhandledThreadExceptionWarning'`）：
-  **`3454 passed、0 failed、0 skipped`**（10 分 31 秒，零 warning）；
+  **`3456 passed、0 failed、0 skipped`**（10 分 57 秒，零 warning）；
 - Rich #4196 v0.5 交付包离线重放：`VERIFICATION PASSED / VERIFIED /
   READY_FOR_ACCEPTANCE`（无网络、无原始账本）；
 - Docker 残留：本任务零残留容器/卷；本机另有 5 个运行中的 agentteams
   容器与 9 个既有数据卷（非本任务创建，未清理）；
-- 归档哈希（`ca5df6c3…`）：execution docker
-  `6bebb847f37b73401feb99129c72e4309ea26a09523f5638fde12428def7a2a5`、
+- 归档哈希（`d460c876…`）：execution docker
+  `b9118865000af88c3824f613be569ddcc5901fa18b328a26aabf6043d999c1c0`、
   execution OCI
-  `e263337d789907d7e9f8caaed0f29950ee1bda60e0fc9158295c27781e3a32a9`、
+  `2dec0d867acac7765abec7fd185712bdb66bce43d5756bd42b8f2e73c4c6c11e`、
   trusted-helper docker
-  `c402ed763c365fddde80db7e2df8df5c9eec712e0fcfd39bcabbbd92bf838701`、
+  `f777c523e6ecf54d0574c2726001b44dd1e3d4221bc08d22670af21437b18778`、
   trusted-helper OCI
-  `8beadf9454eafe3124b3ac37a4414c6c56fa02aafeec7e81f44be736b3b6f395`；
+  `ec6d2ec9845d200fc686a6446e447840b87c620f928a1fad028f6da60970ecd4`；
 - 独立总审修复记录：离线包决策只取重放签名真值（public/diagnostic 一律
   UNAUTHENTICATED/NOT_READY）；selector 全部参数冻结进 spec digest 且 node id
-  只来自受控 canonical collector；当前决策历史在全部入口完整重放（父结果
-  校验+重 compose+committed_at 因果序）；控制证据走闭合 canonical 文档解析器；
-  venv 启动器绑定 invocation/target/pyvenv.cfg；CLI 决策退出码统一
+  只来自受控 canonical collector（-I 隔离 + conftest-free + pytest.py shadow
+  拒绝）；当前决策历史在全部入口完整重放（父结果校验+重 compose+committed_at
+  因果序，leap second 拒绝）；控制证据走闭合 canonical 文档解析器；venv
+  启动器绑定 invocation/target/pyvenv.cfg；CLI 决策退出码统一
   VERIFIED=0/UNKNOWN=3/REFUTED=4；事务矩阵、六表族物理篡改与计划真值补齐；
-  pytest 临时目录清理噪声已消除（本门零 warning）。
+  converter 成员安全与 config 派生平台；pytest 临时目录清理噪声消除
+  （全门零 warning）。
 外部状态边界：
 
 ```yaml
