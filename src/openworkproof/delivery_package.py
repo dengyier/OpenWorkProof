@@ -3007,7 +3007,18 @@ def _verify_v05_delivery_package(
 ) -> DeliveryVerificationResult:
     report = _load_canonical_json(root, manifest, "scope-coverage-report.json")
     if not isinstance(report, dict) or (
-        report.get("schema_version")
+        set(report)
+        != {
+            "schema_version",
+            "privacy_view",
+            "scope_manifest_digest",
+            "full_offline_replay",
+            "decision",
+            "population_status",
+            "control_status",
+            "integrity_reason_codes",
+        }
+        or report.get("schema_version")
         != "openworkproof-scope-coverage-report/0.5"
         or report.get("privacy_view") != manifest.privacy_view
         or report.get("scope_manifest_digest") != manifest.scope_manifest_digest
