@@ -111,7 +111,7 @@ def test_service_builds_and_audits_v05_delivery(service_case) -> None:
     decision = {
         "schema_version": "openworkproof-verification-decision/0.5",
         **draft,
-        "digest": __import__("hashlib").sha256(encoded).hexdigest(),
+        "digest": hashlib.sha256(encoded).hexdigest(),
         "verifier_signatures": [
             {
                 "verifier_subject_id": binding.verifier_subject_id,
