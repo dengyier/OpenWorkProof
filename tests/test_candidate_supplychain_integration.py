@@ -1822,6 +1822,7 @@ def test_candidate_inventory_selector_covers_every_tracked_definition() -> None:
         "src/openworkproof/composition.py",
         "src/openworkproof/delivery_package.py",
         "src/openworkproof/evidence.py",
+        "src/openworkproof/integrity.py",
         "src/openworkproof/models.py",
         "src/openworkproof/policy.py",
         "src/openworkproof/predicates.py",
