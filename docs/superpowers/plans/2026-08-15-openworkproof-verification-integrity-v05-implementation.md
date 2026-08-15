@@ -111,7 +111,7 @@
 - Modify: `tests/conftest.py`
 - Create: `tests/test_verification_integrity_models_v05.py`
 
-- [ ] **Step 1: Prove repository and package identity**
+- [x] **Step 1: Prove repository and package identity**
 
 Run:
 
@@ -133,7 +133,7 @@ PY
 
 Expected: clean worktree on `main`, source and installed distribution versions agree, and the approved design exists. Stop if the worktree contains unrelated changes.
 
-- [ ] **Step 2: Record a fresh pre-v0.5 baseline**
+- [x] **Step 2: Record a fresh pre-v0.5 baseline**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -149,7 +149,7 @@ Expected: clean worktree on `main`, source and installed distribution versions a
 
 Expected: zero failures. Record the actual pass/skip/warning counts; do not copy an older count into documentation.
 
-- [ ] **Step 3: Freeze representative golden bytes before adding v0.5**
+- [x] **Step 3: Freeze representative golden bytes before adding v0.5**
 
 Add fixtures for one deterministic v0.2 Profile, v0.3 Scope/Profile/Result/Decision, and v0.4 Binding object. Add a test that asserts their literal canonical-byte SHA-256 and signature values. Run the test twice and accept literals only if both runs match.
 
@@ -159,7 +159,7 @@ Add fixtures for one deterministic v0.2 Profile, v0.3 Scope/Profile/Result/Decis
 
 Expected RED on the first placeholder literals, then GREEN after replacing only the placeholders with the two-run stable values.
 
-- [ ] **Step 4: Commit only the passing baseline tests**
+- [x] **Step 4: Commit only the passing baseline tests**
 
 ```bash
 git add tests/conftest.py tests/test_verification_integrity_models_v05.py
@@ -176,7 +176,7 @@ git commit -m 'test: freeze verification integrity baseline'
 - Modify: `tests/conftest.py`
 - Modify: `tests/test_verification_integrity_models_v05.py`
 
-- [ ] **Step 1: Add import-only RED tests for all absent v0.5 types**
+- [x] **Step 1: Add import-only RED tests for all absent v0.5 types**
 
 Import and instantiate these absent names inside the test module:
 
@@ -199,7 +199,7 @@ VerificationDecisionV05
 
 Expected RED: import errors for the v0.5 names. Do not commit while this test is red.
 
-- [ ] **Step 2: Add RED invariant tests for the four nested objects**
+- [x] **Step 2: Add RED invariant tests for the four nested objects**
 
 Cover unknown fields, unsorted/duplicate tuples, count ranges, reduced fractions, empty-set rules, selector/engine mismatch, wrong nested digest, invalid validity windows, non-completed expected failure signatures, fixture/provocation drift, and incompatible control status. Assert exact domain formulas:
 
@@ -221,7 +221,7 @@ Run and retain RED before implementation:
 ./.venv/bin/python -m pytest tests/test_verification_integrity_models_v05.py -q -k 'contract or observation or signature'
 ```
 
-- [ ] **Step 3: Implement bounded nested models and the exact closed reason-code set**
+- [x] **Step 3: Implement bounded nested models and the exact closed reason-code set**
 
 In `models.py`, add literal aliases and `ProtocolModel` classes. Use the existing `Digest64`, `CanonicalUTCTime`, `EvidenceRef`, and execution-status types. Enforce maximum 4096 population members and bounded non-empty arrays. Use integer numerator/denominator only; require `gcd(numerator, denominator) == 1` for observed non-empty capture.
 
@@ -256,7 +256,7 @@ CONTROL_EVIDENCE_MISSING
 
 Tests must reject unknown codes, duplicates, unsorted codes, and status/code combinations outside the design mapping.
 
-- [ ] **Step 4: Implement v0.5 sibling models without changing ancestors**
+- [x] **Step 4: Implement v0.5 sibling models without changing ancestors**
 
 Add:
 
@@ -280,7 +280,7 @@ class VerificationDecisionV05(VerificationDecisionV03):
 
 The corresponding draft has no signature envelope. Profiles require exactly one population contract per Scope selector and one control contract per negative arm. Positive results forbid a control observation; negative results require exactly their own control observation.
 
-- [ ] **Step 5: Add version `0.5` to signing helpers**
+- [x] **Step 5: Add version `0.5` to signing helpers**
 
 Extend the version literal and closed maps in `signing.py`. The v0.5 generic single-signer domains are exactly:
 
@@ -292,7 +292,7 @@ _V05_SIGNED_DOMAINS = frozenset(
 
 Keep `verification-decision` in `_V05_CANONICAL_DOMAINS`; its dedicated Verifier signatures cover those canonical bytes and must not route through `sign_payload`. Tests must prove nested contract domains and generic Decision signing are rejected, Profile/Result verify only with version 0.5, a real v0.5 Decision signature verifies against its v0.5 canonical bytes, and Task 1's v0.1-v0.4 golden values remain byte-identical.
 
-- [ ] **Step 6: Run focused model and compatibility GREEN**
+- [x] **Step 6: Run focused model and compatibility GREEN**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_verification_integrity_models_v05.py -q
@@ -301,7 +301,7 @@ Keep `verification-decision` in `_V05_CANONICAL_DOMAINS`; its dedicated Verifier
   tests/test_binding_models_v04.py tests/test_schema_registry.py -q
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/openworkproof/models.py src/openworkproof/signing.py \
@@ -320,7 +320,7 @@ git commit -m 'feat: add verification integrity v05 models'
 - Create: `src/openworkproof/schemas/v0.5/*.json`
 - Create: `specs/v0.5/*.json`
 
-- [ ] **Step 1: Write RED four-object registry tests**
+- [x] **Step 1: Write RED four-object registry tests**
 
 Require version `0.5`, exactly three object schemas plus registry, canonical JSON, runtime/public byte equality, atomic generation, failed-generation rollback, and rejected cross-version lookup. Assert all frozen v0.1-v0.4 digests remain unchanged.
 
@@ -330,11 +330,11 @@ Require version `0.5`, exactly three object schemas plus registry, canonical JSO
 
 Expected RED: protocol version 0.5 is unknown.
 
-- [ ] **Step 2: Register only the three signed sibling schemas**
+- [x] **Step 2: Register only the three signed sibling schemas**
 
 Add `V05_OBJECT_PATHS`, `V05_SCHEMA_FACTORIES`, `_FROZEN_V05_DIGESTS`, and `_FROZEN_V05_REGISTRY`. Nested object definitions remain `$defs` inside these schemas; do not publish them as independently signed protocol objects.
 
-- [ ] **Step 3: Generate twice into independent temporary roots**
+- [x] **Step 3: Generate twice into independent temporary roots**
 
 ```bash
 TMP_A="$(mktemp -d)"
@@ -349,7 +349,7 @@ diff -ru "$TMP_A/runtime" "$TMP_B/runtime"
 
 Expected: zero diff. Add the exact generated files using `apply_patch`; never copy over frozen version directories.
 
-- [ ] **Step 4: Add package data and freeze hashes**
+- [x] **Step 4: Add package data and freeze hashes**
 
 Add `schemas/v0.5/*.json` to `pyproject.toml`. Freeze the observed v0.5 digests only after two deterministic generations agree. Re-run:
 
@@ -357,7 +357,7 @@ Add `schemas/v0.5/*.json` to `pyproject.toml`. Freeze the observed v0.5 digests 
 ./.venv/bin/python -m pytest tests/test_schema_registry.py tests/test_package.py -q
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/openworkproof/schema_registry.py src/openworkproof/schemas/v0.5 \
@@ -374,7 +374,7 @@ git commit -m 'feat: freeze verification integrity v05 schemas'
 - Create: `tests/test_population_integrity_v05.py`
 - Modify: `tests/conftest.py`
 
-- [ ] **Step 1: Write RED contract-to-scope tests**
+- [x] **Step 1: Write RED contract-to-scope tests**
 
 Test exact one-to-one selector mapping, selector spec/engine equality, declared members as a non-empty subset of the rule's output, member-kind equality, no duplicate declaration across contracts, and exact union coverage of all source/test Scope members. Include missing contract, duplicate contract, orphan member, delivery-artifact member, and 4097-member cases.
 
@@ -384,7 +384,7 @@ Test exact one-to-one selector mapping, selector spec/engine equality, declared 
 
 Expected RED: `validate_population_contracts` does not exist.
 
-- [ ] **Step 2: Implement profile validation**
+- [x] **Step 2: Implement profile validation**
 
 Add:
 
@@ -397,7 +397,7 @@ def validate_population_contracts(
 
 Build rule/member indexes once, compare exact identifiers and digests, and reject invalid input. This function does not return an assessment because malformed signed profile input is not a valid `UNKNOWN` decision.
 
-- [ ] **Step 3: Write RED observation assessment tests**
+- [x] **Step 3: Write RED observation assessment tests**
 
 Cover:
 
@@ -411,7 +411,7 @@ Cover:
 - selected members not equal declared members => `drifted`;
 - cross-arm eligible or selected mismatch => `drifted`.
 
-- [ ] **Step 4: Implement deterministic population assessment**
+- [x] **Step 4: Implement deterministic population assessment**
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -428,7 +428,7 @@ def assess_population_integrity(
 
 Use closed precedence: missing/unreplayable evidence -> unavailable; rule/engine/digest/cross-arm mismatch -> drifted; empty -> empty; below count/capture thresholds -> capture_failed; otherwise matched. Return sorted unique reason codes.
 
-- [ ] **Step 5: Run focused GREEN and commit**
+- [x] **Step 5: Run focused GREEN and commit**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_population_integrity_v05.py -q
@@ -447,11 +447,11 @@ git commit -m 'feat: derive population integrity deterministically'
 - Create: `tests/test_control_integrity_v05.py`
 - Modify: `tests/conftest.py`
 
-- [ ] **Step 1: Write RED control-contract validation tests**
+- [x] **Step 1: Write RED control-contract validation tests**
 
 Require exactly one contract per negative arm, no contract for the positive arm, `fixture_digest == mutant_patch_digest`, exact arm id, valid window, recomputed provocation/failure digests, and unique control ids. Test unknown control target and expired contract rejection.
 
-- [ ] **Step 2: Write RED four-status observation tests**
+- [x] **Step 2: Write RED four-status observation tests**
 
 Use this closed truth table:
 
@@ -464,7 +464,7 @@ Use this closed truth table:
 
 Assert dependency/schema/timeout failures cannot be reported as `proven` when the expected signature is semantic regression.
 
-- [ ] **Step 3: Implement pure control validation and aggregation**
+- [x] **Step 3: Implement pure control validation and aggregation**
 
 ```python
 def validate_control_contracts(profile: VerificationProfileV05) -> None: ...
@@ -477,11 +477,11 @@ def assess_control_integrity(
 
 Aggregate with precedence `survived` > `mismatched` > `unavailable`; only all-proven returns `proven`. Validate each observation against its own contract and result timestamp before aggregation.
 
-- [ ] **Step 4: Prove stderr and host noise do not affect signatures**
+- [x] **Step 4: Prove stderr and host noise do not affect signatures**
 
 Build two raw executions with different stderr text, absolute paths, hostnames, durations, and temp directories but identical structured fields. Assert identical `FailureSignatureV05` and digest. Change one exit code, reason code, predicate id, or evidence purpose and assert a different digest.
 
-- [ ] **Step 5: Run GREEN and commit**
+- [x] **Step 5: Run GREEN and commit**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_control_integrity_v05.py -q
@@ -500,15 +500,15 @@ git commit -m 'feat: verify negative controls by failure signature'
 - Modify: `src/openworkproof/verification.py`
 - Create: `tests/test_verification_integrity_transactions_v05.py`
 
-- [ ] **Step 1: Write RED DDL and Profile transaction tests**
+- [x] **Step 1: Write RED DDL and Profile transaction tests**
 
 Require tables `verification_profiles_v05`, `verification_arm_results_v05`, `verification_decisions_v05`, `verification_decision_parents_v05`, `acceptance_transitions_v05`, and `acceptance_transition_parents_v05`. For Profile commit cover Manager signature/role/grant/nonce/expiry, exact committed v0.3 Scope and WorkOrder/Claim binding, contract validation, idempotency, id conflict, pre-COMMIT zero write, COMMIT-then-raise readback, unavailable readback, cleanup failure, identical concurrency, and UPDATE/DELETE triggers.
 
-- [ ] **Step 2: Add parallel v0.5 tables without altering v0.3 DDL**
+- [x] **Step 2: Add parallel v0.5 tables without altering v0.3 DDL**
 
 Each authoritative row stores business id, object digest, canonical JSON blob, signer nonce where applicable, relation ids, and canonical `committed_at`. Add foreign keys to the committed WorkOrder/Scope/Profile family. Add immutable triggers for every v0.5 table. Do not add mutable active/stale flags.
 
-- [ ] **Step 3: Implement Profile commit/load**
+- [x] **Step 3: Implement Profile commit/load**
 
 ```python
 def commit_verification_profile_v05(
@@ -526,11 +526,11 @@ def load_verification_profile_v05(
 
 Load authoritative WorkOrder, Claim, Scope, keys, grants, and complete Profile history. Recompute contract bindings; do not accept digest-only shadow rows. Exact replay after expiry returns the committed truth because its original committed time remains valid; new objects after expiry are rejected.
 
-- [ ] **Step 4: Write RED Arm Result transaction tests**
+- [x] **Step 4: Write RED Arm Result transaction tests**
 
 Cover authorized Verifier signature/binding/time, exact Profile and Scope, complete population observations, positive/negative control cardinality, EvidenceRef availability/digest, result id conflict, stale Profile, old result reuse, all faults, two concurrency modes, and immutable rows.
 
-- [ ] **Step 5: Implement Arm Result commit/load**
+- [x] **Step 5: Implement Arm Result commit/load**
 
 ```python
 def commit_verification_arm_result_v05(
@@ -543,7 +543,7 @@ def commit_verification_arm_result_v05(
 
 Recompute Profile, Scope, evidence snapshot, population observation validity, and control observation validity inside the transaction. Never trust caller-supplied status alone.
 
-- [ ] **Step 6: Run transaction GREEN and compatibility regression**
+- [x] **Step 6: Run transaction GREEN and compatibility regression**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_verification_integrity_transactions_v05.py -q -k 'profile or arm'
@@ -552,7 +552,7 @@ Recompute Profile, Scope, evidence snapshot, population observation validity, an
   tests/test_binding_transactions_v04.py tests/test_replay.py -q
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/openworkproof/evidence.py src/openworkproof/verification.py \
@@ -569,7 +569,7 @@ git commit -m 'feat: commit verification integrity evidence'
 - Modify: `src/openworkproof/verification.py`
 - Modify: `tests/test_verification_integrity_transactions_v05.py`
 
-- [ ] **Step 1: Write RED decision matrix tests**
+- [x] **Step 1: Write RED decision matrix tests**
 
 Assert these exact outcomes:
 
@@ -584,7 +584,7 @@ matched + proven + insufficient independence                   => UNKNOWN
 
 Invalid profile/result/signature input must raise before any signed draft is returned.
 
-- [ ] **Step 2: Implement the assessment composer**
+- [x] **Step 2: Implement the assessment composer**
 
 ```python
 def compose_verification_decision_v05(
@@ -599,11 +599,11 @@ def compose_verification_decision_v05(
 
 Call the existing v0.3 semantic checks, then population and control assessment. Build sorted unique reason codes and one `VerificationIntegrityAssessmentV05`. Do not call v0.3 composer and copy its final decision blindly; v0.5 owns the precedence table above.
 
-- [ ] **Step 3: Write RED Decision transaction and history tests**
+- [x] **Step 3: Write RED Decision transaction and history tests**
 
 Cover exact selected result set, current latest Results, one root, exact supersession, stale parent, fork, cycle, dangling parent, signature/role/time, parent time monotonicity, relation drift, idempotency, conflicting bytes, pre-COMMIT zero write, COMMIT ACK loss, cleanup failure, and identical/conflicting concurrency.
 
-- [ ] **Step 4: Implement prepare/commit/load with full-history replay**
+- [x] **Step 4: Implement prepare/commit/load with full-history replay**
 
 ```python
 def prepare_verification_decision_v05(
@@ -621,7 +621,7 @@ def commit_verification_decision_v05(
 
 Exact ACK readback confirms the exact historical row and parent relation even if a valid child supersedes during the ACK gap; it must not require the committed object still be current.
 
-- [ ] **Step 5: Run GREEN and commit**
+- [x] **Step 5: Run GREEN and commit**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_verification_integrity_transactions_v05.py -q
@@ -642,11 +642,11 @@ git commit -m 'feat: commit verification integrity decisions'
 - Modify: `src/openworkproof/integrity.py`
 - Create: `tests/test_verification_integrity_adapters_v05.py`
 
-- [ ] **Step 1: Write RED pytest eligible-versus-selected tests**
+- [x] **Step 1: Write RED pytest eligible-versus-selected tests**
 
 Create a committed temporary repository with four test nodes. Enumerate eligible nodes before applying marker/path/node-id filters, then select two. Assert stable sorted node ids, exact counts/digests, 2/4 reduced to 1/2, and EvidenceRefs for eligible and selected populations. Also cover no eligible nodes, selector yielding zero, collection error, timeout, required node omission, plugin autoload disabled, and engine digest drift.
 
-- [ ] **Step 2: Add one bounded pytest observation API**
+- [x] **Step 2: Add one bounded pytest observation API**
 
 ```python
 def observe_pytest_population(
@@ -663,11 +663,11 @@ def observe_pytest_population(
 
 Use two explicit collection phases: eligible collection without the selection arguments and selected collection with the frozen arguments. Canonical identity is pytest node id; do not parse human summary lines as nodes.
 
-- [ ] **Step 3: Write RED Git eligible-versus-selected tests**
+- [x] **Step 3: Write RED Git eligible-versus-selected tests**
 
 Cover add/modify/delete/rename, allowlist selection, exclusion, required target, path traversal, symlink, uncommitted content, revision drift, unchanged count with changed identity, and engine digest drift. Eligible is the committed diff closure; selected is the post-rule set.
 
-- [ ] **Step 4: Implement Git observation and structured failure signature builder**
+- [x] **Step 4: Implement Git observation and structured failure signature builder**
 
 ```python
 def observe_git_population(...) -> PopulationObservationBuildResult: ...
@@ -684,7 +684,7 @@ def build_failure_signature(
 
 The builder rejects stderr, stdout, absolute paths, hostnames, durations, and arbitrary metadata because those fields are outside the signed structure.
 
-- [ ] **Step 5: Prove deterministic replay**
+- [x] **Step 5: Prove deterministic replay**
 
 Run each adapter test twice with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, `LC_ALL=C.UTF-8`, and `TZ=UTC`. Assert identical contract/observation/failure digests.
 
@@ -694,7 +694,7 @@ for run in 1 2; do
 done
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/openworkproof/scope.py src/openworkproof/integrity.py \
@@ -711,19 +711,19 @@ git commit -m 'feat: observe pytest and git populations'
 - Modify: `src/openworkproof/settlement.py`
 - Create: `tests/test_acceptance_v05.py`
 
-- [ ] **Step 1: Write RED version-router tests**
+- [x] **Step 1: Write RED version-router tests**
 
 Test current v0.5 VERIFIED acceptance, v0.5 UNKNOWN/REFUTED rejection, v0.2/v0.3 unchanged behavior, missing decision, fabricated cross-version digest, ambiguous rows in multiple families, withdraw, supersede, and settlement readiness.
 
-- [ ] **Step 2: Extend the closed current-decision resolver**
+- [x] **Step 2: Extend the closed current-decision resolver**
 
 Add protocol version `0.5` to the internal `CurrentVerificationRecord`. Require exactly one authoritative family match. A v0.5 acceptance transition writes only to v0.5 transition tables and cannot cite a v0.2/v0.3 decision.
 
-- [ ] **Step 3: Preserve public business-state semantics**
+- [x] **Step 3: Preserve public business-state semantics**
 
 Keep `NOT_READY`, `READY_FOR_ACCEPTANCE`, `ACCEPTED_FOR_SETTLEMENT`, `SUSPENDED`, `WITHDRAWN`, and `SUPERSEDED`. Do not add automatic payment, escrow, or settlement execution.
 
-- [ ] **Step 4: Run GREEN and commit**
+- [x] **Step 4: Run GREEN and commit**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -743,25 +743,25 @@ git commit -m 'feat: route acceptance to integrity decisions'
 - Create: `tests/test_delivery_package_v05.py`
 - Modify: `docs/offline-verification.md`
 
-- [ ] **Step 1: Write RED package-content and privacy tests**
+- [x] **Step 1: Write RED package-content and privacy tests**
 
 Customer-private packages must contain Scope, v0.5 Profile, all Results, Decision, keys, eligible/selected population evidence, control fixture digest/provocation evidence, failure signatures, and schema registry. Diagnostic/public views must retain derived status and original object digests while applying their visibility rules.
 
 Across every public package file assert absence of repository absolute paths, private locators, raw fixture bytes, pytest node ids, customer identity, secret patterns, stderr, hostnames, and temp directories.
 
-- [ ] **Step 2: Add explicit v0.5 protocol detection**
+- [x] **Step 2: Add explicit v0.5 protocol detection**
 
 `_ledger_delivery_protocol` must return exactly one of `0.2`, `0.3`, `0.4`, or `0.5`; dual-family ambiguity is an error. Do not infer v0.5 from optional metadata.
 
-- [ ] **Step 3: Implement offline v0.5 export and verification**
+- [x] **Step 3: Implement offline v0.5 export and verification**
 
 Add `_export_delivery_package_v05` and `_verify_v05_delivery_package`. Offline verification must load only package bytes, revalidate canonical schemas/signatures/authority/relations/evidence, recompute population and control assessment, and reproduce the same Decision without repository, network, or source ledger access.
 
-- [ ] **Step 4: Add explain and compare derived views**
+- [x] **Step 4: Add explain and compare derived views**
 
 Explain output must show eligible/selected counts, capture fraction, population status, each control target/status, decision, reason codes, and the boundary that verification evidence does not prove payment or customer acceptance. Compare output must identify rule, engine, population, fixture, provocation, and failure-signature changes.
 
-- [ ] **Step 5: Run package, privacy, and historical bundle tests**
+- [x] **Step 5: Run package, privacy, and historical bundle tests**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_delivery_package_v05.py -q
@@ -770,7 +770,7 @@ Explain output must show eligible/selected counts, capture fraction, population 
   tests/test_delivery_package_v04.py tests/test_v02_bundles.py -q
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/openworkproof/delivery_package.py tests/test_delivery_package_v05.py \
@@ -791,11 +791,11 @@ git commit -m 'feat: export verification integrity packages'
 - Create: `tests/test_verification_integrity_interfaces_v05.py`
 - Modify: `MCP_SERVER.md`
 
-- [ ] **Step 1: Write RED service-version routing tests**
+- [x] **Step 1: Write RED service-version routing tests**
 
 Require `validate_profile`, `commit_arm_result`, `prepare_decision`, `commit_decision`, `build_delivery`, and `audit_delivery` to dispatch exact v0.5 schema versions. Unknown, missing, or ambiguous versions must fail closed; v0.2-v0.4 behavior remains unchanged.
 
-- [ ] **Step 2: Extend the service facade first**
+- [x] **Step 2: Extend the service facade first**
 
 Add exact model/transaction dispatch in `OpenWorkProofServices`. Add read-only methods:
 
@@ -807,7 +807,7 @@ explain_integrity_package(package: Path) -> dict
 
 Do not accept private keys or create signatures in the service, CLI, or MCP transport.
 
-- [ ] **Step 3: Extend existing CLI commands rather than adding duplicates**
+- [x] **Step 3: Extend existing CLI commands rather than adding duplicates**
 
 Update `profile-validate`, `verify-positive`, `verify-negative`, `verify-compose`, `delivery-build`, `audit-replay`, `audit-explain`, and `audit-compare` for v0.5. Add only:
 
@@ -818,11 +818,11 @@ owp control-observation validate control.json
 
 Exit `0` for valid/satisfied, `1` for malformed/failed operation, `3` for UNKNOWN, and `4` for REFUTED. Always include structured status and reason codes.
 
-- [ ] **Step 4: Add two read-only MCP validation tools**
+- [x] **Step 4: Add two read-only MCP validation tools**
 
 Register `owp_integrity_observation_validate` and `owp_control_observation_validate`; extend `owp_validate_profile` and `owp_run_verification` exact version routing. Assert no MCP tool signs, commits Scope/Profile, accepts delivery, or performs payment.
 
-- [ ] **Step 5: Run parity and type-hint gates**
+- [x] **Step 5: Run parity and type-hint gates**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -839,7 +839,7 @@ for _, value in vars(module).items():
 PY
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/openworkproof/services.py src/openworkproof/cli.py \
@@ -857,7 +857,7 @@ git commit -m 'feat: expose verification integrity interfaces'
 - Create: `tests/test_verification_integrity_adversarial_v05.py`
 - Modify only when a test reveals a defect: v0.5 implementation files from Tasks 2-11
 
-- [ ] **Step 1: Encode the exact protocol attack matrix**
+- [x] **Step 1: Encode the exact protocol attack matrix**
 
 Add parameterized cases for all specification section 12 attacks:
 
@@ -877,19 +877,19 @@ Add parameterized cases for all specification section 12 attacks:
 14. COMMIT occurred and ACK disappeared;
 15. public-package private locator/fixture/absolute-path leakage.
 
-- [ ] **Step 2: Force semantic tests past signature validation**
+- [x] **Step 2: Force semantic tests past signature validation**
 
 For each signed semantic tamper, rebuild the full model and re-sign with the authorized test key. Add a companion bad-signature test so the two error classes cannot be conflated.
 
-- [ ] **Step 3: Add full transaction fault and concurrency matrix**
+- [x] **Step 3: Add full transaction fault and concurrency matrix**
 
 For Profile, Result, and Decision inject insert failure, before-COMMIT, COMMIT failure, COMMIT-then-raise, readback unavailable, and cleanup failure. Snapshot every v0.5 authoritative table. Assert zero writes before COMMIT and exact committed truth afterward. Run identical and same-id-conflicting two-thread cases; identical must be exactly one `committed` plus one `already_committed`.
 
-- [ ] **Step 4: Add physical corruption probes**
+- [x] **Step 4: Add physical corruption probes**
 
 Directly tamper every v0.5 row family with foreign keys temporarily disabled, then restore them before replay. Cover malformed canonical JSON, validly re-signed wrong authority, relation fork/cycle/dangling edge, noncanonical/inverted committed time, missing evidence, and modified registry/schema bytes. Every load/commit/package replay must fail closed.
 
-- [ ] **Step 5: Run the adversarial set three times**
+- [x] **Step 5: Run the adversarial set three times**
 
 ```bash
 for run in 1 2 3; do
@@ -906,7 +906,7 @@ done
   tests/test_verification_integrity_adversarial_v05.py -q
 ```
 
-- [ ] **Step 6: Commit only necessary fixes and the matrix**
+- [x] **Step 6: Commit only necessary fixes and the matrix**
 
 ```bash
 git add tests/test_verification_integrity_adversarial_v05.py \
@@ -932,7 +932,7 @@ Before commit, inspect `git diff --cached --name-only`; remove any file not chan
 - Modify: `tests/test_export_evidence_bundles.py`
 - Modify: `tests/evidence-bundles/verify_evidence_bundle.py`
 
-- [ ] **Step 1: Freeze provenance and claim boundaries**
+- [x] **Step 1: Freeze provenance and claim boundaries**
 
 The README must state:
 
@@ -946,19 +946,19 @@ commercial_validation: not_evidenced
 
 Reuse the committed local demo fixture; do not modify the v0.2-v0.4 bundles.
 
-- [ ] **Step 2: Demonstrate the population blind spot**
+- [x] **Step 2: Demonstrate the population blind spot**
 
 Create one deterministic run where pytest can see multiple eligible tests but the selector chooses zero. Assert the command itself can finish cleanly while v0.5 produces `UNKNOWN / POPULATION_CAPTURE_FAILED`, not VERIFIED.
 
-- [ ] **Step 3: Demonstrate control rot**
+- [x] **Step 3: Demonstrate control rot**
 
 Use one registered semantic mutant that produces the expected signature and one altered failure cause that still fails but mismatches the signature. Assert `proven` for the first and `UNKNOWN / CONTROL_FAILURE_SIGNATURE_MISMATCH` for the second.
 
-- [ ] **Step 4: Demonstrate the repaired full chain**
+- [x] **Step 4: Demonstrate the repaired full chain**
 
 With complete selected population and exact negative control, commit Profile, positive/negative Results, and VERIFIED Decision. Export a customer-private package and reproduce the Decision offline without Git, ledger, or network.
 
-- [ ] **Step 5: Verify the immutable bundle and tamper failure**
+- [x] **Step 5: Verify the immutable bundle and tamper failure**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_verification_integrity_demo_v05.py -q
@@ -969,7 +969,7 @@ env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
 
 Expected: `VERIFICATION PASSED`; changing one population identity, control fixture digest, or failure-signature byte fails.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add tests/integrity-demo/rich-4196 \
@@ -991,19 +991,19 @@ git commit -m 'test: add verification integrity real-issue demo'
 - Modify: `docs/offline-verification.md`
 - Modify: `docs/status.md`
 
-- [ ] **Step 1: Add RED documentation assertions**
+- [x] **Step 1: Add RED documentation assertions**
 
 In the interface/demo tests assert both READMEs mention v0.5 population and control integrity, preserve the three-state boundary, and contain `not_evidenced` language for customer/upstream/commercial status. Assert they do not contain claims of automatic payment, guaranteed correctness, customer adoption, or upstream adoption.
 
-- [ ] **Step 2: Update the Chinese and English product explanation**
+- [x] **Step 2: Update the Chinese and English product explanation**
 
 Explain in business language: v0.3 proves what was selected; v0.5 additionally proves what was eligible before selection and whether a negative control failed for the intended reason. Keep technical object names in a secondary section.
 
-- [ ] **Step 3: Document operator commands and failure interpretation**
+- [x] **Step 3: Document operator commands and failure interpretation**
 
 Update CLI/MCP/offline docs with exact v0.5 commands, exit statuses, package views, reason-code table, and recovery boundaries. State that UNKNOWN is a safe outcome, not a system crash.
 
-- [ ] **Step 4: Update status from fresh evidence only**
+- [x] **Step 4: Update status from fresh evidence only**
 
 Record exact source revision, package version, protocol versions, focused counts, historical compatibility counts, candidate state, demo result, and:
 
@@ -1015,7 +1015,7 @@ upstream_adoption: not_evidenced
 commercial_validation: not_evidenced
 ```
 
-- [ ] **Step 5: Run docs/interface gates and commit**
+- [x] **Step 5: Run docs/interface gates and commit**
 
 ```bash
 ./.venv/bin/python -m pytest \
@@ -1035,7 +1035,7 @@ git commit -m 'docs: publish verification integrity protocol'
 - Create: `supply-chain/images/candidates/${REV}.json`
 - Modify: `docs/status.md`
 
-- [ ] **Step 1: Commit the exact trusted-helper source surface**
+- [x] **Step 1: Commit the exact trusted-helper source surface**
 
 Add only runtime modules needed by offline v0.5 replay, expected to include `src/openworkproof/integrity.py` plus already allowlisted core files. Do not allowlist CLI, MCP, demo, or documentation sources.
 
@@ -1046,7 +1046,7 @@ git commit -m 'build: include integrity replay source'
 REV="$(git rev-parse HEAD)"
 ```
 
-- [ ] **Step 2: Run portable gates before candidate construction**
+- [x] **Step 2: Run portable gates before candidate construction**
 
 ```bash
 ./.venv/bin/python -m pip check
@@ -1059,7 +1059,7 @@ git diff --check
 
 Expected: zero failures. Candidate tests are deferred only until the new committed revision has an inventory.
 
-- [ ] **Step 3: Prepare immutable build contexts**
+- [x] **Step 3: Prepare immutable build contexts**
 
 ```bash
 REV="$(git rev-parse HEAD)"
@@ -1071,13 +1071,13 @@ ARCHIVE_ROOT="$(mktemp -d)"
 
 Inspect the generated context manifests and source hashes before building.
 
-- [ ] **Step 4: Build OCI and Docker archives from the same revision**
+- [x] **Step 4: Build OCI and Docker archives from the same revision**
 
 Use the repository's current candidate build commands and `supply-chain/images/convert_docker_archive.py`; produce execution-test and trusted-helper OCI archives plus Docker v2 archives. Never reuse historical archive hashes, RepoDigests, labels, image IDs, or sizes.
 
 After load/tag, verify live image labels and RepoDigests correspond to `$REV`, and verify zero container/volume residue after probes.
 
-- [ ] **Step 5: Create one new candidate inventory**
+- [x] **Step 5: Create one new candidate inventory**
 
 Use the latest valid `openworkproof-image-candidate-inventory/0.2` file only as a structural reference. Recompute every input hash, archive hash, manifest digest, config digest, image ID, RepoDigest, label, entrypoint, command, byte size, and path. Write only:
 
@@ -1087,7 +1087,7 @@ supply-chain/images/candidates/$REV.json
 
 Do not rewrite a historical inventory.
 
-- [ ] **Step 6: Run candidate and required-live gates**
+- [x] **Step 6: Run candidate and required-live gates**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_candidate_images.py -q
@@ -1098,7 +1098,7 @@ Do not rewrite a historical inventory.
 
 Expected: candidate suites zero failures; required-live full suite zero failures and zero skip. If a platform-only skip remains, stop and resolve it rather than documenting the gate as complete.
 
-- [ ] **Step 7: Verify package/bundle and cleanup state**
+- [x] **Step 7: Verify package/bundle and cleanup state**
 
 ```bash
 env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
@@ -1111,7 +1111,7 @@ find supply-chain/images -name '*.lock' -size 0 -print
 
 Expected: bundle passes; no task-created containers, volumes, or locks remain.
 
-- [ ] **Step 8: Record measured release truth and commit inventory**
+- [x] **Step 8: Record measured release truth and commit inventory**
 
 Update `docs/status.md` with exact commands, counts, duration, warnings, revision, inventory path, archive hashes, and honest external-state boundaries.
 
