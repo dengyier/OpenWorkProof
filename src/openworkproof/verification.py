@@ -2803,6 +2803,22 @@ def _read_v05_population_inventory(
     return inventory
 
 
+def _read_v05_evidence_inventory(
+    path: Path,
+    results: Sequence[VerificationArmResultV05],
+) -> dict[str, bytes]:
+    """Build the evidence inventory for one arm result set: population and
+    control evidence refs, each replayed through the signed reference."""
+    inventory: dict[str, bytes] = {}
+    for result in results:
+        inventory.update(_read_v05_population_inventory(path, result))
+        if result.control_observation is not None:
+            for ref in result.control_observation.evidence_refs:
+                raw = _read_evidence_ref(path, ref, canonical_json=False)
+                inventory[ref.sha256] = raw
+    return inventory
+
+
 def _validate_single_arm_result_v05(
     *,
     connection: sqlite3.Connection,
@@ -3343,9 +3359,7 @@ def _load_current_decision_v05(
                 "v0.5 committed_at causal order is invalid"
             )
         rule_outputs = _derive_v05_rule_outputs(profile, manifest, path)
-        inventory: dict[str, bytes] = {}
-        for result in results:
-            inventory.update(_read_v05_population_inventory(path, result))
+        inventory = _read_v05_evidence_inventory(path, results)
         try:
             draft = integrity.compose_verification_decision_v05(
                 profile=profile,
@@ -3418,9 +3432,7 @@ def prepare_verification_decision_v05(
             work_order=work_order,
         )
         rule_outputs = _derive_v05_rule_outputs(profile, manifest, path)
-        inventory: dict[str, bytes] = {}
-        for result in results:
-            inventory.update(_read_v05_population_inventory(path, result))
+        inventory = _read_v05_evidence_inventory(path, results)
         draft = integrity.compose_verification_decision_v05(
             profile=profile,
             manifest=manifest,
@@ -3579,9 +3591,7 @@ def commit_verification_decision_v05(
                 "v0.5 decision uses stale arm results"
             )
         rule_outputs = _derive_v05_rule_outputs(profile, manifest, path)
-        inventory: dict[str, bytes] = {}
-        for result in results:
-            inventory.update(_read_v05_population_inventory(path, result))
+        inventory = _read_v05_evidence_inventory(path, results)
         try:
             draft = integrity.compose_verification_decision_v05(
                 profile=profile,

@@ -198,20 +198,25 @@ def cli_audit_replay(package: str | Path) -> dict:
 def cli_audit_explain(package: str | Path) -> dict:
     result = cli_audit_replay(package)
     explanation: dict[str, object]
-    try:
-        from openworkproof.delivery_package import (
-            DeliveryPackageError,
-            explain_integrity_package,
-        )
+    from openworkproof.delivery_package import (
+        LegacyPackageError,
+        explain_integrity_package,
+    )
 
+    try:
         explanation = explain_integrity_package(Path(package))
-    except Exception:
+    except LegacyPackageError as error:
+        # Only the explicitly supported legacy case may use the controlled
+        # fallback; any other v0.5 derived-view failure is operational.
         explanation = {
             "current_decision": result["current_decision"],
             "effective_acceptance": result["effective_acceptance"],
             "settlement_readiness": result["settlement_readiness"],
             "boundary": "readiness is not payment or completed settlement",
+            "fallback": "legacy",
         }
+    except Exception as error:
+        raise CliError(f"explain derived view failed: {error}") from error
     return {**result, "explanation": explanation}
 
 
@@ -231,22 +236,24 @@ def cli_audit_compare(old_package: str | Path, new_package: str | Path) -> dict:
     old = cli_audit_replay(old_package)
     new = cli_audit_replay(new_package)
     comparison: dict[str, object]
-    try:
-        from openworkproof.delivery_package import (
-            DeliveryPackageError,
-            compare_integrity_packages,
-        )
+    from openworkproof.delivery_package import (
+        LegacyPackageError,
+        compare_integrity_packages,
+    )
 
+    try:
         comparison = compare_integrity_packages(
             Path(old_package), Path(new_package)
         )
-    except Exception:
-        changed = tuple(
-            key
-            for key in sorted(set(old) | set(new))
-            if old.get(key) != new.get(key)
-        )
-        comparison = {"changed_fields": list(changed)}
+    except LegacyPackageError as error:
+        # Only the explicitly supported legacy case may use the controlled
+        # fallback; any other v0.5 derived-view failure is operational.
+        comparison = {
+            "changed_fields": [],
+            "fallback": "legacy",
+        }
+    except Exception as error:
+        raise CliError(f"compare derived view failed: {error}") from error
     return {
         "old": old,
         "new": new,

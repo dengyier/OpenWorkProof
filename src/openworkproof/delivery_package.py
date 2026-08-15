@@ -76,6 +76,11 @@ class DeliveryPackageError(RuntimeError):
     """A delivery package cannot be exported or verified safely."""
 
 
+class LegacyPackageError(DeliveryPackageError):
+    """A v0.5 derived view is not applicable to a legacy package; the
+    calling surface may use its explicitly controlled legacy fallback."""
+
+
 PrivacyClass = Literal["public", "diagnostic", "customer_private"]
 PrivacyView = Literal["public", "diagnostic", "customer_private"]
 
@@ -2559,6 +2564,7 @@ def _load_v05_objects_and_evidence(root: Path, manifest: DeliveryManifest):
                     raise DeliveryPackageError(
                         "v0.5 control evidence integrity failed"
                     )
+                inventory[ref.sha256] = payload
                 try:
                     document = json.loads(payload)
                 except (UnicodeDecodeError, ValueError) as error:
@@ -2592,7 +2598,9 @@ def _load_v05_objects_and_evidence(root: Path, manifest: DeliveryManifest):
         rule_outputs=_packaged_rule_outputs(root, manifest, profile, scope_manifest),
         evidence_inventory=inventory,
     )
-    control = integrity.assess_control_integrity(profile, tuple(results))
+    control = integrity.assess_control_integrity(
+        profile, tuple(results), evidence_inventory=inventory
+    )
     if (
         population.status != decision.integrity_assessment.population_status
         or control.status != decision.integrity_assessment.control_status
@@ -3133,7 +3141,9 @@ def explain_integrity_package(package_root: Path) -> dict[str, object]:
     root = Path(package_root)
     manifest = load_and_verify_manifest(root)
     if manifest.verification_protocol_version != "0.5":
-        raise DeliveryPackageError("explain_integrity_package requires a v0.5 package")
+        raise LegacyPackageError(
+            "explain_integrity_package requires a v0.5 package"
+        )
     (
         _work_order,
         _claim,
@@ -3214,6 +3224,10 @@ def compare_integrity_packages(
 
     def profile_of(root: Path):
         manifest = load_and_verify_manifest(root)
+        if manifest.verification_protocol_version != "0.5":
+            raise LegacyPackageError(
+                "compare_integrity_packages requires v0.5 packages"
+            )
         _load_v05_objects_and_evidence(root, manifest)
         return VerificationProfileV05.model_validate(
             _load_canonical_json(root, manifest, "verification-profile.json")

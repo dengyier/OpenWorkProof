@@ -1263,6 +1263,10 @@ def _decision_inputs(case, results):
     inventory: dict[str, bytes] = {}
     for result in results:
         inventory.update(_read_v05_population_inventory(case["ledger"], result))
+        if result.control_observation is not None:
+            for ref in result.control_observation.evidence_refs:
+                content = (case["ledger"].parent / ref.path).read_bytes()
+                inventory[ref.sha256] = content
     return rule_outputs, inventory
 
 

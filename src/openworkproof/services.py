@@ -385,8 +385,13 @@ class OpenWorkProofServices:
     ) -> dict:
         """Assess v0.5 control observations without checking authority.
 
-        The control status is derived from the signed inputs only; signer
-        authority is reported as ``not_checked``, never as validly authorized.
+        The control status is derived from the signed inputs; signer
+        authority is reported as ``not_checked``, never as validly
+        authorized. ``proven`` additionally requires the evidence content
+        to resolve through the supplied evidence inventory (canonical
+        bytes, closed resolver, and the facts == observation == expected
+        closure); without an inventory the status is never proven and
+        ``evidence`` is reported as ``not_checked``.
         """
         profile = VerificationProfileV05.model_validate(
             _require(payload, "profile")
@@ -398,12 +403,26 @@ class OpenWorkProofServices:
             VerificationArmResultV05.model_validate(item)
             for item in raw_results
         )
-        assessment = integrity.assess_control_integrity(profile, results)
+        raw_inventory = payload.get("evidence_inventory")
+        inventory: dict[str, bytes] | None = None
+        if raw_inventory is not None:
+            if not isinstance(raw_inventory, Mapping):
+                raise ValueError("evidence_inventory must be a JSON object")
+            inventory = {
+                str(key): _b64url_decode(value)
+                for key, value in raw_inventory.items()
+            }
+        assessment = integrity.assess_control_integrity(
+            profile,
+            results,
+            evidence_inventory=inventory,
+        )
         return {
             "valid": True,
             "authority": "not_checked",
             "control_status": assessment.status,
             "reason_codes": list(assessment.reason_codes),
+            "evidence": "checked" if inventory is not None else "not_checked",
         }
 
     def explain_integrity_package(self, package: Path) -> dict:

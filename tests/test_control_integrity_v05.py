@@ -25,6 +25,7 @@ from openworkproof.models import (
 from openworkproof.signing import sign_payload
 
 from test_population_integrity_v05 import (
+    _EVIDENCE_CONTENT,
     _contract,
     _control_contract,
     _control_observation,
@@ -209,8 +210,24 @@ def _negative_results(
 def _assess_control(
     case: dict[str, Any],
     results: tuple[VerificationArmResultV05, ...],
+    *,
+    with_evidence: bool = False,
 ) -> ControlAssessmentResult:
-    return assess_control_integrity(case["profile"], results)
+    inventory = None
+    if with_evidence:
+        inventory = {}
+        for result in results:
+            observation = result.control_observation
+            if observation is None:
+                continue
+            for ref in observation.evidence_refs:
+                content = _EVIDENCE_CONTENT.get(ref.sha256)
+                if content is None:
+                    raise AssertionError("control evidence content is unavailable")
+                inventory[ref.sha256] = content
+    return assess_control_integrity(
+        case["profile"], results, evidence_inventory=inventory
+    )
 
 
 def test_control_contracts_exactly_cover_negative_arms(
@@ -315,9 +332,9 @@ def test_control_observation_proven(control_case: dict[str, Any]) -> None:
         control_case,
         control_observation=_control_observation_payload(contract),
     )
-    assert _assess_control(control_case, results) == ControlAssessmentResult(
-        "proven", ()
-    )
+    assert _assess_control(
+        control_case, results, with_evidence=True
+    ) == ControlAssessmentResult("proven", ())
 
 
 def test_control_observation_survived(control_case: dict[str, Any]) -> None:
@@ -542,9 +559,9 @@ def test_control_assessment_aggregates_multiple_arms(
         arm=profile.negative_arms[1],
         control_observation=_control_observation_payload(second),
     )
-    assert _assess_control(case, (proven, both_proven)) == ControlAssessmentResult(
-        "proven", ()
-    )
+    assert _assess_control(
+        case, (proven, both_proven), with_evidence=True
+    ) == ControlAssessmentResult("proven", ())
 
 
 @pytest.mark.parametrize(

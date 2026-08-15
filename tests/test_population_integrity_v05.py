@@ -326,6 +326,25 @@ def _observation(
 
 def _control_observation(contract: ControlContractV05) -> dict[str, Any]:
     signature = contract.expected_failure_signature.model_dump(mode="json")
+    document = {
+        "schema_version": "openworkproof-control-evidence/0.5",
+        "control_id": contract.control_id,
+        "fixture_digest": contract.fixture_digest,
+        "provocation_digest": contract.provocation_digest,
+        "execution_status": signature["execution_status"],
+        "exit_codes": signature["exit_codes"],
+        "reason_codes": signature["reason_codes"],
+        "predicate_ids": signature["predicate_ids"],
+        "required_evidence_purposes": signature["required_evidence_purposes"],
+    }
+    content = rfc8785.dumps(document)
+    reference = {
+        "path": "evidence/control.json",
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "media_type": "application/json",
+        "size_bytes": len(content),
+    }
+    _EVIDENCE_CONTENT[reference["sha256"]] = content
     return {
         "control_id": contract.control_id,
         "fixture_digest": contract.fixture_digest,
@@ -333,7 +352,7 @@ def _control_observation(contract: ControlContractV05) -> dict[str, Any]:
         "observed_failure_signature": signature,
         "observed_failure_signature_digest": failure_signature_digest(signature),
         "control_status": "proven",
-        "evidence_refs": [_evidence("test-result")],
+        "evidence_refs": [reference],
     }
 
 

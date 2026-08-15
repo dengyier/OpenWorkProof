@@ -209,6 +209,54 @@ def _validated_profile(profile: VerificationProfileV05) -> VerificationProfileV0
     return VerificationProfileV05.model_validate(profile.model_dump(mode="json"))
 
 
+def _resolve_control_observation_evidence(
+    observation: object,
+    contract: ControlContractV05,
+    inventory: Mapping[str, bytes],
+) -> None:
+    """Resolve every control evidence reference of one observation.
+
+    Mirrors the ledger's control evidence validation: content must replay
+    the signed SHA-256 and size, must be canonical RFC 8785 bytes, must
+    resolve through the closed resolver, and the resolved facts must equal
+    the signed observation exactly. Any failure raises ``ValueError`` so
+    the caller fails closed; shared by the ledger, the offline package,
+    and the service assessment surface (audit D).
+    """
+
+    for ref in observation.evidence_refs:
+        content = inventory.get(ref.sha256)
+        if content is None:
+            raise ValueError("control evidence content is unavailable")
+        if type(content) is not bytes:
+            raise ValueError("control evidence content must be bytes")
+        if len(content) != ref.size_bytes:
+            raise ValueError(
+                "control evidence size does not replay the signed reference"
+            )
+        if hashlib.sha256(content).hexdigest() != ref.sha256:
+            raise ValueError(
+                "control evidence content does not replay the signed reference"
+            )
+        try:
+            document = json.loads(content)
+        except (UnicodeDecodeError, ValueError) as error:
+            raise ValueError("control evidence is invalid JSON") from error
+        if rfc8785.dumps(document) != content:
+            raise ValueError("control evidence is not canonical RFC 8785 bytes")
+        try:
+            facts = resolve_control_evidence(document, contract)
+        except ControlEvidenceError as error:
+            raise ValueError(f"control evidence is unprovable: {error}") from error
+        if (
+            facts.fixture_digest != observation.fixture_digest
+            or facts.provocation_digest != observation.provocation_digest
+            or facts.failure_signature
+            != observation.observed_failure_signature
+        ):
+            raise ValueError("control evidence contradicts the signed observation")
+
+
 def _validated_manifest(manifest: EvaluationScopeManifest) -> EvaluationScopeManifest:
     if type(manifest) is not EvaluationScopeManifest:
         raise ValueError("manifest must be an exact EvaluationScopeManifest")
@@ -843,6 +891,8 @@ def _derived_control_status(
 def assess_control_integrity(
     profile: VerificationProfileV05,
     results: Sequence[VerificationArmResultV05],
+    *,
+    evidence_inventory: Mapping[str, bytes] | None = None,
 ) -> ControlAssessmentResult:
     """Aggregate negative-control observations into one closed control status.
 
@@ -851,11 +901,22 @@ def assess_control_integrity(
     other incomplete set -> ``unavailable``. Each observation's claimed
     status is re-derived from its signed content and must match; caller
     metadata is never trusted alone.
+
+    ``proven`` additionally requires every negative observation's evidence
+    content to resolve through ``evidence_inventory`` (signed reference
+    replay, canonical RFC 8785 bytes, the closed resolver, and the
+    facts == observation == expected closure). When no inventory is
+    supplied the refs-exist signal alone can never claim proven: the
+    aggregate downgrades to ``unavailable`` with ``CONTROL_EVIDENCE_MISSING``.
     """
 
     validate_control_contracts(profile)
     profile = _validated_profile(profile)
     validated_results = _validated_results(results)
+    if evidence_inventory is not None and not isinstance(
+        evidence_inventory, Mapping
+    ):
+        raise ValueError("evidence inventory must be a mapping")
 
     contracts_by_arm = {
         contract.arm_id: contract for contract in profile.control_contracts
@@ -898,6 +959,10 @@ def assess_control_integrity(
             raise ValueError(
                 "negative arm control observation does not bind its contract"
             )
+        if evidence_inventory is not None:
+            _resolve_control_observation_evidence(
+                observation, contract, evidence_inventory
+            )
         derived, code = _derived_control_status(contract, result)
         if observation.control_status != derived:
             raise ValueError(
@@ -909,6 +974,12 @@ def assess_control_integrity(
             reason_codes.add(code)
 
     if statuses == {"proven"}:
+        if evidence_inventory is None:
+            # Refs-existence is not evidence: without resolved content the
+            # closed model never claims proven (audit D).
+            return ControlAssessmentResult(
+                "unavailable", ("CONTROL_EVIDENCE_MISSING",)
+            )
         return ControlAssessmentResult("proven", ())
     if "survived" in statuses:
         return ControlAssessmentResult("survived", ("CONTROL_SURVIVED",))
@@ -1176,7 +1247,11 @@ def compose_verification_decision_v05(
         rule_outputs=rule_outputs,
         evidence_inventory=evidence_inventory,
     )
-    control = assess_control_integrity(profile, results)
+    control = assess_control_integrity(
+        profile,
+        results,
+        evidence_inventory=evidence_inventory,
+    )
 
     missing_required = tuple(
         sorted(

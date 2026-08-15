@@ -184,16 +184,14 @@ def test_service_validates_population_and_control_observations(
         "reason_codes": [],
     }
     controls = case["services"].validate_control_observation(
-        {
-            "profile": case["profile"].model_dump(mode="json"),
-            "results": [case["results"][1].model_dump(mode="json")],
-        }
+        _control_payload(case)
     )
     assert controls == {
         "valid": True,
         "authority": "not_checked",
         "control_status": "proven",
         "reason_codes": [],
+        "evidence": "checked",
     }
 
 
@@ -207,16 +205,14 @@ def test_cli_and_mcp_observation_commands(service_case) -> None:
     assert mcp_result["ok"] is True
     assert mcp_result["population_status"] == "matched"
     assert mcp_result["authority"] == "not_checked"
-    control_payload = {
-        "profile": case["profile"].model_dump(mode="json"),
-        "results": [case["results"][1].model_dump(mode="json")],
-    }
+    control_payload = _control_payload(case)
     control_path = case["tmp_path"] / "control.json"
     control_path.write_text(json.dumps(control_payload), encoding="utf-8")
     assert cli_app(["control-observation", "validate", str(control_path)]) == 0
     control_result = owp_control_observation_validate(json.dumps(control_payload))
     assert control_result["control_status"] == "proven"
     assert control_result["authority"] == "not_checked"
+    assert control_result["evidence"] == "checked"
 
 
 @pytest.mark.parametrize(
@@ -432,3 +428,158 @@ def test_cli_audit_explain_and_compare_use_v05_derived_views(
     comparison = compare_integrity_packages(package, second)
     assert comparison["selector_rule_changes"] == []
     assert comparison["control_changes"] == []
+
+
+def _control_payload(case) -> dict:
+    """Payload with the honest control evidence inventory for the negative
+    arm result."""
+    observation = case["results"][1].control_observation
+    inventory = {}
+    for ref in observation.evidence_refs:
+        content = (case["tmp_path"] / ref.path).read_bytes()
+        inventory[ref.sha256] = (
+            base64.urlsafe_b64encode(content).decode("ascii").rstrip("=")
+        )
+    return {
+        "profile": case["profile"].model_dump(mode="json"),
+        "results": [case["results"][1].model_dump(mode="json")],
+        "evidence_inventory": inventory,
+    }
+
+
+def _build_v05_package(case) -> Path:
+    from openworkproof.models import VerificationDecisionDraftV05
+    from openworkproof.verification import (
+        verification_decision_signing_bytes_v05,
+    )
+
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    for result in case["results"]:
+        case["services"].commit_arm_result(
+            case["ledger"], result.model_dump(mode="json")
+        )
+    request = {
+        "decision_id": "c" * 64,
+        "decided_at": "2026-01-01T00:20:00Z",
+        "nonce": "d" * 64,
+    }
+    draft = case["services"].prepare_decision(case["ledger"], request)
+    encoded = verification_decision_signing_bytes_v05(
+        VerificationDecisionDraftV05.model_validate(draft)
+    )
+    binding = case["profile"].verifier_bindings[0]
+    private_key = case["keys"]["Verifier"][0]
+    decision = {
+        "schema_version": "openworkproof-verification-decision/0.5",
+        **draft,
+        "digest": hashlib.sha256(encoded).hexdigest(),
+        "verifier_signatures": [
+            {
+                "verifier_subject_id": binding.verifier_subject_id,
+                "verifier_key_id": key_id(private_key.public_key()),
+                "signature_alg": "Ed25519",
+                "signature": base64.urlsafe_b64encode(
+                    private_key.sign(encoded)
+                )
+                .decode("ascii")
+                .rstrip("="),
+            }
+        ],
+    }
+    case["services"].commit_decision(case["ledger"], decision)
+    output = case["tmp_path"] / "delivery-b"
+    case["services"].build_delivery(case["ledger"], output, "customer_private")
+    return output
+
+
+def test_audit_d_control_without_evidence_is_not_checked(service_case) -> None:
+    """Audit D: the control observation surface must not claim proven from
+    refs-existence alone — without an evidence inventory it reports
+    evidence:not_checked and a non-proven status."""
+    case = service_case
+    payload = {
+        "profile": case["profile"].model_dump(mode="json"),
+        "results": [case["results"][1].model_dump(mode="json")],
+    }
+    result = case["services"].validate_control_observation(payload)
+    assert result["control_status"] == "unavailable"
+    assert "CONTROL_EVIDENCE_MISSING" in result["reason_codes"]
+    assert result["evidence"] == "not_checked"
+
+
+def test_audit_d_control_with_unreplayable_evidence_fails_closed(
+    service_case,
+) -> None:
+    """Audit D: a supplied evidence inventory whose content does not replay
+    the signed references must fail closed instead of proving."""
+    case = service_case
+    observation = case["results"][1].control_observation
+    junk = {
+        ref.sha256: base64.urlsafe_b64encode(b"junk").decode("ascii").rstrip("=")
+        for ref in observation.evidence_refs
+    }
+    payload = {
+        "profile": case["profile"].model_dump(mode="json"),
+        "results": [case["results"][1].model_dump(mode="json")],
+        "evidence_inventory": junk,
+    }
+    with pytest.raises(ValueError):
+        case["services"].validate_control_observation(payload)
+
+
+def test_audit_e_explain_derived_failure_is_operational(
+    service_case, monkeypatch
+) -> None:
+    """Audit E: a v0.5 derived-view failure must exit operationally (1),
+    never silently fall back and exit with the replay's decision code."""
+    case = service_case
+    output = _build_v05_package(case)
+    import openworkproof.delivery_package as delivery_package
+
+    monkeypatch.setattr(
+        delivery_package,
+        "explain_integrity_package",
+        lambda package: (_ for _ in ()).throw(
+            RuntimeError("derived view exploded")
+        ),
+    )
+    assert cli_app(["audit-explain", str(output)]) == 1
+
+
+def test_audit_e_compare_derived_failure_is_operational(
+    service_case, monkeypatch
+) -> None:
+    """Audit E: a v0.5 compare-view failure must exit operationally (1)."""
+    case = service_case
+    left = _build_v05_package(case)
+    right = case["tmp_path"] / "delivery-b2"
+    case["services"].build_delivery(case["ledger"], right, "customer_private")
+    import openworkproof.delivery_package as delivery_package
+
+    monkeypatch.setattr(
+        delivery_package,
+        "compare_integrity_packages",
+        lambda a, b: (_ for _ in ()).throw(
+            RuntimeError("compare view exploded")
+        ),
+    )
+    assert cli_app(["audit-compare", str(left), str(right)]) == 1
+
+
+def test_audit_e_legacy_explain_uses_controlled_fallback(
+    service_case, monkeypatch
+) -> None:
+    """Audit E: a legacy (non-v0.5) package keeps the controlled fallback
+    and exits with the replay decision code."""
+    case = service_case
+    output = _build_v05_package(case)
+    import openworkproof.delivery_package as delivery_package
+
+    monkeypatch.setattr(
+        delivery_package,
+        "explain_integrity_package",
+        lambda package: (_ for _ in ()).throw(
+            delivery_package.LegacyPackageError("legacy package")
+        ),
+    )
+    assert cli_app(["audit-explain", str(output)]) == 0
