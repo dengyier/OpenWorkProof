@@ -1003,8 +1003,8 @@ Explain in business language: v0.3 proves what was selected; v0.5 additionally p
 
 Update CLI/MCP/offline docs with exact v0.5 commands, exit statuses, package views, reason-code table, and recovery boundaries. State that UNKNOWN is a safe outcome, not a system crash.
 
-- [ ] **Step 4: Update status from fresh evidence only**
-  （第三轮审计在途：勾选待最终 fresh 结果与 total 复审通过后恢复）
+- [x] **Step 4: Update status from fresh evidence only**
+  （第三轮审计闭环：以 final fresh 结果更新；total 复审通过）
 
 Record exact source revision, package version, protocol versions, focused counts, historical compatibility counts, candidate state, demo result, and:
 
@@ -1087,9 +1087,9 @@ supply-chain/images/candidates/$REV.json
 
 Do not rewrite a historical inventory.
 
-- [ ] **Step 6: Run candidate and required-live gates**
-  （第三轮审计在途：候选已按新修订重建，最终 required-live fresh 结果
-  与 zero-skip 确认后恢复勾选）
+- [x] **Step 6: Run candidate and required-live gates**
+  （第三轮审计闭环：候选按 `66d242e…` 重建，required-live fresh
+  3489/0/0 零 warning；total 复审通过）
 
 The candidate/live gates are NOT self-contained without the delivery
 artifact root, the live-Docker switch, and the fully-qualified image
@@ -1132,8 +1132,9 @@ find supply-chain/images -name '*.lock' -size 0 -print
 
 Expected: bundle passes; no task-created containers, volumes, or locks remain.
 
-- [ ] **Step 8: Record measured release truth and commit inventory**
-  （第三轮审计在途：status/checklist 数字以最终 fresh 复核后更新并恢复勾选）
+- [x] **Step 8: Record measured release truth and commit inventory**
+  （第三轮审计闭环：库存 `66d242e…` 已提交，status/checklist 以 final
+  fresh 数字更新；total 复审通过）
 
 Update `docs/status.md` with exact commands, counts, duration, warnings, revision, inventory path, archive hashes, and honest external-state boundaries.
 
@@ -1194,11 +1195,11 @@ Report final local HEAD, origin/main, ahead/behind, commits, exact test counts, 
 
 - [x] Every v0.5 type and reason code in the design appears in an implementation or test task.
 - [x] Every one of the fifteen threat cases has an explicit adversarial test.
-- [ ] Every signed object has canonical model, schema, signing, authority, transaction, history, package, and tamper coverage.  # 第三轮审计在途：final total 复审通过后恢复
-- [ ] Every transaction has pre-COMMIT zero-write, COMMIT-ACK, cleanup, exact replay, immutable row, and concurrency coverage.  # 第三轮审计在途：final total 复审通过后恢复
-- [ ] Git and pytest adapters distinguish eligible from selected populations.  # 第三轮审计在途：final total 复审通过后恢复
-- [ ] `VERIFIED / REFUTED / UNKNOWN` precedence is explicit and tested.  # 第三轮审计在途：final total 复审通过后恢复
-- [ ] v0.1-v0.4 schemas, registries, golden bytes, packages, and version routers remain covered.  # 第三轮审计在途：final total 复审通过后恢复
-- [ ] Public package privacy and commercial claim boundaries are executable tests, not prose only.  # 第三轮审计在途：final total 复审通过后恢复
-- [ ] Candidate inventory is generated only after all source changes are committed.  # 第三轮审计在途：final total 复审通过后恢复
-- [ ] No task implements dynamic streams, Merkle infrastructure, LLM judging, payment, settlement execution, EvidenceRequirementBinding, or a maturity dashboard.  # 第三轮审计在途：final total 复审通过后恢复
+- [x] Every signed object has canonical model, schema, signing, authority, transaction, history, package, and tamper coverage.
+- [x] Every transaction has pre-COMMIT zero-write, COMMIT-ACK, cleanup, exact replay, immutable row, and concurrency coverage.
+- [x] Git and pytest adapters distinguish eligible from selected populations.
+- [x] `VERIFIED / REFUTED / UNKNOWN` precedence is explicit and tested.
+- [x] v0.1-v0.4 schemas, registries, golden bytes, packages, and version routers remain covered.
+- [x] Public package privacy and commercial claim boundaries are executable tests, not prose only.
+- [x] Candidate inventory is generated only after all source changes are committed.
+- [x] No task implements dynamic streams, Merkle infrastructure, LLM judging, payment, settlement execution, EvidenceRequirementBinding, or a maturity dashboard.

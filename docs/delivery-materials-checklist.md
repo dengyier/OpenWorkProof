@@ -29,8 +29,8 @@
   个人真实姓名;独立见证人仅以 key_id 记录,不出现姓名;
 - [x] **可复现性**:`git clone` + `pip install -r requirements-lock.txt` +
   `pytest -q`(required-live)可复跑;M2 演示 `test_delivery_m2.py` 本地闭环;
-- [ ] **一致性**:README/status 计数与 required-live 全量一致
-  (第三轮 fresh 3489 passed、0 failed、0 skip);total 复审通过后勾选;
+- [x] **一致性**:README/status 计数与 required-live 全量一致
+  (第三轮 fresh 3489 passed、0 failed、0 skip);total 复审通过;
 - [x] **边界诚实**:全材料不宣称"独立外部人类验收完成"——明确标注
   外部 Acceptor 人类签署属线下事件、交付验证签署与赛事结果不由本仓库保证。
 

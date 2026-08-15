@@ -18,13 +18,13 @@ selected 分离）、负控契约/失败签名、`VERIFIED / REFUTED / UNKNOWN` 
 冻结交付包离线重放为 `VERIFICATION PASSED`。
 
 Task 15 发布门已重建候选并复测，最终测量（2026-08-15，独立总审修复与终审 Minor
-闭环后的最终重建）。**第三轮独立审计（2026-08-16，Batch A–E）在途**：源码
-变更（`scope.py`/`integrity.py`/`services.py`/`cli.py`/`verification.py`/
-`delivery_package.py`/converter）会失效旧候选，最终候选重建、required-live
-与 candidate 数字将在全部批次闭环与 total 复审后以 fresh 结果重测更新；
-下方非 fresh 数字标注来源与状态。
+闭环后的最终重建）。**第三轮独立审计（2026-08-16，Batch A–E）已闭环**：全部
+A–H 发现经攻击测试 RED→最小修复→逐批独立双审→total 复审通过；候选已按最终
+修订重建，下方数字为第三轮 HEAD fresh 测量。
 
-- candidate source revision（**审计基线**）：`d460c876a7f3046fd1d338951d964bce6d1a6be1`
+- candidate source revision（**当前 = 第三轮最终修订**）：
+  `66d242eb31b312368ada4ce55159c9e313a62e71`；审计基线为
+  `d460c876a7f3046fd1d338951d964bce6d1a6be1`（被本轮源码变更取代，库存保留原字节）：
   （2 Critical + 5 Important + 终审 leap-second Minor 全部闭环的最终实现
   提交）；不可变库存：
   `supply-chain/images/candidates/d460c876a7f3046fd1d338951d964bce6d1a6be1.json`；
