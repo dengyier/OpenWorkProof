@@ -784,6 +784,7 @@ def test_trusted_helper_source_allowlist_is_the_exact_repo_read_closure() -> Non
         "src/openworkproof/composition.py\n"
         "src/openworkproof/delivery_package.py\n"
         "src/openworkproof/evidence.py\n"
+        "src/openworkproof/integrity.py\n"
         "src/openworkproof/models.py\n"
         "src/openworkproof/policy.py\n"
         "src/openworkproof/predicates.py\n"
