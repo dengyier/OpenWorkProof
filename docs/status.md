@@ -39,9 +39,10 @@ A–H 发现经攻击测试 RED→最小修复→逐批独立双审→total 复�
 - 冻结兼容（v0.2/v0.3/v0.4 models/schema/delivery/settlement/acceptance）：
   `216 passed、0 failed`（审计基线 fresh，本轮未触碰 v0.1–v0.4 冻结面；
   亦随 required-live 全量一并复跑）；
-- 便携全量（`pytest -q --ignore=tests/test_candidate_supplychain_integration.py`）：
-  **第三轮 HEAD fresh `3386 passed、0 failed、6 skipped`**（6 分 10 秒；
-  审计基线 fresh 3350；skip 均为未设 live-Docker 环境变量所致平台边界）；
+- 便携全量（`pytest -q`，未设置 live-Docker 环境变量）：
+  **1.2.0 本地待发布候选 fresh `3487 passed、0 failed、7 skipped`**（15 分 07 秒；
+  skip 均为未设置 artifact root、live-Docker 或 immutable image 所致明确边界，
+  已由下方 required-live 零 skip 全量门覆盖）；
 - candidate 两套件（live Docker + artifact root + 全限定镜像引用）：
   **1.2.0 本地待发布候选 fresh `176 passed、0 failed`**（含 live Docker 与上下文
   重建身份链；库存 `d0bec9d…`）；

@@ -250,7 +250,7 @@ RepoDigest, label, user, entrypoint, and command from the new artifacts. Create
 `supply-chain/images/candidates/<source-revision>.json`; never edit an older
 inventory.
 
-- [ ] **Step 5: Run candidate and full release gates**
+- [x] **Step 5: Run candidate and full release gates**
 
 Run both candidate suites with live Docker and the external artifact root,
 then run the complete required-live suite with zero failures and zero skips.
