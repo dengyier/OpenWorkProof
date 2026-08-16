@@ -22,3 +22,4 @@ docs/business-challenge-post-hn.md
 docs/aivs-vcap-alignment.md
 docs/vcap-verifier-interface.md
 docs/vcap-verifier-stub.py
+docs/vcap-verifier-smoke.py
