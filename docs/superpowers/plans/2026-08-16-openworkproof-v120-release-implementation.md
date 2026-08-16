@@ -26,7 +26,7 @@
 **Files:**
 - Modify: `tests/test_package.py`
 
-- [ ] **Step 1: Add the failing release identity test**
+- [x] **Step 1: Add the failing release identity test**
 
 Add a test that loads `pyproject.toml`, `server.json`, and `mcp.json` from the
 repository root and asserts:
@@ -40,11 +40,11 @@ for metadata in (server, legacy_mcp):
     assert metadata["version"] == expected
     assert metadata["packages"][0]["version"] == expected
     assert metadata["license"] == "Apache-2.0"
-assert pyproject["project"]["license"] == {"text": "Apache-2.0"}
-assert "License :: OSI Approved :: Apache Software License" in pyproject["project"]["classifiers"]
+assert pyproject["project"]["license"] == "Apache-2.0"
+assert not any(item.startswith("License ::") for item in pyproject["project"]["classifiers"])
 ```
 
-- [ ] **Step 2: Run the test to observe RED**
+- [x] **Step 2: Run the test to observe RED**
 
 Run:
 
@@ -55,7 +55,7 @@ Run:
 Expected: failure because current release metadata is `1.1.1` and two surfaces
 still declare MIT.
 
-- [ ] **Step 3: Commit only after the metadata implementation in Task 2**
+- [x] **Step 3: Commit only after the metadata implementation in Task 2**
 
 The RED test remains uncommitted until the corresponding metadata is green.
 
@@ -68,13 +68,13 @@ The RED test remains uncommitted until the corresponding metadata is green.
 - Modify: `mcp.json`
 - Test: `tests/test_package.py`
 
-- [ ] **Step 1: Apply the minimal metadata changes**
+- [x] **Step 1: Apply the minimal metadata changes**
 
 Set all package/server/package-reference versions to `1.2.0`. Change only stale
 license metadata in `pyproject.toml` and `mcp.json` to Apache-2.0; do not edit
 the authoritative `LICENSE` text.
 
-- [ ] **Step 2: Refresh the editable install and run GREEN**
+- [x] **Step 2: Refresh the editable install and run GREEN**
 
 ```bash
 .venv/bin/python -m pip install -e .
@@ -84,7 +84,7 @@ the authoritative `LICENSE` text.
 
 Expected: all package tests pass and no broken requirements are reported.
 
-- [ ] **Step 3: Commit the metadata contract**
+- [x] **Step 3: Commit the metadata contract**
 
 ```bash
 git add pyproject.toml src/openworkproof/__init__.py server.json mcp.json tests/test_package.py
@@ -98,12 +98,12 @@ git commit -m "build: prepare OpenWorkProof 1.2.0 metadata"
 - Modify: `README_en.md`
 - Create: `docs/releases/v1.2.0.md`
 
-- [ ] **Step 1: Update visible distribution metadata**
+- [x] **Step 1: Update visible distribution metadata**
 
 Change visible software version and MCP Registry version URLs from `1.1.1` to
 `1.2.0`. Keep protocol references at `0.5` where they describe schema versions.
 
-- [ ] **Step 2: Replace stale release-candidate evidence**
+- [x] **Step 2: Replace stale release-candidate evidence**
 
 Both languages must contain the same values:
 
@@ -120,7 +120,7 @@ Rich #4196: VERIFICATION PASSED / VERIFIED / READY_FOR_ACCEPTANCE
 State schemas v0.1-v0.5, 21 MCP tools, and the `not_evidenced`
 customer/payment/upstream boundaries.
 
-- [ ] **Step 3: Add factual release notes**
+- [x] **Step 3: Add factual release notes**
 
 Create `docs/releases/v1.2.0.md` with:
 
@@ -130,7 +130,7 @@ Create `docs/releases/v1.2.0.md` with:
 - upgrade command `python -m pip install --upgrade openworkproof==1.2.0`;
 - no-customer/no-payment/no-upstream-adoption boundary.
 
-- [ ] **Step 4: Verify parity and stale-value removal**
+- [x] **Step 4: Verify parity and stale-value removal**
 
 ```bash
 rg -n '2491 passed|64f6ba65|Final v0\.2|required-live.*2491|versions/1\.1\.1|当前版本：1\.1\.1|Version: 1\.1\.1' README.md README_en.md
@@ -141,7 +141,7 @@ git diff --check
 Expected: the first command has no matches; the second proves bilingual release
 facts are present.
 
-- [ ] **Step 5: Commit README and release notes**
+- [x] **Step 5: Commit README and release notes**
 
 ```bash
 git add README.md README_en.md docs/releases/v1.2.0.md
@@ -154,7 +154,7 @@ git commit -m "docs: publish OpenWorkProof 1.2.0 release notes"
 - Verify: `dist/openworkproof-1.2.0-py3-none-any.whl`
 - Verify: `dist/openworkproof-1.2.0.tar.gz`
 
-- [ ] **Step 1: Build from a clean output directory**
+- [x] **Step 1: Build from a clean output directory**
 
 ```bash
 rm -rf dist
@@ -164,11 +164,11 @@ rm -rf dist
 
 Expected: exactly one wheel and one sdist, both passing `twine check`.
 
-- [ ] **Step 2: Verify package identity and contents**
+- [x] **Step 2: Verify package identity and contents**
 
 Run an inspection script using `zipfile`, `tarfile`, and `email.parser` to assert
 both artifact names contain `1.2.0`, METADATA declares `Version: 1.2.0` and
-`License: Apache-2.0`, and the wheel contains each
+`License-Expression: Apache-2.0`, and the wheel contains each
 `openworkproof/schemas/v0.{1,2,3,4,5}/schema-registry.json`.
 
 ```bash
@@ -186,17 +186,21 @@ with zipfile.ZipFile(wheel) as archive:
     metadata_name, = [name for name in names if name.endswith(".dist-info/METADATA")]
     metadata = Parser().parsestr(archive.read(metadata_name).decode())
     assert metadata["Version"] == "1.2.0"
-    assert metadata["License"] == "Apache-2.0"
+    assert metadata["License-Expression"] == "Apache-2.0"
     for version_number in range(1, 6):
         assert f"openworkproof/schemas/v0.{version_number}/schema-registry.json" in names
 with tarfile.open(sdist, "r:gz") as archive:
-    names = set(archive.getnames())
-    assert any(name.endswith("/PKG-INFO") for name in names)
+    pkg_info_name = "openworkproof-1.2.0/PKG-INFO"
+    extracted = archive.extractfile(pkg_info_name)
+    assert extracted is not None
+    pkg_info = Parser().parsestr(extracted.read().decode())
+    assert pkg_info["Version"] == "1.2.0"
+    assert pkg_info["License-Expression"] == "Apache-2.0"
 print(wheel, sdist)
 PY
 ```
 
-- [ ] **Step 3: Run local release gates**
+- [x] **Step 3: Run local release gates**
 
 ```bash
 .venv/bin/python -m pytest tests/test_package.py tests/test_schema_registry.py -q
