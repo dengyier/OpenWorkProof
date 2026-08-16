@@ -48,14 +48,14 @@ The following license metadata must equal `Apache-2.0`:
 - Keep the Chinese and English READMEs structurally and factually aligned.
 - Replace stale v0.2 release-candidate evidence with the final v0.5 evidence:
   - v0.5 focused: `401 passed, 0 failed`;
-  - candidate live suites: `175 passed, 0 failed`;
-  - required-live full suite: `3492 passed, 0 failed, 0 skipped`;
+  - candidate live suites: `176 passed, 0 failed`;
+  - required-live full suite: `3494 passed, 0 failed, 0 skipped`;
   - candidate source revision:
-    `a305f7204053f08312613dddb3a0ce7533ce4806`;
+    `d0bec9d2f2c3cf12568fa866d16be1a56de4aa9c`;
   - immutable candidate inventory:
-    `supply-chain/images/candidates/a305f7204053f08312613dddb3a0ce7533ce4806.json`;
+    `supply-chain/images/candidates/d0bec9d2f2c3cf12568fa866d16be1a56de4aa9c.json`;
   - execution image identity:
-    `docker.io/openworkproof/execution-test@sha256:bc35711b843e6e2c479c52d486a1b2ed401cc90c7b15edb52b948206e9157abb`;
+    `docker.io/openworkproof/execution-test@sha256:6d0dadec750eb498ed4d2260b4de65f33ed1c146adda6e64ec8ba588f7a88097`;
   - Rich #4196 offline delivery bundle:
     `VERIFICATION PASSED / VERIFIED / READY_FOR_ACCEPTANCE`.
 - State that protocol schemas cover v0.1 through v0.5 and retain the current

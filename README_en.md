@@ -262,15 +262,15 @@ scorecard. The examples are local integration fixtures; they do not evidence a
 real customer, customer acceptance, payment, fund release, or production
 deployment.
 
-The final v0.5 release candidate completed its gates on source revision
-`a305f7204053f08312613dddb3a0ce7533ce4806` and added an immutable
-[candidate inventory](supply-chain/images/candidates/a305f7204053f08312613dddb3a0ce7533ce4806.json):
+The local 1.2.0 release candidate completed its gates on source revision
+`d0bec9d2f2c3cf12568fa866d16be1a56de4aa9c` and added an immutable
+[candidate inventory](supply-chain/images/candidates/d0bec9d2f2c3cf12568fa866d16be1a56de4aa9c.json):
 
 - v0.5 focused: `401 passed, 0 failed`;
-- candidate live: `175 passed, 0 failed`;
-- required-live full suite: `3492 passed, 0 failed, 0 skipped`;
+- candidate live: `176 passed, 0 failed`;
+- required-live full suite: `3494 passed, 0 failed, 0 skipped`;
 - frozen execution image:
-  `docker.io/openworkproof/execution-test@sha256:bc35711b843e6e2c479c52d486a1b2ed401cc90c7b15edb52b948206e9157abb`;
+  `docker.io/openworkproof/execution-test@sha256:6d0dadec750eb498ed4d2260b4de65f33ed1c146adda6e64ec8ba588f7a88097`;
 - the Rich #4196 v0.5 delivery bundle replayed offline as
   `VERIFICATION PASSED / VERIFIED / READY_FOR_ACCEPTANCE`.
 
@@ -634,8 +634,8 @@ OpenWorkProof/
 - Docker production executor (STARTED_UNCONFIRMED recovery)
 - Rich #4196 full five-role E2E demo (Acceptor TCP signing + offline verification)
 - Dify #33013 full five-role E2E demo (AI application platform, cross-project-type generality)
-- **v0.5 focused: 401 passed, 0 failed; candidate live: 175 passed, 0 failed**
-- **Final v0.5 required-live gate: 3492 passed, 0 failed, 0 skipped**
+- **v0.5 focused: 401 passed, 0 failed; candidate live: 176 passed, 0 failed**
+- **Local 1.2.0 required-live gate: 3494 passed, 0 failed, 0 skipped**
 
 **Not yet complete:** remaining ToolCall handler closures, event submission.
 

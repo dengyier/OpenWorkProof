@@ -109,11 +109,11 @@ Both languages must contain the same values:
 
 ```text
 v0.5 focused: 401 passed, 0 failed
-candidate live: 175 passed, 0 failed
-required-live: 3492 passed, 0 failed, 0 skipped
-source revision: a305f7204053f08312613dddb3a0ce7533ce4806
-inventory: supply-chain/images/candidates/a305f7204053f08312613dddb3a0ce7533ce4806.json
-execution image: docker.io/openworkproof/execution-test@sha256:bc35711b843e6e2c479c52d486a1b2ed401cc90c7b15edb52b948206e9157abb
+candidate live: 176 passed, 0 failed
+required-live: 3494 passed, 0 failed, 0 skipped
+source revision: d0bec9d2f2c3cf12568fa866d16be1a56de4aa9c
+inventory: supply-chain/images/candidates/d0bec9d2f2c3cf12568fa866d16be1a56de4aa9c.json
+execution image: docker.io/openworkproof/execution-test@sha256:6d0dadec750eb498ed4d2260b4de65f33ed1c146adda6e64ec8ba588f7a88097
 Rich #4196: VERIFICATION PASSED / VERIFIED / READY_FOR_ACCEPTANCE
 ```
 
@@ -134,7 +134,7 @@ Create `docs/releases/v1.2.0.md` with:
 
 ```bash
 rg -n '2491 passed|64f6ba65|Final v0\.2|required-live.*2491|versions/1\.1\.1|当前版本：1\.1\.1|Version: 1\.1\.1' README.md README_en.md
-rg -n '401 passed|175 passed|3492 passed|a305f720|READY_FOR_ACCEPTANCE|21.*MCP|v0\.1.*v0\.5|1\.2\.0' README.md README_en.md docs/releases/v1.2.0.md
+rg -n '401 passed|176 passed|3494 passed|d0bec9d2|READY_FOR_ACCEPTANCE|21.*MCP|v0\.1.*v0\.5|1\.2\.0' README.md README_en.md docs/releases/v1.2.0.md
 git diff --check
 ```
 

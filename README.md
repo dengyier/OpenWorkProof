@@ -245,15 +245,15 @@ owp settlement-status pilot.sqlite3
 [v0.2 可验证交付试点](docs/pilot/README.md)。示例对象只用于本地解析和
 接入演练，不代表真实客户、客户验收、付款、资金释放或正式部署。
 
-最终 v0.5 发布候选在 source revision
-`a305f7204053f08312613dddb3a0ce7533ce4806` 上完成发布门，并新增不可变
-[候选库存](supply-chain/images/candidates/a305f7204053f08312613dddb3a0ce7533ce4806.json)：
+1.2.0 本地待发布候选在 source revision
+`d0bec9d2f2c3cf12568fa866d16be1a56de4aa9c` 上完成发布门，并新增不可变
+[候选库存](supply-chain/images/candidates/d0bec9d2f2c3cf12568fa866d16be1a56de4aa9c.json)：
 
 - v0.5 focused：`401 passed、0 failed`；
-- candidate live：`175 passed、0 failed`；
-- required-live 全量：`3492 passed、0 failed、0 skipped`；
+- candidate live：`176 passed、0 failed`；
+- required-live 全量：`3494 passed、0 failed、0 skipped`；
 - 冻结执行镜像：
-  `docker.io/openworkproof/execution-test@sha256:bc35711b843e6e2c479c52d486a1b2ed401cc90c7b15edb52b948206e9157abb`；
+  `docker.io/openworkproof/execution-test@sha256:6d0dadec750eb498ed4d2260b4de65f33ed1c146adda6e64ec8ba588f7a88097`；
 - Rich #4196 v0.5 交付包离线重放为
   `VERIFICATION PASSED / VERIFIED / READY_FOR_ACCEPTANCE`。
 
@@ -623,8 +623,8 @@ OpenWorkProof/
 - Docker 生产执行器（STARTED_UNCONFIRMED 恢复）
 - Rich #4196 完整五角色端到端演示（Acceptor TCP 签名 + 离线验签）
 - Dify #33013 完整五角色端到端演示（AI 应用平台类，跨项目类型通用性验证）
-- **v0.5 focused：401 passed、0 failed；candidate live：175 passed、0 failed**
-- **v0.5 最终 required-live 门：3492 passed、0 failed、0 skipped**
+- **v0.5 focused：401 passed、0 failed；candidate live：176 passed、0 failed**
+- **1.2.0 本地待发布 required-live 门：3494 passed、0 failed、0 skipped**
 
 **尚未完成：** 其他 ToolCall handler 与 evidence publication 的调用闭包、
 正式赛事提交。

@@ -2,9 +2,9 @@
 
 > 对应交付验证计划环节 4(5.2 材料清单 + 5.3 质量检查标准)。
 > 状态时间:2026-08-07;冻结 HEAD:`14fd7d6c4047a4a6d5782e23499180eab9ed7b07`。
-> 第三轮独立审计(2026-08-16)闭环后复核:候选库存目录现有 **21** 份不可变
-> 库存(含当前 `a305f72…` 最终候选与更早历史候选);required-live 全量
-> fresh `3492 passed、0 failed、0 skip`。
+> 1.2.0 本地待发布候选复核:候选库存目录现有 **22** 份不可变
+> 库存(含当前 `d0bec9d…` 候选与更早历史候选);required-live 全量
+> fresh `3494 passed、0 failed、0 skip`。
 
 ## 1. 材料清单(8 类)核对结果
 
@@ -12,8 +12,8 @@
 |---|---|---|---|---|
 | 1 | 项目说明 | README / 30 秒理解 / 市场定位 | `README.md`(30 秒理解 §、为什么是现在 §、愿景 §) | ✅ 已审校更新 |
 | 2 | 协议文档 | specs 设计(6)+ 实施计划(8)+ schema(6)+ 离线验签说明 | `docs/superpowers/specs/`、`docs/superpowers/plans/`、`specs/v0.1/`、`docs/offline-verification.md` | ✅ 齐备(离线验签说明本轮补齐) |
-| 3 | 代码 | 源码(27)+ requirements-lock + 候选库存(21) | `src/openworkproof/`、`requirements-lock.txt`、`supply-chain/images/candidates/` | ✅ 齐备(含当前 HEAD 候选) |
-| 4 | 验证 | 全量测试报告 + focused/candidate/full 计数 | `docs/status.md` §当前验证快照 | ✅ required-live 全量 fresh 3492 passed、0 failed、0 skip |
+| 3 | 代码 | 源码(27)+ requirements-lock + 候选库存(22) | `src/openworkproof/`、`requirements-lock.txt`、`supply-chain/images/candidates/` | ✅ 齐备(含当前候选) |
+| 4 | 验证 | 全量测试报告 + focused/candidate/full 计数 | `docs/status.md` §当前验证快照 | ✅ required-live 全量 fresh 3494 passed、0 failed、0 skip |
 | 5 | 演示 | 环节 2 证据链 + 记录 | `tests/test_delivery_m2.py`、`docs/superpowers/2026-08-07-rich-4196-demo-log.md` | ✅ 已完成(M2) |
 | 6 | 签署 | 环节 3 签名单 + 哈希 | `docs/delivery-signoff/`(MANIFEST/SHA256SUMS/owner+witness.signature) | ✅ 已完成(M3) |
 | 7 | 法律 | Apache-2.0 LICENSE + 版权主体声明 | `LICENSE`、`README.md` §项目主体、`docs/status.md` §项目主体说明 | ✅ 齐备 |
@@ -30,7 +30,7 @@
 - [x] **可复现性**:`git clone` + `pip install -r requirements-lock.txt` +
   `pytest -q`(required-live)可复跑;M2 演示 `test_delivery_m2.py` 本地闭环;
 - [x] **一致性**:README/status 计数与 required-live 全量一致
-  (第三轮 fresh 3492 passed、0 failed、0 skip);total 复审通过;
+  (1.2.0 本地待发布候选 fresh 3494 passed、0 failed、0 skip);
 - [x] **边界诚实**:全材料不宣称"独立外部人类验收完成"——明确标注
   外部 Acceptor 人类签署属线下事件、交付验证签署与赛事结果不由本仓库保证。
 
@@ -50,6 +50,6 @@
 - **真实外部人类签署**:M3 已用协议工具完成 Owner/见证人 Ed25519 签署
   并离线验签通过,但外部真实个人复核属线下事件,不由本仓库保证;
 - **赛事提交**:材料齐备不代表入围或获奖,正式提交由 Owner 执行。
-- **required-live 最终门**:第三轮 fresh 3492 passed、0 failed、0 skip
-  (零 warning),候选按最终修订 `a305f72…` 重建;total 复审通过后
+- **required-live 最终门**:1.2.0 本地待发布候选 fresh 3494 passed、0 failed、0 skip
+  (零 warning),候选按 source revision `d0bec9d…` 重建;
   恢复一致性勾选。
