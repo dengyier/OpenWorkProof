@@ -221,7 +221,7 @@ present; no source changes remain uncommitted.
 - Modify: `README_en.md`
 - Modify: `docs/releases/v1.2.0.md`
 
-- [ ] **Step 1: Preserve the observed RED and its root cause**
+- [x] **Step 1: Preserve the observed RED and its root cause**
 
 The first portable full-suite run after the 1.2.0 metadata change produced
 `2 failed, 3484 passed, 7 skipped`. Both failures were current-candidate
@@ -229,13 +229,13 @@ selection failures with `matched 0`, because `pyproject.toml` is part of the
 frozen candidate definition and its bytes changed. Do not weaken the selector
 and do not rewrite a historical inventory.
 
-- [ ] **Step 2: Generate revision-bound build contexts**
+- [x] **Step 2: Generate revision-bound build contexts**
 
 Use `supply-chain/images/prepare_context.py` with the exact committed source
 revision, the existing full wheelhouse, and the existing Debian closure. The
 revision-specific output directory must not already exist.
 
-- [ ] **Step 3: Build and convert both image archives offline**
+- [x] **Step 3: Build and convert both image archives offline**
 
 Build the execution-test and trusted-helper candidate images for
 `linux/arm64` with `--network none --pull=false --provenance=false`, using the
@@ -243,7 +243,7 @@ commit epoch for the OCI created annotation. Export distinct OCI and Docker
 archives and normalize them only with
 `supply-chain/images/convert_docker_archive.py`.
 
-- [ ] **Step 4: Write a new immutable inventory**
+- [x] **Step 4: Write a new immutable inventory**
 
 Recompute every build-input hash, archive hash, manifest digest, image ID,
 RepoDigest, label, user, entrypoint, and command from the new artifacts. Create
