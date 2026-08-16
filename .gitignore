@@ -13,3 +13,9 @@ proof-bundle.zip
 
 # slidep render service runtime state
 .slidep/
+
+# 商业探索/场景验证材料：仅保留在本地，不进入公开仓库（未验证的商业假设、
+# 竞品分析与发布草稿，涉及商业策略，不予追踪/推送）。
+docs/business-scenario-validation.md
+docs/business-challenge-post-devto.md
+docs/business-challenge-post-hn.md
