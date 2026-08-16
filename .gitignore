@@ -20,3 +20,5 @@ docs/business-scenario-validation.md
 docs/business-challenge-post-devto.md
 docs/business-challenge-post-hn.md
 docs/aivs-vcap-alignment.md
+docs/vcap-verifier-interface.md
+docs/vcap-verifier-stub.py
