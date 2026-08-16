@@ -12,10 +12,10 @@
 ---
 
 项目地址：https://github.com/dengyier/OpenWorkProof
-当前版本：1.1.1
+当前版本：1.2.0
 许可证：Apache-2.0
 PyPI：[openworkproof](https://pypi.org/project/openworkproof/)
-MCP Registry：[io.github.dengyier/OpenWorkProof](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.1.1)
+MCP Registry：[io.github.dengyier/OpenWorkProof](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.2.0)
 
 ---
 
@@ -119,7 +119,7 @@ running → locally_verified → proof_ready → awaiting_human → accepted
                                                         ↘ rejected
 ```
 
-详细协议 Schema 见 [specs/v0.1](specs/v0.1/)。
+详细协议 Schema 见 [specs](specs/)（当前覆盖 v0.1–v0.5）。
 
 ---
 
@@ -227,7 +227,7 @@ OpenWorkProof 自建，`upstream_adoption`、`customer_case`、
 
 ### Evidence Lifecycle v0.2 兼容入口
 
-当前发布候选提供 v0.2 的 Profile 校验、正负证据提交、验证决定、Delivery
+当前 1.2.0 版本保留 v0.2 的 Profile 校验、正负证据提交、验证决定、Delivery
 Package、离线审计和结算就绪度接口：
 
 ```bash
@@ -245,17 +245,18 @@ owp settlement-status pilot.sqlite3
 [v0.2 可验证交付试点](docs/pilot/README.md)。示例对象只用于本地解析和
 接入演练，不代表真实客户、客户验收、付款、资金释放或正式部署。
 
-Task 16 已在 source revision
-`64f6ba65a26e0038e6ce8be7925913a4cc7726a3` 上完成发布门，并新增不可变
-[候选库存](supply-chain/images/candidates/64f6ba65a26e0038e6ce8be7925913a4cc7726a3.json)：
+最终 v0.5 发布候选在 source revision
+`a305f7204053f08312613dddb3a0ce7533ce4806` 上完成发布门，并新增不可变
+[候选库存](supply-chain/images/candidates/a305f7204053f08312613dddb3a0ce7533ce4806.json)：
 
-- focused v0.2：`173 passed`；
-- 便携全量：`2484 passed、0 failed、7 skipped、1 warning`；
-- required-live 全量：`2491 passed、0 failed、0 skipped、1 warning`；
-- Rich #4196 与 Dify #33013 v0.2 包离线重放均为
+- v0.5 focused：`401 passed、0 failed`；
+- candidate live：`175 passed、0 failed`；
+- required-live 全量：`3492 passed、0 failed、0 skipped`；
+- 冻结执行镜像：
+  `docker.io/openworkproof/execution-test@sha256:bc35711b843e6e2c479c52d486a1b2ed401cc90c7b15edb52b948206e9157abb`；
+- Rich #4196 v0.5 交付包离线重放为
   `VERIFICATION PASSED / VERIFIED / READY_FOR_ACCEPTANCE`。
 
-唯一 warning 是既有 `team_network_client` 关闭期线程竞态，未隐藏。
 `READY_FOR_ACCEPTANCE` 表示证据包满足进入验收的协议条件，不等于客户已经
 验收、付款或部署。详细环境、耗时与边界见 [docs/status.md](docs/status.md)。
 
@@ -589,8 +590,8 @@ OpenWorkProof/
 │   ├── repo_tools.py         # 仓库管道工具
 │   ├── runtime_context.py   # 运行时上下文
 │   ├── trusted_helper.py    # 可信助手请求分发
-│   └── schemas/v0.1/         # JSON Schema 文件
-├── specs/v0.1/               # 协议 Schema（WorkOrder/Grant/Receipt/Acceptance）
+│   └── schemas/v0.1..v0.5/   # 多版本 JSON Schema 文件
+├── specs/v0.1..v0.5/         # 公开协议 Schema
 ├── tests/                    # 协议、故障注入与端到端测试
 ├── docs/                     # 文档（状态、演示日志、离线验签说明）
 ├── supply-chain/             # 可信构建镜像 + 候选清单
@@ -622,7 +623,8 @@ OpenWorkProof/
 - Docker 生产执行器（STARTED_UNCONFIRMED 恢复）
 - Rich #4196 完整五角色端到端演示（Acceptor TCP 签名 + 离线验签）
 - Dify #33013 完整五角色端到端演示（AI 应用平台类，跨项目类型通用性验证）
-- **v0.2 最终 required-live 门：2491 passed、0 failed、0 skipped、1 warning**
+- **v0.5 focused：401 passed、0 failed；candidate live：175 passed、0 failed**
+- **v0.5 最终 required-live 门：3492 passed、0 failed、0 skipped**
 
 **尚未完成：** 其他 ToolCall handler 与 evidence publication 的调用闭包、
 正式赛事提交。
@@ -672,7 +674,7 @@ Dify 是面向终端用户的 AI 工作流平台，与 Rich 的开发者工具�
 6. ~~完成 Acceptor 拒绝路径、真实外部 Acceptor 复现~~（已完成）
 7. ~~完成 deny 收据生产入口~~（已完成）
 8. ~~完成 Dify #33013 自包含演示及跨项目类型通用性验证~~（已完成）
-9. ~~MCP Server 注册到官方 MCP Registry~~（已完成，`io.github.dengyier/OpenWorkProof` v1.1.1 active）
+9. ~~MCP Server 注册到官方 MCP Registry~~（`io.github.dengyier/OpenWorkProof` v1.2.0 元数据已就绪；远端发布以 Registry 回读为准）
 10. 剩余：其他 ToolCall handler 与 evidence publication 的调用闭包、正式赛事提交。
 
 ---

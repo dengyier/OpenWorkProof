@@ -12,10 +12,10 @@
 ---
 
 Project: https://github.com/dengyier/OpenWorkProof
-Version: 1.1.1
+Version: 1.2.0
 License: Apache-2.0
 PyPI: [openworkproof](https://pypi.org/project/openworkproof/)
-MCP Registry: [io.github.dengyier/OpenWorkProof](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.1.1)
+MCP Registry: [io.github.dengyier/OpenWorkProof](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.2.0)
 
 ---
 
@@ -121,7 +121,7 @@ running → locally_verified → proof_ready → awaiting_human → accepted
                                                         ↘ rejected
 ```
 
-Detailed protocol schemas in [specs/v0.1](specs/v0.1/).
+Detailed protocol schemas are in [specs](specs/) (currently v0.1-v0.5).
 
 ---
 
@@ -241,7 +241,7 @@ or regulatory compliance.
 
 ### Evidence Lifecycle v0.2 Compatibility Entry Points
 
-The current release candidate exposes v0.2 profile validation, positive and
+The current 1.2.0 release retains v0.2 profile validation, positive and
 negative evidence commits, verification decisions, Delivery Packages, offline
 audits, and settlement-readiness derivation:
 
@@ -262,18 +262,19 @@ scorecard. The examples are local integration fixtures; they do not evidence a
 real customer, customer acceptance, payment, fund release, or production
 deployment.
 
-Task 16 completed the release gates on source revision
-`64f6ba65a26e0038e6ce8be7925913a4cc7726a3` and added an immutable
-[candidate inventory](supply-chain/images/candidates/64f6ba65a26e0038e6ce8be7925913a4cc7726a3.json):
+The final v0.5 release candidate completed its gates on source revision
+`a305f7204053f08312613dddb3a0ce7533ce4806` and added an immutable
+[candidate inventory](supply-chain/images/candidates/a305f7204053f08312613dddb3a0ce7533ce4806.json):
 
-- focused v0.2: `173 passed`;
-- portable full suite: `2484 passed, 0 failed, 7 skipped, 1 warning`;
-- required-live full suite: `2491 passed, 0 failed, 0 skipped, 1 warning`;
-- the Rich #4196 and Dify #33013 v0.2 bundles both replayed offline as
+- v0.5 focused: `401 passed, 0 failed`;
+- candidate live: `175 passed, 0 failed`;
+- required-live full suite: `3492 passed, 0 failed, 0 skipped`;
+- frozen execution image:
+  `docker.io/openworkproof/execution-test@sha256:bc35711b843e6e2c479c52d486a1b2ed401cc90c7b15edb52b948206e9157abb`;
+- the Rich #4196 v0.5 delivery bundle replayed offline as
   `VERIFICATION PASSED / VERIFIED / READY_FOR_ACCEPTANCE`.
 
-The single warning is the existing `team_network_client` shutdown-thread race;
-it is not hidden. `READY_FOR_ACCEPTANCE` means that the evidence package meets
+`READY_FOR_ACCEPTANCE` means that the evidence package meets
 the protocol conditions for entering acceptance. It does not mean that a
 customer accepted, paid for, or deployed it. See [docs/status.md](docs/status.md)
 for the environment, timings, and full claim boundaries.
@@ -599,8 +600,8 @@ OpenWorkProof/
 │   ├── repo_tools.py          # Repository pipeline tools
 │   ├── runtime_context.py     # Runtime context
 │   ├── trusted_helper.py      # Trusted helper request dispatch
-│   └── schemas/v0.1/          # JSON Schema files
-├── specs/v0.1/                # Protocol schemas (WorkOrder/Grant/Receipt/Acceptance)
+│   └── schemas/v0.1..v0.5/    # Multi-version JSON Schema files
+├── specs/v0.1..v0.5/          # Public protocol schemas
 ├── tests/                     # Protocol, fault-injection, and end-to-end tests
 ├── docs/                      # Documentation (status, demo logs, offline verification guide)
 ├── supply-chain/              # Trusted build images + candidate inventory
@@ -633,7 +634,8 @@ OpenWorkProof/
 - Docker production executor (STARTED_UNCONFIRMED recovery)
 - Rich #4196 full five-role E2E demo (Acceptor TCP signing + offline verification)
 - Dify #33013 full five-role E2E demo (AI application platform, cross-project-type generality)
-- **Final v0.2 required-live gate: 2491 passed, 0 failed, 0 skipped, 1 warning**
+- **v0.5 focused: 401 passed, 0 failed; candidate live: 175 passed, 0 failed**
+- **Final v0.5 required-live gate: 3492 passed, 0 failed, 0 skipped**
 
 **Not yet complete:** remaining ToolCall handler closures, event submission.
 
@@ -688,7 +690,7 @@ and fix effectiveness.
 6. ~~Acceptor rejection path and real external Acceptor reproduction~~ (done)
 7. ~~Deny receipt entry point~~ (done)
 8. ~~Dify #33013 self-contained demo with cross-project-type generality validation~~ (done)
-9. ~~MCP Server registered on official MCP Registry~~ (done, `io.github.dengyier/OpenWorkProof` v1.1.1 active)
+9. ~~MCP Server registered on official MCP Registry~~ (`io.github.dengyier/OpenWorkProof` v1.2.0 metadata ready; remote publication requires Registry readback)
 10. Remaining: other ToolCall handler closures, event submission.
 
 ---
