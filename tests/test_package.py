@@ -22,10 +22,10 @@ def test_release_metadata_is_synchronized() -> None:
     assert openworkproof.__version__ == expected_version
     assert version("openworkproof") == expected_version
     assert pyproject["project"]["version"] == expected_version
-    assert pyproject["project"]["license"] == {"text": "Apache-2.0"}
-    assert (
-        "License :: OSI Approved :: Apache Software License"
-        in pyproject["project"]["classifiers"]
+    assert pyproject["project"]["license"] == "Apache-2.0"
+    assert not any(
+        classifier.startswith("License ::")
+        for classifier in pyproject["project"]["classifiers"]
     )
 
     for metadata in (server, legacy_mcp):
