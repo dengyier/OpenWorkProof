@@ -23,17 +23,19 @@ A–H 发现经攻击测试 RED→最小修复→逐批独立双审→total 复�
 修订重建，下方数字为第三轮 HEAD fresh 测量。
 
 - candidate source revision（**当前 = 第三轮最终修订**）：
-  `a305f7204053f08312613dddb3a0ce7533ce4806`（final 硬化后）；此前绑定
-  `66d242e…`（硬化前）；审计基线为 `d460c876a7f3046fd1d338951d964bce6d1a6be1`
-  （被本轮源码变更取代，库存保留原字节）：
-  （2 Critical + 5 Important + 终审 leap-second Minor 全部闭环的最终实现
-  提交）；不可变库存：
-  `supply-chain/images/candidates/d460c876a7f3046fd1d338951d964bce6d1a6be1.json`；
-  更早的 `18732766…`/`ca9c911…`/`ca5df6c3…` 库存保持原字节、不再匹配当前定义；
+  `a305f7204053f08312613dddb3a0ce7533ce4806`（final 硬化后）；不可变库存：
+  `supply-chain/images/candidates/a305f7204053f08312613dddb3a0ce7533ce4806.json`；
 - Python 分发版本 `1.1.1`；冻结协议 Schema `0.1`–`0.5`；
-- v0.5 focused 套件（10 个文件）：**第三轮 HEAD fresh（2026-08-16）
-  `405 passed、0 failed`**（审计基线 fresh 371 → 405 = 34 个新增攻击/证明
-  测试：Batch A +9、B +6、C +5、D +8、E 无测试变更、final 硬化 +2）；
+- v0.5 focused 套件（10 个文件，命令：
+  `pytest tests/test_acceptance_v05.py tests/test_control_integrity_v05.py
+  tests/test_delivery_package_v05.py tests/test_population_integrity_v05.py
+  tests/test_verification_integrity_adapters_v05.py
+  tests/test_verification_integrity_adversarial_v05.py
+  tests/test_verification_integrity_demo_v05.py
+  tests/test_verification_integrity_interfaces_v05.py
+  tests/test_verification_integrity_models_v05.py
+  tests/test_verification_integrity_transactions_v05.py`）：
+  **第三轮 HEAD fresh `401 passed、0 failed`**（72 秒）；
 - 冻结兼容（v0.2/v0.3/v0.4 models/schema/delivery/settlement/acceptance）：
   `216 passed、0 failed`（审计基线 fresh，本轮未触碰 v0.1–v0.4 冻结面；
   亦随 required-live 全量一并复跑）；
@@ -42,25 +44,30 @@ A–H 发现经攻击测试 RED→最小修复→逐批独立双审→total 复�
   审计基线 fresh 3350；skip 均为未设 live-Docker 环境变量所致平台边界）；
 - candidate 两套件（live Docker + artifact root + 全限定镜像引用）：
   **第三轮 HEAD fresh `175 passed、0 failed`**（含 live Docker 与上下文
-  重建身份链；新库存 `a305f72…`）；
+  重建身份链；库存 `a305f72…`）；
 - **required-live 全量**（live Docker + 全限定
-  `docker.io/openworkproof/execution-test@sha256:bc35711b…7abb` +
+  `docker.io/openworkproof/execution-test@sha256:bc35711b843e6e2c479c52d486a1b2ed401cc90c7b15edb52b948206e9157abb` +
   `-W 'error::pytest.PytestUnhandledThreadExceptionWarning'`）：
   **第三轮 HEAD fresh `3492 passed、0 failed、0 skipped`**（13 分 46 秒，
   零 warning）；审计基线 fresh 为 3456；
 - Rich #4196 v0.5 交付包离线重放：`VERIFICATION PASSED / VERIFIED /
-  READY_FOR_ACCEPTANCE`（无网络、无原始账本；本轮 demo/M2 套件 8 passed
-  fresh 重放）；
+  READY_FOR_ACCEPTANCE`（无网络、无原始账本；本轮 demo/M2 套件 fresh 重放）；
 - Docker 残留：本任务零残留容器/卷；本机另有 5 个运行中的 agentteams
   容器与 9 个既有数据卷（非本任务创建，未清理）；
-- 归档哈希（`d460c876…`）：execution docker
-  `b9118865000af88c3824f613be569ddcc5901fa18b328a26aabf6043d999c1c0`、
+- 归档哈希（**当前 `a305f72…`**）：execution docker
+  `0d4b58fc95274e658006c93b5cc3c99688e13e3bf25d0fbaa95ddeb636ceddcb`、
   execution OCI
-  `2dec0d867acac7765abec7fd185712bdb66bce43d5756bd42b8f2e73c4c6c11e`、
+  `cfbac300b425bd4cf21a15e8141b0bb16dbc303c2c2a4cc34cf09550c62c1f63`、
   trusted-helper docker
-  `f777c523e6ecf54d0574c2726001b44dd1e3d4221bc08d22670af21437b18778`、
+  `183e7d07a2b24edfb95e3c8ca5d4ea904c1503c32e377fd3040e42941b294b4f`、
   trusted-helper OCI
-  `ec6d2ec9845d200fc686a6446e447840b87c620f928a1fad028f6da60970ecd4`；
+  `07bb870af46e8c1cdf16fd9c241b701810c8dbc85f522c3acea98d4a8c6c0d0f`；
+
+> 历史绑定（非当前快照，保留原字节供复核）：审计基线
+> `d460c876a7f3046fd1d338951d964bce6d1a6be1`（2 Critical + 5 Important +
+> 终审 leap-second Minor 闭环的实现提交）与硬化前绑定
+> `66d242e…`，以及更早的 `18732766…`/`ca9c911…`/`ca5df6c3…`
+> 库存均已随后续源码变更失效，仅作为历史记录保留，不再匹配当前定义。
 - 独立总审修复记录：离线包决策只取重放签名真值（public/diagnostic 一律
   UNAUTHENTICATED/NOT_READY）；selector 全部参数冻结进 spec digest 且 node id
   只来自受控 canonical collector（-I 隔离 + conftest-free + pytest.py shadow

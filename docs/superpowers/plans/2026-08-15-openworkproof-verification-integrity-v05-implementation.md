@@ -1088,8 +1088,8 @@ supply-chain/images/candidates/$REV.json
 Do not rewrite a historical inventory.
 
 - [x] **Step 6: Run candidate and required-live gates**
-  （第三轮审计闭环：候选按 `66d242e…` 重建，required-live fresh
-  3489/0/0 零 warning；total 复审通过）
+  （第三轮审计闭环：候选按 `a305f72…` 重建，required-live fresh
+  3492/0/0 零 warning；total 复审通过）
 
 The candidate/live gates are NOT self-contained without the delivery
 artifact root, the live-Docker switch, and the fully-qualified image
@@ -1100,7 +1100,7 @@ live drivers. The exact self-contained commands are:
 ```bash
 export OPENWORKPROOF_CANDIDATE_ARTIFACT_ROOT=/Users/molin/Project/openWorkProof-delivery
 export OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1
-export OPENWORKPROOF_DOCKER_TEST_IMAGE=docker.io/openworkproof/execution-test@sha256:2acf4820b5d31f2075ae0bfaa52575f4422d723d89114ebf58b65e3e592761d8
+export OPENWORKPROOF_DOCKER_TEST_IMAGE=docker.io/openworkproof/execution-test@sha256:bc35711b843e6e2c479c52d486a1b2ed401cc90c7b15edb52b948206e9157abb
 ./.venv/bin/python -m pytest tests/test_image_supply_chain.py tests/test_candidate_supplychain_integration.py -q
 ./.venv/bin/python -m pytest -q \
   -W 'error::pytest.PytestUnhandledThreadExceptionWarning'
@@ -1110,7 +1110,8 @@ The `OPENWORKPROOF_DOCKER_TEST_IMAGE` digest must be taken from the
 current candidate inventory's fully-qualified image reference after the
 candidate rebuild (this round's source changes invalidate the previous
 inventory); `OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1` is what turns the
-sandbox live drivers on and eliminates the platform-only skips.
+sandbox live drivers on and eliminates the platform-only skips. Current
+inventory: `supply-chain/images/candidates/a305f7204053f08312613dddb3a0ce7533ce4806.json`.
 
 Expected: candidate suites zero failures and zero skip; required-live
 full suite zero failures and zero skip. If a platform-only skip remains,
@@ -1133,7 +1134,7 @@ find supply-chain/images -name '*.lock' -size 0 -print
 Expected: bundle passes; no task-created containers, volumes, or locks remain.
 
 - [x] **Step 8: Record measured release truth and commit inventory**
-  （第三轮审计闭环：库存 `66d242e…` 已提交，status/checklist 以 final
+  （第三轮审计闭环：库存 `a305f72…` 已提交，status/checklist 以 final
   fresh 数字更新；total 复审通过）
 
 Update `docs/status.md` with exact commands, counts, duration, warnings, revision, inventory path, archive hashes, and honest external-state boundaries.
