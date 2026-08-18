@@ -1091,6 +1091,60 @@ _SCHEMA = (
         SELECT RAISE(ABORT, 'authority checkpoints are immutable');
     END
     """,
+    """
+    CREATE TABLE retraction_receipts_v05 (
+        retraction_id TEXT PRIMARY KEY,
+        retraction_digest TEXT NOT NULL UNIQUE,
+        work_order_digest TEXT NOT NULL
+            REFERENCES work_orders(work_order_digest),
+        target_receipt_id TEXT NOT NULL,
+        target_receipt_digest TEXT NOT NULL,
+        retraction_json BLOB NOT NULL UNIQUE,
+        committed_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX retraction_receipts_v05_target
+    ON retraction_receipts_v05 (target_receipt_id, committed_at)
+    """,
+    """
+    CREATE TRIGGER retraction_receipts_v05_are_immutable_update
+    BEFORE UPDATE ON retraction_receipts_v05
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.5 retraction receipt is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER retraction_receipts_v05_are_immutable_delete
+    BEFORE DELETE ON retraction_receipts_v05
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.5 retraction receipt is immutable');
+    END
+    """,
+    """
+    CREATE TABLE retraction_receipt_parents_v05 (
+        retraction_id TEXT NOT NULL
+            REFERENCES retraction_receipts_v05(retraction_id),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        parent_id TEXT NOT NULL,
+        PRIMARY KEY(retraction_id, ordinal),
+        UNIQUE(retraction_id, parent_id)
+    )
+    """,
+    """
+    CREATE TRIGGER retraction_receipt_parents_v05_are_immutable_update
+    BEFORE UPDATE ON retraction_receipt_parents_v05
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.5 retraction receipt parent is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER retraction_receipt_parents_v05_are_immutable_delete
+    BEFORE DELETE ON retraction_receipt_parents_v05
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.5 retraction receipt parent is immutable');
+    END
+    """,
 )
 
 
