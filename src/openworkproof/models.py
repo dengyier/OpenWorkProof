@@ -5746,6 +5746,157 @@ class AcceptanceTransitionReceipt(SignedProtocolModel):
         return self
 
 
+def retraction_receipt_id(
+    receipt: RetractionReceiptV05 | dict[str, object],
+) -> str:
+    """Recompute the canonical retraction id from the receipt's own fields.
+
+    The id derives from every content field except itself and the signed
+    envelope fields (digest, signature), so a retraction can never claim an
+    identity that its content does not produce.
+    """
+
+    if type(receipt) is RetractionReceiptV05:
+        source: dict[str, object] = receipt.model_dump(mode="json")
+    elif type(receipt) is dict:
+        source = dict(receipt)
+    else:
+        raise ValueError(
+            "retraction id payload must be the exact model or exact dict"
+        )
+    for envelope_field in (
+        "retraction_id",
+        "digest",
+        "signature_alg",
+        "signer_key_id",
+        "signature",
+    ):
+        source.pop(envelope_field, None)
+    payload = _freeze_exact_json_payload(source, max_array_items=16)
+    return _jcs_digest(
+        {
+            "domain": "openworkproof/retraction-receipt/v0.5",
+            "payload": payload,
+        }
+    )
+
+
+_RETRACTION_TARGET_KINDS = frozenset(
+    {
+        "tool_call",
+        "approval_decision",
+        "termination_decision",
+        "grant_issued",
+        "grant_consumed",
+        "grant_revoked",
+        "rollback",
+        "verification_decision",
+    }
+)
+
+
+class RetractionReceiptV05(SignedProtocolModel):
+    """A first-class semantic retraction layered on a previously issued receipt.
+
+    The original receipt stays immutable; this receipt marks its conclusion as
+    refuted or downgraded, under a closed reason taxonomy. It is a v0.5 sibling
+    object: it does not change any v0.1-v0.5 model, signing byte, or schema.
+    """
+
+    _signed_domain = "retraction-receipt"
+    _signed_version = "0.5"
+
+    model_config = _V05_MODEL_CONFIG
+
+    schema_version: Literal["openworkproof-retraction-receipt/0.5"]
+    protocol_version: Literal["0.5"]
+    retraction_id: V05Digest64
+    work_order_digest: V05Digest64
+    target_receipt_id: V05Digest64
+    target_receipt_digest: V05Digest64
+    target_receipt_kind: Literal[
+        "tool_call",
+        "approval_decision",
+        "termination_decision",
+        "grant_issued",
+        "grant_consumed",
+        "grant_revoked",
+        "rollback",
+        "verification_decision",
+    ]
+    retraction_effect: Literal["refuted", "confidence_downgrade"]
+    retraction_reason: Literal[
+        "context_invalidated",
+        "interpretation_error",
+        "cascading_failure",
+        "evidence_refuted",
+    ]
+    refutes_decision_id: V05Digest64 | None
+    refutes_decision_digest: V05Digest64 | None
+    causal_parent_ids: tuple[V05Digest64, ...] = Field(
+        min_length=1, max_length=16, json_schema_extra={"uniqueItems": True}
+    )
+    nonce: V05Digest64
+    retracted_at: V05CanonicalUTCTime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_json_shape(cls, value: Any) -> Any:
+        return _freeze_bounded_protocol_payload(
+            value, cls, max_array_items=16
+        )
+
+    @model_validator(mode="after")
+    def _closed_retraction(self) -> RetractionReceiptV05:
+        if self.retraction_id != retraction_receipt_id(self):
+            raise ValueError("retraction_id does not match retraction receipt")
+        if (self.refutes_decision_id is None) != (
+            self.refutes_decision_digest is None
+        ):
+            raise ValueError(
+                "refutes_decision_id and refutes_decision_digest must be paired"
+            )
+        if self.retraction_effect == "confidence_downgrade" and (
+            self.retraction_reason == "evidence_refuted"
+        ):
+            raise ValueError(
+                "confidence downgrade must not claim evidence_refuted"
+            )
+        expected_parents = {self.target_receipt_id}
+        if self.refutes_decision_id is not None:
+            expected_parents.add(self.refutes_decision_id)
+        if set(self.causal_parent_ids) != expected_parents:
+            raise ValueError(
+                "retraction causal parents do not match its bindings"
+            )
+        return self
+
+    def validate_against_work_order(
+        self,
+        work_order: WorkOrder,
+    ) -> RetractionReceiptV05:
+        """Bind the retraction to a WorkOrder and to a Manager/Verifier signer.
+
+        Retracting a receipt's conclusion is a conclusion-authority action:
+        it may be issued by the Manager or an independent Verifier, never by
+        the Acceptor (who retracts acceptance via AcceptanceTransitionReceipt).
+        """
+
+        allowed = {
+            binding.key_id
+            for binding in work_order.key_bindings
+            if binding.role in {"Manager", "Verifier"}
+        }
+        if (
+            self.work_order_digest != work_order.digest
+            or self.signer_key_id not in allowed
+        ):
+            raise ValueError(
+                "RetractionReceiptV05 does not match WorkOrder signer role"
+            )
+        return self
+
+
 class PolicyDecision(ProtocolModel):
     allowed: bool
     decision: Literal["allow", "deny"]
@@ -5829,8 +5980,10 @@ __all__ = [
     "ReportDiagnostic",
     "ReplayProfile",
     "RepoReadOutput",
+    "RetractionReceiptV05",
     "RootGrantTemplate",
     "RollbackReceipt",
+    "retraction_receipt_id",
     "RollbackReceiptV04",
     "SafeNonNegativeInt",
     "SafePositiveInt",

@@ -104,10 +104,15 @@ _V05_CANONICAL_DOMAINS = frozenset(
         "verification-profile",
         "verification-arm-result",
         "verification-decision",
+        "retraction-receipt",
     }
 )
 _V05_SIGNED_DOMAINS = frozenset(
-    {"verification-profile", "verification-arm-result"}
+    {
+        "verification-profile",
+        "verification-arm-result",
+        "retraction-receipt",
+    }
 )
 
 
