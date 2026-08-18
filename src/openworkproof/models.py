@@ -2917,6 +2917,12 @@ def failure_signature_digest(
     )
 
 
+_CONTROL_TARGET_FAILURE_CODES = {
+    "semantic_regression": ("MUTATION_CAUGHT",),
+    "required_target_coverage": ("SCOPE_REQUIRED_TARGET_MISSING",),
+}
+
+
 def control_contract_id(
     contract: ControlContractV05 | dict[str, object],
 ) -> str:
@@ -2958,6 +2964,15 @@ class ControlContractV05(ProtocolModel):
             raise ValueError("expected failure signature digest does not match")
         if self.expected_failure_signature.execution_status != "completed":
             raise ValueError("expected failure signature must be completed")
+        target_codes = _CONTROL_TARGET_FAILURE_CODES.get(self.control_target)
+        if target_codes is None:
+            raise ValueError("control target has no registered target failure code")
+        if self.expected_failure_signature.reason_codes != target_codes:
+            raise ValueError(
+                "expected failure signature must name exactly the registered "
+                "target failure, never an infrastructure or dependency drift "
+                "reason"
+            )
         if not self.valid_from < self.expires_at:
             raise ValueError("control contract times are not ordered")
         if self.control_id != control_contract_id(self):

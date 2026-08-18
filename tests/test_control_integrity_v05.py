@@ -20,6 +20,7 @@ from openworkproof.models import (
     VerificationArmResultV05,
     VerificationProfileV03,
     VerificationProfileV05,
+    control_contract_id,
     failure_signature_digest,
 )
 from openworkproof.signing import sign_payload
@@ -633,6 +634,156 @@ def test_control_observation_survived_with_survived_reason(
     assert _assess_control(control_case, results) == ControlAssessmentResult(
         "survived", ("CONTROL_SURVIVED",)
     )
+
+
+def _rot_contract(arm_id: str, fixture_digest: str, reason_codes: list[str]) -> dict[str, Any]:
+    """A control contract whose expected failure signature is pure
+    infrastructure/dependency drift instead of the registered target failure."""
+    signature = {
+        "execution_status": "completed",
+        "exit_codes": [1],
+        "reason_codes": reason_codes,
+        "predicate_ids": ["tests_passed"],
+        "required_evidence_purposes": ["test-result"],
+    }
+    payload = {
+        "arm_id": arm_id,
+        "control_target": "semantic_regression",
+        "fixture_digest": fixture_digest,
+        "provocation_digest": "8" * 64,
+        "expected_failure_signature": signature,
+        "expected_failure_signature_digest": failure_signature_digest(signature),
+        "valid_from": "2026-01-01T00:00:00Z",
+        "expires_at": "2026-01-01T01:00:00Z",
+    }
+    return {"control_id": control_contract_id(payload), **payload}
+
+
+def _coverage_contract(arm_id: str, fixture_digest: str, reason_codes: list[str]) -> dict[str, Any]:
+    """A ``required_target_coverage`` control contract with an explicit failure
+    signature; the registered target failure code is ``SCOPE_REQUIRED_TARGET_MISSING``."""
+    signature = {
+        "execution_status": "completed",
+        "exit_codes": [1],
+        "reason_codes": reason_codes,
+        "predicate_ids": ["tests_passed"],
+        "required_evidence_purposes": ["test-result"],
+    }
+    payload = {
+        "arm_id": arm_id,
+        "control_target": "required_target_coverage",
+        "fixture_digest": fixture_digest,
+        "provocation_digest": "8" * 64,
+        "expected_failure_signature": signature,
+        "expected_failure_signature_digest": failure_signature_digest(signature),
+        "valid_from": "2026-01-01T00:00:00Z",
+        "expires_at": "2026-01-01T01:00:00Z",
+    }
+    return {"control_id": control_contract_id(payload), **payload}
+
+
+@pytest.mark.parametrize(
+    "reason_codes",
+    (
+        ["EXEC_DEPENDENCY_DRIFT"],
+        ["EXEC_COMMAND_FAILED"],
+        ["EXEC_TIMEOUT"],
+        ["EXEC_CRASHED"],
+        ["EXEC_WORKSPACE_DRIFT"],
+        ["EVIDENCE_MISSING"],
+        ["MUTATION_CLASSIFIER_UNAVAILABLE"],
+        ["EXEC_COMMAND_FAILED", "EXEC_DEPENDENCY_DRIFT"],
+    ),
+)
+def test_control_contract_rejects_dependency_drift_expected_failure(
+    control_case: dict[str, Any], reason_codes: list[str]
+) -> None:
+    """A negative control whose expected failure is dependency/schema drift,
+    not the registered target defect, must be rejected at contract time.
+
+    Skillselion's rot: a deliberately broken fixture becomes a merely invalid
+    one after a schema migration. If the expected failure signature can name
+    an infrastructure drift code (``EXEC_DEPENDENCY_DRIFT`` and friends), the
+    contract registers "it failed for an unrelated reason" as if it proved the
+    target, so a drifted fixture still derives ``proven``. This must fail at
+    profile construction, before any observation is signed.
+    """
+    arm = control_case["profile"].negative_arms[0]
+    with pytest.raises(ValidationError):
+        _signed_control_profile(
+            control_case["base_profile"],
+            control_case["manifest"],
+            control_case["manager_key"],
+            control_contracts=[
+                _rot_contract(arm.arm_id, arm.mutant_patch_digest, reason_codes)
+            ],
+        )
+
+
+def test_control_contract_rejects_mixed_target_and_drift_failure(
+    control_case: dict[str, Any],
+) -> None:
+    """Even a signature that also names the target cannot smuggle drift codes
+    alongside it: the registered failure must name exactly the target failure,
+    never an infrastructure drift reason."""
+    arm = control_case["profile"].negative_arms[0]
+    with pytest.raises(ValidationError):
+        _signed_control_profile(
+            control_case["base_profile"],
+            control_case["manifest"],
+            control_case["manager_key"],
+            control_contracts=[
+                _rot_contract(
+                    arm.arm_id,
+                    arm.mutant_patch_digest,
+                    ["EXEC_DEPENDENCY_DRIFT", "MUTATION_CAUGHT"],
+                )
+            ],
+        )
+
+
+def test_control_contract_accepts_registered_coverage_target_failure(
+    control_case: dict[str, Any],
+) -> None:
+    """The ``required_target_coverage`` target must accept its registered
+    failure code ``SCOPE_REQUIRED_TARGET_MISSING`` and nothing else."""
+    arm = control_case["profile"].negative_arms[0]
+    _signed_control_profile(
+        control_case["base_profile"],
+        control_case["manifest"],
+        control_case["manager_key"],
+        control_contracts=[
+            _coverage_contract(
+                arm.arm_id,
+                arm.mutant_patch_digest,
+                ["SCOPE_REQUIRED_TARGET_MISSING"],
+            )
+        ],
+    )
+
+
+def test_control_contract_rejects_wrong_code_for_coverage_target(
+    control_case: dict[str, Any],
+) -> None:
+    """A coverage control registering the semantic-regression code (or any
+    drift code) instead of its own target code must be rejected."""
+    arm = control_case["profile"].negative_arms[0]
+    for reason_codes in (
+        ["MUTATION_CAUGHT"],
+        ["EXEC_DEPENDENCY_DRIFT"],
+        ["SCOPE_SELECTOR_MISMATCH"],
+    ):
+        with pytest.raises(ValidationError):
+            _signed_control_profile(
+                control_case["base_profile"],
+                control_case["manifest"],
+                control_case["manager_key"],
+                control_contracts=[
+                    _coverage_contract(
+                        arm.arm_id, arm.mutant_patch_digest, reason_codes
+                    )
+                ],
+            )
 
 
 def test_failure_signature_ignores_platform_noise() -> None:
