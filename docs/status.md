@@ -7,6 +7,33 @@
 执行。当前开发分支支持的冻结协议 Schema：0.1、0.2、0.3、0.4 与 0.5。分发版本
 和协议版本分别记录，不得把 Python 分发版本解释成协议版本。
 
+## Negative-Control Rot Defense 本地开发状态（Phase 1，2026-08-18）
+
+`main` 本地新增负控 rot 防御：负控契约的 `expected_failure_signature.reason_codes`
+必须精确等于注册目标失败码（`semantic_regression→MUTATION_CAUGHT`，
+`required_target_coverage→SCOPE_REQUIRED_TARGET_MISSING`），基础设施/依赖漂移码
+（`EXEC_DEPENDENCY_DRIFT`、`EXEC_COMMAND_FAILED`、`EXEC_TIMEOUT`、
+`EXEC_CRASHED`、`EXEC_WORKSPACE_DRIFT`、`EVIDENCE_MISSING`、
+`MUTATION_CLASSIFIER_UNAVAILABLE` 等）在 Profile 构造期即被拒绝——负控只因
+依赖/schema/基础设施漂移失败时不再派生 `proven`（Skillselion rot 攻击，
+规格 §12 威胁模型第 9 条）。改动仅限 v0.5 语义校验 + 模块常量，未触碰
+v0.1–v0.4 冻结面、签名字节或 JSON Schema。
+
+- 提交：`b80af80`（本地 follow-up，未 push）；独立双审 spec + quality 均
+  APPROVE-WITH-NOTES（无 Critical/Important）。
+- 候选已按新 revision 重建：`supply-chain/images/candidates/b80af80….json`。
+- fresh 测量（2026-08-18）：
+  - v0.5 focused（10 文件）：**410 passed、0 failed**（原 401 + 新增 12 rot 测试）；
+  - 冻结兼容：`216 passed、0 failed`；
+  - candidate 两套件（live Docker + artifact root）：**177 passed、0 failed**；
+  - **required-live 全量**（
+    `docker.io/openworkproof/execution-test@sha256:6184e274…`）：
+    **3506 passed、0 failed、0 skipped，零 warning**（12 分 45 秒）；
+  - pip check / compileall / git diff --check：PASS；
+  - Docker 残留：本任务零残留（5 个 agentteams 容器与 9 个数据卷为既有）。
+- 诚实边界不变：无客户采用、无付费 SOW、无定金、无上游采纳（全部
+  `not_evidenced`）；本段是本地工程状态，不是发布/推送/验收声明。
+
 ## Verification Integrity v0.5 本地开发状态
 
 `main` 分支已实现 v0.5 验证完整性协议：人口契约/观察（eligible 与
