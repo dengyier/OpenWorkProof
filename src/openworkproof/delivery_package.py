@@ -2608,16 +2608,21 @@ def _load_v05_objects_and_evidence(root: Path, manifest: DeliveryManifest):
     control = integrity.assess_control_integrity(
         profile, tuple(results), evidence_inventory=inventory
     )
-    if (
-        population.status != decision.integrity_assessment.population_status
-        or control.status != decision.integrity_assessment.control_status
-        or set(population.reason_codes) | set(control.reason_codes)
-        != set(decision.integrity_assessment.reason_codes)
-    ):
-        raise DeliveryPackageError("v0.5 integrity assessment replay failed")
     retracted_receipt_ids = _packaged_retracted_receipt_ids(
         root, manifest, decision
     )
+    expected_assessment_codes = (
+        set(population.reason_codes)
+        | set(control.reason_codes)
+        | ({"RECEIPT_RETRACTED"} if retracted_receipt_ids else set())
+    )
+    if (
+        population.status != decision.integrity_assessment.population_status
+        or control.status != decision.integrity_assessment.control_status
+        or expected_assessment_codes
+        != set(decision.integrity_assessment.reason_codes)
+    ):
+        raise DeliveryPackageError("v0.5 integrity assessment replay failed")
     draft = integrity.compose_verification_decision_v05(
         profile=profile,
         manifest=scope_manifest,

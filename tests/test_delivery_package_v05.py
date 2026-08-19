@@ -22,6 +22,7 @@ from openworkproof.models import DecisionDraftRequest
 
 from test_acceptance_v05 import _commit_v05_decision
 from test_verification_integrity_transactions_v05 import (
+    _resign_arm_result_v05,
     commit_verification_arm_result_v05,
     commit_verification_profile_v05,
     v05_transaction_case,
@@ -439,6 +440,95 @@ def test_customer_private_v05_package_includes_retraction_chain(
     assert len(receipts) >= 1
     assert receipts[0]["retraction_effect"] == "refuted"
     assert receipts[0]["retraction_reason"] == "evidence_refuted"
+
+
+def test_customer_private_v05_package_replays_refuted_decision(
+    v05_transaction_case,
+) -> None:
+    """A single-decision package whose decision is UNKNOWN with
+    RECEIPT_RETRACTED (retractions committed before the first decision) must
+    export and verify offline: the integrity-assessment replay must reproduce
+    the decision-level code, not just the population/control subset."""
+    from openworkproof.models import (
+        RetractionReceiptV05,
+        parse_action_receipt_json,
+        retraction_receipt_id,
+    )
+    from openworkproof.retraction import commit_retraction_receipt
+    from openworkproof.signing import sign_payload
+
+    case = dict(v05_transaction_case)
+    # No decision is committed yet: commit profile + arm results only.
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    for result in case["results"]:
+        committed = _resign_arm_result_v05(case, result)
+        commit_verification_arm_result_v05(case["ledger"], committed)
+
+    retracted_ids = {
+        receipt_id
+        for result in case["results"]
+        for receipt_id in result.action_receipt_ids
+    }
+    for receipt_id in retracted_ids:
+        row = evidence.connect_ledger(case["ledger"]).execute(
+            "SELECT receipt_json FROM receipts WHERE receipt_id = ?",
+            (receipt_id,),
+        ).fetchone()
+        parsed = parse_action_receipt_json(row[0])
+        payload = {
+            "schema_version": "openworkproof-retraction-receipt/0.5",
+            "protocol_version": "0.5",
+            "work_order_digest": case["profile"].work_order_digest,
+            "target_receipt_id": receipt_id,
+            "target_receipt_digest": parsed.digest,
+            "target_receipt_kind": "tool_call",
+            "retraction_effect": "refuted",
+            "retraction_reason": "evidence_refuted",
+            "refutes_decision_id": None,
+            "refutes_decision_digest": None,
+            "causal_parent_ids": [receipt_id],
+            "nonce": "0" * 64,
+            "retracted_at": "2026-01-01T00:25:00Z",
+        }
+        payload["retraction_id"] = retraction_receipt_id(payload)
+        retraction = RetractionReceiptV05.model_validate(
+            sign_payload(
+                "retraction-receipt",
+                payload,
+                case["keys"]["Manager"][0],
+                version="0.5",
+            )
+        )
+        commit_retraction_receipt(case["ledger"], retraction)
+
+    from openworkproof.verification import (
+        commit_verification_decision_v05,
+        prepare_verification_decision_v05,
+    )
+
+    from test_verification_integrity_transactions_v05 import (
+        _sign_decision_draft_v05,
+    )
+
+    draft = prepare_verification_decision_v05(
+        case["ledger"],
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:30:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    assert draft.decision == "UNKNOWN"
+    assert "RECEIPT_RETRACTED" in draft.reason_codes
+    decision = _sign_decision_draft_v05(case, draft)
+    commit_verification_decision_v05(case["ledger"], decision)
+
+    output = case["tmp_path"] / "customer-package-refuted-decision"
+    export_delivery_package(
+        case["ledger"], output, privacy_view="customer_private"
+    )
+    result = verify_delivery_package(output)
+    assert result.current_decision == "UNKNOWN"
 
 
 def test_customer_private_v05_package_tampered_retraction_fails_offline(
