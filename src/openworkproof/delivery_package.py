@@ -2607,21 +2607,28 @@ def _load_v05_objects_and_evidence(root: Path, manifest: DeliveryManifest):
     if profile.assurance_level == "high_risk":
         # The dual cross-validation and decision derivation use both verifier
         # sets, but the population/control assessment operates on one
-        # representative set (the two converged sets agree field-by-field).
+        # representative set (one result per arm — the two converged sets
+        # agree field-by-field).
         referenced_ids = {
             reference.arm_result_id for reference in decision.arm_results
         }
-        representatives = [
+        referenced = [
             result
             for result in results
             if result.arm_result_id in referenced_ids
         ]
-        if len(representatives) != len(referenced_ids):
+        if len(referenced) != len(referenced_ids):
             raise DeliveryPackageError(
                 "v0.5 decision arm results are unavailable"
             )
+        by_arm_representative: dict[str, object] = {}
+        for result in referenced:
+            by_arm_representative.setdefault(result.arm_id, result)
         assessment_results = tuple(
-            sorted(representatives, key=lambda item: item.arm_result_id)
+            sorted(
+                by_arm_representative.values(),
+                key=lambda item: item.arm_result_id,
+            )
         )
     else:
         assessment_results = tuple(results)

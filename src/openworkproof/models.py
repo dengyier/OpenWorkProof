@@ -2249,13 +2249,36 @@ def _validate_verification_decision_content(
     supersedes_decision_digest: str | None,
     causal_parent_receipt_ids: tuple[str, ...],
     causal_parent_decision_ids: tuple[str, ...],
+    assurance_level: str | None = None,
 ) -> None:
     arm_result_ids = tuple(item.arm_result_id for item in arm_results)
     if not arm_results or arm_result_ids != tuple(sorted(set(arm_result_ids))):
         raise ValueError("arm results must be non-empty sorted and unique")
-    arm_ids = tuple(item.arm_id for item in arm_results)
-    if len(set(arm_ids)) != len(arm_ids):
-        raise ValueError("arm references must be one-to-one")
+    if assurance_level == "high_risk":
+        # A high-risk decision references either the single-verifier set
+        # (one per arm, deriving UNKNOWN on insufficient independence) or the
+        # full dual-verifier set (two distinct arm results per arm, so replay
+        # recomposes from the decision's own references and re-runs the
+        # cross-validation without any assumed-independence flag).
+        arm_ids = tuple(item.arm_id for item in arm_results)
+        from collections import Counter
+
+        counts = Counter(arm_ids)
+        per_arm_counts = set(counts.values())
+        if not per_arm_counts <= {1, 2}:
+            raise ValueError(
+                "high-risk arm references must cover every arm once or twice"
+            )
+        if 2 in per_arm_counts and not _arm_references_distinct_per_arm(
+            arm_results
+        ):
+            raise ValueError(
+                "high-risk arm references must be two distinct arm results per arm"
+            )
+    else:
+        arm_ids = tuple(item.arm_id for item in arm_results)
+        if len(set(arm_ids)) != len(arm_ids):
+            raise ValueError("arm references must be one-to-one")
     if reason_codes != tuple(sorted(set(reason_codes))):
         raise ValueError("decision reason codes must be sorted and unique")
     if (supersedes_decision_id is None) != (supersedes_decision_digest is None):
@@ -2269,6 +2292,18 @@ def _validate_verification_decision_content(
     )
     if causal_parent_decision_ids != expected_decision_parents:
         raise ValueError("causal decision parents do not match supersedes")
+
+
+def _arm_references_distinct_per_arm(
+    arm_results: tuple[VerificationArmResultReference, ...],
+) -> bool:
+    """Return whether the two references for each arm are distinct results."""
+    from collections import defaultdict
+
+    ids_by_arm: dict[str, set[str]] = defaultdict(set)
+    for reference in arm_results:
+        ids_by_arm[reference.arm_id].add(reference.arm_result_id)
+    return all(len(ids) == 2 for ids in ids_by_arm.values())
 
 
 class VerificationDecisionDraft(ProtocolModel):
@@ -3208,6 +3243,22 @@ class VerificationDecisionDraftV05(VerificationDecisionDraftV03):
         )
 
     @model_validator(mode="after")
+    def _closed_draft(self) -> VerificationDecisionDraftV05:
+        # Override the v0.2 base validator: v0.5 high-risk drafts carry the
+        # full dual-verifier references (two per arm), which the base
+        # one-to-one check forbids.
+        _validate_verification_decision_content(
+            arm_results=self.arm_results,
+            reason_codes=self.reason_codes,
+            supersedes_decision_id=self.supersedes_decision_id,
+            supersedes_decision_digest=self.supersedes_decision_digest,
+            causal_parent_receipt_ids=self.causal_parent_receipt_ids,
+            causal_parent_decision_ids=self.causal_parent_decision_ids,
+            assurance_level=self.assurance_level,
+        )
+        return self
+
+    @model_validator(mode="after")
     def _closed_v05_draft(self) -> VerificationDecisionDraftV05:
         _validate_v05_decision_status(self.decision, self.integrity_assessment)
         _validate_v05_decision_reason_codes(
@@ -3239,6 +3290,7 @@ class VerificationDecisionV05(VerificationDecisionV03):
             supersedes_decision_digest=self.supersedes_decision_digest,
             causal_parent_receipt_ids=self.causal_parent_receipt_ids,
             causal_parent_decision_ids=self.causal_parent_decision_ids,
+            assurance_level=self.assurance_level,
         )
         if self.scope_assessment.scope_status != "satisfied" and (
             self.decision != "UNKNOWN"

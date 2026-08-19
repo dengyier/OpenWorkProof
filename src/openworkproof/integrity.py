@@ -1171,6 +1171,7 @@ def compose_verification_decision_v05(
         arm.arm_id: arm for arm in (profile.positive_arm, *profile.negative_arms)
     }
     dual_converged = False
+    decision_reference_results: tuple[VerificationArmResultV05, ...] | None = None
     dual_required = profile.assurance_level == "high_risk"
     if dual_required:
         # Two independent verifier result sets: every arm appears once per
@@ -1369,10 +1370,12 @@ def compose_verification_decision_v05(
             raise verification_module.VerificationInputError(
                 "high-risk verifiers diverged; no decision can be formed"
             )
-        # Converged: the decision references the representative set (one arm
-        # result per arm — the two verifiers agree field-by-field, so either
-        # is faithful). Independence is restored on replay from the decision's
-        # two verifier signatures.
+        # Converged: the decision references the FULL dual-verifier set (every
+        # arm, both verifiers) so replay recomposes from the decision's own
+        # references and re-runs cross-validation — no assumed flag needed,
+        # and later appended runs cannot invalidate this decision's replay.
+        # The population/control/scope assessment and decision derivation use
+        # one representative set (the two agree field-by-field).
         dual_converged = True
         representatives = [
             by_verifier[first_verifier][arm_id]
@@ -1380,6 +1383,9 @@ def compose_verification_decision_v05(
                 expected_arms, key=lambda value: value.encode("utf-8")
             )
         ]
+        decision_reference_results = tuple(
+            sorted(dual_verifier_results, key=lambda result: result.arm_result_id)
+        )
         results = tuple(
             sorted(representatives, key=lambda result: result.arm_result_id)
         )
@@ -1499,7 +1505,12 @@ def compose_verification_decision_v05(
         decision = "VERIFIED"
 
     references: list[VerificationArmResultReference] = []
-    for result in results:
+    reference_results = (
+        decision_reference_results
+        if decision_reference_results is not None
+        else results
+    )
+    for result in reference_results:
         try:
             snapshot = evidence_snapshot_digest(
                 tuple(

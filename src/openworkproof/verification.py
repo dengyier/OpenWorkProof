@@ -3221,6 +3221,7 @@ def _load_arm_results_v05(
     manifest: EvaluationScopeManifest,
     selected_ids: tuple[str, ...] | None = None,
     latest_only: bool = True,
+    latest_per_verifier: bool = False,
 ) -> tuple[VerificationArmResultV05, ...]:
     values: list[VerificationArmResultV05] = []
     for result_id, digest, profile_id, arm_id, raw in connection.execute(
@@ -3271,6 +3272,21 @@ def _load_arm_results_v05(
                 current.arm_result_id,
             ):
                 latest[result.arm_id] = result
+        return tuple(
+            sorted(latest.values(), key=lambda item: item.arm_result_id)
+        )
+    if latest_per_verifier:
+        # Newest result per (arm, verifier): a high-risk prepare sees the
+        # latest dual-verifier set even when earlier runs were appended.
+        latest: dict[tuple[str, str], VerificationArmResultV05] = {}
+        for result in values:
+            key = (result.arm_id, result.verifier_key_id)
+            current = latest.get(key)
+            if current is None or (result.created_at, result.arm_result_id) > (
+                current.created_at,
+                current.arm_result_id,
+            ):
+                latest[key] = result
         return tuple(
             sorted(latest.values(), key=lambda item: item.arm_result_id)
         )
@@ -3382,18 +3398,18 @@ def _load_current_decision_v05(
             raise VerificationTransactionError(
                 "v0.5 decision parents are invalid"
             )
-        # Replay must see the same arm-result input as prepare: for high-risk
-        # profiles that is the full dual-verifier set (every arm, both
-        # verifiers), so the cross-validation re-runs and derives the same
-        # decision. For standard profiles the decision's referenced set is the
-        # single latest per arm.
+        # Replay recomposes from the decision's own referenced arm results:
+        # standard decisions reference one per arm, high-risk decisions
+        # reference the full dual-verifier set, so cross-validation re-runs
+        # from the decision itself and later appended runs cannot invalidate
+        # this decision's replay.
         results = _load_arm_results_v05(
             connection,
             path=path,
             work_order=work_order,
             profile=profile,
             manifest=manifest,
-            latest_only=profile.assurance_level != "high_risk",
+            selected_ids=parents,
         )
         result_committed_rows = tuple(
             connection.execute(
@@ -3492,6 +3508,7 @@ def prepare_verification_decision_v05(
             profile=profile,
             manifest=manifest,
             latest_only=profile.assurance_level != "high_risk",
+            latest_per_verifier=profile.assurance_level == "high_risk",
         )
         previous = _load_current_decision_v05(
             connection,
@@ -3657,45 +3674,45 @@ def commit_verification_decision_v05(
             work_order=work_order,
             profile=profile,
             manifest=manifest,
-            latest_only=profile.assurance_level != "high_risk",
+            latest_only=False,
         )
-        if profile.assurance_level == "high_risk":
-            # High-risk decisions may reference either verifier's result per
-            # arm (both committed in the same batch). Every arm must be
-            # covered, and a referenced result must not be strictly older
-            # than the newest committed result for the same arm.
-            latest_by_arm: dict[str, VerificationArmResultV05] = {}
-            for result in latest:
-                current = latest_by_arm.get(result.arm_id)
-                if current is None or (
-                    result.created_at,
-                    result.arm_result_id,
-                ) > (current.created_at, current.arm_result_id):
-                    latest_by_arm[result.arm_id] = result
-            referenced_by_arm: dict[str, VerificationArmResultV05] = {}
-            for result in results:
-                current = referenced_by_arm.get(result.arm_id)
-                if current is None or (
-                    result.created_at,
-                    result.arm_result_id,
-                ) > (current.created_at, current.arm_result_id):
-                    referenced_by_arm[result.arm_id] = result
-            if set(referenced_by_arm) != set(latest_by_arm):
-                raise VerificationTransactionError(
-                    "v0.5 decision does not cover every current arm"
-                )
-            for arm_id, referenced in referenced_by_arm.items():
-                newest = latest_by_arm.get(arm_id)
-                if newest is not None and referenced.created_at < newest.created_at:
-                    raise VerificationTransactionError(
-                        "v0.5 decision uses stale arm results"
-                    )
-        elif tuple(item.arm_result_id for item in results) != tuple(
-            item.arm_result_id for item in latest
-        ):
+        # The decision must reference the newest committed result per arm
+        # (for high-risk, the newest of each verifier's per-arm batch; both
+        # verifiers are current when committed together).
+        latest_by_arm: dict[str, VerificationArmResultV05] = {}
+        for result in latest:
+            latest_arm_result = latest_by_arm.get(result.arm_id)
+            if latest_arm_result is None or (
+                result.created_at,
+                result.arm_result_id,
+            ) > (latest_arm_result.created_at, latest_arm_result.arm_result_id):
+                latest_by_arm[result.arm_id] = result
+        referenced_by_arm: dict[str, VerificationArmResultV05] = {}
+        for result in results:
+            referenced_arm_result = referenced_by_arm.get(result.arm_id)
+            if referenced_arm_result is None or (
+                result.created_at,
+                result.arm_result_id,
+            ) > (
+                referenced_arm_result.created_at,
+                referenced_arm_result.arm_result_id,
+            ):
+                referenced_by_arm[result.arm_id] = result
+        if set(referenced_by_arm) != set(latest_by_arm):
             raise VerificationTransactionError(
-                "v0.5 decision uses stale arm results"
+                "v0.5 decision does not cover every current arm"
             )
+        for arm_id, referenced in referenced_by_arm.items():
+            newest = latest_by_arm.get(arm_id)
+            if newest is not None and (
+                referenced.created_at,
+                referenced.arm_result_id,
+            ) < (newest.created_at, newest.arm_result_id):
+                raise VerificationTransactionError(
+                    "v0.5 decision uses stale arm results"
+                )
+        # The recompose sees the decision's own referenced arm results (the
+        # full dual-verifier set for high-risk).
         rule_outputs = _derive_v05_rule_outputs(profile, manifest, path)
         inventory = _read_v05_evidence_inventory(path, results)
         retracted_receipt_ids = _committed_refuted_receipt_ids(
@@ -3706,9 +3723,7 @@ def commit_verification_decision_v05(
             draft = integrity.compose_verification_decision_v05(
                 profile=profile,
                 manifest=manifest,
-                arm_results=(
-                    latest if profile.assurance_level == "high_risk" else results
-                ),
+                arm_results=results,
                 request=DecisionDraftRequest(
                     decision_id=parsed.decision_id,
                     decided_at=parsed.model_dump(mode="json")["decided_at"],

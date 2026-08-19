@@ -626,6 +626,7 @@ def test_high_risk_commit_rejects_signer_without_results(
     forged_draft["decision"] = "VERIFIED"
     forged_draft["decision_id"] = "e" * 64
     forged_draft["nonce"] = "f" * 64
+    forged_draft["decided_at"] = "2026-01-01T00:30:00Z"
     from openworkproof.models import VerificationDecisionDraftV05
 
     forged = VerificationDecisionDraftV05.model_validate(forged_draft)
@@ -776,3 +777,141 @@ def test_high_risk_dual_verifier_offline_package_replays(
     )
     result = verify_delivery_package(output)
     assert result.current_decision == "VERIFIED"
+
+
+def test_appended_run_does_not_break_committed_decision_replay(
+    v05_transaction_case,
+) -> None:
+    """Appending a later (still convergent) dual-verifier run must not
+    invalidate an already committed decision's replay: replay recomposes
+    from the decision's own references, not the current ledger state."""
+    import openworkproof.evidence as evidence
+    from openworkproof.scope import ObservedScope
+    from openworkproof.verification import (
+        commit_verification_arm_result_v05,
+        commit_verification_decision_v05,
+        commit_verification_profile_v05,
+        prepare_verification_decision_v05,
+        verification_decision_signing_bytes_v05,
+    )
+
+    case = dict(v05_transaction_case)
+    profile, second_key, second_binding = _high_risk_profile(case)
+    first_key = case["keys"]["Verifier"][0]
+    first_binding = next(
+        item.model_dump(mode="json")
+        for item in profile.verifier_bindings
+        if item.verifier_key_id == _key_id(first_key.public_key())
+    )
+    manifest = case["manifest"]
+    observed = ObservedScope(
+        member_ids=tuple(member.member_id for member in manifest.members),
+        member_count=manifest.member_count,
+        population_digest=manifest.population_digest,
+        required_target_ids=manifest.required_target_ids,
+        source_revision=manifest.source_revision,
+        workspace_manifest_digest=manifest.workspace_manifest_digest,
+        selector_engine_digests=tuple(
+            sorted(rule.selector_engine_digest for rule in manifest.selector_rules)
+        ),
+        evidence_complete=True,
+    )
+
+    def build_set(suffix: str, result_char: str) -> list:
+        out = []
+        for arm_kind, result_prefix in (
+            ("positive", "8"),
+            ("negative", "9"),
+        ):
+            for verifier_idx, (vkey, binding) in enumerate(
+                (
+                    (first_key, first_binding),
+                    (second_key, second_binding),
+                )
+            ):
+                out.append(
+                    _arm_result_for_verifier(
+                        case,
+                        profile,
+                        manifest,
+                        verifier_key=vkey,
+                        binding=binding,
+                        arm_kind=arm_kind,
+                        suffix=f"{arm_kind}-{suffix}",
+                        evidence_ref=_write_json_evidence(
+                            case["tmp_path"],
+                            f"results/{arm_kind}.json",
+                            {"arm": arm_kind, "passed": True},
+                        ),
+                        scope_evidence_ref=_write_json_evidence(
+                            case["tmp_path"],
+                            f"scope/{arm_kind}.json",
+                            observed.model_dump(mode="json"),
+                        ),
+                        result_id=result_prefix
+                        + result_char * 31
+                        + str(verifier_idx) * 32,
+                    )
+                )
+        return out
+
+    commit_verification_profile_v05(case["ledger"], profile)
+    first_set = build_set("r1", "a")
+    for result in first_set:
+        commit_verification_arm_result_v05(case["ledger"], result)
+    draft = prepare_verification_decision_v05(
+        case["ledger"],
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    assert draft.decision == "VERIFIED"
+    encoded = verification_decision_signing_bytes_v05(draft)
+    signatures = []
+    for key, binding in (
+        (first_key, first_binding),
+        (second_key, second_binding),
+    ):
+        signatures.append(
+            {
+                "verifier_subject_id": binding["verifier_subject_id"],
+                "verifier_key_id": _key_id(key.public_key()),
+                "signature_alg": "Ed25519",
+                "signature": _base64.urlsafe_b64encode(key.sign(encoded))
+                .decode("ascii")
+                .rstrip("="),
+            }
+        )
+    signatures.sort(key=lambda item: item["verifier_key_id"].encode("utf-8"))
+    decision = VerificationDecisionV05.model_validate(
+        {
+            "schema_version": "openworkproof-verification-decision/0.5",
+            **draft.model_dump(mode="json"),
+            "digest": hashlib.sha256(encoded).hexdigest(),
+            "verifier_signatures": signatures,
+        }
+    )
+    commit_verification_decision_v05(case["ledger"], decision)
+
+    # Append a second convergent run (newer results, same verifiers).
+    second_set = build_set("r2", "b")
+    for result in second_set:
+        commit_verification_arm_result_v05(case["ledger"], result)
+
+    # The committed decision must still replay: prepare recomposes from the
+    # decision's own references (first run), not the ledger's current state.
+    again = prepare_verification_decision_v05(
+        case["ledger"],
+        DecisionDraftRequest(
+            decision_id="e" * 64,
+            decided_at="2026-01-01T00:30:00Z",
+            nonce="f" * 64,
+        ),
+    )
+    assert again.decision == "VERIFIED"
+    assert evidence.connect_ledger(case["ledger"]).execute(
+        "SELECT 1 FROM verification_decisions_v05 WHERE decision_id = ?",
+        (decision.decision_id,),
+    ).fetchone() is not None
