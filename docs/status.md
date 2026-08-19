@@ -7,6 +7,35 @@
 执行。当前开发分支支持的冻结协议 Schema：0.1、0.2、0.3、0.4 与 0.5。分发版本
 和协议版本分别记录，不得把 Python 分发版本解释成协议版本。
 
+## RetractionReceipt v0.5 本地开发状态（Phase 2，2026-08-19）
+
+`main` 本地新增 RetractionReceipt（语义可撤销性）：`RetractionReceiptV05`
+模型 + `retraction-receipt` 签名域（Manager/Verifier 签发，Acceptor 撤销验收
+仍走 `AcceptanceTransitionReceipt`）、`commit_retraction_receipt` append-only
+事务、`receipt_retraction_status` / `retraction_chain` 查询、决策兼容（被
+`refuted` 撤销的 causal receipt → 决策 `UNKNOWN` + `RECEIPT_RETRACTED`，
+contradicted arm 时 REFUTED 优先；replay 按 `decided_at` 协议时间界定）、
+离线包导出 retraction 链 + 离线重放。新增 reason code `RECEIPT_RETRACTED`
+（走 schema-registry 流程重新生成 v0.5 decision schema + 更新冻结锚点 +
+刷新冻结 demo bundle）。改动仅新增 v0.5 sibling 对象 + 新表 + 语义收紧，
+v0.1–v0.4 冻结面未触碰。
+
+- 独立双审两轮 REJECT 全部修复：schema 冻结锚点漂移、决策 replay 焊死
+  （按 `retracted_at` 协议时间 as_of 界定）、nonce 未闭合（进共享扫描）、
+  离线 `RECEIPT_RETRACTED` 决策包 replay bug。
+- fresh 测量（2026-08-19，HEAD `27ac7bb`）：
+  - v0.5 focused：**477 passed、0 failed**（含 41 个新 retraction/schema 测试）；
+  - candidate 两套件（live Docker）：**178 passed、0 failed**；
+  - **required-live 全量**（
+    `docker.io/openworkproof/execution-test@sha256:5f64e46c…`）：
+    **3532 passed、0 failed、0 skipped，零 warning**（13 分 28 秒）；
+  - pip check / compileall / git diff --check：PASS；
+  - Docker 残留：本任务零残留。
+- 候选：`supply-chain/images/candidates/27ac7bb….json`（绑定 HEAD）。
+- 诚实边界不变：无客户采用、无付费 SOW、无定金、无上游采纳（全部
+  `not_evidenced`）；本段是本地工程状态，不是发布/推送/验收声明。
+- 本地 HEAD `27ac7bb`，领先 origin 14 提交，未 push。
+
 ## Negative-Control Rot Defense 本地开发状态（Phase 1，2026-08-18）
 
 `main` 本地新增负控 rot 防御：负控契约的 `expected_failure_signature.reason_codes`
