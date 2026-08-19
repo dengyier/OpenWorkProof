@@ -970,6 +970,45 @@ def _assert_nonce_unused(
                 raise VerificationTransactionError("protocol nonce is already used")
 
 
+def _committed_refuted_receipt_ids(
+    connection: sqlite3.Connection,
+) -> frozenset[str]:
+    """Return receipt ids whose latest committed retraction is ``refuted``.
+
+    Only a retraction with effect ``refuted`` invalidates the causal chain;
+    a ``confidence_downgrade`` lowers confidence but does not refute. A
+    receipt retracted with effect ``refuted`` under any closed reason
+    (including ``evidence_refuted``) must not back a fresh decision.
+    """
+
+    rows = connection.execute(
+        """
+        SELECT retraction_json
+        FROM retraction_receipts_v05
+        ORDER BY committed_at ASC, retraction_id ASC
+        """
+    ).fetchall()
+    latest_by_target: dict[str, dict[str, object]] = {}
+    for (raw,) in rows:
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError) as error:
+            raise VerificationTransactionError(
+                "committed retraction row is invalid"
+            ) from error
+        target = payload.get("target_receipt_id")
+        if not isinstance(target, str):
+            raise VerificationTransactionError(
+                "committed retraction target is invalid"
+            )
+        latest_by_target[target] = payload
+    return frozenset(
+        target
+        for target, payload in latest_by_target.items()
+        if payload.get("retraction_effect") == "refuted"
+    )
+
+
 def _validate_scope_authority(
     *,
     work_order: WorkOrder,
@@ -3433,6 +3472,7 @@ def prepare_verification_decision_v05(
         )
         rule_outputs = _derive_v05_rule_outputs(profile, manifest, path)
         inventory = _read_v05_evidence_inventory(path, results)
+        retracted_receipt_ids = _committed_refuted_receipt_ids(connection)
         draft = integrity.compose_verification_decision_v05(
             profile=profile,
             manifest=manifest,
@@ -3441,6 +3481,7 @@ def prepare_verification_decision_v05(
             previous_decision=previous,
             rule_outputs=rule_outputs,
             evidence_inventory=inventory,
+            retracted_receipt_ids=retracted_receipt_ids,
         )
         connection.execute("ROLLBACK")
         return draft

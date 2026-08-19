@@ -1129,6 +1129,7 @@ def compose_verification_decision_v05(
     previous_decision: VerificationDecisionV05 | None = None,
     rule_outputs: Mapping[str, Sequence[str]] | None = None,
     evidence_inventory: Mapping[str, bytes] | None = None,
+    retracted_receipt_ids: frozenset[str] = frozenset(),
 ) -> VerificationDecisionDraftV05:
     """Compose the three-state v0.5 decision draft from signed inputs.
 
@@ -1312,6 +1313,14 @@ def compose_verification_decision_v05(
         scope_status = "satisfied"
 
     independence = verification_module.assess_independence(profile, results)
+    causal_receipt_ids = {
+        receipt_id
+        for result in results
+        for receipt_id in result.action_receipt_ids
+    }
+    has_refuted_causal = bool(
+        causal_receipt_ids & set(retracted_receipt_ids)
+    )
     if scope_status != "satisfied":
         decision = "UNKNOWN"
     elif population.status != "matched":
@@ -1324,6 +1333,10 @@ def compose_verification_decision_v05(
         result.expectation_status == "contradicted" for result in negative
     ):
         decision = "REFUTED"
+    elif has_refuted_causal:
+        # The conclusion rests on evidence that a signed retraction has
+        # marked refuted; a fresh decision cannot stand on it.
+        decision = "UNKNOWN"
     elif positive[0].expectation_status != "satisfied" or any(
         result.expectation_status != "satisfied" for result in negative
     ) or not independence.is_sufficient:
@@ -1359,7 +1372,11 @@ def compose_verification_decision_v05(
         population_status=population.status,
         control_status=control.status,
         reason_codes=tuple(
-            sorted(set(population.reason_codes) | set(control.reason_codes))
+            sorted(
+                set(population.reason_codes)
+                | set(control.reason_codes)
+                | ({"RECEIPT_RETRACTED"} if has_refuted_causal else set())
+            )
         ),
     )
     v03_reason_codes = {
@@ -1367,6 +1384,8 @@ def compose_verification_decision_v05(
         *independence.reason_codes,
         *(code for result in results for code in result.reason_codes),
     }
+    if has_refuted_causal:
+        v03_reason_codes.add("RECEIPT_RETRACTED")
     reason_codes = tuple(
         sorted(v03_reason_codes | set(assessment.reason_codes))
     )
