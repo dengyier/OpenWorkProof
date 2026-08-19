@@ -2803,7 +2803,9 @@ def _ledger_export_read_v05(ledger: Path):
             work_order=work_order,
             profile=profile,
             manifest=scope_manifest,
-            latest_only=profile.assurance_level != "high_risk",
+            selected_ids=tuple(
+                item.arm_result_id for item in decision.arm_results
+            ),
         )
         receipts = tuple(
             evidence.parse_action_receipt_json(row[0])

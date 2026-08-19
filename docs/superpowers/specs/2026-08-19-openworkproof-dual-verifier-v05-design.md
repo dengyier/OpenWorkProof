@@ -66,21 +66,26 @@ high_risk 时，arm results 必须是**两套**（每 arm 每个 verifier bindin
 ```text
 arm results 必须来自恰好 2 个不同的 verifier binding
   - 每个 binding 覆盖全部 arm（每个 arm_id 在该验证者集合中出现一次）
+  - 每 (arm, verifier) 恰好一条结果（重复行拒绝——N9）
   - 每 arm 的两套结果必须在全部承载结论的字段上一致：
       expectation_status / execution_status / mutation_status / reason_codes /
-      observed_member_count / observed_population_digest /
+      action_receipt_ids / observed_member_count / observed_population_digest /
       observed_required_target_ids / scope_expectation_status /
       population_observations / control_observation / evidence snapshot digest
   - 任一字段不一致 -> 决策组合失败（VerificationInputError），不产生决策
     （分歧 = 证据冲突，无法形成可重放决策；调用方重跑直到收敛或降级）
 ```
 
-收敛后决策引用**代表集**（每 arm 一个结果，取自第一验证者——两套已逐字段
-一致，任一皆忠实），并由两个验证者签名。可重放性由**全链双套加载**恢复：
-commit/replay/离线包均从账本/包加载完整双套 arm results 并重跑交叉验证，
-与 prepare 的输入一致，从而派生相同决策（不依赖签名数推导独立性）。
+收敛后决策**引用完整双套**（每 arm 两个不同验证者的结果），并由两个验证者
+签名。可重放性由**决策自证**实现：commit/replay/离线包均从**决策自身的
+引用**（`selected_ids`）重跑交叉验证——不依赖签名数推导独立性，追加的后续
+验证轮次不影响已提交决策的可重放性（N7）。新决策的 prepare 用
+**每 (arm, verifier) 最新**（`latest_per_verifier`）——追加轮次后新决策用
+最新双套；commit 的 stale 检查按 (arm, verifier) 粒度验证新鲜度（N8），
+验证者不能引用自己的旧轮压掉更新的失败轮。
 
-低风险（standard）时语义不变（单套 arm results，单验证者可接受）。
+低风险（standard）时语义不变（单套 arm results，单验证者可接受；决策引用
+每 arm 一条）。
 
 ### 4.2 交叉收敛判定
 
@@ -170,4 +175,12 @@ high_risk 且单验证者结果 → 复用既有 `INDEPENDENCE_INSUFFICIENT`（�
 - 本规格是协议能力，不是客户案例、付款、上游采纳或商业验证。
 - Dual Verifier 证明"协议要求双验证者收敛"，不证明"任何实际交付都经双验证"、
   "验证者诚实"或"无共谋"。
+- **分歧不入账的代价（临时折中）**：验证者矛盾（divergence）导致组合失败，
+  不产生可审计的 `UNKNOWN` 决策——审计方无法从账本区分"验证者互相矛盾"与
+  "没人验证"；运营方可以重跑到收敛只发布成功，且任一被绑定的验证者可以
+  阻断全部 high_risk 决策且不留痕迹。这是 §4.2 记录的临时折中，v0.6 决策
+  模型支持双套引用后应以正式的 `DUAL_VERIFIER_DIVERGENCE` 状态入账。
+- **配对规则**：`latest_per_verifier` 允许不同验证者引用不同轮次的
+  结果配对（如 A@00:16 配 B@00:10），只要逐字段收敛即判 VERIFIED——这是
+  可辩护的（每 (arm, verifier) 各自最新），但配对的时间差未强制一致。
 - 所有外部状态保持 `not_evidenced`。

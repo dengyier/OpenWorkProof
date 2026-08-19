@@ -1181,8 +1181,18 @@ def compose_verification_decision_v05(
         # UNKNOWN. If arms carry two results, cross-validation runs below.
         expected_arm_ids = set(expected_arms)
         by_arm: dict[str, set[str]] = {}
+        arm_verifier_rows: dict[tuple[str, str], int] = {}
         for result in results:
             by_arm.setdefault(result.arm_id, set()).add(result.verifier_key_id)
+            key = (result.arm_id, result.verifier_key_id)
+            arm_verifier_rows[key] = arm_verifier_rows.get(key, 0) + 1
+        if any(rows != 1 for rows in arm_verifier_rows.values()):
+            # At most one result per (arm, verifier): extra rows from a
+            # verifier's older run are stale and must not be silently
+            # dropped by the by_verifier merge below.
+            raise verification_module.VerificationInputError(
+                "high-risk arm result set has duplicate verifier rows"
+            )
         single_set = (
             set(by_arm) == expected_arm_ids
             and all(len(verifiers) == 1 for verifiers in by_arm.values())
