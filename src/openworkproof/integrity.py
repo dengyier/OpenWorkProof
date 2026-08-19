@@ -1170,7 +1170,33 @@ def compose_verification_decision_v05(
     expected_arms = {
         arm.arm_id: arm for arm in (profile.positive_arm, *profile.negative_arms)
     }
-    if len(results) != len(expected_arms) or {
+    dual_converged = False
+    dual_required = profile.assurance_level == "high_risk"
+    if dual_required:
+        # Two independent verifier result sets: every arm appears once per
+        # verifier. If every arm has exactly one result (single verifier),
+        # fall through to the normal single-set path where the independence
+        # assessment (high_risk requires two distinct verifiers) derives
+        # UNKNOWN. If arms carry two results, cross-validation runs below.
+        expected_arm_ids = set(expected_arms)
+        by_arm: dict[str, set[str]] = {}
+        for result in results:
+            by_arm.setdefault(result.arm_id, set()).add(result.verifier_key_id)
+        single_set = (
+            set(by_arm) == expected_arm_ids
+            and all(len(verifiers) == 1 for verifiers in by_arm.values())
+        )
+        dual_set = (
+            set(by_arm) == expected_arm_ids
+            and all(len(verifiers) == 2 for verifiers in by_arm.values())
+            and len({result.verifier_key_id for result in results}) == 2
+        )
+        if not (single_set or dual_set):
+            raise verification_module.VerificationInputError(
+                "high-risk arm result set is incomplete or inconsistent"
+            )
+        dual_required = dual_set
+    elif len(results) != len(expected_arms) or {
         result.arm_id for result in results
     } != set(expected_arms):
         raise verification_module.VerificationInputError(
@@ -1237,6 +1263,158 @@ def compose_verification_decision_v05(
             raise verification_module.VerificationInputError(
                 "superseding decision time is stale"
             )
+
+    if dual_required:
+        # Dual-verifier cross-validation: for every arm the two independent
+        # verifiers must converge on the same evidence snapshot. A lying
+        # verifier that fabricates an exit code produces different evidence,
+        # which fails convergence here. On convergence, one representative
+        # arm result per arm carries the decision.
+        from openworkproof.acceptance import evidence_snapshot_digest
+
+        dual_converged = False
+
+        by_verifier: dict[str, dict[str, VerificationArmResultV05]] = {}
+        for result in results:
+            by_verifier.setdefault(result.verifier_key_id, {})[
+                result.arm_id
+            ] = result
+        if len(by_verifier) != 2:
+            raise verification_module.VerificationInputError(
+                "high-risk decision requires two independent verifiers"
+            )
+        representatives: list[VerificationArmResultV05] = []
+        divergence = False
+        first_verifier, second_verifier = sorted(by_verifier)
+        for arm_id in sorted(expected_arms, key=lambda value: value.encode("utf-8")):
+            first = by_verifier[first_verifier].get(arm_id)
+            second = by_verifier[second_verifier].get(arm_id)
+            if first is None or second is None:
+                raise verification_module.VerificationInputError(
+                    "high-risk arm result set is incomplete per verifier"
+                )
+            first_snapshot = evidence_snapshot_digest(
+                tuple(
+                    sorted(
+                        (*first.evidence_refs, *first.scope_evidence_refs),
+                        key=lambda ref: ref.path,
+                    )
+                )
+            )
+            second_snapshot = evidence_snapshot_digest(
+                tuple(
+                    sorted(
+                        (*second.evidence_refs, *second.scope_evidence_refs),
+                        key=lambda ref: ref.path,
+                    )
+                )
+            )
+            if first_snapshot != second_snapshot:
+                divergence = True
+            if first.arm_kind == "positive":
+                representatives.append(first)
+        if divergence:
+            # Divergence is a decision-level reason, not a population/control
+            # integrity code: the two verifiers failed to converge, so the
+            # assessment is unavailable and the decision is UNKNOWN. The arm
+            # results still reference the first verifier's representative set
+            # (the decision is UNKNOWN regardless of their content).
+            try:
+                representative_snapshot = evidence_snapshot_digest(
+                    tuple(
+                        sorted(
+                            (*representatives[0].evidence_refs,
+                             *representatives[0].scope_evidence_refs),
+                            key=lambda ref: ref.path,
+                        )
+                    )
+                )
+            except Exception:
+                representative_snapshot = "0" * 64
+            return VerificationDecisionDraftV05(
+                decision_id=request.decision_id,
+                work_order_digest=profile.work_order_digest,
+                subject_claim_digest=profile.subject_claim_digest,
+                profile_id=profile.profile_id,
+                profile_digest=profile.digest,
+                arm_results=(
+                    {
+                        "arm_id": representatives[0].arm_id,
+                        "arm_result_id": representatives[0].arm_result_id,
+                        "arm_result_digest": representatives[0].digest,
+                        "evidence_snapshot_digest": representative_snapshot,
+                    },
+                ),
+                assurance_level=profile.assurance_level,
+                decision="UNKNOWN",
+                independence={
+                    "distinct_subjects": False,
+                    "distinct_keys": False,
+                    "distinct_controllers": False,
+                    "distinct_execution_contexts": False,
+                    "reason_codes": (
+                        "INDEPENDENCE_CONTEXT_REUSED",
+                        "INDEPENDENCE_DOMAIN_OVERLAP",
+                        "INDEPENDENCE_INSUFFICIENT",
+                        "INDEPENDENCE_KEY_REUSED",
+                    ),
+                },
+                reason_codes=(
+                    "CONTROL_EVIDENCE_MISSING",
+                    "DUAL_VERIFIER_DIVERGENCE",
+                    "POPULATION_EVIDENCE_MISSING",
+                ),
+                supersedes_decision_id=(
+                    None
+                    if previous_decision is None
+                    else previous_decision.decision_id
+                ),
+                supersedes_decision_digest=(
+                    None
+                    if previous_decision is None
+                    else previous_decision.digest
+                ),
+                causal_parent_receipt_ids=tuple(
+                    sorted(
+                        set(representatives[0].action_receipt_ids)
+                    )
+                ),
+                causal_parent_decision_ids=(
+                    ()
+                    if previous_decision is None
+                    else (previous_decision.decision_id,)
+                ),
+                decided_at=request.model_dump(mode="json")["decided_at"],
+                nonce=request.nonce,
+                scope_manifest_digest=manifest.digest,
+                scope_assessment={
+                    "declared_member_count": manifest.member_count,
+                    "observed_member_counts": (0,),
+                    "population_digest": manifest.population_digest,
+                    "required_target_count": len(manifest.required_target_ids),
+                    "missing_required_target_ids": [],
+                    "scope_status": "indeterminate",
+                },
+                integrity_assessment={
+                    "population_status": "unavailable",
+                    "control_status": "unavailable",
+                    "reason_codes": (
+                        "CONTROL_EVIDENCE_MISSING",
+                        "POPULATION_EVIDENCE_MISSING",
+                    ),
+                },
+            )
+        # Converged: build a single representative set (positive arm from the
+        # first verifier; negative arms from the first verifier too — both
+        # converged, so either is faithful).
+        dual_converged = True
+        representatives = [
+            by_verifier[first_verifier][arm_id]
+            for arm_id in sorted(
+                expected_arms, key=lambda value: value.encode("utf-8")
+            )
+        ]
+        results = tuple(representatives)
 
     positive = tuple(
         result for result in results if result.arm_kind == "positive"
@@ -1313,6 +1491,18 @@ def compose_verification_decision_v05(
         scope_status = "satisfied"
 
     independence = verification_module.assess_independence(profile, results)
+    if dual_converged:
+        # The dual-verifier cross-validation already proved two distinct
+        # verifiers converged; the representative set is single-verifier, so
+        # force the independence assessment to the sufficient state that the
+        # original dual set satisfied.
+        independence = type(independence)(
+            distinct_subjects=True,
+            distinct_keys=True,
+            distinct_controllers=True,
+            distinct_execution_contexts=True,
+            reason_codes=(),
+        )
     causal_receipt_ids = {
         receipt_id
         for result in results

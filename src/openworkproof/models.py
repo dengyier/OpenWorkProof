@@ -2476,7 +2476,9 @@ VerificationIntegrityReasonCode = Literal[
 ]
 
 VerificationReasonCodeV05 = (
-    VerificationReasonCodeV03 | VerificationIntegrityReasonCode
+    VerificationReasonCodeV03
+    | VerificationIntegrityReasonCode
+    | Literal["DUAL_VERIFIER_DIVERGENCE"]
 )
 
 _POPULATION_INTEGRITY_CODES = frozenset(
