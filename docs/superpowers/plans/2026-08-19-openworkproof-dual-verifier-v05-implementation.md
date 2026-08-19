@@ -21,17 +21,26 @@ standard 语义不变。新 reason code `DUAL_VERIFIER_DIVERGENCE`。
 
 ## Task 2：模型层（reason code）
 
-- `DUAL_VERIFIER_DIVERGENCE` 加入 `VerificationIntegrityReasonCode` + 决策
-  reason code 集合；走 schema-registry 流程（如 schema 变更）。
+- `DUAL_VERIFIER_DIVERGENCE` 加入 `VerificationReasonCodeV05`（顶层决策 reason
+  code），**不加入** `VerificationIntegrityReasonCode`（避免污染 population/
+  control assessment 集合；独立审查确认这是正确选择）。
+- 走 schema-registry 流程（schema 变更时重新生成 + 更新锚点）。
 
 ## Task 3：组合层
 
 - `compose_verification_decision_v05` high_risk 分支：
-  - 要求 2 个不同 verifier binding 覆盖全部 arm；
-  - 交叉验证正臂 evidence_snapshot_digest；
-  - 不满足 → UNKNOWN（INDEPENDENCE_INSUFFICIENT / DUAL_VERIFIER_DIVERGENCE）。
-- `prepare/commit_verification_decision_v05` 传导新 reason code 到
-  assessment + 顶层（与 RECEIPT_RETRACTED 同模式）。
+  - 接受双套 arm results（每 arm 每个 verifier 一套）；
+  - 逐字段交叉验证全部承载结论的字段（expectation_status / execution_status /
+    mutation_status / reason_codes / observed_* / scope_expectation_status /
+    population_observations / control_observation / evidence snapshot），
+    任一不一致 → `VerificationInputError`（分歧不可得决策，重跑或降级）；
+  - single_set 必须是同一 verifier 覆盖全部 arm（split 覆盖拒绝）；
+  - 收敛 → 代表集（每 arm 一个结果，按 arm_result_id 排序）+ 双签名；
+  - replay/commit 以决策签名数（2）恢复独立性充分
+    （`assumed_independence_sufficient`）；prepare 加载全部 arm results
+    （`latest_only=False`）供双套判定。
+- `prepare/commit_verification_decision_v05` 传导（commit stale 判定对
+  high_risk 按每 arm 最新 created_at，容忍同批双 verifier）。
 
 ## Task 4：独立双审 + 门禁
 

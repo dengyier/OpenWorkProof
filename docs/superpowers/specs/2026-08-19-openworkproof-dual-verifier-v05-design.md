@@ -66,16 +66,20 @@ high_risk 时，arm results 必须是**两套**（每 arm 每个 verifier bindin
 ```text
 arm results 必须来自恰好 2 个不同的 verifier binding
   - 每个 binding 覆盖全部 arm（每个 arm_id 在该验证者集合中出现一次）
-  - 两套结果的正臂 evidence_snapshot_digest 必须相等（交叉收敛）
-  - 两套结果的负臂 expectation_status / reason_codes 一致
-不满足任意一条 -> VerificationInputError 或决策 UNKNOWN
+  - 每 arm 的两套结果必须在全部承载结论的字段上一致：
+      expectation_status / execution_status / mutation_status / reason_codes /
+      observed_member_count / observed_population_digest /
+      observed_required_target_ids / scope_expectation_status /
+      population_observations / control_observation / evidence snapshot digest
+  - 任一字段不一致 -> 决策组合失败（VerificationInputError），不产生决策
+    （分歧 = 证据冲突，无法形成可重放决策；调用方重跑直到收敛或降级）
 ```
 
-低风险（standard）时语义不变（单套 arm results，单验证者可接受）。
+收敛后决策引用**代表集**（每 arm 一个结果，取自第一验证者——两套已逐字段
+一致，任一皆忠实），并由两个验证者签名。可重放性由决策的**双签名**恢复：
+replay 时以签名数（2）推导独立性充分，而不重新从单套代表集推导。
 
-> 注：现有 `compose_verification_decision_v05` 只接受单套 arm results
-> （`expected_arms` 一一对应）。本规格扩展它：high_risk 时接受双套并
-> 交叉验证；standard 时保持单套语义。
+低风险（standard）时语义不变（单套 arm results，单验证者可接受）。
 
 ### 4.2 交叉收敛判定
 
@@ -108,22 +112,23 @@ high_risk 且单验证者结果 → 复用既有 `INDEPENDENCE_INSUFFICIENT`（�
 ### 4.4 签名与决策
 
 - high_risk 决策仍要求 2 个 verifier 签名（既有逻辑不变）；
-- 但签名**只对收敛后的决策 draft 有效**：组合阶段先验证双验证者证据收敛，
-  再产生 draft，最后两个验证者签名该 draft；
-- 撒谎验证者伪造 exit code → 其 evidence snapshot 与诚实验证者不一致 →
-  组合阶段 UNKNOWN，签名不产生。
+- 组合阶段先验证双验证者逐字段收敛，再产生 draft，最后两个验证者签名；
+- 撒谎验证者伪造 exit code → 其结论字段与诚实验证者不一致 → 组合失败，
+  签名不产生；
+- 分歧时 compose 抛 `VerificationInputError`，不产生决策——这是诚实的
+  证据冲突表达，调用方重跑或降级。
 
 ### 4.5 威胁模型
 
 1. 单验证者伪造全部 arm results → high_risk 要求 2 个 binding，单验证者
-   集合不满足 → UNKNOWN。
+   集合不满足 → 组合失败或 independence 不足。
 2. 两个验证者共谋（同一执行）→ 无法防御（信任模型假设至少一个诚实）；
    但共谋需两个独立密钥 + 两个独立上下文，攻击面翻倍。
-3. 一个撒谎验证者伪造 exit code → 另一诚实验证者结果不同 → 证据摘要
-   不一致 → UNKNOWN（漏洞关闭）。
-4. 两个验证者都诚实但环境噪声不同 → 证据摘要不一致 → UNKNOWN（安全方向，
+3. 一个撒谎验证者伪造 exit code（expectation_status/execution_status 等）→
+   结论字段与诚实验证者不一致 → 组合失败（漏洞关闭）。
+4. 两个验证者都诚实但环境噪声不同 → 结论字段不一致 → 组合失败（安全方向，
    成本是重试直到环境收敛，或接受标准验证）。
-5. 验证者引用同一伪造证据 → 摘要一致但证据伪造 → 需攻击者同时控制两个
+5. 验证者引用同一份伪造证据 → 结论字段可能一致 → 需攻击者同时控制两个
    独立验证者 + 证据发布（超出单验证者信任模型，记录为边界）。
 
 ## 5. 测试与验收标准

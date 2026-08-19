@@ -6,8 +6,12 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import hashlib
+
 from openworkproof.models import (
+    DecisionDraftRequest,
     VerificationArmResultV05,
+    VerificationDecisionV05,
     VerificationProfileV05,
 )
 from openworkproof.signing import sign_payload
@@ -138,63 +142,6 @@ def _arm_result_for_verifier(
     )
 
 
-def _dual_verifier_results(
-    case: dict[str, Any],
-    profile: VerificationProfileV05,
-    *,
-    divergent_evidence: bool = False,
-    same_key: bool = False,
-) -> tuple[VerificationArmResultV05, ...]:
-    """Produce two verifier result sets for the high-risk profile.
-
-    With divergent_evidence the two positive arms carry different evidence
-    digests; otherwise they share the same evidence (convergent).
-    With same_key both sets are signed by the first verifier key only.
-    """
-    manifest = case["manifest"]
-    first_binding = profile.verifier_bindings[0].model_dump(mode="json")
-    second_binding = profile.verifier_bindings[1].model_dump(mode="json")
-    first_key = case["keys"]["Verifier"][0]
-    _, second_key, _ = _high_risk_profile(case)
-
-    def evidence_for(suffix: str, divergent: bool) -> dict[str, object]:
-        value = {"arm": suffix, "passed": True}
-        if divergent:
-            value["dup"] = suffix
-        return _write_json_evidence(
-            case["tmp_path"], f"dual/{suffix}.json", value
-        )
-
-    results = []
-    for arm_kind, arm_suffix, result_prefix in (
-        ("positive", "positive", "8"),
-        ("negative", "negative", "9"),
-    ):
-        pos_ev = evidence_for(f"{arm_suffix}-v0", False)
-        scope_ref = _write_json_evidence(
-            case["tmp_path"],
-            f"dual/scope-{arm_suffix}.json",
-            {"arm": arm_suffix, "population_digest": manifest.population_digest},
-        )
-        verifier_key = first_key if same_key else second_key
-        binding = first_binding if same_key else second_binding
-        results.append(
-            _arm_result_for_verifier(
-                case,
-                profile,
-                manifest,
-                verifier_key=verifier_key,
-                binding=binding,
-                arm_kind=arm_kind,
-                suffix=f"{arm_suffix}-v1",
-                evidence_ref=pos_ev,
-                scope_evidence_ref=scope_ref,
-                result_id=result_prefix + "1" * 63,
-            )
-        )
-    return tuple(results)
-
-
 def test_high_risk_single_verifier_arm_set_is_unknown(
     v05_transaction_case,
 ) -> None:
@@ -285,9 +232,10 @@ def test_high_risk_dual_verifier_divergent_evidence_is_unknown(
                     result_id=result_prefix + str(verifier_idx) * 63,
                 )
             )
-    draft = _compose_v05(case, profile=profile, results=tuple(results))
-    assert draft.decision == "UNKNOWN"
-    assert "DUAL_VERIFIER_DIVERGENCE" in draft.reason_codes
+    from openworkproof.verification import VerificationInputError
+
+    with pytest.raises(VerificationInputError, match="diverged"):
+        _compose_v05(case, profile=profile, results=tuple(results))
 
 
 def test_high_risk_dual_verifier_convergent_is_verified(
@@ -343,7 +291,7 @@ def test_high_risk_dual_verifier_convergent_is_verified(
                     verifier_key=vkey,
                     binding=binding,
                     arm_kind=arm_kind,
-                    suffix=f"{suffix}-v{verifier_idx}",
+                    suffix=f"{suffix}-shared",
                     evidence_ref=ev,
                     scope_evidence_ref=scope_ref,
                     result_id=result_prefix + str(verifier_idx) * 63,
@@ -351,3 +299,204 @@ def test_high_risk_dual_verifier_convergent_is_verified(
             )
     draft = _compose_v05(case, profile=profile, results=tuple(results))
     assert draft.decision == "VERIFIED"
+
+
+def test_high_risk_dual_verifier_full_chain_commit_and_replay(
+    v05_transaction_case,
+) -> None:
+    """End-to-end: two independent verifier result sets commit to the ledger,
+    prepare derives a converged VERIFIED, the decision commits, and a later
+    prepare/replay stays stable (the decision replays from its own arm
+    results plus the two-verifier signature set)."""
+    import openworkproof.evidence as evidence
+    from openworkproof.verification import (
+        VerificationCommittedError,
+        commit_verification_arm_result_v05,
+        commit_verification_decision_v05,
+        commit_verification_profile_v05,
+        prepare_verification_decision_v05,
+    )
+
+    from test_verification_integrity_transactions_v05 import (
+        _sign_decision_draft_v05,
+    )
+
+    case = dict(v05_transaction_case)
+    profile, second_key, second_binding = _high_risk_profile(case)
+    first_key = case["keys"]["Verifier"][0]
+    first_binding = next(
+        item.model_dump(mode="json")
+        for item in profile.verifier_bindings
+        if item.verifier_key_id == _key_id(first_key.public_key())
+    )
+    manifest = case["manifest"]
+
+    from openworkproof.scope import ObservedScope
+
+    observed = ObservedScope(
+        member_ids=tuple(member.member_id for member in manifest.members),
+        member_count=manifest.member_count,
+        population_digest=manifest.population_digest,
+        required_target_ids=manifest.required_target_ids,
+        source_revision=manifest.source_revision,
+        workspace_manifest_digest=manifest.workspace_manifest_digest,
+        selector_engine_digests=tuple(
+            sorted(rule.selector_engine_digest for rule in manifest.selector_rules)
+        ),
+        evidence_complete=True,
+    )
+
+    def evidence_for(suffix: str, value: object) -> dict[str, object]:
+        return _write_json_evidence(
+            case["tmp_path"], suffix, value
+        )
+
+    results = []
+    for arm_kind, suffix, result_prefix in (
+        ("positive", "positive", "8"),
+        ("negative", "negative", "9"),
+    ):
+        for verifier_idx, (vkey, binding) in enumerate(
+            (
+                (first_key, first_binding),
+                (second_key, second_binding),
+            )
+        ):
+            ev = evidence_for(
+                f"results/{arm_kind}.json", {"arm": arm_kind, "passed": True}
+            )
+            scope_ref = evidence_for(
+                f"scope/{arm_kind}.json",
+                observed.model_dump(mode="json"),
+            )
+            results.append(
+                _arm_result_for_verifier(
+                    case,
+                    profile,
+                    manifest,
+                    verifier_key=vkey,
+                    binding=binding,
+                    arm_kind=arm_kind,
+                    suffix=f"{arm_kind}-shared",
+                    evidence_ref=ev,
+                    scope_evidence_ref=scope_ref,
+                    result_id=result_prefix + str(verifier_idx) * 63,
+                )
+            )
+
+    # Commit the high-risk profile and all four arm results.
+    commit_verification_profile_v05(case["ledger"], profile)
+    for result in results:
+        commit_verification_arm_result_v05(case["ledger"], result)
+
+    # prepare must see both verifier sets and converge to VERIFIED.
+    draft = prepare_verification_decision_v05(
+        case["ledger"],
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    assert draft.decision == "VERIFIED"
+    from openworkproof.verification import verification_decision_signing_bytes_v05
+
+    encoded = verification_decision_signing_bytes_v05(draft)
+    signatures = []
+    for key, binding in (
+        (first_key, first_binding),
+        (second_key, second_binding),
+    ):
+        signatures.append(
+            {
+                "verifier_subject_id": binding["verifier_subject_id"],
+                "verifier_key_id": _key_id(key.public_key()),
+                "signature_alg": "Ed25519",
+                "signature": _base64.urlsafe_b64encode(key.sign(encoded))
+                .decode("ascii")
+                .rstrip("="),
+            }
+        )
+    signatures.sort(key=lambda item: item["verifier_key_id"].encode("utf-8"))
+    decision = VerificationDecisionV05.model_validate(
+        {
+            "schema_version": "openworkproof-verification-decision/0.5",
+            **draft.model_dump(mode="json"),
+            "digest": hashlib.sha256(encoded).hexdigest(),
+            "verifier_signatures": signatures,
+        }
+    )
+    assert len(decision.verifier_signatures) == 2
+    commit_verification_decision_v05(case["ledger"], decision)
+
+    # A second prepare must replay the committed chain stably (VERIFIED).
+    again = prepare_verification_decision_v05(
+        case["ledger"],
+        DecisionDraftRequest(
+            decision_id="e" * 64,
+            decided_at="2026-01-01T00:30:00Z",
+            nonce="f" * 64,
+        ),
+    )
+    assert again.decision == "VERIFIED"
+
+
+def test_high_risk_split_verifier_coverage_is_rejected(
+    v05_transaction_case,
+) -> None:
+    """A split coverage (positive arm from verifier A, negative arm from
+    verifier B) must not bypass cross-validation: every arm needs both
+    verifiers, so this inconsistent set is rejected."""
+    from openworkproof.verification import VerificationInputError
+
+    case = v05_transaction_case
+    profile, second_key, second_binding = _high_risk_profile(case)
+    first_key = case["keys"]["Verifier"][0]
+    first_binding = next(
+        item.model_dump(mode="json")
+        for item in profile.verifier_bindings
+        if item.verifier_key_id == _key_id(first_key.public_key())
+    )
+    manifest = case["manifest"]
+
+    # Positive arm from verifier 0, negative arm from verifier 1 (split).
+    results = [
+        _arm_result_for_verifier(
+            case,
+            profile,
+            manifest,
+            verifier_key=first_key,
+            binding=first_binding,
+            arm_kind="positive",
+            suffix="positive-split",
+            evidence_ref=_write_json_evidence(
+                case["tmp_path"], "results/positive.json", {"passed": True}
+            ),
+            scope_evidence_ref=_write_json_evidence(
+                case["tmp_path"],
+                "scope/positive.json",
+                {"population_digest": manifest.population_digest},
+            ),
+            result_id="8" * 63 + "0",
+        ),
+        _arm_result_for_verifier(
+            case,
+            profile,
+            manifest,
+            verifier_key=second_key,
+            binding=second_binding,
+            arm_kind="negative",
+            suffix="negative-split",
+            evidence_ref=_write_json_evidence(
+                case["tmp_path"], "results/negative.json", {"passed": True}
+            ),
+            scope_evidence_ref=_write_json_evidence(
+                case["tmp_path"],
+                "scope/negative.json",
+                {"population_digest": manifest.population_digest},
+            ),
+            result_id="9" * 63 + "1",
+        ),
+    ]
+    with pytest.raises(VerificationInputError, match="incomplete or inconsistent"):
+        _compose_v05(case, profile=profile, results=tuple(results))

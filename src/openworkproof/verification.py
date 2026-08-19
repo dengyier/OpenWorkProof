@@ -3220,6 +3220,7 @@ def _load_arm_results_v05(
     profile: VerificationProfileV05,
     manifest: EvaluationScopeManifest,
     selected_ids: tuple[str, ...] | None = None,
+    latest_only: bool = True,
 ) -> tuple[VerificationArmResultV05, ...]:
     values: list[VerificationArmResultV05] = []
     for result_id, digest, profile_id, arm_id, raw in connection.execute(
@@ -3261,17 +3262,19 @@ def _load_arm_results_v05(
                 "v0.5 decision arm result is unavailable"
             )
         return tuple(sorted(selected, key=lambda item: item.arm_result_id))
-    latest: dict[str, VerificationArmResultV05] = {}
-    for result in values:
-        current = latest.get(result.arm_id)
-        if current is None or (result.created_at, result.arm_result_id) > (
-            current.created_at,
-            current.arm_result_id,
-        ):
-            latest[result.arm_id] = result
-    return tuple(
-        sorted(latest.values(), key=lambda item: item.arm_result_id)
-    )
+    if latest_only:
+        latest: dict[str, VerificationArmResultV05] = {}
+        for result in values:
+            current = latest.get(result.arm_id)
+            if current is None or (result.created_at, result.arm_result_id) > (
+                current.created_at,
+                current.arm_result_id,
+            ):
+                latest[result.arm_id] = result
+        return tuple(
+            sorted(latest.values(), key=lambda item: item.arm_result_id)
+        )
+    return tuple(sorted(values, key=lambda item: item.arm_result_id))
 
 
 def _validate_committed_at(value: object) -> str:
@@ -3433,6 +3436,9 @@ def _load_current_decision_v05(
                 rule_outputs=rule_outputs,
                 evidence_inventory=inventory,
                 retracted_receipt_ids=retracted_receipt_ids,
+                assumed_independence_sufficient=(
+                    len(decision.verifier_signatures) == 2
+                ),
             )
         except Exception as error:
             raise VerificationTransactionError(
@@ -3483,6 +3489,7 @@ def prepare_verification_decision_v05(
             work_order=work_order,
             profile=profile,
             manifest=manifest,
+            latest_only=profile.assurance_level != "high_risk",
         )
         previous = _load_current_decision_v05(
             connection,
@@ -3648,8 +3655,40 @@ def commit_verification_decision_v05(
             work_order=work_order,
             profile=profile,
             manifest=manifest,
+            latest_only=profile.assurance_level != "high_risk",
         )
-        if tuple(item.arm_result_id for item in results) != tuple(
+        if profile.assurance_level == "high_risk":
+            # High-risk decisions may reference either verifier's result per
+            # arm (both committed in the same batch). Every arm must be
+            # covered, and a referenced result must not be strictly older
+            # than the newest committed result for the same arm.
+            latest_by_arm: dict[str, VerificationArmResultV05] = {}
+            for result in latest:
+                current = latest_by_arm.get(result.arm_id)
+                if current is None or (
+                    result.created_at,
+                    result.arm_result_id,
+                ) > (current.created_at, current.arm_result_id):
+                    latest_by_arm[result.arm_id] = result
+            referenced_by_arm: dict[str, VerificationArmResultV05] = {}
+            for result in results:
+                current = referenced_by_arm.get(result.arm_id)
+                if current is None or (
+                    result.created_at,
+                    result.arm_result_id,
+                ) > (current.created_at, current.arm_result_id):
+                    referenced_by_arm[result.arm_id] = result
+            if set(referenced_by_arm) != set(latest_by_arm):
+                raise VerificationTransactionError(
+                    "v0.5 decision does not cover every current arm"
+                )
+            for arm_id, referenced in referenced_by_arm.items():
+                newest = latest_by_arm.get(arm_id)
+                if newest is not None and referenced.created_at < newest.created_at:
+                    raise VerificationTransactionError(
+                        "v0.5 decision uses stale arm results"
+                    )
+        elif tuple(item.arm_result_id for item in results) != tuple(
             item.arm_result_id for item in latest
         ):
             raise VerificationTransactionError(
@@ -3675,6 +3714,9 @@ def commit_verification_decision_v05(
                 rule_outputs=rule_outputs,
                 evidence_inventory=inventory,
                 retracted_receipt_ids=retracted_receipt_ids,
+                assumed_independence_sufficient=(
+                    len(parsed.verifier_signatures) == 2
+                ),
             )
             validate_verification_decision_v05(
                 profile=profile, manifest=manifest, decision=parsed
