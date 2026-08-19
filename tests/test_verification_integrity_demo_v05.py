@@ -69,7 +69,7 @@ FROZEN_BUNDLE = (
 )
 ISSUE_URL = "https://github.com/Textualize/rich/issues/4196"
 FROZEN_BUNDLE_SHA256 = (
-    "067b4d2232bf5ff87239dd9f02de7031645e37451200fd1081088bf541786767"
+    "3f318911cd9f25fd111bb2ec570c265b21b7a9b4920f883a4dbb7d4b2e0cb70a"
 )
 
 

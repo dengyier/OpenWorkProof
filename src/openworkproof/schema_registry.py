@@ -259,13 +259,13 @@ _FROZEN_V05_DIGESTS = {
         "39ecc3489c87ef84fab5a5daeeaa3db18f250e5edd2e516913131651543e6e1f"
     ),
     "verification-decision.schema.json": (
-        "c4849a7a92d53c38f2c02f47917e77877626b3bfc316b4d97ae0bf3c915ec752"
+        "682dc06cb5034bc55f93378d5b887e6ef46522ef289ab1aec54debda880128d3"
     ),
     "verification-profile.schema.json": (
         "100bec3f748c56ca96645ed301bf19209673709f1058918178c9e942df8fcc2e"
     ),
     "schema-registry.json": (
-        "a70975ec51c77e086e3233835591f7781a8937fd630d86697f8a6a8c61d239c8"
+        "bc3e702340b538529b2d5faff5227991e05c08643d5ebc7af5a5a059c85049e8"
     ),
 }
 _FROZEN_V05_REGISTRY = {
