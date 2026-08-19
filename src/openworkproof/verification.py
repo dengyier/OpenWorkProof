@@ -3633,6 +3633,7 @@ def commit_verification_decision_v05(
             )
         rule_outputs = _derive_v05_rule_outputs(profile, manifest, path)
         inventory = _read_v05_evidence_inventory(path, results)
+        retracted_receipt_ids = _committed_refuted_receipt_ids(connection)
         try:
             draft = integrity.compose_verification_decision_v05(
                 profile=profile,
@@ -3646,6 +3647,7 @@ def commit_verification_decision_v05(
                 previous_decision=current,
                 rule_outputs=rule_outputs,
                 evidence_inventory=inventory,
+                retracted_receipt_ids=retracted_receipt_ids,
             )
             validate_verification_decision_v05(
                 profile=profile, manifest=manifest, decision=parsed
