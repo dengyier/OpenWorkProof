@@ -103,12 +103,18 @@ def verification_profile_v03(
     )
 
 
-def _retract_receipt(case: dict[str, Any], receipt_id: str, receipt_digest: str) -> RetractionReceiptV05:
+def _retract_receipt(
+    case: dict[str, Any],
+    receipt_id: str,
+    receipt_digest: str,
+    retracted_at: str = "2026-01-01T00:25:00Z",
+) -> RetractionReceiptV05:
     payload = _retraction_payload(
         target_receipt_id=receipt_id,
         target_receipt_digest=receipt_digest,
         retraction_reason="evidence_refuted",
         retraction_effect="refuted",
+        retracted_at=retracted_at,
     )
     payload["work_order_digest"] = case["profile"].work_order_digest
     payload["retraction_id"] = retraction_receipt_id(payload)
@@ -217,3 +223,92 @@ def _decision_request(case: dict[str, Any], suffix: str) -> Any:
         decided_at="2026-01-01T00:30:00Z",
         nonce="f" * 64,
     )
+
+
+def test_retraction_then_decision_commit_then_reprepare_is_stable(
+    v05_transaction_case,
+) -> None:
+    """A decision committed while refuted retractions exist must replay
+    stably: prepare, commit, then prepare again (and export) must not fail
+    with a recomposition mismatch. Regression for the frozen-ledger bug."""
+    import rfc8785
+
+    from openworkproof.models import (
+        RetractionReceiptV05,
+        parse_action_receipt_json,
+        retraction_receipt_id,
+    )
+    from openworkproof.retraction import commit_retraction_receipt
+    from openworkproof.signing import sign_payload
+
+    case = v05_transaction_case
+    commit_verification_profile_v05(case["ledger"], case["profile"])
+    for result in case["results"]:
+        committed = _resign_arm_result_v05(case, result)
+        commit_verification_arm_result_v05(case["ledger"], committed)
+
+    retracted_ids = {
+        receipt_id
+        for result in case["results"]
+        for receipt_id in result.action_receipt_ids
+    }
+    for receipt_id in retracted_ids:
+        row = evidence.connect_ledger(case["ledger"]).execute(
+            "SELECT receipt_json FROM receipts WHERE receipt_id = ?",
+            (receipt_id,),
+        ).fetchone()
+        parsed = parse_action_receipt_json(row[0])
+        payload = _retraction_payload(
+            target_receipt_id=receipt_id,
+            target_receipt_digest=parsed.digest,
+            retraction_reason="evidence_refuted",
+            retraction_effect="refuted",
+            retracted_at="2026-01-01T00:45:00Z",
+        )
+        payload["work_order_digest"] = case["profile"].work_order_digest
+        payload["retraction_id"] = retraction_receipt_id(payload)
+        retraction = RetractionReceiptV05.model_validate(
+            sign_payload(
+                "retraction-receipt",
+                payload,
+                case["keys"]["Manager"][0],
+                version="0.5",
+            )
+        )
+        commit_retraction_receipt(case["ledger"], retraction)
+
+    from openworkproof.models import DecisionDraftRequest
+    from openworkproof.verification import (
+        commit_verification_decision_v05,
+        prepare_verification_decision_v05,
+    )
+
+    from test_verification_integrity_transactions_v05 import (
+        _sign_decision_draft_v05,
+    )
+
+    # First prepare sees the refuted receipts -> UNKNOWN.
+    draft = prepare_verification_decision_v05(
+        case["ledger"],
+        DecisionDraftRequest(
+            decision_id="e" * 64,
+            decided_at="2026-01-01T00:50:00Z",
+            nonce="f" * 64,
+        ),
+    )
+    assert draft.decision == "UNKNOWN"
+    assert "RECEIPT_RETRACTED" in draft.reason_codes
+    decision = _sign_decision_draft_v05(case, draft)
+    commit_verification_decision_v05(case["ledger"], decision)
+
+    # Second prepare must replay the committed chain stably (UNKNOWN again).
+    again = prepare_verification_decision_v05(
+        case["ledger"],
+        DecisionDraftRequest(
+            decision_id="9" * 64,
+            decided_at="2026-01-01T00:55:00Z",
+            nonce="a" * 64,
+        ),
+    )
+    assert again.decision == "UNKNOWN"
+    assert "RECEIPT_RETRACTED" in again.reason_codes

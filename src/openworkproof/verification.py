@@ -956,6 +956,7 @@ def _assert_nonce_unused(
         ("verification_profiles_v05", "profile_id", "profile_json"),
         ("verification_decisions_v05", "decision_id", "decision_json"),
         ("acceptance_transitions_v05", "transition_id", "transition_json"),
+        ("retraction_receipts_v05", "retraction_id", "retraction_json"),
     ):
         for identifier, raw in connection.execute(
             f"SELECT {identifier_column}, {json_column} FROM {table}"
@@ -972,13 +973,20 @@ def _assert_nonce_unused(
 
 def _committed_refuted_receipt_ids(
     connection: sqlite3.Connection,
+    *,
+    as_of: str | None = None,
 ) -> frozenset[str]:
-    """Return receipt ids whose latest committed retraction is ``refuted``.
+    """Return receipt ids whose committed retraction is ``refuted``.
 
     Only a retraction with effect ``refuted`` invalidates the causal chain;
     a ``confidence_downgrade`` lowers confidence but does not refute. A
     receipt retracted with effect ``refuted`` under any closed reason
     (including ``evidence_refuted``) must not back a fresh decision.
+
+    When ``as_of`` is given, only retractions committed at or before that
+    canonical UTC instant are considered, so replay of a committed decision
+    sees the retraction state that existed when it was decided — a later
+    retraction must not retroactively invalidate a decision that predates it.
     """
 
     rows = connection.execute(
@@ -1001,6 +1009,14 @@ def _committed_refuted_receipt_ids(
             raise VerificationTransactionError(
                 "committed retraction target is invalid"
             )
+        retracted_at = payload.get("retracted_at")
+        if as_of is not None and (
+            not isinstance(retracted_at, str) or retracted_at > as_of
+        ):
+            # Only retractions effective by the as-of protocol instant shape
+            # that decision; database committed_at is second-granular and can
+            # collide, so the protocol timestamp is authoritative.
+            continue
         latest_by_target[target] = payload
     return frozenset(
         target
@@ -3399,6 +3415,10 @@ def _load_current_decision_v05(
             )
         rule_outputs = _derive_v05_rule_outputs(profile, manifest, path)
         inventory = _read_v05_evidence_inventory(path, results)
+        retracted_receipt_ids = _committed_refuted_receipt_ids(
+            connection,
+            as_of=decision.model_dump(mode="json")["decided_at"],
+        )
         try:
             draft = integrity.compose_verification_decision_v05(
                 profile=profile,
@@ -3412,6 +3432,7 @@ def _load_current_decision_v05(
                 previous_decision=previous,
                 rule_outputs=rule_outputs,
                 evidence_inventory=inventory,
+                retracted_receipt_ids=retracted_receipt_ids,
             )
         except Exception as error:
             raise VerificationTransactionError(
@@ -3472,7 +3493,10 @@ def prepare_verification_decision_v05(
         )
         rule_outputs = _derive_v05_rule_outputs(profile, manifest, path)
         inventory = _read_v05_evidence_inventory(path, results)
-        retracted_receipt_ids = _committed_refuted_receipt_ids(connection)
+        retracted_receipt_ids = _committed_refuted_receipt_ids(
+            connection,
+            as_of=parsed_request.model_dump(mode="json")["decided_at"],
+        )
         draft = integrity.compose_verification_decision_v05(
             profile=profile,
             manifest=manifest,
@@ -3633,7 +3657,10 @@ def commit_verification_decision_v05(
             )
         rule_outputs = _derive_v05_rule_outputs(profile, manifest, path)
         inventory = _read_v05_evidence_inventory(path, results)
-        retracted_receipt_ids = _committed_refuted_receipt_ids(connection)
+        retracted_receipt_ids = _committed_refuted_receipt_ids(
+            connection,
+            as_of=parsed.model_dump(mode="json")["decided_at"],
+        )
         try:
             draft = integrity.compose_verification_decision_v05(
                 profile=profile,

@@ -2615,6 +2615,9 @@ def _load_v05_objects_and_evidence(root: Path, manifest: DeliveryManifest):
         != set(decision.integrity_assessment.reason_codes)
     ):
         raise DeliveryPackageError("v0.5 integrity assessment replay failed")
+    retracted_receipt_ids = _packaged_retracted_receipt_ids(
+        root, manifest, decision
+    )
     draft = integrity.compose_verification_decision_v05(
         profile=profile,
         manifest=scope_manifest,
@@ -2626,12 +2629,52 @@ def _load_v05_objects_and_evidence(root: Path, manifest: DeliveryManifest):
         ),
         rule_outputs=_packaged_rule_outputs(root, manifest, profile, scope_manifest),
         evidence_inventory=inventory,
+        retracted_receipt_ids=retracted_receipt_ids,
     )
     if verification.verification_decision_signing_bytes_v05(
         draft
     ) != verification.verification_decision_signing_bytes_v05(decision):
         raise DeliveryPackageError("v0.5 decision replay failed")
     return work_order, claim, scope_manifest, profile, decision, results, inventory
+
+
+def _packaged_retracted_receipt_ids(
+    root: Path,
+    manifest: DeliveryManifest,
+    decision,
+) -> frozenset[str]:
+    """Return receipt ids refuted by packaged retractions at decision time.
+
+    Only retractions with effect ``refuted`` invalidate the causal chain, and
+    only those committed before the decision's ``decided_at`` can have shaped
+    it. The package is customer-private when this runs, so the retraction
+    rows are always present.
+    """
+
+    relative = "execution-ledger/retraction-receipts.json"
+    try:
+        payload = _load_canonical_json(root, manifest, relative)
+    except DeliveryPackageError:
+        return frozenset()
+    if not isinstance(payload, list):
+        raise DeliveryPackageError("v0.5 retraction receipts are invalid")
+    decided_at = decision.model_dump(mode="json")["decided_at"]
+    refuted: set[str] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            raise DeliveryPackageError("v0.5 retraction receipt is invalid")
+        if item.get("retraction_effect") != "refuted":
+            continue
+        retracted_at = item.get("retracted_at")
+        if not isinstance(retracted_at, str) or retracted_at > decided_at:
+            continue
+        target = item.get("target_receipt_id")
+        if not isinstance(target, str):
+            raise DeliveryPackageError(
+                "v0.5 retraction receipt target is invalid"
+            )
+        refuted.add(target)
+    return frozenset(refuted)
 
 
 def _packaged_rule_outputs(root, manifest, profile, scope_manifest):

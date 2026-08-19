@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 import openworkproof.evidence as evidence
+import rfc8785
 from openworkproof.models import RetractionReceiptV05, retraction_receipt_id
 from openworkproof.retraction import (
     RetractionCommittedError,
@@ -245,3 +246,105 @@ def test_commit_retraction_concurrent_single_winner(retraction_case) -> None:
         outcomes = list(pool.map(lambda _: attempt(), range(2)))
     assert outcomes.count("committed") + outcomes.count("already") == 2
     assert receipt_retraction_status(case["ledger"], receipt.receipt_id) == "refuted"
+
+
+def test_retraction_nonce_cannot_be_reused_across_targets(
+    retraction_case,
+) -> None:
+    """Two retractions with different targets must not share a nonce: the
+    nonce is a global single-use protocol value."""
+    case = retraction_case
+    receipt = case["receipt"]
+    first = _signed_retraction_for(
+        case,
+        target_receipt_id=receipt.receipt_id,
+        target_receipt_digest=receipt.digest,
+    )
+    commit_retraction_receipt(case["ledger"], first)
+    # Second target: craft another committed receipt then retract with the
+    # same nonce.
+    second_receipt = case["receipt"]
+    same_nonce = _signed_retraction_for(
+        case,
+        target_receipt_id=second_receipt.receipt_id,
+        target_receipt_digest=second_receipt.digest,
+    )
+    # Force the same nonce by rebuilding the payload with first.nonce.
+    payload = _retraction_payload(
+        target_receipt_id=second_receipt.receipt_id,
+        target_receipt_digest=second_receipt.digest,
+    )
+    payload["work_order_digest"] = case["work_order"].digest
+    payload["nonce"] = first.nonce
+    payload["retraction_id"] = retraction_receipt_id(payload)
+    duplicate = RetractionReceiptV05.model_validate(
+        sign_payload(
+            "retraction-receipt",
+            payload,
+            case["keys"]["Manager"][0],
+            version="0.5",
+        )
+    )
+    with pytest.raises(RetractionTransactionError):
+        commit_retraction_receipt(case["ledger"], duplicate)
+
+
+def test_retraction_nonce_conflicts_with_committed_decision(
+    retraction_case,
+    sidecar_receipt_factory,
+) -> None:
+    """A retraction nonce must not collide with a nonce already used by any
+    other protocol object (here: another committed receipt)."""
+    case = retraction_case
+    # A second committed receipt that consumed a nonce.
+    second = sidecar_receipt_factory(
+        state_before="locally_verified",
+        state_after="evidence_incomplete",
+        event_type="system_event",
+        event_name="proof_composed",
+        sequence=2,
+    )
+    # Give the second receipt a distinct id so both rows coexist.
+    second = second.model_copy(
+        update={"receipt_id": "7" * 64, "nonce": "5" * 64}
+    )
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            INSERT INTO receipts (
+                receipt_id, work_order_digest, nonce, sequence,
+                previous_digest, receipt_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                second.receipt_id,
+                second.work_order_digest,
+                "5" * 64,
+                second.sequence,
+                second.previous_receipt_digest,
+                evidence._canonical_json(second.model_dump(mode="json")),
+            ),
+        )
+        connection.execute("COMMIT")
+    finally:
+        connection.close()
+    receipt = case["receipt"]
+    payload = _retraction_payload(
+        target_receipt_id=receipt.receipt_id,
+        target_receipt_digest=receipt.digest,
+    )
+    payload["work_order_digest"] = case["work_order"].digest
+    payload["nonce"] = "5" * 64
+    payload["retraction_id"] = retraction_receipt_id(payload)
+    retraction = RetractionReceiptV05.model_validate(
+        sign_payload(
+            "retraction-receipt",
+            payload,
+            case["keys"]["Manager"][0],
+            version="0.5",
+        )
+    )
+    with pytest.raises(RetractionTransactionError):
+        commit_retraction_receipt(case["ledger"], retraction)

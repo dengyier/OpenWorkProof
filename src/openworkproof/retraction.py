@@ -355,17 +355,16 @@ def _assert_retraction_nonce_unused(
     connection,
     nonce: str,
 ) -> None:
-    """Reject a nonce already used by any protocol object in this ledger."""
+    """Reject a nonce already used by any protocol object in this ledger.
+
+    The shared ``_assert_nonce_unused`` scans every protocol table that
+    carries a nonce, including ``retraction_receipts_v05``, so a retraction
+    nonce collides with any prior object (and vice versa).
+    """
 
     from openworkproof.verification import _assert_nonce_unused
 
     _assert_nonce_unused(connection, nonce)
-    row = connection.execute(
-        f"SELECT 1 FROM {_RETRACTION_TABLE} WHERE retraction_id = ?",
-        (nonce,),
-    ).fetchone()
-    if row is not None:
-        raise RetractionTransactionError("retraction nonce is already used")
 
 
 def receipt_retraction_status(

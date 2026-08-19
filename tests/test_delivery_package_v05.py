@@ -419,6 +419,7 @@ def _retract_causal_receipts(case) -> None:
         commit_retraction_receipt(case["ledger"], retraction)
 
 
+
 def test_customer_private_v05_package_includes_retraction_chain(
     v05_transaction_case,
 ) -> None:
