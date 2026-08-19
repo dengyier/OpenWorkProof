@@ -76,27 +76,33 @@ arm results 必须来自恰好 2 个不同的 verifier binding
 ```
 
 收敛后决策引用**代表集**（每 arm 一个结果，取自第一验证者——两套已逐字段
-一致，任一皆忠实），并由两个验证者签名。可重放性由决策的**双签名**恢复：
-replay 时以签名数（2）推导独立性充分，而不重新从单套代表集推导。
+一致，任一皆忠实），并由两个验证者签名。可重放性由**全链双套加载**恢复：
+commit/replay/离线包均从账本/包加载完整双套 arm results 并重跑交叉验证，
+与 prepare 的输入一致，从而派生相同决策（不依赖签名数推导独立性）。
 
 低风险（standard）时语义不变（单套 arm results，单验证者可接受）。
 
 ### 4.2 交叉收敛判定
 
-对每个 arm_id，两套结果的 `evidence_snapshot_digest` 必须相等：
+对每个 arm_id，两套结果的**全部承载结论字段**必须一致：
 
-```python
-by_verifier: dict[str, dict[str, VerificationArmResultV05]] = {}
-for result in arm_results:
-    by_verifier.setdefault(result.verifier_key_id, {})[result.arm_id] = result
-if len(by_verifier) != 2:  # high_risk
-    -> INDEPENDENCE_INSUFFICIENT (UNKNOWN)
-for arm_id in expected_arms:
-    v0 = by_verifier[verifier0][arm_id]
-    v1 = by_verifier[verifier1][arm_id]
-    if v0.evidence_snapshot_digest != v1.evidence_snapshot_digest:
-        -> DUAL_VERIFIER_DIVERGENCE (UNKNOWN)
+```text
+expectation_status / execution_status / mutation_status / reason_codes /
+action_receipt_ids / observed_member_count / observed_population_digest /
+observed_required_target_ids / scope_expectation_status /
+population_observations / control_observation / evidence snapshot digest
 ```
+
+任一字段不一致 → `VerificationInputError("high-risk verifiers diverged;
+no decision can be formed")`，不产生决策。
+
+> **设计决策（临时折中，v0.6 演进）**：分歧不产生 `UNKNOWN` 决策，而是
+> 组合失败。原因：冻结的 v0.5 决策模型每 arm 恰好一个引用
+> （`arm_results` 一对一），双套引用违反它、单套引用 replay 时丢失分歧
+> 信号。`DUAL_VERIFIER_DIVERGENCE` reason code 保留在 v0.5 schema
+> （已走 registry 流程），作为 v0.6 决策模型支持双套引用后的正式分歧态。
+> 当前分歧的诚实表达是 `VerificationInputError`：调用方重跑直到收敛或
+> 降级为 standard 验证。
 
 `evidence_snapshot_digest` 由既有 `evidence_snapshot_digest()` 从 arm result
 的 evidence refs 计算（compose 已在用）。
@@ -135,17 +141,24 @@ high_risk 且单验证者结果 → 复用既有 `INDEPENDENCE_INSUFFICIENT`（�
 
 ### 5.1 决策组合
 
-- high_risk + 单验证者 arm results → UNKNOWN / INDEPENDENCE_INSUFFICIENT；
+- high_risk + 单验证者 arm results → UNKNOWN（independence 不足）；
 - high_risk + 双验证者收敛 → VERIFIED（其他条件满足）；
-- high_risk + 双验证者证据摘要不一致 → UNKNOWN / DUAL_VERIFIER_DIVERGENCE；
+- high_risk + 双验证者任一结论字段不一致 → `VerificationInputError`
+  （分歧不可得决策；临时折中，见 §4.2）；
+- high_risk + split 覆盖（正臂 A 负臂 B）→ 拒绝；
 - standard + 单验证者 → VERIFIED（既有语义不变）；
-- high_risk + 双验证者但 arm 覆盖不完整 → 拒绝或 UNKNOWN。
+- high_risk 决策 commit/replay/离线包：全链加载双套重跑交叉验证，
+  单验证者（第二验证者只联署）或伪造 VERIFIED → commit 拒绝
+  （recompose 与签名不匹配）。
 
 ### 5.2 攻击测试（RED）
 
-- 撒谎验证者伪造 exit code（expectation_status=satisfied + MUTATION_CAUGHT，
-  但证据与诚实验证者不同）→ 双验证者下必须 UNKNOWN；
-- 单验证者冒充双验证者（同一密钥两套结果）→ 必须拒绝。
+- 撒谎验证者伪造 exit code（expectation_status 等与诚实验证者不同）→
+  `VerificationInputError`（漏洞关闭）；
+- 单验证者冒充双验证者（同一密钥两套结果）→ 拒绝；
+- 第二验证者只联署不产出 → commit 拒绝（recompose 单套 → UNKNOWN
+  ≠ 签名 VERIFIED）；
+- 伪造 VERIFIED draft → commit 拒绝（draft mismatch）。
 
 ### 5.3 冻结面
 
