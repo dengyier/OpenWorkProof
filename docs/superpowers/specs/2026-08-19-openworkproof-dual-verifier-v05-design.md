@@ -80,9 +80,10 @@ arm results 必须来自恰好 2 个不同的 verifier binding
 签名。可重放性由**决策自证**实现：commit/replay/离线包均从**决策自身的
 引用**（`selected_ids`）重跑交叉验证——不依赖签名数推导独立性，追加的后续
 验证轮次不影响已提交决策的可重放性（N7）。新决策的 prepare 用
-**每 (arm, verifier) 最新**（`latest_per_verifier`）——追加轮次后新决策用
-最新双套。**commit 的 stale 门要求决策引用的结果集精确等于 prepare 会加载
-的那一套**（high_risk 为每 (arm, verifier) 最新，standard 为每 arm 最新）：
+**每 (arm, verifier) 最新**（`latest_per_verifier`，按验证者**自报的
+`created_at`** 取最新）——追加轮次后新决策用最新双套。**commit 的 stale 门
+要求决策引用的结果集精确等于 prepare 会加载的那一套**（high_risk 为每
+(arm, verifier) 最新，standard 为每 arm 最新）：
 验证者不能引用自己的旧轮压掉更新的失败轮（N8），手工挑选引用的伪造决策
 在 commit 被拒绝。
 
@@ -185,4 +186,10 @@ high_risk 且单验证者结果 → 复用既有 `INDEPENDENCE_INSUFFICIENT`（�
 - **配对规则**：`latest_per_verifier` 允许不同验证者引用不同轮次的
   结果配对（如 A@00:16 配 B@00:10），只要逐字段收敛即判 VERIFIED——这是
   可辩护的（每 (arm, verifier) 各自最新），但配对的时间差未强制一致。
+- **新鲜度是验证者自报的 `created_at`**：协议按验证者写入结果的
+  `created_at` 取最新，不验证该时间戳的真实性（仅约束在 binding/profile
+  有效窗内）。验证者可以把失败轮 backdate 到窗内更早时刻使其永不被选为
+  最新——这不扩大攻击者可达的结果集（与根本不发布失败轮等价，均已覆盖），
+  但账本会残留一条被决策忽略的 contradicted 行，审计方无法仅凭账本区分
+  "backdated 的失败轮"与"正常的历史失败轮"。
 - 所有外部状态保持 `not_evidenced`。

@@ -9,6 +9,7 @@ import json
 import math
 import re
 import unicodedata
+from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
@@ -2257,23 +2258,17 @@ def _validate_verification_decision_content(
     if assurance_level == "high_risk":
         # A high-risk decision references either the single-verifier set
         # (one per arm, deriving UNKNOWN on insufficient independence) or the
-        # full dual-verifier set (two distinct arm results per arm, so replay
-        # recomposes from the decision's own references and re-runs the
-        # cross-validation without any assumed-independence flag).
+        # full dual-verifier set (two per arm, so replay recomposes from the
+        # decision's own references and re-runs the cross-validation without
+        # any assumed-independence flag). Mixed shapes (some arms once, others
+        # twice) are rejected; arm_result_ids are globally unique, so two
+        # references for one arm are always distinct results.
         arm_ids = tuple(item.arm_id for item in arm_results)
-        from collections import Counter
-
-        counts = Counter(arm_ids)
-        per_arm_counts = set(counts.values())
-        if not per_arm_counts <= {1, 2}:
+        per_arm_counts = set(Counter(arm_ids).values())
+        if per_arm_counts not in ({1}, {2}):
             raise ValueError(
-                "high-risk arm references must cover every arm once or twice"
-            )
-        if 2 in per_arm_counts and not _arm_references_distinct_per_arm(
-            arm_results
-        ):
-            raise ValueError(
-                "high-risk arm references must be two distinct arm results per arm"
+                "high-risk arm references must be all single-verifier "
+                "(one per arm) or all dual-verifier (two per arm)"
             )
     else:
         arm_ids = tuple(item.arm_id for item in arm_results)
@@ -2292,18 +2287,6 @@ def _validate_verification_decision_content(
     )
     if causal_parent_decision_ids != expected_decision_parents:
         raise ValueError("causal decision parents do not match supersedes")
-
-
-def _arm_references_distinct_per_arm(
-    arm_results: tuple[VerificationArmResultReference, ...],
-) -> bool:
-    """Return whether the two references for each arm are distinct results."""
-    from collections import defaultdict
-
-    ids_by_arm: dict[str, set[str]] = defaultdict(set)
-    for reference in arm_results:
-        ids_by_arm[reference.arm_id].add(reference.arm_result_id)
-    return all(len(ids) == 2 for ids in ids_by_arm.values())
 
 
 class VerificationDecisionDraft(ProtocolModel):
@@ -2515,6 +2498,11 @@ VerificationReasonCodeV05 = (
     | VerificationIntegrityReasonCode
     | Literal["DUAL_VERIFIER_DIVERGENCE"]
 )
+# DUAL_VERIFIER_DIVERGENCE is a forward-looking v0.6 state: the frozen v0.5
+# decision model holds one reference per arm, so dual-verifier divergence
+# cannot be recorded on-ledger and is instead a combination failure
+# (VerificationInputError). See spec §4.2 for the documented temporary
+# compromise and the v0.6 path.
 
 _POPULATION_INTEGRITY_CODES = frozenset(
     {

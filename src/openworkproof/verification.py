@@ -3686,7 +3686,8 @@ def commit_verification_decision_v05(
         )
         if tuple(sorted(selected_ids)) != tuple(sorted(expected_ids)):
             raise VerificationTransactionError(
-                "v0.5 decision references stale arm results"
+                "v0.5 decision references arm results that are not the "
+                "current set (stale, subset, or extra references)"
             )
         # The recompose sees the decision's own referenced arm results (the
         # full dual-verifier set for high-risk).
