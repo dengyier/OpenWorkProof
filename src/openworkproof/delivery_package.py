@@ -27,6 +27,7 @@ from openworkproof.models import (
     Identifier,
     PolicyAnchor,
     ProtocolModel,
+    RetractionReceiptV05,
     SafeNonNegativeInt,
     SubjectClaim,
     VerificationArmResult,
@@ -2798,6 +2799,13 @@ def _ledger_export_read_v05(ledger: Path):
                     control_files[
                         f"evidence/controls/{result.arm_kind}/{ref.path}"
                     ] = payload
+        retractions = tuple(
+            RetractionReceiptV05.model_validate_json(row[0])
+            for row in connection.execute(
+                "SELECT retraction_json FROM retraction_receipts_v05 "
+                "ORDER BY committed_at ASC, retraction_id ASC"
+            )
+        )
         return (
             work_order,
             claim,
@@ -2811,6 +2819,7 @@ def _ledger_export_read_v05(ledger: Path):
             spec_files,
             population_files,
             control_files,
+            retractions,
         )
     except DeliveryPackageError:
         evidence._best_effort_rollback(connection)
@@ -2853,6 +2862,7 @@ def _export_delivery_package_v05(
             spec_files,
             population_files,
             control_files,
+            retractions,
         ) = _ledger_export_read_v05(ledger)
         temporary.mkdir(mode=0o700)
         report = {
@@ -2937,6 +2947,15 @@ def _export_delivery_package_v05(
                     ),
                     "execution-ledger/receipt-parents.json": (
                         _canonical_bytes(parent_rows),
+                        "customer_private",
+                    ),
+                    "execution-ledger/retraction-receipts.json": (
+                        _canonical_bytes(
+                            [
+                                item.model_dump(mode="json")
+                                for item in retractions
+                            ]
+                        ),
                         "customer_private",
                     ),
                     "verify.sh": (_VERIFY_SCRIPT, "customer_private"),

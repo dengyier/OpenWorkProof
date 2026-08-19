@@ -365,3 +365,95 @@ def test_ledger_delivery_protocol_detects_exactly_one_family(
         connection.close()
     with pytest.raises(DeliveryPackageError, match="ambiguous"):
         _ledger_delivery_protocol(case["ledger"])
+
+
+def _retract_causal_receipts(case) -> None:
+    """Retract every causal receipt of the committed chain with
+    evidence_refuted. The committed decision stays as history; the
+    retraction affects future decisions (covered by the decision-layer
+    tests). Here we only need the retraction rows to be exportable."""
+    from openworkproof.models import (
+        RetractionReceiptV05,
+        parse_action_receipt_json,
+        retraction_receipt_id,
+    )
+    from openworkproof.retraction import commit_retraction_receipt
+    from openworkproof.signing import sign_payload
+
+    results = case["results"]
+    retracted_ids = {
+        receipt_id
+        for result in results
+        for receipt_id in result.action_receipt_ids
+    }
+    for receipt_id in retracted_ids:
+        row = evidence.connect_ledger(case["ledger"]).execute(
+            "SELECT receipt_json FROM receipts WHERE receipt_id = ?",
+            (receipt_id,),
+        ).fetchone()
+        parsed = parse_action_receipt_json(row[0])
+        payload = {
+            "schema_version": "openworkproof-retraction-receipt/0.5",
+            "protocol_version": "0.5",
+            "work_order_digest": case["profile"].work_order_digest,
+            "target_receipt_id": receipt_id,
+            "target_receipt_digest": parsed.digest,
+            "target_receipt_kind": "tool_call",
+            "retraction_effect": "refuted",
+            "retraction_reason": "evidence_refuted",
+            "refutes_decision_id": None,
+            "refutes_decision_digest": None,
+            "causal_parent_ids": [receipt_id],
+            "nonce": "0" * 64,
+            "retracted_at": "2026-01-01T00:40:00Z",
+        }
+        payload["retraction_id"] = retraction_receipt_id(payload)
+        retraction = RetractionReceiptV05.model_validate(
+            sign_payload(
+                "retraction-receipt",
+                payload,
+                case["keys"]["Manager"][0],
+                version="0.5",
+            )
+        )
+        commit_retraction_receipt(case["ledger"], retraction)
+
+
+def test_customer_private_v05_package_includes_retraction_chain(
+    v05_transaction_case,
+) -> None:
+    """A customer-private package from a chain with committed retractions must
+    carry the retraction ledger rows so an offline verifier can see the
+    lifecycle, and must replay to the retracted decision."""
+    case = _full_case(v05_transaction_case)
+    _retract_causal_receipts(case)
+    output = case["tmp_path"] / "customer-package-retracted"
+    manifest = export_delivery_package(
+        case["ledger"], output, privacy_view="customer_private"
+    )
+    paths = {entry.path for entry in manifest.entries}
+    assert "execution-ledger/retraction-receipts.json" in paths
+    raw = (output / "execution-ledger/retraction-receipts.json").read_bytes()
+    receipts = json.loads(raw)
+    assert len(receipts) >= 1
+    assert receipts[0]["retraction_effect"] == "refuted"
+    assert receipts[0]["retraction_reason"] == "evidence_refuted"
+
+
+def test_customer_private_v05_package_tampered_retraction_fails_offline(
+    v05_transaction_case,
+) -> None:
+    """Audit C7 analog: tampering the retraction row in a package must make the
+    offline verification fail closed."""
+    case = _full_case(v05_transaction_case)
+    _retract_causal_receipts(case)
+    output = case["tmp_path"] / "customer-package-tampered"
+    export_delivery_package(
+        case["ledger"], output, privacy_view="customer_private"
+    )
+    target = output / "execution-ledger/retraction-receipts.json"
+    tampered = json.loads(target.read_bytes())
+    tampered[0]["retraction_reason"] = "interpretation_error"
+    target.write_text(rfc8785.dumps(tampered).decode("utf-8"))
+    with pytest.raises(DeliveryPackageError):
+        verify_delivery_package(output)
