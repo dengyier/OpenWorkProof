@@ -81,8 +81,10 @@ arm results 必须来自恰好 2 个不同的 verifier binding
 引用**（`selected_ids`）重跑交叉验证——不依赖签名数推导独立性，追加的后续
 验证轮次不影响已提交决策的可重放性（N7）。新决策的 prepare 用
 **每 (arm, verifier) 最新**（`latest_per_verifier`）——追加轮次后新决策用
-最新双套；commit 的 stale 检查按 (arm, verifier) 粒度验证新鲜度（N8），
-验证者不能引用自己的旧轮压掉更新的失败轮。
+最新双套。**commit 的 stale 门要求决策引用的结果集精确等于 prepare 会加载
+的那一套**（high_risk 为每 (arm, verifier) 最新，standard 为每 arm 最新）：
+验证者不能引用自己的旧轮压掉更新的失败轮（N8），手工挑选引用的伪造决策
+在 commit 被拒绝。
 
 低风险（standard）时语义不变（单套 arm results，单验证者可接受；决策引用
 每 arm 一条）。

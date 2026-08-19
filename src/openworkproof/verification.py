@@ -3668,49 +3668,26 @@ def commit_verification_decision_v05(
             manifest=manifest,
             selected_ids=selected_ids,
         )
-        latest = _load_arm_results_v05(
-            connection,
-            path=path,
-            work_order=work_order,
-            profile=profile,
-            manifest=manifest,
-            latest_only=False,
-        )
-        # The decision must reference the newest committed result per arm
-        # (for high-risk, the newest of each verifier's per-arm batch; both
-        # verifiers are current when committed together).
-        latest_by_arm: dict[str, VerificationArmResultV05] = {}
-        for result in latest:
-            latest_arm_result = latest_by_arm.get(result.arm_id)
-            if latest_arm_result is None or (
-                result.created_at,
-                result.arm_result_id,
-            ) > (latest_arm_result.created_at, latest_arm_result.arm_result_id):
-                latest_by_arm[result.arm_id] = result
-        referenced_by_arm: dict[str, VerificationArmResultV05] = {}
-        for result in results:
-            referenced_arm_result = referenced_by_arm.get(result.arm_id)
-            if referenced_arm_result is None or (
-                result.created_at,
-                result.arm_result_id,
-            ) > (
-                referenced_arm_result.created_at,
-                referenced_arm_result.arm_result_id,
-            ):
-                referenced_by_arm[result.arm_id] = result
-        if set(referenced_by_arm) != set(latest_by_arm):
-            raise VerificationTransactionError(
-                "v0.5 decision does not cover every current arm"
+        # The decision's referenced set must equal exactly the set prepare
+        # would load: for high-risk that is the newest result per
+        # (arm, verifier) (a verifier cannot cite its older run to suppress
+        # a newer failing one); for standard it is the newest per arm.
+        expected_ids = tuple(
+            item.arm_result_id
+            for item in _load_arm_results_v05(
+                connection,
+                path=path,
+                work_order=work_order,
+                profile=profile,
+                manifest=manifest,
+                latest_only=profile.assurance_level != "high_risk",
+                latest_per_verifier=profile.assurance_level == "high_risk",
             )
-        for arm_id, referenced in referenced_by_arm.items():
-            newest = latest_by_arm.get(arm_id)
-            if newest is not None and (
-                referenced.created_at,
-                referenced.arm_result_id,
-            ) < (newest.created_at, newest.arm_result_id):
-                raise VerificationTransactionError(
-                    "v0.5 decision uses stale arm results"
-                )
+        )
+        if tuple(sorted(selected_ids)) != tuple(sorted(expected_ids)):
+            raise VerificationTransactionError(
+                "v0.5 decision references stale arm results"
+            )
         # The recompose sees the decision's own referenced arm results (the
         # full dual-verifier set for high-risk).
         rule_outputs = _derive_v05_rule_outputs(profile, manifest, path)

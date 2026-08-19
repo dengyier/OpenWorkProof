@@ -1179,3 +1179,118 @@ def test_high_risk_commit_rejects_suppressed_failed_rerun(
         assert "diverged" in str(error.__cause__)
     else:
         raise AssertionError("prepare must diverge")
+
+    # Manual citation attack: build a VERIFIED draft referencing A's OLD
+    # passing run + B's newest, bypassing prepare. Commit must reject it as
+    # stale — A's newer failing run cannot be suppressed.
+    from openworkproof.models import VerificationDecisionDraftV05
+
+    run1_positive = next(
+        r
+        for r in results
+        if r.arm_kind == "positive" and r.verifier_key_id == first_binding["verifier_key_id"]
+    )
+    b_positive = next(
+        r
+        for r in results
+        if r.arm_kind == "positive" and r.verifier_key_id == second_binding["verifier_key_id"]
+    )
+    run1_negative = next(
+        r
+        for r in results
+        if r.arm_kind == "negative" and r.verifier_key_id == first_binding["verifier_key_id"]
+    )
+    b_negative = next(
+        r
+        for r in results
+        if r.arm_kind == "negative" and r.verifier_key_id == second_binding["verifier_key_id"]
+    )
+    from openworkproof.acceptance import evidence_snapshot_digest
+
+    def ref(result):
+        return {
+            "arm_id": result.arm_id,
+            "arm_result_id": result.arm_result_id,
+            "arm_result_digest": result.digest,
+            "evidence_snapshot_digest": evidence_snapshot_digest(
+                tuple(
+                    sorted(
+                        (*result.evidence_refs, *result.scope_evidence_refs),
+                        key=lambda r: r.path,
+                    )
+                )
+            ),
+        }
+
+    forged_refs = sorted(
+        [ref(run1_positive), ref(b_positive), ref(run1_negative), ref(b_negative)],
+        key=lambda item: item["arm_result_id"].encode("utf-8"),
+    )
+    forged_payload = {
+        "decision_id": "e" * 64,
+        "work_order_digest": profile.work_order_digest,
+        "subject_claim_digest": profile.subject_claim_digest,
+        "profile_id": profile.profile_id,
+        "profile_digest": profile.digest,
+        "arm_results": forged_refs,
+        "assurance_level": "high_risk",
+        "decision": "VERIFIED",
+        "independence": {
+            "distinct_subjects": True,
+            "distinct_keys": True,
+            "distinct_controllers": True,
+            "distinct_execution_contexts": True,
+            "reason_codes": [],
+        },
+        "reason_codes": [],
+        "supersedes_decision_id": None,
+        "supersedes_decision_digest": None,
+        "causal_parent_receipt_ids": [
+            r.action_receipt_ids[0] for r in (run1_positive,)
+        ],
+        "causal_parent_decision_ids": [],
+        "decided_at": "2026-01-01T00:20:00Z",
+        "nonce": "f" * 64,
+        "scope_manifest_digest": manifest.digest,
+        "scope_assessment": {
+            "declared_member_count": manifest.member_count,
+            "observed_member_counts": [manifest.member_count, manifest.member_count],
+            "population_digest": manifest.population_digest,
+            "required_target_count": len(manifest.required_target_ids),
+            "missing_required_target_ids": [],
+            "scope_status": "satisfied",
+        },
+        "integrity_assessment": {
+            "population_status": "matched",
+            "control_status": "proven",
+            "reason_codes": [],
+        },
+    }
+    forged_draft = VerificationDecisionDraftV05.model_validate(forged_payload)
+    forged_encoded = verification_decision_signing_bytes_v05(forged_draft)
+    forged_signatures = []
+    for key, binding in (
+        (first_key, first_binding),
+        (second_key, second_binding),
+    ):
+        forged_signatures.append(
+            {
+                "verifier_subject_id": binding["verifier_subject_id"],
+                "verifier_key_id": _key_id(key.public_key()),
+                "signature_alg": "Ed25519",
+                "signature": _base64.urlsafe_b64encode(key.sign(forged_encoded))
+                .decode("ascii")
+                .rstrip("="),
+            }
+        )
+    forged_signatures.sort(key=lambda item: item["verifier_key_id"].encode("utf-8"))
+    forged_decision = VerificationDecisionV05.model_validate(
+        {
+            "schema_version": "openworkproof-verification-decision/0.5",
+            **forged_draft.model_dump(mode="json"),
+            "digest": hashlib.sha256(forged_encoded).hexdigest(),
+            "verifier_signatures": forged_signatures,
+        }
+    )
+    with pytest.raises(VerificationTransactionError, match="stale"):
+        commit_verification_decision_v05(case["ledger"], forged_decision)
