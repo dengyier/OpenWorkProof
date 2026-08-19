@@ -1130,7 +1130,6 @@ def compose_verification_decision_v05(
     rule_outputs: Mapping[str, Sequence[str]] | None = None,
     evidence_inventory: Mapping[str, bytes] | None = None,
     retracted_receipt_ids: frozenset[str] = frozenset(),
-    assumed_independence_sufficient: bool = False,
 ) -> VerificationDecisionDraftV05:
     """Compose the three-state v0.5 decision draft from signed inputs.
 
@@ -1310,6 +1309,7 @@ def compose_verification_decision_v05(
                 "observed_population_digest",
                 "observed_required_target_ids",
                 "scope_expectation_status",
+                "action_receipt_ids",
             )
             for field in conclusion_fields:
                 if first.model_dump(mode="json")[field] != second.model_dump(
@@ -1458,20 +1458,7 @@ def compose_verification_decision_v05(
     else:
         scope_status = "satisfied"
 
-    if assumed_independence_sufficient:
-        # Replay of a high-risk decision whose signature set carries two
-        # verifiers: independence is established by the two distinct verifier
-        # signatures, not by re-deriving it from the single-set representative
-        # arm results.
-        independence = verification_module.assess_independence(profile, results)
-        independence = type(independence)(
-            distinct_subjects=True,
-            distinct_keys=True,
-            distinct_controllers=True,
-            distinct_execution_contexts=True,
-            reason_codes=(),
-        )
-    elif dual_converged:
+    if dual_converged:
         # Derive independence from the original dual-verifier result sets
         # (two distinct verifiers covering every arm), which is the honest
         # derivation rather than asserting it over the representative set.

@@ -2468,18 +2468,24 @@ def _load_v05_objects_and_evidence(root: Path, manifest: DeliveryManifest):
     receipt_ids = {receipt.receipt_id for receipt in receipts}
     results: list[VerificationArmResultV05] = []
     inventory: dict[str, bytes] = {}
-    for reference in decision.arm_results:
+    # Load every packaged arm result (high-risk packages carry both verifier
+    # sets so the dual cross-validation re-runs offline); standard packages
+    # carry exactly the decision's referenced set.
+    arm_paths = sorted(
+        entry.path
+        for entry in manifest.entries
+        if entry.path.startswith("evidence/arms/")
+    )
+    for arm_path in arm_paths:
+        arm_result_id = arm_path.rsplit("/", 1)[1][: -len(".json")]
         try:
             result = VerificationArmResultV05.model_validate(
-                _load_canonical_json(
-                    root, manifest, f"evidence/arms/{reference.arm_result_id}.json"
-                )
+                _load_canonical_json(root, manifest, arm_path)
             )
         except Exception as error:
             raise DeliveryPackageError("v0.5 arm result is invalid") from error
         if (
-            result.arm_result_id != reference.arm_result_id
-            or result.digest != reference.arm_result_digest
+            result.arm_result_id != arm_result_id
             or any(item not in receipt_ids for item in result.action_receipt_ids)
         ):
             raise DeliveryPackageError("v0.5 arm result binding failed")
@@ -2598,15 +2604,36 @@ def _load_v05_objects_and_evidence(root: Path, manifest: DeliveryManifest):
                         "v0.5 control evidence contradicts the signed observation"
                     )
         results.append(result)
+    if profile.assurance_level == "high_risk":
+        # The dual cross-validation and decision derivation use both verifier
+        # sets, but the population/control assessment operates on one
+        # representative set (the two converged sets agree field-by-field).
+        referenced_ids = {
+            reference.arm_result_id for reference in decision.arm_results
+        }
+        representatives = [
+            result
+            for result in results
+            if result.arm_result_id in referenced_ids
+        ]
+        if len(representatives) != len(referenced_ids):
+            raise DeliveryPackageError(
+                "v0.5 decision arm results are unavailable"
+            )
+        assessment_results = tuple(
+            sorted(representatives, key=lambda item: item.arm_result_id)
+        )
+    else:
+        assessment_results = tuple(results)
     population = integrity.assess_population_integrity(
         profile,
         scope_manifest,
-        tuple(results),
+        assessment_results,
         rule_outputs=_packaged_rule_outputs(root, manifest, profile, scope_manifest),
         evidence_inventory=inventory,
     )
     control = integrity.assess_control_integrity(
-        profile, tuple(results), evidence_inventory=inventory
+        profile, assessment_results, evidence_inventory=inventory
     )
     retracted_receipt_ids = _packaged_retracted_receipt_ids(
         root, manifest, decision
@@ -2769,9 +2796,7 @@ def _ledger_export_read_v05(ledger: Path):
             work_order=work_order,
             profile=profile,
             manifest=scope_manifest,
-            selected_ids=tuple(
-                item.arm_result_id for item in decision.arm_results
-            ),
+            latest_only=profile.assurance_level != "high_risk",
         )
         receipts = tuple(
             evidence.parse_action_receipt_json(row[0])

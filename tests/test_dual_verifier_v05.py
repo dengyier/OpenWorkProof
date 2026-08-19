@@ -500,3 +500,279 @@ def test_high_risk_split_verifier_coverage_is_rejected(
     ]
     with pytest.raises(VerificationInputError, match="incomplete or inconsistent"):
         _compose_v05(case, profile=profile, results=tuple(results))
+
+
+def test_high_risk_commit_rejects_signer_without_results(
+    v05_transaction_case,
+) -> None:
+    """A second verifier that signs the draft but produced no arm results must
+    not let a single-verifier set commit as high-risk VERIFIED: commit
+    recomposes from the full ledger set (only one verifier present) and the
+    draft diverges from the signed VERIFIED."""
+    import openworkproof.evidence as evidence
+    from openworkproof.verification import (
+        VerificationTransactionError,
+        commit_verification_arm_result_v05,
+        commit_verification_decision_v05,
+        commit_verification_profile_v05,
+        prepare_verification_decision_v05,
+        verification_decision_signing_bytes_v05,
+    )
+
+    from test_verification_integrity_transactions_v05 import (
+        _sign_decision_draft_v05,
+    )
+
+    case = dict(v05_transaction_case)
+    profile, second_key, second_binding = _high_risk_profile(case)
+    first_key = case["keys"]["Verifier"][0]
+    first_binding = next(
+        item.model_dump(mode="json")
+        for item in profile.verifier_bindings
+        if item.verifier_key_id == _key_id(first_key.public_key())
+    )
+    manifest = case["manifest"]
+    from openworkproof.scope import ObservedScope
+
+    observed = ObservedScope(
+        member_ids=tuple(member.member_id for member in manifest.members),
+        member_count=manifest.member_count,
+        population_digest=manifest.population_digest,
+        required_target_ids=manifest.required_target_ids,
+        source_revision=manifest.source_revision,
+        workspace_manifest_digest=manifest.workspace_manifest_digest,
+        selector_engine_digests=tuple(
+            sorted(rule.selector_engine_digest for rule in manifest.selector_rules)
+        ),
+        evidence_complete=True,
+    )
+
+    # Only verifier A produces results; B signs later.
+    results = []
+    for arm_kind, suffix, result_prefix in (
+        ("positive", "positive", "8"),
+        ("negative", "negative", "9"),
+    ):
+        results.append(
+            _arm_result_for_verifier(
+                case,
+                profile,
+                manifest,
+                verifier_key=first_key,
+                binding=first_binding,
+                arm_kind=arm_kind,
+                suffix=f"{arm_kind}-a",
+                evidence_ref=_write_json_evidence(
+                    case["tmp_path"], f"results/{arm_kind}.json", {"passed": True}
+                ),
+                scope_evidence_ref=_write_json_evidence(
+                    case["tmp_path"], f"scope/{arm_kind}.json",
+                    observed.model_dump(mode="json"),
+                ),
+                result_id=result_prefix + "a" * 63,
+            )
+        )
+
+    commit_verification_profile_v05(case["ledger"], profile)
+    for result in results:
+        commit_verification_arm_result_v05(case["ledger"], result)
+
+    # prepare honestly derives UNKNOWN (single verifier under high risk).
+    draft = prepare_verification_decision_v05(
+        case["ledger"],
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    assert draft.decision == "UNKNOWN"
+    encoded = verification_decision_signing_bytes_v05(draft)
+    signatures = []
+    for key, binding in (
+        (first_key, first_binding),
+        (second_key, second_binding),
+    ):
+        signatures.append(
+            {
+                "verifier_subject_id": binding["verifier_subject_id"],
+                "verifier_key_id": _key_id(key.public_key()),
+                "signature_alg": "Ed25519",
+                "signature": _base64.urlsafe_b64encode(key.sign(encoded))
+                .decode("ascii")
+                .rstrip("="),
+            }
+        )
+    signatures.sort(key=lambda item: item["verifier_key_id"].encode("utf-8"))
+    decision = VerificationDecisionV05.model_validate(
+        {
+            "schema_version": "openworkproof-verification-decision/0.5",
+            **draft.model_dump(mode="json"),
+            "digest": hashlib.sha256(encoded).hexdigest(),
+            "verifier_signatures": signatures,
+        }
+    )
+    # Commit recomposes from the full ledger (single verifier present) and the
+    # recomposed draft is UNKNOWN, matching the signed UNKNOWN -> commits.
+    commit_verification_decision_v05(case["ledger"], decision)
+    assert evidence.connect_ledger(case["ledger"]).execute(
+        "SELECT 1 FROM verification_decisions_v05 WHERE decision_id = ?",
+        (decision.decision_id,),
+    ).fetchone() is not None
+
+    # Forge: flip the signed draft to VERIFIED and try to commit. Recomposition
+    # from the single-verifier ledger derives UNKNOWN, so the mismatch rejects.
+    forged_draft = draft.model_dump(mode="json")
+    forged_draft["decision"] = "VERIFIED"
+    forged_draft["decision_id"] = "e" * 64
+    forged_draft["nonce"] = "f" * 64
+    from openworkproof.models import VerificationDecisionDraftV05
+
+    forged = VerificationDecisionDraftV05.model_validate(forged_draft)
+    forged_encoded = verification_decision_signing_bytes_v05(forged)
+    forged_signatures = []
+    for key, binding in (
+        (first_key, first_binding),
+        (second_key, second_binding),
+    ):
+        forged_signatures.append(
+            {
+                "verifier_subject_id": binding["verifier_subject_id"],
+                "verifier_key_id": _key_id(key.public_key()),
+                "signature_alg": "Ed25519",
+                "signature": _base64.urlsafe_b64encode(key.sign(forged_encoded))
+                .decode("ascii")
+                .rstrip("="),
+            }
+        )
+    forged_signatures.sort(key=lambda item: item["verifier_key_id"].encode("utf-8"))
+    forged_decision = VerificationDecisionV05.model_validate(
+        {
+            "schema_version": "openworkproof-verification-decision/0.5",
+            **forged.model_dump(mode="json"),
+            "digest": hashlib.sha256(forged_encoded).hexdigest(),
+            "verifier_signatures": forged_signatures,
+        }
+    )
+    with pytest.raises(VerificationTransactionError, match="draft mismatch"):
+        commit_verification_decision_v05(case["ledger"], forged_decision)
+
+
+def test_high_risk_dual_verifier_offline_package_replays(
+    v05_transaction_case,
+) -> None:
+    """A customer-private package from a converged high-risk decision must
+    replay offline: the package carries both verifier sets and the offline
+    verifier re-runs the dual cross-validation."""
+    import openworkproof.evidence as evidence
+    from openworkproof.delivery_package import (
+        export_delivery_package,
+        verify_delivery_package,
+    )
+    from openworkproof.scope import ObservedScope
+    from openworkproof.verification import (
+        commit_verification_arm_result_v05,
+        commit_verification_decision_v05,
+        commit_verification_profile_v05,
+        prepare_verification_decision_v05,
+        verification_decision_signing_bytes_v05,
+    )
+
+    case = dict(v05_transaction_case)
+    profile, second_key, second_binding = _high_risk_profile(case)
+    first_key = case["keys"]["Verifier"][0]
+    first_binding = next(
+        item.model_dump(mode="json")
+        for item in profile.verifier_bindings
+        if item.verifier_key_id == _key_id(first_key.public_key())
+    )
+    manifest = case["manifest"]
+    observed = ObservedScope(
+        member_ids=tuple(member.member_id for member in manifest.members),
+        member_count=manifest.member_count,
+        population_digest=manifest.population_digest,
+        required_target_ids=manifest.required_target_ids,
+        source_revision=manifest.source_revision,
+        workspace_manifest_digest=manifest.workspace_manifest_digest,
+        selector_engine_digests=tuple(
+            sorted(rule.selector_engine_digest for rule in manifest.selector_rules)
+        ),
+        evidence_complete=True,
+    )
+    results = []
+    for arm_kind, suffix, result_prefix in (
+        ("positive", "positive", "8"),
+        ("negative", "negative", "9"),
+    ):
+        for verifier_idx, (vkey, binding) in enumerate(
+            (
+                (first_key, first_binding),
+                (second_key, second_binding),
+            )
+        ):
+            results.append(
+                _arm_result_for_verifier(
+                    case,
+                    profile,
+                    manifest,
+                    verifier_key=vkey,
+                    binding=binding,
+                    arm_kind=arm_kind,
+                    suffix=f"{arm_kind}-shared",
+                    evidence_ref=_write_json_evidence(
+                        case["tmp_path"],
+                        f"results/{arm_kind}.json",
+                        {"arm": arm_kind, "passed": True},
+                    ),
+                    scope_evidence_ref=_write_json_evidence(
+                        case["tmp_path"],
+                        f"scope/{arm_kind}.json",
+                        observed.model_dump(mode="json"),
+                    ),
+                    result_id=result_prefix + str(verifier_idx) * 63,
+                )
+            )
+    commit_verification_profile_v05(case["ledger"], profile)
+    for result in results:
+        commit_verification_arm_result_v05(case["ledger"], result)
+    draft = prepare_verification_decision_v05(
+        case["ledger"],
+        DecisionDraftRequest(
+            decision_id="c" * 64,
+            decided_at="2026-01-01T00:20:00Z",
+            nonce="d" * 64,
+        ),
+    )
+    assert draft.decision == "VERIFIED"
+    encoded = verification_decision_signing_bytes_v05(draft)
+    signatures = []
+    for key, binding in (
+        (first_key, first_binding),
+        (second_key, second_binding),
+    ):
+        signatures.append(
+            {
+                "verifier_subject_id": binding["verifier_subject_id"],
+                "verifier_key_id": _key_id(key.public_key()),
+                "signature_alg": "Ed25519",
+                "signature": _base64.urlsafe_b64encode(key.sign(encoded))
+                .decode("ascii")
+                .rstrip("="),
+            }
+        )
+    signatures.sort(key=lambda item: item["verifier_key_id"].encode("utf-8"))
+    decision = VerificationDecisionV05.model_validate(
+        {
+            "schema_version": "openworkproof-verification-decision/0.5",
+            **draft.model_dump(mode="json"),
+            "digest": hashlib.sha256(encoded).hexdigest(),
+            "verifier_signatures": signatures,
+        }
+    )
+    commit_verification_decision_v05(case["ledger"], decision)
+    output = case["tmp_path"] / "dual-package"
+    export_delivery_package(
+        case["ledger"], output, privacy_view="customer_private"
+    )
+    result = verify_delivery_package(output)
+    assert result.current_decision == "VERIFIED"

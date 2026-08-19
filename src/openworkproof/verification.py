@@ -3382,13 +3382,18 @@ def _load_current_decision_v05(
             raise VerificationTransactionError(
                 "v0.5 decision parents are invalid"
             )
+        # Replay must see the same arm-result input as prepare: for high-risk
+        # profiles that is the full dual-verifier set (every arm, both
+        # verifiers), so the cross-validation re-runs and derives the same
+        # decision. For standard profiles the decision's referenced set is the
+        # single latest per arm.
         results = _load_arm_results_v05(
             connection,
             path=path,
             work_order=work_order,
             profile=profile,
             manifest=manifest,
-            selected_ids=parents,
+            latest_only=profile.assurance_level != "high_risk",
         )
         result_committed_rows = tuple(
             connection.execute(
@@ -3436,9 +3441,6 @@ def _load_current_decision_v05(
                 rule_outputs=rule_outputs,
                 evidence_inventory=inventory,
                 retracted_receipt_ids=retracted_receipt_ids,
-                assumed_independence_sufficient=(
-                    len(decision.verifier_signatures) == 2
-                ),
             )
         except Exception as error:
             raise VerificationTransactionError(
@@ -3704,7 +3706,9 @@ def commit_verification_decision_v05(
             draft = integrity.compose_verification_decision_v05(
                 profile=profile,
                 manifest=manifest,
-                arm_results=results,
+                arm_results=(
+                    latest if profile.assurance_level == "high_risk" else results
+                ),
                 request=DecisionDraftRequest(
                     decision_id=parsed.decision_id,
                     decided_at=parsed.model_dump(mode="json")["decided_at"],
@@ -3714,9 +3718,6 @@ def commit_verification_decision_v05(
                 rule_outputs=rule_outputs,
                 evidence_inventory=inventory,
                 retracted_receipt_ids=retracted_receipt_ids,
-                assumed_independence_sufficient=(
-                    len(parsed.verifier_signatures) == 2
-                ),
             )
             validate_verification_decision_v05(
                 profile=profile, manifest=manifest, decision=parsed
