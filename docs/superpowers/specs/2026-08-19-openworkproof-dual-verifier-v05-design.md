@@ -118,7 +118,7 @@ no decision can be formed")`，不产生决策。
 ### 4.3 新 reason code
 
 ```text
-DUAL_VERIFIER_DIVERGENCE   # 双验证者证据摘要不一致
+DUAL_VERIFIER_DIVERGENCE   # 双验证者任一承载结论的字段不一致
 ```
 
 high_risk 且单验证者结果 → 复用既有 `INDEPENDENCE_INSUFFICIENT`（不新造）。
