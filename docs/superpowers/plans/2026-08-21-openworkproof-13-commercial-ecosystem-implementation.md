@@ -487,13 +487,16 @@ class DeliverySurfaceFacts:
     acceptance_receipt_digest: str | None
     evidence_closed_at: str
     trusted_verifier_keys: Mapping[str, Ed25519PublicKey]
+    trusted_verifier_subjects: Mapping[str, str]
 ```
 
 `load_surface_facts(root)` 先调用 `verify_delivery_package(root)`，再用现有 v0.5
 loader 读取 WorkOrder/Profile/Decision。`trusted_verifier_keys` 只包含已验证、由
 WorkOrder Manager 签署并绑定到该 WorkOrder 的 VerificationProfile 中的 Verifier
 binding。WorkOrder 是信任根，Profile 是其显式委托层；这样 standard 保持单
-Verifier，而 high-risk 可使用两个独立 Verifier。public/diagnostic/legacy 包直接拒绝。
+Verifier，而 high-risk 可使用两个独立 Verifier。`trusted_verifier_subjects` 从同一
+Profile binding 派生，用于把环境指纹的 `collector_actor_id` 绑定回签名主体。
+public/diagnostic/legacy 包直接拒绝。
 
 - [x] **Step 4: 增加篡改与信任角色矩阵**
 

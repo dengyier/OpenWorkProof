@@ -172,7 +172,8 @@ signature
 Verifier 的信任链为 WorkOrder → WorkOrder Manager 签署的 VerificationProfile
 → Profile 中的 Verifier binding。WorkOrder 保持固定六角色与单 Verifier 角色，
 high-risk 所需的第二个独立 Verifier 由同一 WorkOrder 下已签 Profile 显式委托，
-不得由调用方元数据或未签配置补充。
+不得由调用方元数据或未签配置补充。环境指纹的 `collector_key_id` 与
+`collector_actor_id` 必须同时匹配该 Profile binding，不能只验证公钥而忽略主体。
 
 首版缺失原因至少覆盖：runner image 不可得、container digest 不可得、toolchain
 lock 不可得、sandbox policy 不可得、workflow identity 不可验证。未知原因不得

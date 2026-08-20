@@ -100,6 +100,7 @@ class DeliverySurfaceFacts:
     acceptance_receipt_digest: str | None
     evidence_closed_at: str
     trusted_verifier_keys: Mapping[str, Ed25519PublicKey]
+    trusted_verifier_subjects: Mapping[str, str]
 
 
 PrivacyClass = Literal["public", "diagnostic", "customer_private"]
@@ -3362,6 +3363,15 @@ def load_surface_facts(package_root: Path) -> DeliverySurfaceFacts:
             {
                 key: trusted[key]
                 for key in sorted(trusted, key=lambda value: value.encode("utf-8"))
+            }
+        ),
+        trusted_verifier_subjects=MappingProxyType(
+            {
+                binding.verifier_key_id: binding.verifier_subject_id
+                for binding in sorted(
+                    profile.verifier_bindings,
+                    key=lambda value: value.verifier_key_id.encode("utf-8"),
+                )
             }
         ),
     )

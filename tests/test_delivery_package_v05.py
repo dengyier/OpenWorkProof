@@ -641,15 +641,20 @@ def test_surface_facts_come_only_from_verified_private_v05_package(
     assert facts.evidence_closed_at == decision["decided_at"]
 
     verifier_ids = {
-        item["key_id"]
-        for item in work_order["key_bindings"]
-        if item["role"] == "Verifier"
+        item["verifier_key_id"] for item in profile["verifier_bindings"]
+    }
+    verifier_subjects = {
+        item["verifier_key_id"]: item["verifier_subject_id"]
+        for item in profile["verifier_bindings"]
     }
     assert set(facts.trusted_verifier_keys) == verifier_ids
+    assert dict(facts.trusted_verifier_subjects) == verifier_subjects
     with pytest.raises(TypeError):
         facts.trusted_verifier_keys["ed25519:" + "0" * 64] = next(
             iter(facts.trusted_verifier_keys.values())
         )
+    with pytest.raises(TypeError):
+        facts.trusted_verifier_subjects["ed25519:" + "0" * 64] = "forged"
 
     encoded = verification_decision_signing_bytes_v05(
         __import__("openworkproof.models", fromlist=["VerificationDecisionV05"])

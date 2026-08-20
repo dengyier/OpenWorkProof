@@ -784,6 +784,10 @@ def test_high_risk_dual_verifier_offline_package_replays(
         first_binding["verifier_key_id"],
         second_binding["verifier_key_id"],
     }
+    assert dict(facts.trusted_verifier_subjects) == {
+        first_binding["verifier_key_id"]: first_binding["verifier_subject_id"],
+        second_binding["verifier_key_id"]: second_binding["verifier_subject_id"],
+    }
 
 
 def test_appended_run_does_not_break_committed_decision_replay(
