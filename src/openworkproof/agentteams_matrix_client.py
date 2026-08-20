@@ -123,6 +123,21 @@ class AgentTeamsMatrixClient:
         """Locate the worker's own room (named ``Worker: <name>``)."""
         return self.find_room(f"Worker: {worker_name}")
 
+    def resolve_room_alias(self, alias: str) -> str:
+        """Resolve one exact Matrix room alias to its opaque room id."""
+        if not isinstance(alias, str) or not alias.startswith("#"):
+            raise AgentTeamsMatrixRequestError("room alias is invalid")
+        response = self._request(
+            "GET",
+            f"/_matrix/client/v3/directory/room/{_quote(alias)}",
+        )
+        room_id = response.get("room_id")
+        if not isinstance(room_id, str) or not room_id.startswith("!"):
+            raise AgentTeamsMatrixRequestError(
+                "room alias response has no room id"
+            )
+        return room_id
+
     # ---- messaging ---------------------------------------------------------
 
     def send_text(self, room_id: str, body: str) -> str:

@@ -199,6 +199,18 @@ def test_matrix_worker_room_lookup(monkeypatch) -> None:
     assert client.worker_room("dev-worker") == "!b:hs"
 
 
+def test_matrix_resolves_exact_room_alias(monkeypatch) -> None:
+    responder = _JsonResponder([{"room_id": "!team:hs"}])
+    monkeypatch.setattr(
+        "openworkproof.agentteams_matrix_client.urllib.request.urlopen",
+        responder,
+    )
+    client = AgentTeamsMatrixClient(homeserver="http://hs:18080", token="t")
+
+    assert client.resolve_room_alias("#team:hs") == "!team:hs"
+    assert responder.calls[0][1].endswith("%23team%3Ahs")
+
+
 def test_matrix_send_text_returns_event_id(monkeypatch) -> None:
     responder = _JsonResponder([{"event_id": "$evt"}])
     monkeypatch.setattr(

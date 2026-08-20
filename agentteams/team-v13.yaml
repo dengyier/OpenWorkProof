@@ -1,0 +1,11 @@
+apiVersion: agentteams.io/v1beta1
+kind: Team
+metadata:
+  name: owp-team
+spec:
+  description: OpenWorkProof 1.3 three-role verifiable delivery team
+  workerMembers:
+    - name: dev-worker
+      role: team_leader
+    - name: verifier-worker
+      role: worker

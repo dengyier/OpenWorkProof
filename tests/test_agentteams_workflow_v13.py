@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
+import runpy
 
 import pytest
 
@@ -17,6 +20,8 @@ from openworkproof.agentteams_workflow import (
 
 TASK_ID = "a" * 64
 ARTIFACT_DIGEST = "b" * 64
+ROOT = Path(__file__).resolve().parents[1]
+DEMO_SCRIPT = ROOT / "agentteams/scripts/run_openworkproof_13_demo.py"
 
 
 def _binding(role: str, sender: str, digit: str) -> AgentTeamsRoleBinding:
@@ -332,3 +337,119 @@ def test_artifact_path_is_relative_and_traversal_free() -> None:
     raw["artifact_path"] = "../secret"
     with pytest.raises(ValueError, match="artifact path"):
         AgentTeamsWorkflowMessageV01.model_validate(raw)
+
+
+def _demo_module() -> dict[str, object]:
+    return runpy.run_path(str(DEMO_SCRIPT), run_name="openworkproof_demo_test")
+
+
+def test_v13_resources_close_three_role_permissions() -> None:
+    workers = (ROOT / "agentteams/workers-v13.yaml").read_text(encoding="utf-8")
+    team = (ROOT / "agentteams/team-v13.yaml").read_text(encoding="utf-8")
+
+    assert "name: dev-worker" in workers
+    assert "name: verifier-worker" in workers
+    assert workers.count("runtime: copaw") == 2
+    developer, verifier = workers.split("---", 1)
+    assert "owp.apply_patch" in developer
+    assert "owp.surface_verify" in verifier
+    assert "owp.apply_patch" not in verifier
+    assert "name: owp-team" in team
+    assert "role: team_leader" in team
+    assert "name: dev-worker" in team
+    assert "name: verifier-worker" in team
+
+
+def test_demo_preflight_requires_token_and_three_distinct_bindings(
+    monkeypatch,
+) -> None:
+    module = _demo_module()
+    run_live_preflight = module["run_live_preflight"]
+    task_path = ROOT / "agentteams/fixtures/agentscope-2239-task.json"
+    monkeypatch.delenv("AGENTTEAMS_MATRIX_TOKEN", raising=False)
+
+    with pytest.raises(RuntimeError, match="AGENTTEAMS_MATRIX_TOKEN"):
+        run_live_preflight(task_path=task_path)
+
+
+def test_demo_preflight_accepts_exact_live_identity_snapshot(
+    monkeypatch,
+) -> None:
+    module = _demo_module()
+    run_live_preflight = module["run_live_preflight"]
+    task_path = ROOT / "agentteams/fixtures/agentscope-2239-task.json"
+    task = json.loads(task_path.read_text(encoding="utf-8"))
+    senders = {
+        item["role"]: item["matrix_user_id"]
+        for item in task["role_bindings"]
+    }
+
+    class Controller:
+        def get_managers(self):
+            return [
+                {
+                    "name": "default",
+                    "phase": "Running",
+                    "matrixUserID": senders["Manager"],
+                }
+            ]
+
+        def get_workers(self):
+            return [
+                {
+                    "name": "dev-worker",
+                    "phase": "Running",
+                    "matrixUserID": senders["Developer"],
+                },
+                {
+                    "name": "verifier-worker",
+                    "phase": "Running",
+                    "matrixUserID": senders["Verifier"],
+                },
+            ]
+
+    class Matrix:
+        def resolve_room_alias(self, alias):
+            assert alias == "#team:hs"
+            return "!team:hs"
+
+        def joined_rooms(self):
+            return ["!team:hs"]
+
+    monkeypatch.setenv("AGENTTEAMS_MATRIX_TOKEN", "in-memory-test-token")
+    result = run_live_preflight(
+        task_path=task_path,
+        room="#team:hs",
+        controller=Controller(),
+        matrix=Matrix(),
+    )
+
+    assert result.roles == ("Manager", "Developer", "Verifier")
+    assert result.room_id == "!team:hs"
+
+
+def test_recording_wrapper_requires_explicit_privacy_attestations() -> None:
+    wrapper = (
+        ROOT / "agentteams/scripts/record_openworkproof_13_demo.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "OWP_SCREEN_RECORD_INPUT" in wrapper
+    assert "OWP_ELEMENT_TARGET_ROOM_ONLY" in wrapper
+    assert "OWP_DESKTOP_NOTIFICATIONS_OFF" in wrapper
+    assert "OWP_NO_VISIBLE_SECRETS" in wrapper
+    assert "ffprobe" in wrapper
+    assert "printf 'q\\n'" in wrapper
+
+
+@pytest.mark.agentteams
+def test_live_team_has_three_distinct_roles() -> None:
+    if os.environ.get("OPENWORKPROOF_AGENTTEAMS_REQUIRED") != "1":
+        pytest.skip("live AgentTeams not required")
+    module = _demo_module()
+    result = module["run_live_preflight"](
+        task_path=ROOT / "agentteams/fixtures/agentscope-2239-task.json"
+    )
+
+    assert result.roles == ("Manager", "Developer", "Verifier")
+    assert len(set(result.matrix_user_ids)) == 3
+    assert len(set(result.openworkproof_key_ids)) == 3

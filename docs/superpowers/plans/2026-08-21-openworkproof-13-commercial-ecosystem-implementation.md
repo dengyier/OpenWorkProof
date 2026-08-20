@@ -1180,7 +1180,7 @@ git commit -m "feat: bind agentteams roles to evidence workflow"
 - Modify: `agentteams/README.md`
 - Modify: `tests/test_agentteams_workflow_v13.py`
 
-- [ ] **Step 1: 写 live 前置门测试**
+- [x] **Step 1: 写 live 前置门测试**
 
 ```python
 @pytest.mark.agentteams
@@ -1195,7 +1195,7 @@ def test_live_team_has_three_distinct_roles():
 
 required-live 演示命令设置该变量，因此不能 skip；普通 portable suite 可 skip。
 
-- [ ] **Step 2: 运行测试观察 RED**
+- [x] **Step 2: 运行测试观察 RED**
 
 ```bash
 OPENWORKPROOF_AGENTTEAMS_REQUIRED=1 \
@@ -1205,7 +1205,7 @@ OPENWORKPROOF_AGENTTEAMS_REQUIRED=1 \
 Expected：FAIL，v13 资源或运行入口不存在；若 AgentTeams 未运行，必须明确为
 preflight failure，不能伪装通过。
 
-- [ ] **Step 3: 创建三角色资源**
+- [x] **Step 3: 创建三角色资源**
 
 `team-v13.yaml` 使用 AgentTeams 的 Manager `default`，Developer 与 Verifier
 分别绑定 `dev-worker`、`verifier-worker`。两个 Worker 挂同一 OWP MCP server；

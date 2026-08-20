@@ -1,0 +1,26 @@
+{
+  "schema_version": "openworkproof-agentteams-demo-task/0.1",
+  "task_id": "28465ee0cac9701954260641db4799cb363ff838231d2a4f6ca451240a3a171a",
+  "issue_url": "https://github.com/agentscope-ai/agentscope/issues/2239",
+  "objective": "Repair DictMixin attribute lookup semantics and verify deepcopy, hasattr, and getattr default behavior.",
+  "manager_resource": "default",
+  "developer_resource": "dev-worker",
+  "verifier_resource": "verifier-worker",
+  "role_bindings": [
+    {
+      "role": "Manager",
+      "matrix_user_id": "@manager:matrix-local.agentteams.io:18080",
+      "openworkproof_key_id": "ed25519:1d81a51a74e01037035df1174cd15ffee8a2e38d3a8b27fd2401a3fc440d41f6"
+    },
+    {
+      "role": "Developer",
+      "matrix_user_id": "@dev-worker:matrix-local.agentteams.io:18080",
+      "openworkproof_key_id": "ed25519:ee142aa89faaff7a0798aaa0549725edff175259efe6633e5dff36caeef9833c"
+    },
+    {
+      "role": "Verifier",
+      "matrix_user_id": "@verifier-worker:matrix-local.agentteams.io:18080",
+      "openworkproof_key_id": "ed25519:d1046419ca02b42810137ac634da135cd7ad3f5f3f642673f06a9f4e4b5fc7cb"
+    }
+  ]
+}

@@ -101,3 +101,44 @@ matrix.send_text(room, "<修复任务描述>")
   OWP 真值验证，不声称 Worker 端到端实时执行完成。
 - Demo 不证明：AgentScope 上游合入、客户采用、付款或结算。
 - AgentScope / AgentTeams 均为第三方开源项目，OWP 只做集成。
+
+## OpenWorkProof 1.3 三角色演示
+
+1.3 资源使用 AgentTeams 全局 `Manager/default`，以及
+`workers-v13.yaml` 中相互隔离的 Developer、Verifier。Developer 可以读取、
+打补丁和运行测试；Verifier 只能读取、独立测试和执行 Surface Bundle 离线验证，
+不得取得 `owp.apply_patch`。
+
+```bash
+bash install/agentteams-apply.sh -f agentteams/workers-v13.yaml
+bash install/agentteams-apply.sh -f agentteams/team-v13.yaml
+
+export AGENTTEAMS_MATRIX_TOKEN='<session token>'
+OPENWORKPROOF_AGENTTEAMS_REQUIRED=1 \
+  ./.venv/bin/python -m pytest tests/test_agentteams_workflow_v13.py \
+  -q -k live_team
+```
+
+token 只从环境变量读取，不写入 task、provenance、命令行参数或仓库。前置门会
+核对三种角色、三个 Matrix sender、三个 OpenWorkProof key id 与 Running 状态；
+任一不一致均失败。当前运行入口在缺少完整验收上下文时会停在硬门，绝不把
+Verifier 的 `VERIFIED` 改写成人类 Acceptor 已验收。
+
+比赛录屏必须由操作者显式选择 macOS 屏幕输入，并在启动前确认 Element 只显示
+目标房间、通知已关闭、屏幕无 secret：
+
+```bash
+OWP_SCREEN_RECORD_INPUT='1:none' \
+OWP_ELEMENT_TARGET_ROOM_ONLY=1 \
+OWP_DESKTOP_NOTIFICATIONS_OFF=1 \
+OWP_NO_VISIBLE_SECRETS=1 \
+agentteams/scripts/record_openworkproof_13_demo.sh \
+  .artifacts/agentteams-v13-demo.mp4 -- \
+  ./.venv/bin/python agentteams/scripts/run_openworkproof_13_demo.py \
+  --preflight-only \
+  --room '#agentteams-team-owp-team:matrix-local.agentteams.io:18080' \
+  --task-file agentteams/fixtures/agentscope-2239-task.json
+```
+
+`record_openworkproof_13_demo.sh` 用 `q` 正常结束 ffmpeg，再用 ffprobe 检查视频
+可解码。`.artifacts/`、token、私钥与未脱敏录屏均不得提交。

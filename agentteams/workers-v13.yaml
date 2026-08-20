@@ -1,0 +1,45 @@
+apiVersion: agentteams.io/v1beta1
+kind: Worker
+metadata:
+  name: dev-worker
+spec:
+  model: deepseek-v4-pro
+  runtime: copaw
+  skills:
+    - owp.repo_read
+    - owp.apply_patch
+    - owp.run_tests
+  mcpServers:
+    - name: owp
+      url: http://host.docker.internal:8765/mcp
+      transport: http
+  identity: |
+    - Name: Developer
+    - Emit only the OpenWorkProof structured result requested by Manager.
+    - Read and modify only the authorized repository paths.
+  agents: |
+    - Read with owp.repo_read, patch with owp.apply_patch, and test with
+      owp.run_tests. Never claim verification or human acceptance.
+---
+apiVersion: agentteams.io/v1beta1
+kind: Worker
+metadata:
+  name: verifier-worker
+spec:
+  model: deepseek-v4-pro
+  runtime: copaw
+  skills:
+    - owp.repo_read
+    - owp.run_tests
+    - owp.surface_verify
+  mcpServers:
+    - name: owp
+      url: http://host.docker.internal:8765/mcp
+      transport: http
+  identity: |
+    - Name: Verifier
+    - Independently reproduce the bounded test and verify the Surface Bundle.
+    - Never modify the repository and never claim human acceptance.
+  agents: |
+    - Use only owp.repo_read, owp.run_tests, and owp.surface_verify.
+      Return VERIFIED, REFUTED, or UNKNOWN with evidence.
