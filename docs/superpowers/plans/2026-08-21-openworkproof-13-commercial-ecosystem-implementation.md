@@ -647,7 +647,7 @@ git commit -m "feat: derive deterministic verification reports"
 - Create: `tests/test_surface_bundle_v01.py`
 - Create: `tests/fixtures/surface/README.md`
 
-- [ ] **Step 1: 写包结构与攻击 RED 测试**
+- [x] **Step 1: 写包结构与攻击 RED 测试**
 
 ```python
 def test_surface_bundle_round_trips_offline(
@@ -677,7 +677,7 @@ def test_surface_bundle_rejects_each_tampered_layer(surface_bundle, target):
 路径矩阵覆盖 `../`、绝对路径、symlink、hardlink、FIFO、重复 path、大小超限、
 文件数超限、manifest 漏项和多项。
 
-- [ ] **Step 2: 运行测试观察 RED**
+- [x] **Step 2: 运行测试观察 RED**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_surface_bundle_v01.py -q
@@ -685,7 +685,7 @@ def test_surface_bundle_rejects_each_tampered_layer(surface_bundle, target):
 
 Expected：collection ERROR，模块不存在。
 
-- [ ] **Step 3: 实现外层 manifest 与安全复制**
+- [x] **Step 3: 实现外层 manifest 与安全复制**
 
 ```python
 class SurfaceManifestEntry(ProtocolModel):
@@ -719,7 +719,7 @@ verify.sh
 先写 sibling 临时目录，全部验证后 `os.replace` 提交。输入输出不得重叠；复制
 只接受普通单链接文件；上限固定为 4096 文件、单文件 64 MiB、总计 512 MiB。
 
-- [ ] **Step 4: 实现离线验证顺序**
+- [x] **Step 4: 实现离线验证顺序**
 
 1. 安全读取并重算 SurfaceManifest 每个 entry；
 2. 调用 `verify_delivery_package(delivery-package/)`；
@@ -729,7 +729,7 @@ verify.sh
 6. 比较 canonical report JSON 与 HTML renderer bytes；
 7. 返回重算结果，不信任磁盘报告中的 status。
 
-- [ ] **Step 5: 回归并提交**
+- [x] **Step 5: 回归并提交**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_surface_bundle_v01.py \
