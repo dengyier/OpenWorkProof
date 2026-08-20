@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import base64
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ import rfc8785
 
 import openworkproof.evidence as evidence
 from openworkproof.delivery_package import (
+    DeliverySurfaceFacts,
     DeliveryManifest,
     DeliveryManifestEntry,
     DeliveryPackageError,
@@ -16,11 +18,14 @@ from openworkproof.delivery_package import (
     compare_integrity_packages,
     explain_integrity_package,
     export_delivery_package,
+    load_surface_facts,
     verify_delivery_package,
 )
-from openworkproof.models import DecisionDraftRequest
+from openworkproof.models import AcceptanceReceipt, DecisionDraftRequest
+from openworkproof.signing import sign_payload
+from openworkproof.verification import verification_decision_signing_bytes_v05
 
-from test_acceptance_v05 import _commit_v05_decision
+from test_acceptance_v05 import _commit_acceptance_fixture, _commit_v05_decision
 from test_verification_integrity_transactions_v05 import (
     _resign_arm_result_v05,
     commit_verification_arm_result_v05,
@@ -28,6 +33,8 @@ from test_verification_integrity_transactions_v05 import (
     v05_transaction_case,
     verification_profile_v03,
 )
+from test_acceptance_v03 import _commit_v03_decision
+from test_verification_transactions_v03 import v03_transaction_case
 
 
 def _full_case(case):
@@ -548,3 +555,230 @@ def test_customer_private_v05_package_tampered_retraction_fails_offline(
     target.write_text(rfc8785.dumps(tampered).decode("utf-8"))
     with pytest.raises(DeliveryPackageError):
         verify_delivery_package(output)
+
+
+# --------------------------------------------------------------------------- #
+# Verified read-only surface facts
+# --------------------------------------------------------------------------- #
+
+
+def _rewrite_private_object(
+    root: Path,
+    relative: str,
+    mutate,
+) -> None:
+    target = root / relative
+    document = json.loads(target.read_text(encoding="utf-8"))
+    mutate(document)
+    payload = rfc8785.dumps(document)
+    target.write_bytes(payload)
+
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for entry in manifest["entries"]:
+        if entry["path"] == relative:
+            entry["sha256"] = hashlib.sha256(payload).hexdigest()
+            entry["size_bytes"] = len(payload)
+            break
+    else:  # pragma: no cover - fixture invariant
+        raise AssertionError(f"missing manifest entry: {relative}")
+    manifest_path.write_bytes(rfc8785.dumps(manifest))
+
+
+def _change_verifier_role(value) -> None:
+    next(
+        item
+        for item in value["key_bindings"]
+        if item["role"] == "Verifier"
+    )["role"] = "Developer"
+
+
+def _change_verifier_public_key(value) -> None:
+    next(
+        item
+        for item in value["key_bindings"]
+        if item["role"] == "Verifier"
+    )["public_key_b64url"] = "A" * 43
+
+
+def _change_source_commit(value) -> None:
+    current = value["source_commit"]
+    value["source_commit"] = ("0" if current[0] != "0" else "1") + current[1:]
+
+
+def _change_decision_nonce(value) -> None:
+    current = value["nonce"]
+    value["nonce"] = ("0" if current[0] != "0" else "1") + current[1:]
+
+
+def _change_decision_digest(value) -> None:
+    current = value["digest"]
+    value["digest"] = ("0" if current[0] != "0" else "1") + current[1:]
+
+
+def test_surface_facts_come_only_from_verified_private_v05_package(
+    v05_transaction_case,
+) -> None:
+    case = _full_case(v05_transaction_case)
+    output = case["tmp_path"] / "surface-facts-private"
+    manifest = export_delivery_package(
+        case["ledger"], output, privacy_view="customer_private"
+    )
+
+    facts = load_surface_facts(output)
+    assert isinstance(facts, DeliverySurfaceFacts)
+
+    work_order = json.loads((output / "work-order.json").read_bytes())
+    profile = json.loads((output / "verification-profile.json").read_bytes())
+    decision = json.loads((output / "verification-decision.json").read_bytes())
+    assert facts.decision == decision["decision"]
+    assert facts.reason_codes == tuple(decision["reason_codes"])
+    assert facts.work_order_digest == manifest.work_order_digest
+    assert facts.source_revision == work_order["source_commit"]
+    assert facts.risk_class == profile["assurance_level"]
+    assert facts.decision_digests == (decision["digest"],)
+    assert facts.acceptance_receipt_digest is None
+    assert facts.evidence_closed_at == decision["decided_at"]
+
+    verifier_ids = {
+        item["key_id"]
+        for item in work_order["key_bindings"]
+        if item["role"] == "Verifier"
+    }
+    assert set(facts.trusted_verifier_keys) == verifier_ids
+    with pytest.raises(TypeError):
+        facts.trusted_verifier_keys["ed25519:" + "0" * 64] = next(
+            iter(facts.trusted_verifier_keys.values())
+        )
+
+    encoded = verification_decision_signing_bytes_v05(
+        __import__("openworkproof.models", fromlist=["VerificationDecisionV05"])
+        .VerificationDecisionV05.model_validate(decision)
+    )
+    for signature in decision["verifier_signatures"]:
+        public_key = facts.trusted_verifier_keys[signature["verifier_key_id"]]
+        raw = base64.urlsafe_b64decode(
+            signature["signature"]
+            + "=" * (-len(signature["signature"]) % 4)
+        )
+        public_key.verify(raw, encoded)
+
+
+def test_surface_facts_reject_public_and_diagnostic_v05_views(
+    v05_transaction_case,
+) -> None:
+    case = _full_case(v05_transaction_case)
+    for privacy_view in ("public", "diagnostic"):
+        output = case["tmp_path"] / f"surface-facts-{privacy_view}"
+        export_delivery_package(
+            case["ledger"], output, privacy_view=privacy_view
+        )
+        with pytest.raises(DeliveryPackageError):
+            load_surface_facts(output)
+
+
+def test_surface_facts_include_verified_acceptance_terminal(
+    v05_transaction_case,
+    signed_acceptance_receipt,
+) -> None:
+    case = _full_case(v05_transaction_case)
+    connection = evidence.connect_ledger(case["ledger"])
+    try:
+        receipts = tuple(
+            evidence.parse_action_receipt_json(row[0])
+            for row in connection.execute(
+                "SELECT receipt_json FROM receipts ORDER BY sequence"
+            )
+        )
+    finally:
+        connection.close()
+    request = receipts[-1]
+    payload = signed_acceptance_receipt.model_dump(
+        mode="json",
+        exclude={"digest", "signature_alg", "signer_key_id", "signature"},
+    )
+    payload.update(
+        {
+            "acceptance_request_receipt_id": request.receipt_id,
+            "acceptance_request_receipt_digest": request.digest,
+            "receipt_digests": sorted({item.digest for item in receipts}),
+            "accepted_at": "2026-01-01T00:30:00Z",
+        }
+    )
+    accepted = AcceptanceReceipt.model_validate(
+        sign_payload(
+            "acceptance-receipt",
+            payload,
+            case["keys"]["Acceptor"][0],
+        )
+    )
+    _commit_acceptance_fixture(case["ledger"], accepted)
+    output = case["tmp_path"] / "surface-facts-accepted"
+    export_delivery_package(
+        case["ledger"], output, privacy_view="customer_private"
+    )
+
+    facts = load_surface_facts(output)
+    assert facts.acceptance_receipt_digest == accepted.digest
+    assert facts.evidence_closed_at == accepted.model_dump(
+        mode="json"
+    )["accepted_at"]
+
+
+def test_surface_facts_reject_legacy_private_package(
+    v03_transaction_case,
+) -> None:
+    case = v03_transaction_case
+    _commit_v03_decision(case)
+    output = case["tmp_path"] / "surface-facts-v03"
+    export_delivery_package(
+        case["ledger"], output, privacy_view="customer_private"
+    )
+    with pytest.raises(DeliveryPackageError):
+        load_surface_facts(output)
+
+
+@pytest.mark.parametrize(
+    ("case_id", "relative", "mutate"),
+    (
+        ("work-order-role", "work-order.json", _change_verifier_role),
+        ("work-order-key", "work-order.json", _change_verifier_public_key),
+        ("work-order-source", "work-order.json", _change_source_commit),
+        ("decision-content", "verification-decision.json", _change_decision_nonce),
+        ("decision-digest", "verification-decision.json", _change_decision_digest),
+    ),
+)
+def test_surface_facts_reject_rebuilt_inner_object_tamper(
+    v05_transaction_case,
+    case_id,
+    relative,
+    mutate,
+) -> None:
+    case = _full_case(v05_transaction_case)
+    output = case["tmp_path"] / f"surface-facts-tamper-{case_id}"
+    export_delivery_package(
+        case["ledger"], output, privacy_view="customer_private"
+    )
+    _rewrite_private_object(output, relative, mutate)
+    with pytest.raises(DeliveryPackageError):
+        load_surface_facts(output)
+
+
+def test_surface_facts_reject_manifest_entry_hash_or_path_tamper(
+    v05_transaction_case,
+) -> None:
+    case = _full_case(v05_transaction_case)
+    for field, replacement in (
+        ("sha256", "1" * 64),
+        ("path", "renamed-work-order.json"),
+    ):
+        output = case["tmp_path"] / f"surface-facts-manifest-{field}"
+        export_delivery_package(
+            case["ledger"], output, privacy_view="customer_private"
+        )
+        manifest_path = output / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["entries"][0][field] = replacement
+        manifest_path.write_bytes(rfc8785.dumps(manifest))
+        with pytest.raises(DeliveryPackageError):
+            load_surface_facts(output)

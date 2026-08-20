@@ -668,6 +668,7 @@ def test_high_risk_dual_verifier_offline_package_replays(
     import openworkproof.evidence as evidence
     from openworkproof.delivery_package import (
         export_delivery_package,
+        load_surface_facts,
         verify_delivery_package,
     )
     from openworkproof.scope import ObservedScope
@@ -777,6 +778,12 @@ def test_high_risk_dual_verifier_offline_package_replays(
     )
     result = verify_delivery_package(output)
     assert result.current_decision == "VERIFIED"
+    facts = load_surface_facts(output)
+    assert facts.risk_class == "high_risk"
+    assert set(facts.trusted_verifier_keys) == {
+        first_binding["verifier_key_id"],
+        second_binding["verifier_key_id"],
+    }
 
 
 def test_appended_run_does_not_break_committed_decision_replay(

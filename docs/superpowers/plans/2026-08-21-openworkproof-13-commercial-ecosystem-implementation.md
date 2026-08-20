@@ -446,8 +446,10 @@ git commit -m "feat: register companion evidence schemas"
 **Files:**
 - Modify: `src/openworkproof/delivery_package.py`
 - Modify: `tests/test_delivery_package_v05.py`
+- Modify: `tests/test_dual_verifier_v05.py`
+- Modify: `docs/superpowers/specs/2026-08-21-openworkproof-13-commercial-ecosystem-design.md`
 
-- [ ] **Step 1: 写只读 facts RED 测试**
+- [x] **Step 1: 写只读 facts RED 测试**
 
 ```python
 def test_load_surface_facts_comes_only_from_verified_package(rich_v05_package) -> None:
@@ -463,7 +465,7 @@ def test_load_surface_facts_rejects_tampered_inner_package(tampered_v05_package)
         load_surface_facts(tampered_v05_package)
 ```
 
-- [ ] **Step 2: 运行测试观察 RED**
+- [x] **Step 2: 运行测试观察 RED**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_delivery_package_v05.py -q -k surface_facts
@@ -471,7 +473,7 @@ def test_load_surface_facts_rejects_tampered_inner_package(tampered_v05_package)
 
 Expected：FAIL，`load_surface_facts` 不存在。
 
-- [ ] **Step 3: 增加冻结只读返回类型**
+- [x] **Step 3: 增加冻结只读返回类型**
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -488,22 +490,26 @@ class DeliverySurfaceFacts:
 ```
 
 `load_surface_facts(root)` 先调用 `verify_delivery_package(root)`，再用现有 v0.5
-loader 读取 WorkOrder/Profile/Decision。`trusted_verifier_keys` 只包含已签 WorkOrder
-中角色为 `Verifier` 的 key binding，并通过 `decode_and_verify_key_binding` 解码。
-public/diagnostic/legacy 包直接拒绝。
+loader 读取 WorkOrder/Profile/Decision。`trusted_verifier_keys` 只包含已验证、由
+WorkOrder Manager 签署并绑定到该 WorkOrder 的 VerificationProfile 中的 Verifier
+binding。WorkOrder 是信任根，Profile 是其显式委托层；这样 standard 保持单
+Verifier，而 high-risk 可使用两个独立 Verifier。public/diagnostic/legacy 包直接拒绝。
 
-- [ ] **Step 4: 增加篡改与信任角色矩阵**
+- [x] **Step 4: 增加篡改与信任角色矩阵**
 
 完整 JSON 重建后分别篡改 WorkOrder key role、public key、source revision、
 decision digest、manifest entry，均要求 fail closed。不得用 `model_copy`
 绕过 Pydantic 重校验。
 
-- [ ] **Step 5: 回归并提交**
+- [x] **Step 5: 回归并提交**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_delivery_package_v05.py tests/test_signing.py -q
 git diff --check
-git add src/openworkproof/delivery_package.py tests/test_delivery_package_v05.py
+git add src/openworkproof/delivery_package.py tests/test_delivery_package_v05.py \
+  tests/test_dual_verifier_v05.py \
+  docs/superpowers/specs/2026-08-21-openworkproof-13-commercial-ecosystem-design.md \
+  docs/superpowers/plans/2026-08-21-openworkproof-13-commercial-ecosystem-implementation.md
 git commit -m "feat: expose verified delivery surface facts"
 ```
 

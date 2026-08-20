@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+from collections.abc import Mapping
+from dataclasses import dataclass
 import hashlib
 import html
 import json
@@ -9,10 +12,12 @@ import os
 from pathlib import Path
 import re
 import shutil
+from types import MappingProxyType
 from typing import Literal
 import uuid
 
 import rfc8785
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import Field, model_validator
 
 import openworkproof.evidence as evidence
@@ -80,6 +85,21 @@ class DeliveryPackageError(RuntimeError):
 class LegacyPackageError(DeliveryPackageError):
     """A v0.5 derived view is not applicable to a legacy package; the
     calling surface may use its explicitly controlled legacy fallback."""
+
+
+@dataclass(frozen=True, slots=True)
+class DeliverySurfaceFacts:
+    """Read-only facts derived exclusively from a verified private v0.5 package."""
+
+    decision: Literal["VERIFIED", "REFUTED", "UNKNOWN"]
+    reason_codes: tuple[str, ...]
+    work_order_digest: str
+    source_revision: str
+    risk_class: Literal["standard", "high_risk"]
+    decision_digests: tuple[str, ...]
+    acceptance_receipt_digest: str | None
+    evidence_closed_at: str
+    trusted_verifier_keys: Mapping[str, Ed25519PublicKey]
 
 
 PrivacyClass = Literal["public", "diagnostic", "customer_private"]
@@ -2350,10 +2370,12 @@ __all__ = [
     "DeliveryManifest",
     "DeliveryManifestEntry",
     "DeliveryPackageError",
+    "DeliverySurfaceFacts",
     "DeliveryVerificationResult",
     "digest_manifest",
     "export_delivery_package",
     "load_and_verify_anchors",
+    "load_surface_facts",
     "load_signed_history",
     "replay_acceptance",
     "replay_verification",
@@ -3043,6 +3065,15 @@ def _export_delivery_package_v05(
                     "verify.sh": (_VERIFY_SCRIPT, "customer_private"),
                 }
             )
+            for terminal, relative in (
+                (history.acceptance, "acceptance/acceptance-receipt.json"),
+                (history.rejection, "acceptance/rejection-receipt.json"),
+            ):
+                if terminal is not None:
+                    files[relative] = (
+                        _canonical_bytes(terminal.model_dump(mode="json")),
+                        "customer_private",
+                    )
             schema_files = {}
             schema_dir = Path(__import__("openworkproof").__file__).parent / "schemas" / "v0.5"
             for name in (
@@ -3234,6 +3265,105 @@ def _verify_v05_delivery_package(
         ),
         manifest_digest=digest_manifest(manifest),
         full_offline_replay=True,
+    )
+
+
+def load_surface_facts(package_root: Path) -> DeliverySurfaceFacts:
+    """Return immutable facts from an authenticated private v0.5 package.
+
+    This is deliberately a derived read surface: it does not accept caller
+    metadata and it does not treat public or diagnostic aggregate views as
+    authenticated protocol truth.
+    """
+
+    root = Path(package_root)
+    verification_result = verify_delivery_package(root)
+    manifest = load_and_verify_manifest(root)
+    if (
+        manifest.verification_protocol_version != "0.5"
+        or manifest.privacy_view != "customer_private"
+        or manifest.full_offline_replay is not True
+        or verification_result.full_offline_replay is not True
+        or verification_result.current_decision
+        not in {"VERIFIED", "REFUTED", "UNKNOWN"}
+    ):
+        raise DeliveryPackageError(
+            "surface facts require an authenticated private v0.5 package"
+        )
+
+    work_order, _claim, _scope, profile, decision, _results, _inventory = (
+        _load_v05_objects_and_evidence(root, manifest)
+    )
+    if (
+        verification_result.manifest_digest != digest_manifest(manifest)
+        or verification_result.current_decision != decision.decision
+        or work_order.source_commit != _claim.source_revision
+        or work_order.source_commit != _scope.source_revision
+    ):
+        raise DeliveryPackageError("surface fact source snapshot is inconsistent")
+    receipts = _load_receipts(root, manifest, work_order)
+    history = _load_acceptance_history(
+        root,
+        manifest,
+        work_order,
+        decision,
+        receipts,
+    )
+
+    trusted: dict[str, Ed25519PublicKey] = {}
+    try:
+        for binding in profile.verifier_bindings:
+            raw = base64.urlsafe_b64decode(
+                binding.verifier_public_key_b64url
+                + "=" * (-len(binding.verifier_public_key_b64url) % 4)
+            )
+            trusted[binding.verifier_key_id] = (
+                Ed25519PublicKey.from_public_bytes(raw)
+            )
+    except Exception as error:
+        raise DeliveryPackageError(
+            "surface verifier trust binding is invalid"
+        ) from error
+    if not trusted or any(
+        signature.verifier_key_id not in trusted
+        for signature in decision.verifier_signatures
+    ):
+        raise DeliveryPackageError(
+            "verification decision is not signed-profile-verifier-bound"
+        )
+
+    terminal_times = [decision.model_dump(mode="json")["decided_at"]]
+    if history.acceptance is not None:
+        terminal_times.append(
+            history.acceptance.model_dump(mode="json")["accepted_at"]
+        )
+    if history.rejection is not None:
+        terminal_times.append(
+            history.rejection.model_dump(mode="json")["rejected_at"]
+        )
+    for transition in (history.withdrawal, history.supersession):
+        if transition is not None:
+            terminal_times.append(
+                transition.model_dump(mode="json")["decided_at"]
+            )
+
+    return DeliverySurfaceFacts(
+        decision=decision.decision,
+        reason_codes=tuple(decision.reason_codes),
+        work_order_digest=work_order.digest,
+        source_revision=work_order.source_commit,
+        risk_class=profile.assurance_level,
+        decision_digests=(decision.digest,),
+        acceptance_receipt_digest=(
+            None if history.acceptance is None else history.acceptance.digest
+        ),
+        evidence_closed_at=max(terminal_times),
+        trusted_verifier_keys=MappingProxyType(
+            {
+                key: trusted[key]
+                for key in sorted(trusted, key=lambda value: value.encode("utf-8"))
+            }
+        ),
     )
 
 

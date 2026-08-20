@@ -169,6 +169,11 @@ signature
 指纹；standard 验证若出现 `partial`/`unavailable`，除非已签 Scope 明确允许
 对应缺失原因，否则结果只能是 `UNKNOWN`，不得降级为 `VERIFIED`。
 
+Verifier 的信任链为 WorkOrder → WorkOrder Manager 签署的 VerificationProfile
+→ Profile 中的 Verifier binding。WorkOrder 保持固定六角色与单 Verifier 角色，
+high-risk 所需的第二个独立 Verifier 由同一 WorkOrder 下已签 Profile 显式委托，
+不得由调用方元数据或未签配置补充。
+
 首版缺失原因至少覆盖：runner image 不可得、container digest 不可得、toolchain
 lock 不可得、sandbox policy 不可得、workflow identity 不可验证。未知原因不得
 落成 `complete`。
