@@ -1079,7 +1079,7 @@ git commit -m "feat: add github verification action"
 - Modify: `src/openworkproof/agentteams_matrix_client.py`
 - Modify: `tests/test_agentteams_adapters.py`
 
-- [ ] **Step 1: 写 sender binding 与返工 RED 测试**
+- [x] **Step 1: 写 sender binding 与返工 RED 测试**
 
 ```python
 def test_three_distinct_senders_complete_rework_loop(workflow):
@@ -1102,7 +1102,7 @@ def test_role_name_with_same_sender_is_rejected(workflow):
 另测同 key 两角色、重复 event id、乱序消息、错误 task id、artifact digest 不符、
 超过一次返工、ACK 丢失、消息成功但核心提交失败、核心提交成功但消息失败。
 
-- [ ] **Step 2: 运行测试观察 RED**
+- [x] **Step 2: 运行测试观察 RED**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_agentteams_workflow_v13.py -q
@@ -1110,7 +1110,7 @@ def test_role_name_with_same_sender_is_rejected(workflow):
 
 Expected：collection ERROR，模块不存在。
 
-- [ ] **Step 3: 实现结构化消息 envelope**
+- [x] **Step 3: 实现结构化消息 envelope**
 
 ```python
 class AgentTeamsRoleBinding(ProtocolModel):
@@ -1134,7 +1134,7 @@ class AgentTeamsWorkflowMessageV01(ProtocolModel):
 Matrix body 必须是该 JSON，不接受 `DEV_RESULT <token>` 自由文本作为协议真相。
 raw event id 仅进入本地 provenance；核心报告不使用它判定。
 
-- [ ] **Step 4: 实现纯状态机与幂等**
+- [x] **Step 4: 实现纯状态机与幂等**
 
 ```text
 awaiting_dispatch -> awaiting_development -> awaiting_verification
@@ -1147,7 +1147,7 @@ attempt 2 非 VERIFIED -> not_ready
 平台发送在核心状态落盘后执行；发送失败返回 `committed_but_unannounced`，不能
 回滚核心真相。
 
-- [ ] **Step 5: 为 Matrix timeline 保留 event id**
+- [x] **Step 5: 为 Matrix timeline 保留 event id**
 
 把 `read_timeline` 返回值扩展为：
 
@@ -1157,7 +1157,7 @@ attempt 2 非 VERIFIED -> not_ready
 
 同步修改全部仓库调用点和旧测试；不得从 body 伪造 event id。
 
-- [ ] **Step 6: 回归并提交**
+- [x] **Step 6: 回归并提交**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_agentteams_workflow_v13.py \

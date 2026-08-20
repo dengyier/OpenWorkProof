@@ -218,12 +218,20 @@ def test_matrix_read_timeline_filters_messages(monkeypatch) -> None:
     events = [
         {
             "type": "m.room.message",
+            "event_id": "$reply",
             "sender": "@manager:hs",
             "content": {"msgtype": "m.text", "body": "reply"},
         },
         {"type": "m.room.member", "sender": "@admin:hs", "content": {}},
         {
             "type": "m.room.message",
+            "event_id": "$image",
+            "sender": "@admin:hs",
+            "content": {"msgtype": "m.image", "body": "image.png"},
+        },
+        {
+            "type": "m.room.message",
+            "event_id": "$ask",
             "sender": "@admin:hs",
             "content": {"msgtype": "m.text", "body": "ask"},
         },
@@ -236,10 +244,34 @@ def test_matrix_read_timeline_filters_messages(monkeypatch) -> None:
     client = AgentTeamsMatrixClient(homeserver="http://hs:18080", token="t")
     timeline = client.read_timeline("!a:hs", limit=10)
     assert timeline == [
-        {"sender": "@manager:hs", "body": "reply"},
-        {"sender": "@admin:hs", "body": "ask"},
+        {"event_id": "$reply", "sender": "@manager:hs", "body": "reply"},
+        {"event_id": "$ask", "sender": "@admin:hs", "body": "ask"},
     ]
     assert "dir=b" in responder.calls[0][1]
+
+
+def test_matrix_timeline_rejects_message_without_event_id(monkeypatch) -> None:
+    responder = _JsonResponder(
+        [
+            {
+                "chunk": [
+                    {
+                        "type": "m.room.message",
+                        "sender": "@manager:hs",
+                        "content": {"msgtype": "m.text", "body": "{}"},
+                    }
+                ]
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        "openworkproof.agentteams_matrix_client.urllib.request.urlopen",
+        responder,
+    )
+    client = AgentTeamsMatrixClient(homeserver="http://hs:18080", token="t")
+
+    with pytest.raises(AgentTeamsMatrixError, match="event id"):
+        client.read_timeline("!a:hs")
 
 
 def test_matrix_requires_token() -> None:

@@ -142,7 +142,7 @@ class AgentTeamsMatrixClient:
     def read_timeline(
         self, room_id: str, *, limit: int = 20
     ) -> list[dict[str, Any]]:
-        """Return recent ``m.room.message`` events (sender, body) newest
+        """Return recent ``m.room.message`` events (id, sender, body) newest
         first, as a plain list of dicts."""
         query = urllib.parse.urlencode({"dir": "b", "limit": str(limit)})
         response = self._request(
@@ -150,14 +150,43 @@ class AgentTeamsMatrixClient:
             f"/_matrix/client/v3/rooms/{_quote(room_id)}/messages?{query}",
         )
         events: list[dict[str, Any]] = []
-        for chunk in response.get("chunk", []):
+        chunks = response.get("chunk", [])
+        if not isinstance(chunks, list):
+            raise AgentTeamsMatrixRequestError("timeline chunk is not a list")
+        for chunk in chunks:
+            if not isinstance(chunk, dict):
+                raise AgentTeamsMatrixRequestError(
+                    "timeline event is not an object"
+                )
             if chunk.get("type") != "m.room.message":
                 continue
             content = chunk.get("content") or {}
+            if not isinstance(content, dict):
+                raise AgentTeamsMatrixRequestError(
+                    "timeline message content is not an object"
+                )
+            if content.get("msgtype") != "m.text":
+                continue
+            event_id = chunk.get("event_id")
+            sender = chunk.get("sender")
+            body = content.get("body")
+            if not isinstance(event_id, str) or not event_id:
+                raise AgentTeamsMatrixRequestError(
+                    "timeline message has no event id"
+                )
+            if not isinstance(sender, str) or not sender:
+                raise AgentTeamsMatrixRequestError(
+                    "timeline message has no sender"
+                )
+            if not isinstance(body, str):
+                raise AgentTeamsMatrixRequestError(
+                    "timeline message has no text body"
+                )
             events.append(
                 {
-                    "sender": chunk.get("sender", ""),
-                    "body": content.get("body", ""),
+                    "event_id": event_id,
+                    "sender": sender,
+                    "body": body,
                 }
             )
         return events
@@ -191,7 +220,10 @@ class AgentTeamsMatrixClient:
             ) as response:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")
+            try:
+                detail = error.read().decode("utf-8", errors="replace")
+            finally:
+                error.close()
             if error.code in (401, 403):
                 raise AgentTeamsMatrixAuthError(
                     f"matrix auth failed ({error.code}): {detail}"
