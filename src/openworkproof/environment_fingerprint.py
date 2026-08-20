@@ -35,6 +35,9 @@ from openworkproof.signing import key_id
 __all__ = [
     "EnvironmentFingerprintPayloadV01",
     "SignedEnvironmentFingerprintV01",
+    "core_execution_digest",
+    "core_execution_projection",
+    "derive_environment_allowlist_digest",
     "environment_signing_bytes",
     "sign_environment_fingerprint",
     "verify_environment_fingerprint",
@@ -181,6 +184,52 @@ class SignedEnvironmentFingerprintV01(ProtocolModel):
     signature_alg: Literal["Ed25519"]
     collector_key_id: KeyId
     signature: Signature
+
+
+def derive_environment_allowlist_digest(
+    *,
+    runner_os: str,
+    runner_arch: str,
+    runner_image_digest: str | None,
+    container_image_digest: str | None,
+    toolchain_lock_digest: str | None,
+    command_digest: str,
+    arguments_digest: str,
+    sandbox_policy_digest: str | None,
+) -> str:
+    """Digest only neutral allowlisted execution axes, never platform fields."""
+
+    projection = {
+        "runner_os": runner_os,
+        "runner_arch": runner_arch,
+        "runner_image_digest": runner_image_digest,
+        "container_image_digest": container_image_digest,
+        "toolchain_lock_digest": toolchain_lock_digest,
+        "command_digest": command_digest,
+        "arguments_digest": arguments_digest,
+        "sandbox_policy_digest": sandbox_policy_digest,
+    }
+    return hashlib.sha256(rfc8785.dumps(projection)).hexdigest()
+
+
+def core_execution_projection(
+    payload: EnvironmentFingerprintPayloadV01,
+) -> dict[str, Any]:
+    """Return platform-neutral execution facts for conformance debugging."""
+
+    rebuilt = _rebuild_payload(payload)
+    raw = rebuilt.model_dump(mode="json")
+    raw.pop("workflow_identity_digest")
+    raw.pop("collected_at")
+    raw.pop("collector_actor_id")
+    return raw
+
+
+def core_execution_digest(payload: EnvironmentFingerprintPayloadV01) -> str:
+    """Digest the neutral projection without replacing the signed digest."""
+
+    projection = core_execution_projection(payload)
+    return hashlib.sha256(rfc8785.dumps(projection)).hexdigest()
 
 
 def _encode_base64url(raw: bytes) -> str:

@@ -9,13 +9,14 @@ import os
 from pathlib import Path
 import re
 import stat
-from typing import Any, ClassVar, Literal
+from typing import Any, Literal
 
 import rfc8785
 from pydantic import ConfigDict, model_validator
 
 from openworkproof.environment_fingerprint import (
     EnvironmentFingerprintPayloadV01,
+    derive_environment_allowlist_digest,
 )
 from openworkproof.models import CanonicalUTCTime, Digest64, ProtocolModel
 
@@ -204,26 +205,6 @@ class GitHubExecutionSourceV01(ProtocolModel):
     collected_at: CanonicalUTCTime
     collector_actor_id: str
 
-    _ALLOWLIST: ClassVar[tuple[str, ...]] = (
-        "GITHUB_REPOSITORY",
-        "GITHUB_EVENT_NAME",
-        "GITHUB_SHA",
-        "GITHUB_WORKFLOW_REF",
-        "GITHUB_JOB",
-        "GITHUB_RUN_ID",
-        "GITHUB_RUN_ATTEMPT",
-        "RUNNER_OS",
-        "RUNNER_ARCH",
-        "OWP_RUNNER_IMAGE_DIGEST",
-        "OWP_CONTAINER_IMAGE_DIGEST",
-        "OWP_TOOLCHAIN_LOCK_DIGEST",
-        "OWP_SANDBOX_POLICY_DIGEST",
-        "OWP_COMMAND_DIGEST",
-        "OWP_ARGUMENTS_DIGEST",
-        "OWP_COLLECTED_AT",
-        "OWP_COLLECTOR_ACTOR_ID",
-    )
-
     @model_validator(mode="after")
     def _closed_source(self) -> GitHubExecutionSourceV01:
         if _OID40.fullmatch(self.event_sha) is None:
@@ -267,12 +248,32 @@ class GitHubExecutionSourceV01(ProtocolModel):
         pr_head_sha, pr_head_repository, fork_source = _pr_facts(
             event_name, event, repository
         )
-        projection = {
-            name: environment.get(name)
-            for name in cls._ALLOWLIST
-            if environment.get(name) not in {None, ""}
-        }
-        allowlist_digest = hashlib.sha256(rfc8785.dumps(projection)).hexdigest()
+        runner_os = _required(environment, "RUNNER_OS")
+        runner_arch = _required(environment, "RUNNER_ARCH")
+        runner_image_digest = _optional_digest(
+            environment, "OWP_RUNNER_IMAGE_DIGEST"
+        )
+        container_image_digest = _optional_digest(
+            environment, "OWP_CONTAINER_IMAGE_DIGEST"
+        )
+        toolchain_lock_digest = _optional_digest(
+            environment, "OWP_TOOLCHAIN_LOCK_DIGEST"
+        )
+        sandbox_policy_digest = _optional_digest(
+            environment, "OWP_SANDBOX_POLICY_DIGEST"
+        )
+        command_digest = _required(environment, "OWP_COMMAND_DIGEST")
+        arguments_digest = _required(environment, "OWP_ARGUMENTS_DIGEST")
+        allowlist_digest = derive_environment_allowlist_digest(
+            runner_os=runner_os,
+            runner_arch=runner_arch,
+            runner_image_digest=runner_image_digest,
+            container_image_digest=container_image_digest,
+            toolchain_lock_digest=toolchain_lock_digest,
+            command_digest=command_digest,
+            arguments_digest=arguments_digest,
+            sandbox_policy_digest=sandbox_policy_digest,
+        )
         try:
             return cls(
                 schema_version=_SOURCE_SCHEMA,
@@ -286,22 +287,14 @@ class GitHubExecutionSourceV01(ProtocolModel):
                 job=_required(environment, "GITHUB_JOB"),
                 run_id=_required(environment, "GITHUB_RUN_ID"),
                 run_attempt=_required(environment, "GITHUB_RUN_ATTEMPT"),
-                runner_os=_required(environment, "RUNNER_OS"),
-                runner_arch=_required(environment, "RUNNER_ARCH"),
-                runner_image_digest=_optional_digest(
-                    environment, "OWP_RUNNER_IMAGE_DIGEST"
-                ),
-                container_image_digest=_optional_digest(
-                    environment, "OWP_CONTAINER_IMAGE_DIGEST"
-                ),
-                toolchain_lock_digest=_optional_digest(
-                    environment, "OWP_TOOLCHAIN_LOCK_DIGEST"
-                ),
-                sandbox_policy_digest=_optional_digest(
-                    environment, "OWP_SANDBOX_POLICY_DIGEST"
-                ),
-                command_digest=_required(environment, "OWP_COMMAND_DIGEST"),
-                arguments_digest=_required(environment, "OWP_ARGUMENTS_DIGEST"),
+                runner_os=runner_os,
+                runner_arch=runner_arch,
+                runner_image_digest=runner_image_digest,
+                container_image_digest=container_image_digest,
+                toolchain_lock_digest=toolchain_lock_digest,
+                sandbox_policy_digest=sandbox_policy_digest,
+                command_digest=command_digest,
+                arguments_digest=arguments_digest,
                 environment_allowlist_digest=allowlist_digest,
                 collected_at=_required(environment, "OWP_COLLECTED_AT"),
                 collector_actor_id=_required(

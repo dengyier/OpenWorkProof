@@ -18,7 +18,17 @@ from typing import Any, Literal
 from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
 import rfc8785
 
-from openworkproof.models import Digest64, KeyId, ProtocolModel
+from openworkproof.environment_fingerprint import (
+    EnvironmentFingerprintPayloadV01,
+    derive_environment_allowlist_digest,
+)
+from openworkproof.models import (
+    CanonicalUTCTime,
+    Digest64,
+    KeyId,
+    ObjectId40,
+    ProtocolModel,
+)
 
 
 AgentTeamsRole = Literal["Manager", "Developer", "Verifier"]
@@ -147,6 +157,134 @@ class AgentTeamsWorkflowMessageV01(ProtocolModel):
         ):
             raise ValueError("verification requires an artifact and decision")
         return self
+
+
+class AgentTeamsExecutionSourceV01(ProtocolModel):
+    """Allowlisted AgentTeams provenance plus neutral execution axes."""
+
+    model_config = _MODEL_CONFIG
+
+    schema_version: Literal["openworkproof-agentteams-execution-source/0.1"]
+    task_id: Digest64
+    team_room_id_digest: Digest64
+    message_event_digests: tuple[Digest64, ...]
+    source_revision: ObjectId40
+    runner_os: str
+    runner_arch: str
+    runner_image_digest: Digest64 | None
+    container_image_digest: Digest64 | None
+    toolchain_lock_digest: Digest64 | None
+    command_digest: Digest64
+    arguments_digest: Digest64
+    sandbox_policy_digest: Digest64 | None
+    collected_at: CanonicalUTCTime
+    collector_actor_id: str
+
+    @field_validator("message_event_digests", mode="after")
+    @classmethod
+    def _closed_event_digests(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not 1 <= len(value) <= 16 or value != tuple(sorted(set(value))):
+            raise ValueError("message event digests must be sorted and unique")
+        return value
+
+    @classmethod
+    def from_mapping(
+        cls, source: Mapping[str, Any]
+    ) -> AgentTeamsExecutionSourceV01:
+        if not isinstance(source, Mapping):
+            raise AgentTeamsWorkflowError("AgentTeams source must be a mapping")
+        names = (
+            "schema_version",
+            "task_id",
+            "team_room_id_digest",
+            "message_event_digests",
+            "source_revision",
+            "runner_os",
+            "runner_arch",
+            "runner_image_digest",
+            "container_image_digest",
+            "toolchain_lock_digest",
+            "command_digest",
+            "arguments_digest",
+            "sandbox_policy_digest",
+            "collected_at",
+            "collector_actor_id",
+        )
+        try:
+            return cls.model_validate({name: source.get(name) for name in names})
+        except Exception as error:
+            raise AgentTeamsWorkflowError(
+                "AgentTeams execution source is invalid"
+            ) from error
+
+
+def project_agentteams_environment(
+    source: AgentTeamsExecutionSourceV01,
+) -> EnvironmentFingerprintPayloadV01:
+    """Project AgentTeams provenance into the shared neutral environment."""
+
+    try:
+        rebuilt = AgentTeamsExecutionSourceV01.model_validate(
+            source.model_dump(mode="json", warnings="error")
+        )
+        serialized = rebuilt.model_dump(mode="json", warnings="error")
+        workflow_identity_digest = hashlib.sha256(
+            rfc8785.dumps(
+                {
+                    "task_id": rebuilt.task_id,
+                    "team_room_id_digest": rebuilt.team_room_id_digest,
+                    "message_event_digests": rebuilt.message_event_digests,
+                }
+            )
+        ).hexdigest()
+        allowlist_digest = derive_environment_allowlist_digest(
+            runner_os=rebuilt.runner_os,
+            runner_arch=rebuilt.runner_arch,
+            runner_image_digest=rebuilt.runner_image_digest,
+            container_image_digest=rebuilt.container_image_digest,
+            toolchain_lock_digest=rebuilt.toolchain_lock_digest,
+            command_digest=rebuilt.command_digest,
+            arguments_digest=rebuilt.arguments_digest,
+            sandbox_policy_digest=rebuilt.sandbox_policy_digest,
+        )
+        axes = (
+            (rebuilt.runner_image_digest, "RUNNER_IMAGE_UNAVAILABLE"),
+            (rebuilt.container_image_digest, "CONTAINER_DIGEST_UNAVAILABLE"),
+            (rebuilt.toolchain_lock_digest, "TOOLCHAIN_LOCK_UNAVAILABLE"),
+            (rebuilt.sandbox_policy_digest, "SANDBOX_POLICY_UNAVAILABLE"),
+        )
+        missing = tuple(
+            sorted(
+                (reason for value, reason in axes if value is None),
+                key=lambda value: value.encode("utf-8"),
+            )
+        )
+        return EnvironmentFingerprintPayloadV01.model_validate(
+            {
+                "schema_version": "openworkproof-execution-environment/0.1",
+                "source_revision": rebuilt.source_revision,
+                "runner_os": rebuilt.runner_os,
+                "runner_arch": rebuilt.runner_arch,
+                "runner_image_digest": rebuilt.runner_image_digest,
+                "container_image_digest": rebuilt.container_image_digest,
+                "toolchain_lock_digest": rebuilt.toolchain_lock_digest,
+                "command_digest": rebuilt.command_digest,
+                "arguments_digest": rebuilt.arguments_digest,
+                "environment_allowlist_digest": allowlist_digest,
+                "sandbox_policy_digest": rebuilt.sandbox_policy_digest,
+                "workflow_identity_digest": workflow_identity_digest,
+                "collection_status": "complete" if not missing else "partial",
+                "missing_reason_codes": missing,
+                "collected_at": serialized["collected_at"],
+                "collector_actor_id": rebuilt.collector_actor_id,
+            }
+        )
+    except AgentTeamsWorkflowError:
+        raise
+    except Exception as error:
+        raise AgentTeamsWorkflowError(
+            "AgentTeams environment projection is invalid"
+        ) from error
 
 
 class AgentTeamsWorkflowStateV01(ProtocolModel):
@@ -410,10 +548,12 @@ class AgentTeamsWorkflow:
 
 __all__ = [
     "AgentTeamsCommitAcknowledgementLost",
+    "AgentTeamsExecutionSourceV01",
     "AgentTeamsRoleBinding",
     "AgentTeamsWorkflow",
     "AgentTeamsWorkflowError",
     "AgentTeamsWorkflowMessageV01",
     "AgentTeamsWorkflowOutcome",
     "AgentTeamsWorkflowStateV01",
+    "project_agentteams_environment",
 ]

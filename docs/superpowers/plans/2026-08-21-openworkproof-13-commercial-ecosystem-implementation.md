@@ -1301,7 +1301,7 @@ git commit -m "feat: add three-agent verification demo"
 - Modify: `src/openworkproof/adapters/github_surface.py`
 - Modify: `src/openworkproof/agentteams_workflow.py`
 
-- [ ] **Step 1: 写同一规范输入 RED 测试**
+- [x] **Step 1: 写同一规范输入 RED 测试**
 
 ```python
 def test_github_and_agentteams_share_core_digest(normalized_execution_input):
@@ -1316,12 +1316,12 @@ def test_github_and_agentteams_share_core_digest(normalized_execution_input):
     )
 ```
 
-- [ ] **Step 2: 写平台 metadata 污染攻击**
+- [x] **Step 2: 写平台 metadata 污染攻击**
 
 增加 100 个随机 GitHub env/Matrix event 字段，不在 allowlist 的字段不得改变
 core digest；改变 source revision、command、args、sandbox 或 toolchain 必须改变。
 
-- [ ] **Step 3: 实现显式 core projection**
+- [x] **Step 3: 实现显式 core projection**
 
 ```python
 def core_execution_projection(
@@ -1343,7 +1343,7 @@ def core_execution_digest(
 
 该 digest 只用于 conformance 与调试，不替代完整 signed fingerprint digest。
 
-- [ ] **Step 4: 回归并提交**
+- [x] **Step 4: 回归并提交**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_surface_conformance_v13.py \
