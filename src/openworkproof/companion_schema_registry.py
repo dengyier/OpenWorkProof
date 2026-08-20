@@ -2,8 +2,9 @@
 
 The companion registry sits *beside* the frozen v0.1-v0.5 protocol registry: it
 packages the closed companion evidence-document schemas (execution environment
-fingerprint) without mutating any frozen protocol bytes, hashes or object
-routing.  The writer follows the same safe two-target transaction shape as the
+fingerprint and deterministic verification report) without mutating any frozen
+protocol bytes, hashes or object routing.  The writer follows the same safe
+two-target transaction shape as the
 protocol registry -- resolved/distinct target checks, sibling stages,
 complete-file verification, backup/commit/rollback, exact byte readback after an
 uncertain COMMIT acknowledgement, and cleanup -- and it never removes a target
@@ -25,6 +26,7 @@ import tempfile
 import rfc8785
 
 from openworkproof.environment_fingerprint import SignedEnvironmentFingerprintV01
+from openworkproof.verification_report import VerificationReportV01
 
 
 __all__ = [
@@ -41,9 +43,11 @@ _REGISTRY_FILENAME = "schema-registry.json"
 _REGISTRY_SCHEMA_VERSION = "openworkproof-companion-schema-registry/0.1"
 OBJECT_PATHS = {
     "execution-environment": "execution-environment.schema.json",
+    "verification-report": "verification-report.schema.json",
 }
 SCHEMA_FACTORIES = {
     "execution-environment": SignedEnvironmentFingerprintV01.model_json_schema,
+    "verification-report": VerificationReportV01.model_json_schema,
 }
 _FILENAMES = frozenset({_REGISTRY_FILENAME, *OBJECT_PATHS.values()})
 _LOCK_PREFIX = ".openworkproof-companion-lock-"

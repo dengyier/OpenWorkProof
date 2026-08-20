@@ -21,6 +21,7 @@ import pytest
 import rfc8785
 
 from openworkproof.environment_fingerprint import SignedEnvironmentFingerprintV01
+from openworkproof.verification_report import VerificationReportV01
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -30,10 +31,12 @@ COMPANION_FILENAMES = frozenset(
     {
         "schema-registry.json",
         "execution-environment.schema.json",
+        "verification-report.schema.json",
     }
 )
 COMPANION_OBJECT_PATHS = {
     "execution-environment": "execution-environment.schema.json",
+    "verification-report": "verification-report.schema.json",
 }
 COMPANION_TRANSACTION_PREFIXES = (
     ".openworkproof-companion-backup-",
@@ -174,10 +177,12 @@ def test_registry_entries_are_sorted_with_exact_sha256() -> None:
     for name in COMPANION_OBJECT_PATHS.values():
         assert files[name] == rfc8785.dumps(json.loads(files[name]))
 
-    expected_schema = rfc8785.dumps(
+    assert files["execution-environment.schema.json"] == rfc8785.dumps(
         SignedEnvironmentFingerprintV01.model_json_schema()
     )
-    assert files["execution-environment.schema.json"] == expected_schema
+    assert files["verification-report.schema.json"] == rfc8785.dumps(
+        VerificationReportV01.model_json_schema()
+    )
 
     registry = json.loads(files["schema-registry.json"])
     assert registry == {
@@ -190,7 +195,14 @@ def test_registry_entries_are_sorted_with_exact_sha256() -> None:
                 "sha256": hashlib.sha256(
                     files["execution-environment.schema.json"]
                 ).hexdigest(),
-            }
+            },
+            {
+                "object_type": "verification-report",
+                "path": "verification-report.schema.json",
+                "sha256": hashlib.sha256(
+                    files["verification-report.schema.json"]
+                ).hexdigest(),
+            },
         ],
     }
     assert [entry["object_type"] for entry in registry["schemas"]] == sorted(
@@ -586,6 +598,14 @@ def test_built_wheel_contains_exactly_companion_schema_resources(
                 hashlib.sha256(
                     api.generated_companion_files()[
                         "execution-environment.schema.json"
+                    ]
+                ).hexdigest(),
+            ),
+            (
+                "verification-report.schema.json",
+                hashlib.sha256(
+                    api.generated_companion_files()[
+                        "verification-report.schema.json"
                     ]
                 ).hexdigest(),
             ),

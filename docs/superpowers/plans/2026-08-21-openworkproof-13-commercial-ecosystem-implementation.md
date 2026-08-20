@@ -526,7 +526,7 @@ git commit -m "feat: expose verified delivery surface facts"
 - Regenerate: `src/openworkproof/schemas/companion-v0.1/*.json`
 - Regenerate: `specs/companion-v0.1/*.json`
 
-- [ ] **Step 1: 写三态组合 RED 测试**
+- [x] **Step 1: 写三态组合 RED 测试**
 
 ```python
 @pytest.mark.parametrize(
@@ -552,7 +552,7 @@ def test_report_status_is_fail_closed(delivery, fingerprints, expected):
 另测两个 fingerprint source revision 不一致、相同 key 重复、坏签名、未被
 WorkOrder 信任、重渲染摘要变化、墙钟变化影响结果。
 
-- [ ] **Step 2: 运行测试观察 RED**
+- [x] **Step 2: 运行测试观察 RED**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_verification_report_v01.py -q
@@ -560,7 +560,7 @@ WorkOrder 信任、重渲染摘要变化、墙钟变化影响结果。
 
 Expected：collection ERROR，模块不存在。
 
-- [ ] **Step 3: 实现闭合报告模型和组合规则**
+- [x] **Step 3: 实现闭合报告模型和组合规则**
 
 ```python
 ReportReasonCode = Literal[
@@ -571,6 +571,7 @@ ReportReasonCode = Literal[
     "ENVIRONMENT_COUNT_INSUFFICIENT",
     "ENVIRONMENT_SOURCE_MISMATCH",
     "ENVIRONMENT_SIGNATURE_INVALID",
+    "ENVIRONMENT_SUBJECT_MISMATCH",
 ]
 
 class VerificationReportV01(ProtocolModel):
@@ -597,8 +598,11 @@ class VerificationReportV01(ProtocolModel):
 不是外层 SurfaceManifest digest，避免 report ↔ surface manifest 循环引用。
 `replay_result_digest` 对除自身外的完整 canonical report payload 求 SHA-256；
 `evidence_closed_at` 来自 Delivery Package，不读取当前墙钟。
+所有传入的环境指纹（包括 Delivery 已为 REFUTED/UNKNOWN 时）仍必须完成签名、
+source revision 与 Profile 主体绑定审计；high-risk 的两个 complete 指纹必须来自
+两个不同受信 key。首版输入只接受精确 tuple/list 且最多两个元素，避免无界遍历。
 
-- [ ] **Step 4: 实现静态 HTML renderer**
+- [x] **Step 4: 实现静态 HTML renderer**
 
 ```python
 def render_report_html(report: VerificationReportV01) -> bytes:
@@ -617,7 +621,7 @@ def render_report_html(report: VerificationReportV01) -> bytes:
 真实实现使用静态 CSS、无脚本、无外链，所有文本 `html.escape`。HTML 只渲染
 报告模型字段，不接收 adapter 自由 metadata。
 
-- [ ] **Step 5: 加入 report schema 并提交**
+- [x] **Step 5: 加入 report schema 并提交**
 
 更新 companion `OBJECT_PATHS`/`SCHEMA_FACTORIES`，重新生成双目录：
 
