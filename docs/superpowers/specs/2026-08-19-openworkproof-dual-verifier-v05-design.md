@@ -172,6 +172,12 @@ high_risk 且单验证者结果 → 复用既有 `INDEPENDENCE_INSUFFICIENT`（�
 
 - v0.1–v0.5 schema、golden bytes、冻结 bundle 不变（若无 schema 变更）；
   若加 `DUAL_VERIFIER_DIVERGENCE` reason code，走 schema-registry 流程。
+- **前向不兼容提示**：`arm_results` 的一对一约束是**语义**规则（模型层
+  校验），JSON Schema 从未表达它，因此本次放宽（high_risk 允许每 arm 1 条
+  或 2 条）不产生 schema/锚点信号。钉在已发布 1.2.0 的消费者会以
+  `arm references must be one-to-one` 拒绝新的 high_risk 双套决策，且无法
+  通过 registry digest 察觉。v0.6 引入正式双套引用时，旧的 1 条/arm 的
+  v0.5 high_risk 决策必须继续可重放（不得破坏既有决策链）。
 
 ## 6. 诚实边界
 
