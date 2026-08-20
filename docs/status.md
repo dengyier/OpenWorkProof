@@ -3,6 +3,30 @@
 > 本文档是项目实现状态的权威记录。README 只保留概览，
 > 「已经完成什么」和「尚未完成什么」的完整清单以本文为准。
 
+## 1.3.0 双入口本地候选（2026-08-21）
+
+- 商业入口：GitHub Action 已能从客户私有 v0.5 Delivery Package 和已签环境
+  指纹生成 Surface Bundle，并通过 `owp surface-verify` 离线复核。
+- 生态入口：AgentTeams / MCP 共用同一证据核心；Manager、Developer、Verifier
+  的角色、密钥和 Matrix 事件 ID 均被显式绑定。
+- 跨入口一致性：GitHub 与 AgentTeams 共享中立执行投影；平台身份只进入各自
+  完整指纹，不污染共同事实摘要。
+- AgentTeams 真实运行目前只完成安全 preflight。当前环境缺 Matrix token，且
+  Worker 模型端曾返回额度不足；没有真实三 Agent 工作结果，也没有人工
+  Acceptor 终态。
+- Task 14 fresh 发布门尚未执行，本文不沿用 1.2.0 的历史计数宣称 1.3.0 已发布。
+- 下文凡将 1.2.0 写作“当前”或“待发布”的段落均是带日期的历史快照；当前
+  状态以本节为准，Task 14 完成后再统一回填 fresh 计数。
+
+```yaml
+customer_adoption: not_evidenced
+paid_sow: not_evidenced
+deposit: not_evidenced
+upstream_adoption: not_evidenced
+agentteams_live_execution: not_evidenced
+human_acceptance: not_evidenced
+```
+
 ## 当前发布事实（以本次命令和公开回读为准）
 
 - 干净基线 revision（Task 1 起点，不含候选改动）：

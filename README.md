@@ -12,12 +12,52 @@
 ---
 
 项目地址：https://github.com/dengyier/OpenWorkProof
-当前版本：1.2.0
+本地候选版本：1.3.0（尚未发布；公开 PyPI / MCP Registry 仍以各自页面回读为准）
 许可证：Apache-2.0
 PyPI：[openworkproof](https://pypi.org/project/openworkproof/)
 MCP Registry：[io.github.dengyier/OpenWorkProof](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.2.0)
 
 支持本协议的研究与维护：[GitHub Sponsors](https://github.com/sponsors/dengyier)（早期采用者可获 README 署名）
+
+---
+
+## 1.3 双入口：先卖结果，再建设生态
+
+OpenWorkProof 1.3 把同一套可验证证据核心做成两个入口：
+
+- **商业入口｜GitHub Action**：让 Agent 方案商、AI 解决方案商和系统集成商
+  在现有 PR 流程中生成可离线复核的 Surface Bundle，并把结果交给客户验收；
+- **生态入口｜AgentTeams / MCP**：让 Manager、Developer、Verifier 三个角色
+  共享同一任务但保持角色、密钥、事件和证据边界，为更多编排器提供协议适配面。
+
+最短接入路径（需要现成的 Delivery Package、Verifier 私钥文件、工具链锁和
+沙箱策略；私钥不进入仓库）：
+
+```yaml
+- name: Verify Agent delivery
+  uses: dengyier/OpenWorkProof/integrations/github@v1.3.0
+  with:
+    delivery-package: delivery-package
+    collector-private-key-file: ${{ runner.temp }}/verifier.key
+    collector-actor-id: customer-verifier
+    toolchain-lock-file: toolchain.lock
+    sandbox-policy-file: sandbox-policy.json
+```
+
+报告首先回答四问，而不是展示协议术语：
+
+1. **验证了什么主张？** —— 交付对象、源 revision 与验收范围；
+2. **看到了什么证据？** —— 测试人口、选择结果、负控与环境指纹；
+3. **受到什么约束？** —— 授权、工具、路径、容器、工具链和沙箱边界；
+4. **现在能得出什么结论？** —— `VERIFIED`、`REFUTED` 或 `UNKNOWN`，以及
+   是否仅达到 `READY_FOR_ACCEPTANCE`。
+
+`owp surface-verify PATH` 可在不接入原账本、不访问执行环境的情况下离线复核
+签名 Surface Bundle。三态结论不等于客户验收、付款、结算或法律判断。
+
+AgentTeams 三角色演示目前完成了配置、角色绑定、Matrix 事件 ID 绑定和安全
+录屏前置检查；真实 Worker 执行与人工 Acceptor 闭环仍为
+`agentteams_live_execution: not_evidenced`、`human_acceptance: not_evidenced`。
 
 ---
 
@@ -229,7 +269,7 @@ OpenWorkProof 自建，`upstream_adoption`、`customer_case`、
 
 ### Evidence Lifecycle v0.2 兼容入口
 
-当前 1.2.0 版本保留 v0.2 的 Profile 校验、正负证据提交、验证决定、Delivery
+当前 1.3.0 本地候选保留 v0.2 的 Profile 校验、正负证据提交、验证决定、Delivery
 Package、离线审计和结算就绪度接口：
 
 ```bash
@@ -247,7 +287,7 @@ owp settlement-status pilot.sqlite3
 [v0.2 可验证交付试点](docs/pilot/README.md)。示例对象只用于本地解析和
 接入演练，不代表真实客户、客户验收、付款、资金释放或正式部署。
 
-1.2.0 本地待发布候选在 source revision
+以下是 1.2.0 的历史发布门快照：其候选曾在 source revision
 `d0bec9d2f2c3cf12568fa866d16be1a56de4aa9c` 上完成发布门，并新增不可变
 [候选库存](supply-chain/images/candidates/d0bec9d2f2c3cf12568fa866d16be1a56de4aa9c.json)：
 
@@ -625,8 +665,8 @@ OpenWorkProof/
 - Docker 生产执行器（STARTED_UNCONFIRMED 恢复）
 - Rich #4196 完整五角色端到端演示（Acceptor TCP 签名 + 离线验签）
 - Dify #33013 完整五角色端到端演示（AI 应用平台类，跨项目类型通用性验证）
-- **v0.5 focused：401 passed、0 failed；candidate live：176 passed、0 failed**
-- **1.2.0 本地待发布 required-live 门：3494 passed、0 failed、0 skipped**
+- **1.2.0 历史发布门快照**：v0.5 focused 401 passed；candidate live 176 passed；required-live 3494 passed、0 failed、0 skipped
+- **1.3.0 当前分支 fresh 门**：待 Task 14 完成后填写，不沿用历史计数
 
 **尚未完成：** 其他 ToolCall handler 与 evidence publication 的调用闭包、
 正式赛事提交。

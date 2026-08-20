@@ -95,6 +95,50 @@ def test_pilot_commercial_fields_are_external() -> None:
         )
 
 
+def test_v13_docs_expose_both_surfaces_without_unearned_claims() -> None:
+    chinese = _text("README.md")
+    english = _text("README_en.md")
+    status = _text("docs/status.md")
+    pilot = _text("docs/pilot/README.md")
+
+    assert "GitHub Action" in chinese
+    assert "AgentTeams" in chinese
+    assert "四问" in chinese
+    assert "GitHub Action" in english
+    assert "AgentTeams" in english
+    assert "four-question" in english
+
+    combined = "\n".join((chinese, english, status, pilot))
+    for boundary in (
+        "customer_adoption: not_evidenced",
+        "paid_sow: not_evidenced",
+        "deposit: not_evidenced",
+        "upstream_adoption: not_evidenced",
+        "agentteams_live_execution: not_evidenced",
+        "human_acceptance: not_evidenced",
+    ):
+        assert boundary in combined
+
+
+def test_v13_pilot_has_bounded_inputs_deliverables_and_exclusions() -> None:
+    pilot = _text("docs/pilot/README.md")
+    normalized = " ".join(pilot.split())
+    for requirement in (
+        "真实私有仓库或脱敏仓库",
+        "一个 Agent PR 流程",
+        "客户 Verifier 密钥绑定",
+        "客户 Acceptor",
+        "三个 Surface Bundle",
+        "差异报告",
+        "人工验收 SOP",
+        "不包含代开发",
+        "不提供付款担保",
+        "不构成法律审计",
+        "不包含无限期运维",
+    ):
+        assert requirement in normalized, f"pilot missing: {requirement}"
+
+
 def test_portable_ci_runs_tests_and_frozen_compatibility() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "python -m pytest -q" in workflow

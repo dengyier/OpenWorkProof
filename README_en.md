@@ -12,12 +12,57 @@
 ---
 
 Project: https://github.com/dengyier/OpenWorkProof
-Version: 1.2.0
+Local candidate: 1.3.0 (not released; verify public PyPI / MCP Registry state on their own pages)
 License: Apache-2.0
 PyPI: [openworkproof](https://pypi.org/project/openworkproof/)
 MCP Registry: [io.github.dengyier/OpenWorkProof](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.2.0)
 
 Support the protocol's research and maintenance: [GitHub Sponsors](https://github.com/sponsors/dengyier) (early adopters receive README attribution)
+
+---
+
+## 1.3 Dual Surface: Sell the Outcome, Sustain the Ecosystem
+
+OpenWorkProof 1.3 exposes one verifiable-evidence core through two surfaces:
+
+- **Commercial surface — GitHub Action:** Agent vendors, AI solution providers,
+  and system integrators can produce an offline-verifiable Surface Bundle inside
+  an existing PR workflow and hand it to a customer for acceptance.
+- **Ecosystem surface — AgentTeams / MCP:** Manager, Developer, and Verifier share
+  one task while retaining separate roles, keys, Matrix events, and evidence.
+
+The five-minute path requires an existing Delivery Package, a Verifier key file,
+a toolchain lock, and a sandbox policy. The private key must not enter the repo:
+
+```yaml
+- name: Verify Agent delivery
+  uses: dengyier/OpenWorkProof/integrations/github@v1.3.0
+  with:
+    delivery-package: delivery-package
+    collector-private-key-file: ${{ runner.temp }}/verifier.key
+    collector-actor-id: customer-verifier
+    toolchain-lock-file: toolchain.lock
+    sandbox-policy-file: sandbox-policy.json
+```
+
+The four-question report leads with buyer language:
+
+1. **What claim was verified?** — delivery target, source revision, and scope.
+2. **What evidence was observed?** — population, selection, negative control,
+   and environment fingerprints.
+3. **What constrained the work?** — authority, tools, paths, container,
+   toolchain, and sandbox boundaries.
+4. **What can be concluded now?** — `VERIFIED`, `REFUTED`, or `UNKNOWN`, and
+   whether the work is only `READY_FOR_ACCEPTANCE`.
+
+`owp surface-verify PATH` verifies a signed Surface Bundle offline, without the
+live ledger or execution environment. The three-state result is not customer
+acceptance, payment, settlement, or a legal judgment.
+
+The AgentTeams three-agent demo has configuration, role binding, Matrix event-ID
+binding, and recording preflight. Real Worker execution and human acceptance
+remain `agentteams_live_execution: not_evidenced` and
+`human_acceptance: not_evidenced`.
 
 ---
 
@@ -243,7 +288,7 @@ or regulatory compliance.
 
 ### Evidence Lifecycle v0.2 Compatibility Entry Points
 
-The current 1.2.0 release retains v0.2 profile validation, positive and
+The current local 1.3.0 candidate retains v0.2 profile validation, positive and
 negative evidence commits, verification decisions, Delivery Packages, offline
 audits, and settlement-readiness derivation:
 
@@ -264,7 +309,8 @@ scorecard. The examples are local integration fixtures; they do not evidence a
 real customer, customer acceptance, payment, fund release, or production
 deployment.
 
-The local 1.2.0 release candidate completed its gates on source revision
+The following is the historical 1.2.0 release-gate snapshot. That candidate
+completed its gates on source revision
 `d0bec9d2f2c3cf12568fa866d16be1a56de4aa9c` and added an immutable
 [candidate inventory](supply-chain/images/candidates/d0bec9d2f2c3cf12568fa866d16be1a56de4aa9c.json):
 
@@ -636,8 +682,8 @@ OpenWorkProof/
 - Docker production executor (STARTED_UNCONFIRMED recovery)
 - Rich #4196 full five-role E2E demo (Acceptor TCP signing + offline verification)
 - Dify #33013 full five-role E2E demo (AI application platform, cross-project-type generality)
-- **v0.5 focused: 401 passed, 0 failed; candidate live: 176 passed, 0 failed**
-- **Local 1.2.0 required-live gate: 3494 passed, 0 failed, 0 skipped**
+- **Historical 1.2.0 release-gate snapshot:** v0.5 focused 401 passed; candidate live 176 passed; required-live 3494 passed, 0 failed, 0 skipped
+- **Current 1.3.0 branch fresh gates:** pending Task 14; historical counts are not reused
 
 **Not yet complete:** remaining ToolCall handler closures, event submission.
 

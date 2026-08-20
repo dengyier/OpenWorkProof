@@ -1369,7 +1369,7 @@ git commit -m "test: enforce shared surface evidence contract"
 - Modify: `tests/test_documentation_boundaries.py`
 - Modify: `tests/test_package.py`
 
-- [ ] **Step 1: 写版本与诚实边界 RED 测试**
+- [x] **Step 1: 写版本与诚实边界 RED 测试**
 
 ```python
 def test_release_metadata_is_130() -> None:
@@ -1385,7 +1385,7 @@ def test_docs_do_not_claim_unearned_commercial_status() -> None:
     assert "not_evidenced" in text
 ```
 
-- [ ] **Step 2: 运行测试观察 RED**
+- [x] **Step 2: 运行测试观察 RED**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_package.py \
@@ -1394,7 +1394,7 @@ def test_docs_do_not_claim_unearned_commercial_status() -> None:
 
 Expected：版本测试 FAIL，当前仍为 1.2.0。
 
-- [ ] **Step 3: 更新版本与双语文档**
+- [x] **Step 3: 更新版本与双语文档**
 
 README 顺序：
 
@@ -1408,13 +1408,13 @@ README 顺序：
 
 所有测试数量在 Task 14 fresh 门后回填，不能预写。
 
-- [ ] **Step 4: 更新 21 天试点 SOP**
+- [x] **Step 4: 更新 21 天试点 SOP**
 
 `docs/pilot/README.md` 写明：输入是一个真实私有/脱敏仓库、一个 Agent PR 流程、
 客户提供的 Verifier key binding 和验收人；交付物是三次 Surface Bundle、差异
 报告、人工验收 SOP；不包含代开发、付款担保、法律审计和无限运维。
 
-- [ ] **Step 5: 回归并提交**
+- [x] **Step 5: 回归并提交**
 
 ```bash
 ./.venv/bin/python -m pip install -e .

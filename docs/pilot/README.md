@@ -15,6 +15,28 @@
 - 所有客户验收、付款、正式部署、重复采购只有在对应外部材料存在后，
   才能从 `not evidenced` 更新为事实。
 
+## 1.3 试点合同边界
+
+**客户输入**：一个真实私有仓库或脱敏仓库、一个 Agent PR 流程、客户
+Verifier 密钥绑定和客户 Acceptor。客户保管自己的私钥，并决定最终接受、
+拒绝或要求补证。
+
+**21 天交付物**：在基线、修订和最终验收三个节点分别生成**三个 Surface
+Bundle**，同时提供一份差异报告和一份人工验收 SOP。每个 Bundle 都应能由
+未接入原执行系统的第三方离线复核。
+
+**明确排除**：本试点不包含代开发，不提供付款担保，不构成法律审计，
+不包含无限期运维。技术状态不会自动制造客户验收或商业事实。
+
+```yaml
+customer_adoption: not_evidenced
+paid_sow: not_evidenced
+deposit: not_evidenced
+upstream_adoption: not_evidenced
+agentteams_live_execution: not_evidenced
+human_acceptance: not_evidenced
+```
+
 ## 交付信任等级与成本边界
 
 | 等级 | 增量机制 | 交付物与适用边界 |
