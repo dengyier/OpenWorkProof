@@ -3,9 +3,45 @@
 > 本文档是项目实现状态的权威记录。README 只保留概览，
 > 「已经完成什么」和「尚未完成什么」的完整清单以本文为准。
 
-当前本地待发布分发版本：1.2.0；公开 PyPI/MCP 分发仍为 1.1.1，发布动作尚未
-执行。当前开发分支支持的冻结协议 Schema：0.1、0.2、0.3、0.4 与 0.5。分发版本
-和协议版本分别记录，不得把 Python 分发版本解释成协议版本。
+## 当前发布事实（以本次命令和公开回读为准）
+
+- 干净基线 revision（Task 1 起点，不含候选改动）：
+  `5cecd4265cbf2b7b118914f386fec87e7de744c4`。
+- 基线三文件命令与精确结果（controller fresh，在干净基线 revision
+  `5cecd426…` 上复跑，未含任何候选改动）：
+  - `./.venv/bin/python -m pytest -q tests/test_package.py
+    tests/test_documentation_boundaries.py tests/test_schema_registry.py`
+    ：`47 passed in 3.07s`。
+- Task 1 candidate diff（尚未提交，无 commit SHA）加入 CI 契约测试后，
+  Harness 复跑三文件命令：
+  - `./.venv/bin/python -m pytest -q tests/test_package.py
+    tests/test_documentation_boundaries.py tests/test_schema_registry.py`
+    ：`48 passed in 3.91s`。该结果属 candidate 改动后的复跑，不归入干净基线
+    revision `5cecd426…` 已有事实，也不预写任何未来 commit SHA。
+- 本轮其余命令与精确结果：
+  - `./.venv/bin/python -m pytest -q tests/test_documentation_boundaries.py
+    tests/test_package.py`：7 passed、0 failed、0 skipped、0 warnings（0.02s）；
+  - `./.venv/bin/python -m pip check`：No broken requirements found；
+  - `./.venv/bin/python -m compileall -q src tests`：通过；
+  - `git diff --check`：通过。
+- 公开回读（来源与回读时间如实标注；回读失败/无结论一律 `not_evidenced`，禁止
+  猜测）：
+  - Python package（PyPI，来源
+    `https://pypi.org/pypi/openworkproof/json`，回读 2026-08-20T19:27Z）：
+    最新版本 `1.2.0`；
+  - GitHub Release（来源
+    `https://api.github.com/repos/dengyier/OpenWorkProof/releases/latest`，
+    回读 2026-08-20T19:27Z）：最新 `v1.2.0`（published 2026-08-16T09:31:26Z）；
+  - MCP Registry（来源
+    `https://registry.modelcontextprotocol.io/v0.1/servers?search=openworkproof`，
+    回读 2026-08-20T19:31:58Z，HTTP 200）：返回
+    `io.github.dengyier/OpenWorkProof` 版本 `1.2.0`、package `openworkproof`
+    版本 `1.2.0`、official metadata `isLatest: true`、publishedAt
+    `2026-08-16T09:59:03.383097Z`。以上仅为公开注册表回读结果，不扩大为
+    生态采纳或上游采纳。
+- 客户采用、付费 SOW、付款、续费、上游采纳：`not_evidenced`。
+- 历史测试数字保留为历史记录（见下文各阶段小节），不覆盖、不冒充本快照的当前
+  结果。
 
 ## Dual Verifier v0.5 本地开发状态（Phase 3，2026-08-19）
 

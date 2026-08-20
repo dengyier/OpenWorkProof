@@ -93,3 +93,12 @@ def test_pilot_commercial_fields_are_external() -> None:
         assert "协议状态绝不制造商业事实" in text or (
             "协议不证明收到定金" in text
         )
+
+
+def test_portable_ci_runs_tests_and_frozen_compatibility() -> None:
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "python -m pytest -q" in workflow
+    assert "tests/test_schema_registry.py" in workflow
+    assert "python -m pip check" in workflow
+    assert "python -m compileall -q src tests" in workflow
+    assert "OPENWORKPROOF_REQUIRE_LIVE" not in workflow
