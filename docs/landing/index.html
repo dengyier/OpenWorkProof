@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenWorkProof — 你的 Agent 说"测试全绿"，我们独立验证它到底做了什么</title>
+<meta name="description" content="一份可离线重放的工作验证报告：VERIFIED / REFUTED / UNKNOWN，附完整证据链。开源协议，5 分钟即可自行复现。">
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --ink: #1a1a1a;
+    --muted: #555;
+    --accent: #0a5c4a;
+    --accent-soft: #e3f1ec;
+    --line: #ddd;
+    --warn: #7a3b00;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.65;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 48px 24px 96px; }
+  .badge {
+    display: inline-block; font-size: 13px; color: var(--accent);
+    border: 1px solid var(--accent); border-radius: 999px;
+    padding: 2px 12px; margin-bottom: 18px; letter-spacing: .02em;
+  }
+  h1 { font-size: 34px; line-height: 1.25; margin-bottom: 16px; }
+  .sub { font-size: 18px; color: var(--muted); margin-bottom: 28px; }
+  .cta {
+    display: inline-block; background: var(--accent); color: #fff;
+    text-decoration: none; font-weight: 600; padding: 14px 28px;
+    border-radius: 8px; font-size: 17px; margin-bottom: 10px;
+  }
+  .cta:hover { background: #08493a; }
+  .cta-note { font-size: 13px; color: var(--muted); margin-bottom: 44px; }
+  section { margin-bottom: 44px; }
+  h2 { font-size: 22px; margin-bottom: 14px; }
+  ul { padding-left: 22px; }
+  li { margin-bottom: 10px; }
+  .card {
+    background: #fff; border: 1px solid var(--line); border-radius: 10px;
+    padding: 20px 24px; margin-bottom: 14px;
+  }
+  .card h3 { font-size: 16px; margin-bottom: 6px; }
+  .verdict { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .verified { color: var(--accent); font-weight: 700; }
+  .refuted { color: #a40000; font-weight: 700; }
+  .unknown { color: var(--warn); font-weight: 700; }
+  code {
+    background: #ececec; border-radius: 4px; padding: 1px 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em;
+  }
+  pre {
+    background: #1a1a1a; color: #e8e8e8; border-radius: 8px;
+    padding: 16px 18px; overflow-x: auto; font-size: 13px; line-height: 1.5;
+  }
+  .footnote { font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 18px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <span class="badge">开源 · 可离线重放 · Apache-2.0</span>
+  <h1>你的 Agent 说"测试全绿"。它到底做了什么？</h1>
+  <p class="sub">
+    一份可离线重放的工作验证报告——<span class="verdict">VERIFIED</span> /
+    <span class="verdict">REFUTED</span> / <span class="verdict">UNKNOWN</span>，
+    附完整证据链。客户不信任我们的服务器，也可以自己复现。
+  </p>
+
+  <a class="cta" href="#free-sample">免费做第一个样例（5 分钟复现）</a>
+  <p class="cta-note">你给一个 Agent 交付，我们出一份验证报告；你花 5 分钟在本地复现，无需信任任何服务器。</p>
+
+  <section>
+    <h2>这些坑，你可能都见过</h2>
+    <ul>
+      <li>Agent 声称"测试全绿"，实际改的是测试而不是 bug——上线即故障。</li>
+      <li>Agent 声称"做完了"，实际只交付了 21% 的工作量。</li>
+      <li>Agent 自评自过——审查自己，结论永远是"通过"。</li>
+      <li>交付方与验收方各执一词，谁也拿不出可独立复核的证据。</li>
+    </ul>
+    <p>共同点：<strong>没有人独立验证过"Agent 到底做了什么"</strong>。OpenWorkProof 补上这一层。</p>
+  </section>
+
+  <section>
+    <h2>交付物：一份《Agent 工作验证报告》</h2>
+    <div class="card">
+      <h3>1. 三态结论</h3>
+      <p>
+        一次交付 → 一份结论：
+        <span class="verdict">VERIFIED</span>（证据链完整且一致）、
+        <span class="verdict">REFUTED</span>（证据被推翻，如负控未按注册原因失败）、
+        <span class="verdict">UNKNOWN</span>（证据不足——安全的结论，不是故障）。
+      </p>
+    </div>
+    <div class="card">
+      <h3>2. 证据摘要</h3>
+      <p>授权链、执行范围、合格人口（选了多少 / 合格多少）、负控结果、<br>
+        源码 revision、参数、manifest digest——全部签名、只追加、不可篡改。</p>
+    </div>
+    <div class="card">
+      <h3>3. 可重放包</h3>
+      <p>一份 delivery package + 一条命令，客户在本地离线复现：
+        <code>verify_delivery_package</code>。不依赖我们的服务器、不依赖网络。</p>
+    </div>
+    <div class="card">
+      <h3>4. 独立验证（高风险工作）</h3>
+      <p>两个不同信任域的 Verifier 各自独立执行、独立签名，结果逐字段交叉收敛；
+        任一承载结论的字段不一致 → 拒绝形成决策。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>为什么可以信</h2>
+    <ul>
+      <li><strong>5 分钟挑战</strong>：我们只改证据链里的一个字节，验证器仍能抓出它——你自己跑一遍。</li>
+      <li><strong>协议开源</strong>：全部代码公开，Apache-2.0，冻结 Schema 0.1–0.5。</li>
+      <li><strong>离线可重放</strong>：客户在任何一台干净机器上复现，不信任任何一方。</li>
+    </ul>
+    <p>试试 5 分钟挑战：</p>
+    <pre>git clone https://github.com/dengyier/OpenWorkProof
+cd OpenWorkProof
+python -m pip install -e .
+python tests/evidence-bundles/verify_evidence_bundle.py \
+  tests/evidence-bundles/rich-4196-integrity-v05-delivery-package.json</pre>
+  </section>
+
+  <section id="free-sample">
+    <h2>免费做第一个样例</h2>
+    <p>
+      你提供一个 Agent 交付（repo / commit / 一个交付物），我们跑一次验证，
+      出一份报告 + 可重放包，你花 5 分钟复现。
+      有用再谈付费，没用你零损失。
+    </p>
+    <p>
+      联系：<a href="mailto:qyue0113@gmail.com">qyue0113@gmail.com</a> ·
+      <a href="https://github.com/dengyier/OpenWorkProof">GitHub</a> ·
+      <a href="https://github.com/sponsors/dengyier">GitHub Sponsors</a>
+    </p>
+  </section>
+
+  <p class="footnote">
+    诚实边界：本页描述的是协议能力与交付物，不是客户案例、付款或采用证据
+    （全部 <code>not_evidenced</code>）。报告证明"证据链可重放 + 三态决策"，
+    不证明工作正确性，也不代替客户做验收决定。协议不托管资金、不执行付款。
+  </p>
+</main>
+</body>
+</html>
