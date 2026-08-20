@@ -7,6 +7,48 @@
 执行。当前开发分支支持的冻结协议 Schema：0.1、0.2、0.3、0.4 与 0.5。分发版本
 和协议版本分别记录，不得把 Python 分发版本解释成协议版本。
 
+## Dual Verifier v0.5 本地开发状态（Phase 3，2026-08-19）
+
+`main` 本地新增 Dual Verifier（双独立密钥交叉验证）：high_risk 决策要求
+双套 arm results（每 arm 每个 verifier binding 各一套），`compose` 逐字段
+交叉验证全部承载结论字段（expectation_status / execution_status /
+mutation_status / reason_codes / action_receipt_ids / observed_* /
+scope_expectation_status / population_observations / control_observation /
+evidence snapshot），任一不一致 → 组合失败（`VerificationInputError`，临时
+折中：v0.6 决策模型支持双套引用后用 `DUAL_VERIFIER_DIVERGENCE` 正式入账）。
+决策引用完整双套，commit/replay/离线包均从决策自身引用（`selected_ids`）
+重跑交叉验证，不依赖签名数推导独立性；prepare 用每 (arm, verifier) 最新；
+commit stale 门要求决策引用集精确等于 prepare 会加载的那一套（验证者不能
+引用自己的旧轮压掉更新的失败轮）。单验证者集合 → UNKNOWN（independence
+不足）；split 覆盖拒绝；standard 语义不变；v0.1–v0.4 冻结面未触碰，v0.5
+schema 仅新增 `DUAL_VERIFIER_DIVERGENCE` reason code（走 schema-registry
+流程重新生成 + 更新冻结锚点 + 刷新冻结 demo bundle）。
+
+- 独立双审 **7 轮**（spec + quality/security）全部 REJECT 关闭后终审
+  APPROVE + APPROVE-WITH-NOTES：R1（只比 evidence snapshot → 逐字段收敛）、
+  R2（双验证者路径 prepare/commit/replay 不可达 → 决策自证全链双套）、
+  N1（签名数推导独立性恒真 → 删除 flag）、N8（commit stale 粒度 → 引用集
+  精确等于 prepare 加载集，质量审查 PoC 原样重跑验证）、N9（每
+  (arm, verifier) 行数门）等；终审 Notes 清理（imports 上移、死检查删除、
+  报错文案、§4.2 注释、自报 created_at 诚实边界）已落实。
+- fresh 测量（2026-08-19，HEAD `6e56bb0`）：
+  - v0.5 focused：**dual-verifier 10 测试 + retraction/delivery/schema 全绿**；
+  - 全量便携：**3358 passed、0 failed、6 skipped**（非 Linux 环境 skip）；
+  - candidate 重建：`supply-chain/images/candidates/837dbb10….json`
+    （4 归档 + SHA256SUMS + sidecar），candidate 两套件 + inventory-binds/
+    selector 全绿（live Docker）；
+  - **required-live 全量**（
+    `docker.io/openworkproof/execution-test@sha256:3065c0005c…`）：
+    **3543 passed、0 failed、0 skipped，零 warning**（13 分 35 秒）；
+  - pip check / compileall / git diff --check：PASS；
+  - Docker 残留：本任务零残留。
+- 诚实边界不变：无客户采用、无付费 SOW、无定金、无上游采纳（全部
+  `not_evidenced`）；Dual Verifier 证明"协议要求双验证者收敛"，不证明
+  "任何实际交付都经双验证"、"验证者诚实"或"无共谋"；分歧不入账不可审计、
+  单验证者可无痕阻断全部 high_risk、配对时间差未强制、新鲜度按验证者自报
+  `created_at`（backdate 与不发布等价）——均为 spec §6 诚实记录的边界。
+- 本地 HEAD `6e56bb0`，领先 origin 若干提交，未 push。
+
 ## RetractionReceipt v0.5 本地开发状态（Phase 2，2026-08-19）
 
 `main` 本地新增 RetractionReceipt（语义可撤销性）：`RetractionReceiptV05`
