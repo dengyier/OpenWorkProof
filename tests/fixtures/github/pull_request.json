@@ -1,0 +1,21 @@
+{
+  "pull_request": {
+    "base": {
+      "repo": {
+        "fork": false,
+        "full_name": "example/openworkproof"
+      }
+    },
+    "head": {
+      "repo": {
+        "fork": false,
+        "full_name": "example/openworkproof"
+      },
+      "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "number": 42
+  },
+  "repository": {
+    "full_name": "example/openworkproof"
+  }
+}

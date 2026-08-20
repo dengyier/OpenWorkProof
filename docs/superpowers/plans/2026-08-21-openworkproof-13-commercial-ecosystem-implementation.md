@@ -852,7 +852,7 @@ git commit -m "feat: expose surface bundle verification"
 - Create: `tests/test_github_surface.py`
 - Create: `tests/fixtures/github/pull_request.json`
 
-- [ ] **Step 1: 写 GitHub adapter RED 测试**
+- [x] **Step 1: 写 GitHub adapter RED 测试**
 
 ```python
 def test_github_projection_matches_pr_head(fixed_github_env):
@@ -874,7 +874,7 @@ runner/container digest、secret 不进入 dump、workflow identity 只存摘要
 `run_action_fixture` 是本地 runner 集成路径；Task 9 的 smoke workflow 是
 GitHub-hosted runner 集成路径，两者都必须通过。
 
-- [ ] **Step 2: 运行测试观察 RED**
+- [x] **Step 2: 运行测试观察 RED**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_github_surface.py -q
@@ -882,7 +882,7 @@ GitHub-hosted runner 集成路径，两者都必须通过。
 
 Expected：collection ERROR，模块不存在。
 
-- [ ] **Step 3: 实现平台来源模型与投影**
+- [x] **Step 3: 实现平台来源模型与投影**
 
 ```python
 class GitHubExecutionSourceV01(ProtocolModel):
@@ -904,12 +904,16 @@ class GitHubExecutionSourceV01(ProtocolModel):
 `project_github_environment` 对 workflow fields 的 canonical projection 求摘要，
 不把 repository、run id 或 workflow ref 原文写入中立指纹。
 
-- [ ] **Step 4: 实现缺失字段的诚实降级**
+`pull_request` 事件的 `GITHUB_SHA` 是 merge ref；adapter 单独保存它用于 workflow
+identity 摘要，并把实际 checkout revision 与 event 中的 PR head SHA 比较。这样既
+拒绝 checkout 漂移，也不会把 GitHub 的正常 merge-ref 语义误判成漂移。
+
+- [x] **Step 4: 实现缺失字段的诚实降级**
 
 runner/container/toolchain/sandbox 任一不可得时，把精确 missing reason 写入
 payload。不得补全零 digest，也不得用 mutable image tag 代替 digest。
 
-- [ ] **Step 5: 回归并提交**
+- [x] **Step 5: 回归并提交**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_github_surface.py \
