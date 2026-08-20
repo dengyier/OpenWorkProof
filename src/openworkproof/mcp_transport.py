@@ -22,6 +22,8 @@ over stdio.  The server is organised in three layers:
 - ``owp_run_verification``       — prepare or commit one versioned verification step
 - ``owp_get_decision``           — prepare a versioned verification decision draft
 - ``owp_build_delivery_package`` — export a closed delivery package
+- ``owp_verify_surface_bundle``  — replay a surface bundle without writes
+- ``owp_render_surface_report``  — return its verified derived report
 - ``owp_get_settlement_readiness`` — derive the current readiness snapshot
 
 **Standalone validation tools:**
@@ -618,6 +620,29 @@ def owp_build_delivery_package(
         Path(output),
         privacy_view,
     )
+
+
+@mcp.tool()
+def owp_verify_surface_bundle(package_path: str) -> dict[str, Any]:
+    """Verify and replay one surface bundle without writing or signing."""
+    return _service_call(
+        OpenWorkProofServices().verify_surface,
+        Path(package_path),
+    )
+
+
+@mcp.tool()
+def owp_render_surface_report(package_path: str) -> dict[str, Any]:
+    """Return the verified derived report, never payment or acceptance."""
+
+    def render(path: Path) -> dict[str, Any]:
+        verified = OpenWorkProofServices().verify_surface(path)
+        return {
+            "report": verified["report"],
+            "boundary": "not payment or acceptance",
+        }
+
+    return _service_call(render, Path(package_path))
 
 
 @mcp.tool()

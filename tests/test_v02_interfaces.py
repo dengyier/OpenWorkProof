@@ -180,6 +180,93 @@ def test_services_settlement_status_delegates_without_recomputing(
     assert calls == [ledger]
 
 
+def test_services_surface_facade_delegates_to_single_core(
+    tmp_path, monkeypatch
+) -> None:
+    from openworkproof.environment_fingerprint import (
+        SignedEnvironmentFingerprintV01,
+    )
+
+    delivery = tmp_path / "delivery"
+    output = tmp_path / "surface"
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    first.write_text('{"fingerprint":"first"}', encoding="utf-8")
+    second.write_text('{"fingerprint":"second"}', encoding="utf-8")
+    parsed = iter(("signed-first", "signed-second"))
+    calls = []
+
+    monkeypatch.setattr(
+        SignedEnvironmentFingerprintV01,
+        "model_validate_json",
+        lambda _payload: next(parsed),
+    )
+    monkeypatch.setattr(
+        services,
+        "build_surface_bundle",
+        lambda source, fingerprints, target: calls.append(
+            ("build", source, fingerprints, target)
+        ),
+    )
+
+    class _Report(_Dumpable):
+        decision_status = "VERIFIED"
+        reason_codes = ()
+        bundle_digest = "a" * 64
+
+    class _SurfaceResult:
+        report = _Report({"decision_status": "VERIFIED"})
+        manifest_digest = "c" * 64
+
+    monkeypatch.setattr(
+        services,
+        "verify_surface_bundle",
+        lambda target: _SurfaceResult(),
+    )
+    facade = OpenWorkProofServices()
+    result = facade.build_surface(delivery, (first, second), output)
+    assert result["decision_status"] == "VERIFIED"
+    assert calls == [
+        ("build", delivery, ("signed-first", "signed-second"), output)
+    ]
+
+
+def test_v02_mcp_surface_tools_are_read_only_and_delegate_once(monkeypatch) -> None:
+    import inspect
+
+    from openworkproof import mcp_transport
+
+    calls = []
+
+    class FakeServices:
+        def verify_surface(self, path):
+            calls.append(path)
+            return {
+                "decision_status": "UNKNOWN",
+                "reason_codes": ["ENVIRONMENT_INCOMPLETE"],
+                "bundle_digest": "b" * 64,
+                "report": {"decision_status": "UNKNOWN"},
+            }
+
+    monkeypatch.setattr(mcp_transport, "OpenWorkProofServices", FakeServices)
+    verified = mcp_transport.owp_verify_surface_bundle("surface")
+    rendered = mcp_transport.owp_render_surface_report("surface")
+    assert verified["ok"] is True
+    assert verified["decision_status"] == "UNKNOWN"
+    assert rendered == {
+        "schema_version": "openworkproof/mcp/0.2",
+        "ok": True,
+        "report": {"decision_status": "UNKNOWN"},
+        "boundary": "not payment or acceptance",
+    }
+    assert calls == [Path("surface"), Path("surface")]
+    for function in (
+        mcp_transport.owp_verify_surface_bundle,
+        mcp_transport.owp_render_surface_report,
+    ):
+        assert "private_key" not in inspect.signature(function).parameters
+
+
 def test_v02_mcp_tools_are_registered() -> None:
     from openworkproof import mcp_transport
 
@@ -190,6 +277,8 @@ def test_v02_mcp_tools_are_registered() -> None:
         "owp_get_decision",
         "owp_build_delivery_package",
         "owp_get_settlement_readiness",
+        "owp_verify_surface_bundle",
+        "owp_render_surface_report",
     } <= names
 
 

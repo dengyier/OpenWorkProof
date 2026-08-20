@@ -12,6 +12,9 @@ from openworkproof.delivery_package import (
     export_delivery_package,
     verify_delivery_package,
 )
+from openworkproof.environment_fingerprint import (
+    SignedEnvironmentFingerprintV01,
+)
 from openworkproof.models import (
     WorkOrder,
     DecisionDraftRequest,
@@ -58,6 +61,10 @@ from openworkproof.scope import (
     compare_observed_scope,
 )
 from openworkproof.settlement import read_settlement_snapshot
+from openworkproof.surface_bundle import (
+    build_surface_bundle,
+    verify_surface_bundle,
+)
 from openworkproof.verification import (
     commit_evaluation_scope,
     commit_verification_arm_result,
@@ -322,6 +329,37 @@ class OpenWorkProofServices:
 
     def audit_delivery(self, package: Path) -> dict:
         return verify_delivery_package(package).model_dump(mode="json")
+
+    def build_surface(
+        self,
+        delivery_package: Path,
+        fingerprint_paths: tuple[Path, ...],
+        output: Path,
+    ) -> dict:
+        if type(fingerprint_paths) is not tuple or not 1 <= len(
+            fingerprint_paths
+        ) <= 2:
+            raise ValueError("surface requires one or two fingerprint files")
+        fingerprints = tuple(
+            SignedEnvironmentFingerprintV01.model_validate_json(
+                path.read_bytes()
+            )
+            for path in fingerprint_paths
+        )
+        build_surface_bundle(delivery_package, fingerprints, output)
+        return self.verify_surface(output)
+
+    def verify_surface(self, package: Path) -> dict:
+        verified = verify_surface_bundle(package)
+        report = verified.report
+        return {
+            "decision_status": report.decision_status,
+            "reason_codes": list(report.reason_codes),
+            "bundle_digest": report.bundle_digest,
+            "surface_manifest_digest": verified.manifest_digest,
+            "report": report.model_dump(mode="json"),
+            "boundary": "not payment or acceptance",
+        }
 
     def validate_population_observation(
         self, payload: Mapping[str, object]

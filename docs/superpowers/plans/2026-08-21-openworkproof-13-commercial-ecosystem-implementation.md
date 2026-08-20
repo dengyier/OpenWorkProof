@@ -752,7 +752,7 @@ git commit -m "feat: add offline-verifiable surface bundles"
 - Modify: `tests/test_cli_transport.py`
 - Modify: `tests/test_v02_interfaces.py`
 
-- [ ] **Step 1: 写 CLI 0/2/3/4 RED 测试**
+- [x] **Step 1: 写 CLI 0/2/3/4 RED 测试**
 
 ```python
 @pytest.mark.parametrize(
@@ -784,7 +784,7 @@ def test_surface_verify_operational_error_is_four(monkeypatch):
 保留旧 command 的历史退出码；0/2/3/4 只用于新增 `surface-*` 命令，避免 minor
 release 破坏既有脚本。
 
-- [ ] **Step 2: 运行测试观察 RED**
+- [x] **Step 2: 运行测试观察 RED**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_cli_transport.py -q -k surface
@@ -792,7 +792,7 @@ release 破坏既有脚本。
 
 Expected：FAIL，parser 不认识命令。
 
-- [ ] **Step 3: 新增 facade 与 parser**
+- [x] **Step 3: 新增 facade 与 parser**
 
 ```python
 def cli_surface_build(delivery_package, fingerprints, output_path) -> dict:
@@ -815,7 +815,7 @@ owp surface-verify SURFACE
 
 `surface-build` 不接受 raw private key；签名必须在 build 前完成。
 
-- [ ] **Step 4: 新增 MCP 只读工具**
+- [x] **Step 4: 新增 MCP 只读工具**
 
 ```python
 @mcp.tool()
@@ -833,7 +833,7 @@ def owp_render_surface_report(package_path: str) -> dict[str, Any]:
 
 两个工具只读，不写账本、不签名、不接受私钥。
 
-- [ ] **Step 5: 回归并提交**
+- [x] **Step 5: 回归并提交**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_cli_transport.py tests/test_v02_interfaces.py \

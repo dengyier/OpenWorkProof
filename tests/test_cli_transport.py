@@ -187,6 +187,74 @@ def test_mcp_server_registers_transport_tools() -> None:
     assert "owp_repo_read" in names
 
 
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    (("VERIFIED", 0), ("REFUTED", 2), ("UNKNOWN", 3)),
+)
+def test_surface_verify_uses_closed_exit_codes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    status: str,
+    expected: int,
+) -> None:
+    result = {
+        "decision_status": status,
+        "reason_codes": (
+            []
+            if status == "VERIFIED"
+            else [
+                "DELIVERY_REFUTED"
+                if status == "REFUTED"
+                else "DELIVERY_UNKNOWN"
+            ]
+        ),
+        "bundle_digest": "a" * 64,
+    }
+    monkeypatch.setattr(cli, "cli_surface_verify", lambda _path: result)
+    assert cli.app(["surface-verify", "bundle"]) == expected
+    assert json.loads(capsys.readouterr().out) == result
+
+
+def test_surface_verify_operational_error_is_four(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fail(_path):
+        raise cli.CliError("surface input is invalid")
+
+    monkeypatch.setattr(cli, "cli_surface_verify", fail)
+    assert cli.app(["surface-verify", "/private/customer/surface"]) == 4
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "decision_status": None,
+        "reason_codes": ["OPERATIONAL_ERROR"],
+        "bundle_digest": None,
+    }
+    assert "surface input is invalid" in captured.err
+    assert "/private/customer/surface" not in captured.out
+
+
+def test_surface_build_parser_accepts_signed_fingerprints_only() -> None:
+    parsed = cli.build_parser().parse_args(
+        [
+            "surface-build",
+            "delivery",
+            "--fingerprint",
+            "environment-a.json",
+            "--fingerprint",
+            "environment-b.json",
+            "--output",
+            "surface",
+        ]
+    )
+    assert parsed.command == "surface-build"
+    assert parsed.fingerprints == [
+        "environment-a.json",
+        "environment-b.json",
+    ]
+    assert not any("private_key" in name for name in vars(parsed))
+
+
 def test_mcp_owp_status_tool(
     tmp_path, signed_work_order, ephemeral_role_keys, sidecar_receipt_factory, fixed_now
 ) -> None:

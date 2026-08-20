@@ -13,6 +13,8 @@ Commands:
 - ``owp verify-positive|verify-negative`` — commit one signed arm result
 - ``owp verify-compose``         — explicitly prepare or commit a decision
 - ``owp delivery-build``         — export an offline delivery package
+- ``owp surface-build``          — build a signed-evidence surface bundle
+- ``owp surface-verify``         — replay a surface with closed exit codes
 - ``owp audit-replay|audit-explain|audit-compare`` — inspect packages offline
 - ``owp settlement-status``      — derive readiness without claiming payment
 - ``owp scope-build|scope-validate|scope-commit|scope-compare`` — v0.3 scope
@@ -348,6 +350,26 @@ def cli_package_replay(package: str | Path) -> dict:
     )
 
 
+def cli_surface_build(
+    delivery_package: str | Path,
+    fingerprints: Sequence[str | Path],
+    output_path: str | Path,
+) -> dict:
+    return _service_result(
+        OpenWorkProofServices().build_surface,
+        Path(delivery_package),
+        tuple(Path(path) for path in fingerprints),
+        Path(output_path),
+    )
+
+
+def cli_surface_verify(package: str | Path) -> dict:
+    return _service_result(
+        OpenWorkProofServices().verify_surface,
+        Path(package),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="owp")
     parser.add_argument(
@@ -413,6 +435,26 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("public", "diagnostic", "customer_private"),
         required=True,
     )
+
+    surface_build = sub.add_parser(
+        "surface-build", help="build an offline-verifiable surface bundle"
+    )
+    surface_build.add_argument("delivery", help="v0.5 delivery package directory")
+    surface_build.add_argument(
+        "--fingerprint",
+        dest="fingerprints",
+        action="append",
+        required=True,
+        help="signed environment fingerprint JSON (repeat at most twice)",
+    )
+    surface_build.add_argument(
+        "--output", dest="output_path", required=True, help="new surface directory"
+    )
+
+    surface_verify = sub.add_parser(
+        "surface-verify", help="verify and replay one surface bundle offline"
+    )
+    surface_verify.add_argument("surface", help="surface bundle directory")
 
     scope_build = sub.add_parser(
         "scope-build", help="build an unsigned v0.3 Evaluation Scope draft"
@@ -586,6 +628,14 @@ def app(argv: Sequence[str] | None = None) -> int:
                 args.output_path,
                 args.privacy_view,
             )
+        elif args.command == "surface-build":
+            result = cli_surface_build(
+                args.delivery,
+                args.fingerprints,
+                args.output_path,
+            )
+        elif args.command == "surface-verify":
+            result = cli_surface_verify(args.surface)
         elif args.command == "audit-replay":
             result = cli_audit_replay(args.package)
         elif args.command == "audit-explain":
@@ -598,6 +648,21 @@ def app(argv: Sequence[str] | None = None) -> int:
             parser.error(f"unknown command: {args.command}")
             return 2
     except CliError as error:
+        if args.command in {"surface-build", "surface-verify"}:
+            print(
+                json.dumps(
+                    {
+                        "decision_status": None,
+                        "reason_codes": ["OPERATIONAL_ERROR"],
+                        "bundle_digest": None,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                )
+            )
+            print(json.dumps({"error": str(error)}, ensure_ascii=False), file=sys.stderr)
+            return 4
         print(json.dumps({"error": str(error)}, ensure_ascii=False), file=sys.stderr)
         return 1
     if args.output == "text" and args.command == "status":
@@ -615,8 +680,25 @@ def app(argv: Sequence[str] | None = None) -> int:
             f"valid={str(result['valid']).lower()} "
             f"authority={result['authority']} member_count={result['member_count']}"
         )
+    elif args.command in {"surface-build", "surface-verify"}:
+        print(
+            json.dumps(
+                {
+                    "decision_status": result["decision_status"],
+                    "reason_codes": result["reason_codes"],
+                    "bundle_digest": result["bundle_digest"],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+        )
     else:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+    if args.command in {"surface-build", "surface-verify"}:
+        return {"VERIFIED": 0, "REFUTED": 2, "UNKNOWN": 3}[
+            str(result["decision_status"])
+        ]
     if args.command == "scope-compare":
         return {
             "satisfied": 0,
