@@ -75,3 +75,5 @@ Then break it: change one byte anywhere in the evidence chain and watch the verd
 ---
 
 *OpenWorkProof is a Python protocol layer that makes agent work authorizable, verifiable, and offline-replayable. Apache-2.0. [Sponsors welcome](https://github.com/sponsors/dengyier).*
+
+*Want a verification report for one of your agent deliveries? [Free first sample](https://dengyier.github.io/OpenWorkProof/landing/) — you give a delivery, we produce a report you can replay offline in 5 minutes.*
