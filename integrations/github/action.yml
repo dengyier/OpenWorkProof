@@ -1,0 +1,52 @@
+name: OpenWorkProof Verify Delivery
+description: Build and verify an offline-verifiable Agent delivery report
+inputs:
+  delivery-package:
+    required: true
+  collector-private-key-file:
+    required: true
+  collector-actor-id:
+    required: true
+  runner-image-digest:
+    required: false
+  container-image-digest:
+    required: false
+  toolchain-lock-file:
+    required: true
+  sandbox-policy-file:
+    required: true
+  output-directory:
+    required: false
+    default: openworkproof-surface
+outputs:
+  decision:
+    value: ${{ steps.verify.outputs.decision }}
+  bundle-digest:
+    value: ${{ steps.verify.outputs.bundle_digest }}
+  artifact-path:
+    value: ${{ steps.verify.outputs.artifact_path }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - shell: bash
+      run: python -m pip install "$GITHUB_ACTION_PATH/../.."
+    - id: verify
+      shell: bash
+      env:
+        OWP_COLLECTOR_PRIVATE_KEY_FILE: ${{ inputs.collector-private-key-file }}
+        OWP_COLLECTOR_ACTOR_ID: ${{ inputs.collector-actor-id }}
+        OWP_DELIVERY_PACKAGE: ${{ inputs.delivery-package }}
+        OWP_RUNNER_IMAGE_DIGEST: ${{ inputs.runner-image-digest }}
+        OWP_CONTAINER_IMAGE_DIGEST: ${{ inputs.container-image-digest }}
+        OWP_TOOLCHAIN_LOCK_FILE: ${{ inputs.toolchain-lock-file }}
+        OWP_SANDBOX_POLICY_FILE: ${{ inputs.sandbox-policy-file }}
+        OWP_SURFACE_OUTPUT: ${{ inputs.output-directory }}
+      run: "$GITHUB_ACTION_PATH/run.sh"
+    - if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: openworkproof-evidence-bundle
+        path: openworkproof-evidence-bundle.tar.gz

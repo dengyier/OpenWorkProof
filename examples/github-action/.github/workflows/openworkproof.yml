@@ -1,0 +1,29 @@
+name: OpenWorkProof delivery verification
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-delivery:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Write collector key to a temporary file
+        shell: bash
+        env:
+          OWP_KEY: ${{ secrets.OPENWORKPROOF_COLLECTOR_PRIVATE_KEY }}
+        run: |
+          umask 077
+          printf '%s' "$OWP_KEY" >"$RUNNER_TEMP/openworkproof-collector.key"
+      - uses: dengyier/OpenWorkProof/integrations/github@v1.3.0
+        with:
+          delivery-package: openworkproof-delivery
+          collector-private-key-file: ${{ runner.temp }}/openworkproof-collector.key
+          collector-actor-id: verifier
+          toolchain-lock-file: requirements.lock
+          sandbox-policy-file: openworkproof-sandbox.json

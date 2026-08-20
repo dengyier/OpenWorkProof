@@ -935,7 +935,7 @@ git commit -m "feat: project github execution context"
 - Create: `examples/github-action/.github/workflows/openworkproof.yml`
 - Create: `examples/github-action/README.md`
 
-- [ ] **Step 1: 写 action 契约 RED 测试**
+- [x] **Step 1: 写 action 契约 RED 测试**
 
 ```python
 def test_action_never_accepts_private_key_as_cli_argument() -> None:
@@ -950,7 +950,7 @@ def test_action_preserves_surface_exit_code(tmp_path) -> None:
     assert completed.returncode == 3
 ```
 
-- [ ] **Step 2: 运行测试观察 RED**
+- [x] **Step 2: 运行测试观察 RED**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_github_action_contract.py -q
@@ -958,7 +958,7 @@ def test_action_preserves_surface_exit_code(tmp_path) -> None:
 
 Expected：FAIL，action 文件不存在。
 
-- [ ] **Step 3: 创建 action 输入输出**
+- [x] **Step 3: 创建 action 输入输出**
 
 `integrations/github/action.yml`：
 
@@ -1014,7 +1014,7 @@ runs:
         path: openworkproof-evidence-bundle.tar.gz
 ```
 
-- [ ] **Step 4: 实现 shell 的错误与摘要边界**
+- [x] **Step 4: 实现 shell 的错误与摘要边界**
 
 `run.sh`：
 
@@ -1050,14 +1050,14 @@ exit "$status"
 UNKNOWN/REFUTED 也先生成并上传证据再保留 3/2 退出码，artifact 上传失败则保持
 operational failure，不得回写 success。
 
-- [ ] **Step 5: 增加仓库内 smoke workflow**
+- [x] **Step 5: 增加仓库内 smoke workflow**
 
 smoke 使用冻结测试 key fixture 和测试 Delivery Package，只验证 action plumbing；
 workflow 名称与 summary 必须带 `fixture`，防止误称生产信任。真实 secret 不入库。
 同时加入 `examples/github-action/` 最小第三方接入示例，明确 key 必须来自 GitHub
 secret 写入的临时文件，不能把测试 key 当作生产 key。
 
-- [ ] **Step 6: 回归并提交**
+- [x] **Step 6: 回归并提交**
 
 ```bash
 chmod +x integrations/github/run.sh
