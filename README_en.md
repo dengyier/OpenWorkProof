@@ -17,6 +17,8 @@ License: Apache-2.0
 PyPI: [openworkproof](https://pypi.org/project/openworkproof/)
 MCP Registry: [io.github.dengyier/OpenWorkProof](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.2.0)
 
+Support the protocol's research and maintenance: [GitHub Sponsors](https://github.com/sponsors/dengyier) (early adopters receive README attribution)
+
 ---
 
 ## 30-Second Overview

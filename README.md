@@ -17,6 +17,8 @@
 PyPI：[openworkproof](https://pypi.org/project/openworkproof/)
 MCP Registry：[io.github.dengyier/OpenWorkProof](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.2.0)
 
+支持本协议的研究与维护：[GitHub Sponsors](https://github.com/sponsors/dengyier)（早期采用者可获 README 署名）
+
 ---
 
 ## 30 秒理解 OpenWorkProof
