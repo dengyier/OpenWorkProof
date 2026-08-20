@@ -224,20 +224,38 @@ def test_matrix_event_requires_structured_body_and_raw_bindings(
             }
         )
     message = _dispatch()
-    body = json.dumps(message.model_dump(mode="json"))
-    with pytest.raises(AgentTeamsWorkflowError, match="raw event id"):
-        workflow.accept_matrix_event(
-            {"event_id": "$other", "sender": "@manager:hs", "body": body}
-        )
+    wire = message.model_dump(mode="json")
+    wire.pop("event_id")
+    body = json.dumps(wire)
     with pytest.raises(AgentTeamsWorkflowError, match="raw sender"):
         workflow.accept_matrix_event(
             {"event_id": message.event_id, "sender": "@other:hs", "body": body}
         )
+    claimed_event = {**wire, "event_id": message.event_id}
+    with pytest.raises(AgentTeamsWorkflowError, match="must not claim event id"):
+        workflow.accept_matrix_event(
+            {
+                "event_id": message.event_id,
+                "sender": message.sender,
+                "body": json.dumps(claimed_event),
+            }
+        )
+
+    outcome = workflow.accept_matrix_event(
+        {
+            "event_id": message.event_id,
+            "sender": message.sender,
+            "body": body,
+        }
+    )
+    assert outcome.event_id == message.event_id
 
 
 def test_matrix_event_rejects_duplicate_json_keys(workflow) -> None:
     message = _dispatch()
-    body = json.dumps(message.model_dump(mode="json"))
+    wire = message.model_dump(mode="json")
+    wire.pop("event_id")
+    body = json.dumps(wire)
     duplicate = '{"task_id":"' + ("f" * 64) + '",' + body[1:]
 
     with pytest.raises(AgentTeamsWorkflowError, match="structured JSON"):

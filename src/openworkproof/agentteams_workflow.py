@@ -308,7 +308,16 @@ class AgentTeamsWorkflow:
             raise AgentTeamsWorkflowError("message body must be structured JSON")
         try:
             raw = json.loads(body, object_pairs_hook=_closed_json_object)
+            if type(raw) is not dict:
+                raise ValueError("message body is not an object")
+            if "event_id" in raw:
+                raise AgentTeamsWorkflowError(
+                    "message body must not claim event id"
+                )
+            raw["event_id"] = raw_event_id
             message = AgentTeamsWorkflowMessageV01.model_validate(raw)
+        except AgentTeamsWorkflowError:
+            raise
         except Exception as error:
             raise AgentTeamsWorkflowError(
                 "message body must be structured JSON"
