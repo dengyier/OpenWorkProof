@@ -445,3 +445,135 @@ def test_inspect_rejects_unknown_file(full_delivery_case) -> None:
     (root / "evil.txt").write_text("nope", encoding="utf-8")
     with pytest.raises(DeliveryCaseError, match="unknown"):
         inspect_delivery_case(root)
+
+
+@pytest.fixture
+def verified_result(full_delivery_case) -> DeliveryCaseResultV01:
+    root, _ = full_delivery_case
+    return inspect_delivery_case(root)
+
+
+def test_summary_answers_business_questions_without_overclaim(
+    verified_result: DeliveryCaseResultV01,
+) -> None:
+    from openworkproof.delivery_case_render import render_delivery_summary
+
+    rendered = render_delivery_summary(verified_result)
+    for text in (
+        "Who authorized",
+        "What was executed",
+        "Who verified",
+        "Can the buyer accept",
+        "Settlement review",
+    ):
+        assert text in rendered
+    assert "payment completed" not in rendered.lower()
+    assert "guaranteed" not in rendered.lower()
+    assert "/Users/" not in rendered
+
+
+def test_render_delivery_result_is_canonical_json(
+    verified_result: DeliveryCaseResultV01,
+) -> None:
+    from openworkproof.delivery_case_render import render_delivery_result
+
+    payload = render_delivery_result(verified_result)
+    assert rfc8785.dumps(verified_result.model_dump(mode="json")) == payload
+    assert json.loads(payload)["case_id"] == verified_result.case_id
+
+
+def test_export_is_no_replace_and_self_verifies(full_delivery_case, tmp_path) -> None:
+    from openworkproof.delivery_case import export_delivery_case
+
+    root, _ = full_delivery_case
+    output = tmp_path / "export"
+    first = export_delivery_case(root, output)
+    assert first.case_stage == "READY_FOR_SETTLEMENT_REVIEW"
+    with pytest.raises(DeliveryCaseError, match="already exists"):
+        export_delivery_case(root, output)
+
+
+def test_export_produces_exact_allowlist_file_set(full_delivery_case, tmp_path) -> None:
+    from openworkproof.delivery_case import export_delivery_case
+
+    root, _ = full_delivery_case
+    output = tmp_path / "export"
+    export_delivery_case(root, output)
+    top_level = sorted(
+        path.relative_to(output).as_posix()
+        for path in output.iterdir()
+    )
+    assert top_level == [
+        "case",
+        "delivery-case-manifest.json",
+        "delivery-result.json",
+        "delivery-summary.md",
+    ]
+    assert (output / "delivery-case-manifest.json").is_file()
+    assert (output / "delivery-result.json").is_file()
+    assert (output / "delivery-summary.md").is_file()
+
+
+def test_export_round_trips_through_verify(full_delivery_case, tmp_path) -> None:
+    from openworkproof.delivery_case import (
+        export_delivery_case,
+        verify_exported_delivery_case,
+    )
+
+    root, _ = full_delivery_case
+    output = tmp_path / "export"
+    exported = export_delivery_case(root, output)
+    verified = verify_exported_delivery_case(output)
+    assert verified == exported
+
+
+def test_export_rejects_tampered_case_file(full_delivery_case, tmp_path) -> None:
+    from openworkproof.delivery_case import (
+        DeliveryCaseError,
+        export_delivery_case,
+        verify_exported_delivery_case,
+    )
+
+    root, _ = full_delivery_case
+    output = tmp_path / "export"
+    export_delivery_case(root, output)
+    tampered = output / "case" / "settlement" / "settlement-status.json"
+    tampered.write_bytes(tampered.read_bytes() + b"tamper")
+    with pytest.raises(DeliveryCaseError):
+        verify_exported_delivery_case(output)
+
+
+def test_export_manifest_is_integrity_only(full_delivery_case, tmp_path) -> None:
+    from openworkproof.delivery_case import export_delivery_case
+
+    root, _ = full_delivery_case
+    output = tmp_path / "export"
+    export_delivery_case(root, output)
+    manifest = json.loads(
+        (output / "delivery-case-manifest.json").read_text(encoding="utf-8")
+    )
+    assert "integrity only" in manifest["boundary"]
+    assert "trust root" in manifest["boundary"]
+    assert manifest["schema_version"] == "openworkproof-delivery-case-manifest/0.1"
+    paths = {entry["path"] for entry in manifest["entries"]}
+    assert "delivery-case-manifest.json" not in paths
+    assert "delivery-result.json" in paths
+    assert "delivery-summary.md" in paths
+    assert "case/case.json" in paths
+
+
+def test_export_contains_no_secret_or_absolute_path(
+    full_delivery_case, tmp_path
+) -> None:
+    from openworkproof.delivery_case import export_delivery_case
+
+    root, _ = full_delivery_case
+    output = tmp_path / "export"
+    export_delivery_case(root, output)
+    combined = b"".join(
+        path.read_bytes() for path in output.rglob("*") if path.is_file()
+    )
+    text = combined.decode("utf-8", errors="replace")
+    assert str(tmp_path) not in text
+    assert "private_key" not in text
+    assert "PRIVATE KEY" not in text

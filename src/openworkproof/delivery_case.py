@@ -46,6 +46,8 @@ __all__ = [
     "ExternalEvidenceReferenceV01",
     "initialize_delivery_case",
     "inspect_delivery_case",
+    "export_delivery_case",
+    "verify_exported_delivery_case",
 ]
 
 
@@ -370,7 +372,7 @@ def _path_is_allowed(path: str) -> bool:
     )
 
 
-def _read_regular(path: Path) -> bytes:
+def _read_regular(path: Path) -> tuple[bytes, int]:
     try:
         before = path.lstat()
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
@@ -447,13 +449,13 @@ def _read_regular(path: Path) -> bytes:
         final.st_mtime_ns,
     ) != identity:
         raise DeliveryCaseError("delivery case file changed after read")
-    return payload
+    return payload, stat.S_IMODE(opened.st_mode)
 
 
-def _scan_case_tree(root: Path) -> dict[str, bytes]:
+def _scan_tree(root: Path, allowed) -> dict[str, tuple[bytes, int]]:
     if root.is_symlink() or not root.is_dir():
         raise DeliveryCaseError("delivery case root must be a real directory")
-    files: dict[str, bytes] = {}
+    files: dict[str, tuple[bytes, int]] = {}
     total = 0
     try:
         for directory, names, filenames in os.walk(root, followlinks=False):
@@ -472,12 +474,12 @@ def _scan_case_tree(root: Path) -> dict[str, bytes]:
                     raise DeliveryCaseError("delivery case path is duplicated")
                 if len(files) >= MAX_CASE_FILES:
                     raise DeliveryCaseError("delivery case file count exceeds the limit")
-                payload = _read_regular(path)
-                if not _path_is_allowed(relative):
+                payload, mode = _read_regular(path)
+                if not allowed(relative):
                     raise DeliveryCaseError(
                         f"delivery case contains an unknown file: {relative}"
                     )
-                files[relative] = payload
+                files[relative] = (payload, mode)
                 total += len(payload)
                 if total > MAX_CASE_TOTAL_BYTES:
                     raise DeliveryCaseError("delivery case total size exceeds the limit")
@@ -486,6 +488,31 @@ def _scan_case_tree(root: Path) -> dict[str, bytes]:
     except (OSError, UnicodeError, ValueError) as error:
         raise DeliveryCaseError("delivery case tree scan failed") from error
     return files
+
+
+def _scan_case_tree(root: Path) -> dict[str, tuple[bytes, int]]:
+    return _scan_tree(root, _path_is_allowed)
+
+
+_EXPORT_PATHS = frozenset(
+    {
+        "delivery-case-manifest.json",
+        "delivery-result.json",
+        "delivery-summary.md",
+    }
+)
+
+
+def _export_path_is_allowed(path: str) -> bool:
+    if path in _EXPORT_PATHS:
+        return True
+    if path.startswith("case/"):
+        return _path_is_allowed(path[len("case/") :])
+    return False
+
+
+def _scan_export_tree(root: Path) -> dict[str, tuple[bytes, int]]:
+    return _scan_tree(root, _export_path_is_allowed)
 
 
 def _canonical_case_root(case_root: Path) -> Path:
@@ -559,7 +586,7 @@ def _result(
 
 def _verified_settlement_result(
     root: Path,
-    snapshot: dict[str, bytes],
+    snapshot: dict[str, tuple[bytes, int]],
     case: DeliveryCaseManifestV01,
     sow: ExternalEvidenceReferenceV01,
     payment: ExternalEvidenceReferenceV01,
@@ -567,12 +594,12 @@ def _verified_settlement_result(
     acceptance,
 ) -> DeliveryCaseResultV01:
     binding = _load_strict_model(
-        snapshot["acceptance/acceptance/decision-binding.json"],
+        snapshot["acceptance/acceptance/decision-binding.json"][0],
         AcceptanceDecisionBindingV01,
         "acceptance decision binding",
     )
     settlement = _load_strict_model(
-        snapshot["settlement/settlement-status.json"],
+        snapshot["settlement/settlement-status.json"][0],
         SettlementSnapshot,
         "settlement status",
     )
@@ -617,9 +644,9 @@ def inspect_delivery_case(case_root: Path) -> DeliveryCaseResultV01:
         raise DeliveryCaseError("delivery case SOW reference is missing")
     if "commercial/payer-status.json" not in snapshot:
         raise DeliveryCaseError("delivery case payer status is missing")
-    case = _load_case(snapshot["case.json"])
-    sow = _load_external_reference(snapshot["commercial/sow-reference.json"])
-    payment = _load_external_reference(snapshot["commercial/payer-status.json"])
+    case = _load_case(snapshot["case.json"][0])
+    sow = _load_external_reference(snapshot["commercial/sow-reference.json"][0])
+    payment = _load_external_reference(snapshot["commercial/payer-status.json"][0])
     if sow.status == "not_evidenced":
         return _result(
             case, DeliveryCaseStage.SCOPE_DRAFTED, sow=sow, payment=payment,
@@ -677,3 +704,227 @@ def inspect_delivery_case(case_root: Path) -> DeliveryCaseResultV01:
     return _verified_settlement_result(
         root, snapshot, case, sow, payment, surface, acceptance
     )
+
+
+_EXPORT_MANIFEST_BOUNDARY = (
+    "integrity only; not an authorization, acceptance, payment, or legal trust root"
+)
+
+
+def _compose_export_manifest(
+    case_snapshot: dict[str, tuple[bytes, int]],
+    *,
+    case_id: str,
+    result_bytes: bytes,
+    summary_bytes: bytes,
+) -> bytes:
+    entries: list[dict[str, object]] = []
+    for relative, (payload, _mode) in case_snapshot.items():
+        entries.append(
+            {
+                "path": f"case/{relative}",
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size_bytes": len(payload),
+            }
+        )
+    for relative, payload in (
+        ("delivery-result.json", result_bytes),
+        ("delivery-summary.md", summary_bytes),
+    ):
+        entries.append(
+            {
+                "path": relative,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size_bytes": len(payload),
+            }
+        )
+    entries.sort(key=lambda entry: str(entry["path"]).encode("utf-8"))
+    return rfc8785.dumps(
+        {
+            "schema_version": "openworkproof-delivery-case-manifest/0.1",
+            "case_id": case_id,
+            "boundary": _EXPORT_MANIFEST_BOUNDARY,
+            "entries": entries,
+        }
+    )
+
+
+def _load_export_manifest(payload: bytes) -> dict[str, object]:
+    try:
+        raw = json.loads(payload)
+    except Exception as error:
+        raise DeliveryCaseError("export manifest is invalid") from error
+    if rfc8785.dumps(raw) != payload:
+        raise DeliveryCaseError("export manifest is not canonical")
+    if type(raw) is not dict or set(raw) != {
+        "schema_version",
+        "case_id",
+        "boundary",
+        "entries",
+    }:
+        raise DeliveryCaseError("export manifest envelope is not closed")
+    if raw["schema_version"] != "openworkproof-delivery-case-manifest/0.1":
+        raise DeliveryCaseError("export manifest schema is invalid")
+    if raw["boundary"] != _EXPORT_MANIFEST_BOUNDARY:
+        raise DeliveryCaseError("export manifest boundary is invalid")
+    if type(raw["case_id"]) is not str or len(raw["case_id"]) != 64:
+        raise DeliveryCaseError("export manifest case id is invalid")
+    entries = raw["entries"]
+    if type(entries) is not list or not entries:
+        raise DeliveryCaseError("export manifest entries are invalid")
+    paths: list[str] = []
+    for entry in entries:
+        if type(entry) is not dict or set(entry) != {
+            "path",
+            "sha256",
+            "size_bytes",
+        }:
+            raise DeliveryCaseError("export manifest entry is invalid")
+        try:
+            _safe_relative(entry["path"])
+        except DeliveryCaseError as error:
+            raise DeliveryCaseError("export manifest path is invalid") from error
+        if (
+            type(entry["sha256"]) is not str
+            or len(entry["sha256"]) != 64
+            or type(entry["size_bytes"]) is not int
+            or not 0 <= entry["size_bytes"] <= 2 * 1024 * 1024 * 1024
+        ):
+            raise DeliveryCaseError("export manifest entry is invalid")
+        paths.append(entry["path"])
+    if list(paths) != sorted(set(paths), key=lambda value: value.encode("utf-8")):
+        raise DeliveryCaseError("export manifest entries are not sorted or unique")
+    return raw
+
+
+def _rename_no_replace(source: Path, destination: Path) -> None:
+    import ctypes
+    import errno
+    import sys
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    if sys.platform == "darwin":
+        rename = libc.renameatx_np
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(-2, source_bytes, -2, destination_bytes, 0x00000004)
+    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        rename = libc.renameat2
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(-100, source_bytes, -100, destination_bytes, 1)
+    else:
+        raise DeliveryCaseError("atomic no-replace directory rename is unavailable")
+    if result != 0:
+        error_number = ctypes.get_errno()
+        if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+            raise FileExistsError(
+                error_number, os.strerror(error_number), destination
+            )
+        raise OSError(error_number, os.strerror(error_number), destination)
+
+
+def export_delivery_case(
+    case_root: Path,
+    output: Path,
+) -> DeliveryCaseResultV01:
+    """Export one delivery case as a self-verifying, no-replace directory."""
+
+    from openworkproof.delivery_case_render import (  # noqa: PLC0415
+        render_delivery_result,
+        render_delivery_summary,
+    )
+
+    source = _canonical_case_root(case_root)
+    output_path = Path(output)
+    if output_path.exists() or output_path.is_symlink():
+        raise DeliveryCaseError("delivery case export target already exists")
+    parent = _canonical_parent(output_path)
+    result = inspect_delivery_case(source)
+    case_snapshot = _scan_case_tree(source)
+    result_bytes = render_delivery_result(result)
+    summary_bytes = render_delivery_summary(result).encode("utf-8")
+    manifest_bytes = _compose_export_manifest(
+        case_snapshot,
+        case_id=result.case_id,
+        result_bytes=result_bytes,
+        summary_bytes=summary_bytes,
+    )
+    stage = Path(tempfile.mkdtemp(prefix=".owp-delivery-case-export-", dir=parent))
+    try:
+        for relative, (payload, mode) in case_snapshot.items():
+            _write_new(stage, f"case/{relative}", payload, mode=mode)
+        _write_new(stage, "delivery-result.json", result_bytes, mode=0o600)
+        _write_new(stage, "delivery-summary.md", summary_bytes, mode=0o600)
+        _write_new(stage, "delivery-case-manifest.json", manifest_bytes, mode=0o600)
+        verify_exported_delivery_case(stage)
+        if output_path.exists() or output_path.is_symlink():
+            raise DeliveryCaseError("delivery case export target already exists")
+        try:
+            _rename_no_replace(stage, output_path)
+        except FileExistsError as error:
+            raise DeliveryCaseError(
+                "delivery case export target already exists"
+            ) from error
+        return result
+    except DeliveryCaseError:
+        try:
+            shutil.rmtree(stage)
+        except OSError as error:
+            raise DeliveryCaseError("delivery case export cleanup failed") from error
+        raise
+    except Exception as error:
+        try:
+            shutil.rmtree(stage)
+        except OSError as cleanup_error:
+            raise DeliveryCaseError("delivery case export cleanup failed") from cleanup_error
+        raise DeliveryCaseError("delivery case export failed") from error
+
+
+def verify_exported_delivery_case(
+    export_dir: Path,
+) -> DeliveryCaseResultV01:
+    """Verify one exported delivery case and re-derive its status from evidence."""
+
+    root = _canonical_case_root(export_dir)
+    snapshot = _scan_export_tree(root)
+    if "delivery-case-manifest.json" not in snapshot:
+        raise DeliveryCaseError("delivery case export manifest is missing")
+    if "delivery-result.json" not in snapshot:
+        raise DeliveryCaseError("delivery case export result is missing")
+    manifest = _load_export_manifest(snapshot["delivery-case-manifest.json"][0])
+    actual = set(snapshot) - {"delivery-case-manifest.json"}
+    expected = {str(entry["path"]) for entry in manifest["entries"]}
+    if actual != expected:
+        raise DeliveryCaseError("delivery case export manifest file set is not exact")
+    for entry in manifest["entries"]:
+        relative = str(entry["path"])
+        payload = snapshot[relative][0]
+        if (
+            len(payload) != entry["size_bytes"]
+            or hashlib.sha256(payload).hexdigest() != entry["sha256"]
+        ):
+            raise DeliveryCaseError("delivery case export integrity failed")
+    stored = _load_strict_model(
+        snapshot["delivery-result.json"][0],
+        DeliveryCaseResultV01,
+        "delivery result",
+    )
+    derived = inspect_delivery_case(root / "case")
+    if derived != stored:
+        raise DeliveryCaseError("delivery result does not match the replayed case")
+    return derived
