@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import tempfile
 from typing import Annotated, Any, Literal
 
 import rfc8785
@@ -27,6 +28,7 @@ __all__ = [
     "AcceptanceManifestV01",
     "compose_acceptance_manifest",
     "validate_acceptance_bundle_manifest",
+    "verify_acceptance_bundle_directory",
 ]
 
 MAX_ACCEPTANCE_FILES = 4096
@@ -317,6 +319,37 @@ def _parse_acceptance_manifest(payload: bytes) -> AcceptanceManifestV01:
     return manifest
 
 
+def _write_new(
+    root: Path,
+    relative: str,
+    payload: bytes,
+    *,
+    mode: int = 0o600,
+) -> None:
+    relative = _acceptance_relative_path(relative)
+    target = root.joinpath(*relative.split("/"))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(
+        target,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0),
+        mode,
+    )
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise AcceptanceBundleError(
+                    "acceptance bundle snapshot write made no progress"
+                )
+            view = view[written:]
+    finally:
+        os.close(descriptor)
+
+
 _REQUIRED_ACCEPTANCE_FILES = frozenset(
     {
         "acceptance/committed-evidence-index.json",
@@ -441,8 +474,22 @@ def validate_acceptance_bundle_manifest(
     """Validate only the stable outer snapshot and closed file manifest."""
 
     try:
-        root = _canonical_root(Path(bundle_root))
-        scanned = _scan_tree(root)
+        manifest, _scanned = _load_acceptance_manifest_snapshot(bundle_root)
+        return manifest
+    except AcceptanceBundleError:
+        raise
+    except Exception as error:
+        raise AcceptanceBundleError(
+            "acceptance bundle manifest validation failed"
+        ) from error
+
+
+def _load_acceptance_manifest_snapshot(
+    bundle_root: Path,
+) -> tuple[AcceptanceManifestV01, dict[str, _ScannedFile]]:
+    root = _canonical_root(Path(bundle_root))
+    scanned = _scan_tree(root)
+    try:
         manifest_file = scanned.get("acceptance-manifest.json")
         if manifest_file is None:
             raise AcceptanceBundleError(
@@ -480,10 +527,347 @@ def validate_acceptance_bundle_manifest(
             raise AcceptanceBundleError(
                 "acceptance bundle required files are invalid"
             )
-        return manifest
+        return manifest, scanned
     except AcceptanceBundleError:
         raise
     except Exception as error:
         raise AcceptanceBundleError(
-            "acceptance bundle manifest validation failed"
+            "acceptance bundle manifest snapshot is invalid"
+        ) from error
+
+
+def _canonical_json(payload: bytes, label: str) -> object:
+    try:
+        value = json.loads(payload)
+    except Exception as error:
+        raise AcceptanceBundleError(f"{label} is invalid") from error
+    if _canonical(value) != payload:
+        raise AcceptanceBundleError(f"{label} is not canonical")
+    return value
+
+
+def _load_companion_objects(
+    scanned: dict[str, _ScannedFile],
+    *,
+    terminal_decision: Literal["accepted", "rejected"],
+):
+    from openworkproof.models import (  # noqa: PLC0415
+        AcceptanceDecisionBindingV01,
+        AcceptanceReceipt,
+        AcceptanceRejectionReceipt,
+        CapabilityGrant,
+        CompositionReport,
+        EvidenceRef,
+    )
+    from openworkproof.policy import CommittedEvidence  # noqa: PLC0415
+
+    def load_array(relative: str, model, label: str) -> tuple:
+        raw = _canonical_json(scanned[relative].payload, label)
+        if type(raw) is not list:
+            raise AcceptanceBundleError(f"{label} must be an array")
+        try:
+            return tuple(model.model_validate(item) for item in raw)
+        except Exception as error:
+            raise AcceptanceBundleError(f"{label} is malformed") from error
+
+    grants = load_array(
+        "acceptance/effective-grants.json",
+        CapabilityGrant,
+        "acceptance effective grants",
+    )
+    attempts = load_array(
+        "acceptance/grant-attempts.json",
+        CapabilityGrant,
+        "acceptance grant attempts",
+    )
+    reports = load_array(
+        "acceptance/composition-reports.json",
+        CompositionReport,
+        "acceptance composition reports",
+    )
+    if not reports:
+        raise AcceptanceBundleError(
+            "acceptance composition reports are empty"
+        )
+    terminal_raw = _canonical_json(
+        scanned["acceptance/terminal-receipt.json"].payload,
+        "acceptance terminal receipt",
+    )
+    terminal_type = (
+        AcceptanceReceipt
+        if terminal_decision == "accepted"
+        else AcceptanceRejectionReceipt
+    )
+    try:
+        terminal = terminal_type.model_validate(terminal_raw)
+        binding = AcceptanceDecisionBindingV01.model_validate(
+            _canonical_json(
+                scanned["acceptance/decision-binding.json"].payload,
+                "acceptance decision binding",
+            )
+        )
+    except Exception as error:
+        raise AcceptanceBundleError(
+            "acceptance terminal or binding is malformed"
+        ) from error
+
+    index = _canonical_json(
+        scanned["acceptance/committed-evidence-index.json"].payload,
+        "acceptance committed evidence index",
+    )
+    if (
+        type(index) is not dict
+        or set(index) != {"schema_version", "entries"}
+        or index["schema_version"]
+        != "openworkproof-committed-evidence-index/0.1"
+        or type(index["entries"]) is not list
+    ):
+        raise AcceptanceBundleError(
+            "acceptance committed evidence index is malformed"
+        )
+    committed = []
+    indexed_paths = []
+    for raw_entry in index["entries"]:
+        if type(raw_entry) is not dict or set(raw_entry) != {
+            "bundle_path",
+            "reference",
+        }:
+            raise AcceptanceBundleError(
+                "acceptance committed evidence entry is malformed"
+            )
+        try:
+            reference = EvidenceRef.model_validate(raw_entry["reference"])
+            bundle_path = _acceptance_relative_path(raw_entry["bundle_path"])
+        except Exception as error:
+            raise AcceptanceBundleError(
+                "acceptance committed evidence entry is malformed"
+            ) from error
+        expected_path = f"acceptance/evidence/{reference.path}"
+        if bundle_path != expected_path or bundle_path not in scanned:
+            raise AcceptanceBundleError(
+                "acceptance committed evidence path is not bound"
+            )
+        payload = scanned[bundle_path].payload
+        if (
+            len(payload) != reference.size_bytes
+            or hashlib.sha256(payload).hexdigest() != reference.sha256
+        ):
+            raise AcceptanceBundleError(
+                "acceptance committed evidence integrity failed"
+            )
+        indexed_paths.append(bundle_path)
+        committed.append(CommittedEvidence(reference=reference, payload=payload))
+    if indexed_paths != sorted(
+        set(indexed_paths), key=lambda value: value.encode("utf-8")
+    ) or set(indexed_paths) != {
+        path for path in scanned if path.startswith("acceptance/evidence/")
+    }:
+        raise AcceptanceBundleError(
+            "acceptance committed evidence index is not exact"
+        )
+    return grants, attempts, reports, tuple(committed), terminal, binding
+
+
+def verify_acceptance_bundle_directory(
+    bundle_root: Path,
+) -> AcceptanceBundleVerificationResult:
+    """Replay one Acceptance Bundle from copied bytes without a live ledger."""
+
+    try:
+        from openworkproof import acceptance, delivery_package  # noqa: PLC0415
+        from openworkproof.models import ApprovalRequestedReceipt  # noqa: PLC0415
+        from openworkproof.signing import (  # noqa: PLC0415
+            decode_and_verify_key_binding,
+            verify_payload,
+        )
+        from openworkproof.surface_bundle import verify_surface_bundle  # noqa: PLC0415
+
+        manifest, scanned = _load_acceptance_manifest_snapshot(bundle_root)
+        with tempfile.TemporaryDirectory(
+            prefix="openworkproof-acceptance-verify-",
+            dir=_canonical_root(Path(bundle_root)).parent,
+        ) as raw_snapshot:
+            snapshot = Path(raw_snapshot)
+            for relative, item in scanned.items():
+                _write_new(
+                    snapshot,
+                    relative,
+                    item.payload,
+                    mode=item.mode,
+                )
+            surface_root = snapshot / "surface"
+            surface = verify_surface_bundle(surface_root)
+            if surface.report.decision_status != "VERIFIED":
+                raise AcceptanceBundleError(
+                    "acceptance bundle requires a VERIFIED surface"
+                )
+            delivery_root = surface_root / "delivery-package"
+            delivery_result = delivery_package.verify_delivery_package(
+                delivery_root
+            )
+            delivery_manifest = delivery_package.load_and_verify_manifest(
+                delivery_root
+            )
+            if (
+                delivery_manifest.verification_protocol_version != "0.5"
+                or delivery_manifest.privacy_view != "customer_private"
+                or delivery_result.full_offline_replay is not True
+                or delivery_result.current_decision != "VERIFIED"
+            ):
+                raise AcceptanceBundleError(
+                    "acceptance bundle requires a private replayable v0.5 delivery"
+                )
+            (
+                work_order,
+                _claim,
+                _scope,
+                _profile,
+                decision,
+                _results,
+                _inventory,
+            ) = delivery_package._load_v05_objects_and_evidence(
+                delivery_root,
+                delivery_manifest,
+            )
+            receipts = delivery_package._load_receipts(
+                delivery_root,
+                delivery_manifest,
+                work_order,
+            )
+            history = delivery_package._load_acceptance_history(
+                delivery_root,
+                delivery_manifest,
+                work_order,
+                decision,
+                receipts,
+            )
+            if history.withdrawal is not None or history.supersession is not None:
+                raise AcceptanceBundleError(
+                    "acceptance bundle forbids terminal transitions"
+                )
+            (
+                grants,
+                attempts,
+                reports,
+                committed,
+                terminal,
+                binding,
+            ) = _load_companion_objects(
+                scanned,
+                terminal_decision=manifest.terminal_decision,
+            )
+            package_terminal = (
+                history.acceptance
+                if manifest.terminal_decision == "accepted"
+                else history.rejection
+            )
+            other_terminal = (
+                history.rejection
+                if manifest.terminal_decision == "accepted"
+                else history.acceptance
+            )
+            if package_terminal is None or other_terminal is not None:
+                raise AcceptanceBundleError(
+                    "acceptance bundle terminal is not unique"
+                )
+            if terminal != package_terminal:
+                raise AcceptanceBundleError(
+                    "acceptance bundle terminal diverges from the delivery"
+                )
+            public_keys = {
+                item.key_id: decode_and_verify_key_binding(item)
+                for item in work_order.key_bindings
+            }
+            verified_terminal = acceptance.verify_acceptance_bundle(
+                work_order=work_order,
+                report=reports[-1],
+                effective_grants=grants,
+                grant_attempts=attempts,
+                receipts=receipts,
+                committed_evidence=committed,
+                acceptance_receipt=(
+                    terminal if manifest.terminal_decision == "accepted" else None
+                ),
+                rejection=(
+                    terminal if manifest.terminal_decision == "rejected" else None
+                ),
+                public_keys=public_keys,
+                reports=reports,
+            )
+            acceptors = tuple(
+                item for item in work_order.key_bindings if item.role == "Acceptor"
+            )
+            if (
+                len(acceptors) != 1
+                or binding.signer_key_id != acceptors[0].key_id
+                or not verify_payload(
+                    "acceptance-decision-binding",
+                    binding.model_dump(mode="json"),
+                    decode_and_verify_key_binding(acceptors[0]),
+                )
+            ):
+                raise AcceptanceBundleError(
+                    "acceptance decision binding authority is invalid"
+                )
+            request = receipts[-1] if receipts else None
+            terminal_id = (
+                verified_terminal.acceptance_id
+                if manifest.terminal_decision == "accepted"
+                else verified_terminal.rejection_id
+            )
+            if not isinstance(request, ApprovalRequestedReceipt) or any(
+                (
+                    binding.work_order_digest != work_order.digest,
+                    binding.verification_decision_id != decision.decision_id,
+                    binding.verification_decision_digest != decision.digest,
+                    binding.composition_report_digest
+                    != acceptance.composition_report_digest(reports[-1]),
+                    binding.acceptance_request_receipt_id != request.receipt_id,
+                    binding.acceptance_request_receipt_digest != request.digest,
+                    binding.terminal_kind != manifest.terminal_decision,
+                    binding.terminal_receipt_id != terminal_id,
+                    binding.terminal_receipt_digest != verified_terminal.digest,
+                )
+            ):
+                raise AcceptanceBundleError(
+                    "acceptance decision binding does not match one delivery"
+                )
+            if any(
+                (
+                    manifest.surface_manifest_digest != surface.manifest_digest,
+                    manifest.delivery_manifest_digest
+                    != delivery_result.manifest_digest,
+                    manifest.work_order_digest != work_order.digest,
+                    manifest.verification_decision_digest != decision.digest,
+                    manifest.composition_report_digest
+                    != acceptance.composition_report_digest(reports[-1]),
+                    manifest.terminal_receipt_digest != verified_terminal.digest,
+                    manifest.acceptance_decision_binding_digest != binding.digest,
+                    surface.report.work_order_digest != work_order.digest,
+                    surface.report.verification_decision_digests
+                    != (decision.digest,),
+                )
+            ):
+                raise AcceptanceBundleError(
+                    "acceptance manifest summary diverges from replay"
+                )
+            return AcceptanceBundleVerificationResult(
+                schema_version="openworkproof-acceptance-bundle-result/0.1",
+                terminal_decision=(
+                    "ACCEPTED"
+                    if manifest.terminal_decision == "accepted"
+                    else "REJECTED"
+                ),
+                work_order_digest=work_order.digest,
+                surface_manifest_digest=surface.manifest_digest,
+                verification_decision_digest=decision.digest,
+                terminal_receipt_digest=verified_terminal.digest,
+                acceptance_decision_binding_digest=binding.digest,
+                boundary="not payment, settlement, legal audit, or adoption",
+            )
+    except AcceptanceBundleError:
+        raise
+    except Exception as error:
+        raise AcceptanceBundleError(
+            "acceptance bundle verification failed"
         ) from error
