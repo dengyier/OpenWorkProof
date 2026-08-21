@@ -172,4 +172,3 @@ Critical/Important 必须先 RED 后修。最终更新实施计划复选框与 `
 
 旧计划 `2026-08-21-openworkproof-13-commercial-ecosystem-implementation.md` 的“完整真实
 演示入口”仍未完成；本轮 Task 8 只实现外部验收 Bundle gate。不要扩大宣称。
-
