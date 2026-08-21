@@ -25,7 +25,12 @@ import stat
 import tempfile
 import rfc8785
 
+from openworkproof.acceptance_bundle import (
+    AcceptanceBundleVerificationResult,
+    AcceptanceManifestV01,
+)
 from openworkproof.environment_fingerprint import SignedEnvironmentFingerprintV01
+from openworkproof.models import AcceptanceDecisionBindingV01
 from openworkproof.verification_report import VerificationReportV01
 
 
@@ -42,10 +47,18 @@ COMPANION_VERSION = "0.1"
 _REGISTRY_FILENAME = "schema-registry.json"
 _REGISTRY_SCHEMA_VERSION = "openworkproof-companion-schema-registry/0.1"
 OBJECT_PATHS = {
+    "acceptance-bundle-manifest": "acceptance-bundle-manifest.schema.json",
+    "acceptance-bundle-result": "acceptance-bundle-result.schema.json",
+    "acceptance-decision-binding": "acceptance-decision-binding.schema.json",
     "execution-environment": "execution-environment.schema.json",
     "verification-report": "verification-report.schema.json",
 }
 SCHEMA_FACTORIES = {
+    "acceptance-bundle-manifest": AcceptanceManifestV01.model_json_schema,
+    "acceptance-bundle-result": (
+        AcceptanceBundleVerificationResult.model_json_schema
+    ),
+    "acceptance-decision-binding": AcceptanceDecisionBindingV01.model_json_schema,
     "execution-environment": SignedEnvironmentFingerprintV01.model_json_schema,
     "verification-report": VerificationReportV01.model_json_schema,
 }

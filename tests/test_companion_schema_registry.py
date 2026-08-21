@@ -20,7 +20,12 @@ import zipfile
 import pytest
 import rfc8785
 
+from openworkproof.acceptance_bundle import (
+    AcceptanceBundleVerificationResult,
+    AcceptanceManifestV01,
+)
 from openworkproof.environment_fingerprint import SignedEnvironmentFingerprintV01
+from openworkproof.models import AcceptanceDecisionBindingV01
 from openworkproof.verification_report import VerificationReportV01
 
 
@@ -30,13 +35,28 @@ COMPANION_REGISTRY_SCHEMA_VERSION = "openworkproof-companion-schema-registry/0.1
 COMPANION_FILENAMES = frozenset(
     {
         "schema-registry.json",
+        "acceptance-bundle-manifest.schema.json",
+        "acceptance-bundle-result.schema.json",
+        "acceptance-decision-binding.schema.json",
         "execution-environment.schema.json",
         "verification-report.schema.json",
     }
 )
 COMPANION_OBJECT_PATHS = {
+    "acceptance-bundle-manifest": "acceptance-bundle-manifest.schema.json",
+    "acceptance-bundle-result": "acceptance-bundle-result.schema.json",
+    "acceptance-decision-binding": "acceptance-decision-binding.schema.json",
     "execution-environment": "execution-environment.schema.json",
     "verification-report": "verification-report.schema.json",
+}
+COMPANION_SCHEMA_FACTORIES = {
+    "acceptance-bundle-manifest": AcceptanceManifestV01.model_json_schema,
+    "acceptance-bundle-result": (
+        AcceptanceBundleVerificationResult.model_json_schema
+    ),
+    "acceptance-decision-binding": AcceptanceDecisionBindingV01.model_json_schema,
+    "execution-environment": SignedEnvironmentFingerprintV01.model_json_schema,
+    "verification-report": VerificationReportV01.model_json_schema,
 }
 COMPANION_TRANSACTION_PREFIXES = (
     ".openworkproof-companion-backup-",
@@ -177,12 +197,9 @@ def test_registry_entries_are_sorted_with_exact_sha256() -> None:
     for name in COMPANION_OBJECT_PATHS.values():
         assert files[name] == rfc8785.dumps(json.loads(files[name]))
 
-    assert files["execution-environment.schema.json"] == rfc8785.dumps(
-        SignedEnvironmentFingerprintV01.model_json_schema()
-    )
-    assert files["verification-report.schema.json"] == rfc8785.dumps(
-        VerificationReportV01.model_json_schema()
-    )
+    for object_type, factory in COMPANION_SCHEMA_FACTORIES.items():
+        path = COMPANION_OBJECT_PATHS[object_type]
+        assert files[path] == rfc8785.dumps(factory())
 
     registry = json.loads(files["schema-registry.json"])
     assert registry == {
@@ -190,19 +207,13 @@ def test_registry_entries_are_sorted_with_exact_sha256() -> None:
         "document_version": COMPANION_VERSION,
         "schemas": [
             {
-                "object_type": "execution-environment",
-                "path": "execution-environment.schema.json",
+                "object_type": object_type,
+                "path": COMPANION_OBJECT_PATHS[object_type],
                 "sha256": hashlib.sha256(
-                    files["execution-environment.schema.json"]
+                    files[COMPANION_OBJECT_PATHS[object_type]]
                 ).hexdigest(),
-            },
-            {
-                "object_type": "verification-report",
-                "path": "verification-report.schema.json",
-                "sha256": hashlib.sha256(
-                    files["verification-report.schema.json"]
-                ).hexdigest(),
-            },
+            }
+            for object_type in sorted(COMPANION_OBJECT_PATHS)
         ],
     }
     assert [entry["object_type"] for entry in registry["schemas"]] == sorted(
@@ -586,29 +597,8 @@ def test_built_wheel_contains_exactly_companion_schema_resources(
             if name.startswith(prefix) and not name.endswith("/")
         }
         assert members == COMPANION_FILENAMES
-        for name, expected_digest in (
-            (
-                "schema-registry.json",
-                hashlib.sha256(
-                    api.generated_companion_files()["schema-registry.json"]
-                ).hexdigest(),
-            ),
-            (
-                "execution-environment.schema.json",
-                hashlib.sha256(
-                    api.generated_companion_files()[
-                        "execution-environment.schema.json"
-                    ]
-                ).hexdigest(),
-            ),
-            (
-                "verification-report.schema.json",
-                hashlib.sha256(
-                    api.generated_companion_files()[
-                        "verification-report.schema.json"
-                    ]
-                ).hexdigest(),
-            ),
-        ):
+        generated = api.generated_companion_files()
+        for name in sorted(COMPANION_FILENAMES):
+            expected_digest = hashlib.sha256(generated[name]).hexdigest()
             content = archive.read(f"{prefix}{name}")
             assert hashlib.sha256(content).hexdigest() == expected_digest

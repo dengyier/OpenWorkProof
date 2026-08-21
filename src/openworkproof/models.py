@@ -5715,6 +5715,90 @@ class AcceptanceRejectionReceipt(SignedProtocolModel):
         return self
 
 
+_ACCEPTANCE_DECISION_BINDING_FIELDS = (
+    "schema_version",
+    "protocol_version",
+    "work_order_digest",
+    "verification_decision_id",
+    "verification_decision_digest",
+    "composition_report_digest",
+    "acceptance_request_receipt_id",
+    "acceptance_request_receipt_digest",
+    "terminal_kind",
+    "terminal_receipt_id",
+    "terminal_receipt_digest",
+    "bound_at",
+    "nonce",
+)
+
+
+def acceptance_decision_binding_id(
+    value: Mapping[str, Any],
+) -> str:
+    """Derive the content-addressed ID for one acceptance/decision binding."""
+
+    if not isinstance(value, Mapping):
+        raise ValueError("acceptance decision binding must be a mapping")
+    try:
+        payload = {
+            field: value[field]
+            for field in _ACCEPTANCE_DECISION_BINDING_FIELDS
+        }
+    except (KeyError, TypeError) as error:
+        raise ValueError(
+            "acceptance decision binding fields are incomplete"
+        ) from error
+    return _jcs_digest(
+        {
+            "domain": "openworkproof/acceptance-decision-binding-id/v0.1",
+            "payload": payload,
+        }
+    )
+
+
+class AcceptanceDecisionBindingV01(SignedProtocolModel):
+    """Acceptor-signed link from a v0.5 decision to one terminal receipt."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        validate_assignment=True,
+        revalidate_instances="subclass-instances",
+    )
+    _signed_domain = "acceptance-decision-binding"
+
+    schema_version: Literal[
+        "openworkproof-acceptance-decision-binding/0.1"
+    ]
+    protocol_version: Literal["0.1"]
+    binding_id: Digest64
+    work_order_digest: Digest64
+    verification_decision_id: Digest64
+    verification_decision_digest: Digest64
+    composition_report_digest: Digest64
+    acceptance_request_receipt_id: Digest64
+    acceptance_request_receipt_digest: Digest64
+    terminal_kind: Literal["accepted", "rejected"]
+    terminal_receipt_id: Digest64
+    terminal_receipt_digest: Digest64
+    bound_at: CanonicalUTCTime
+    nonce: Digest64
+
+    @model_validator(mode="after")
+    def _validate_binding_id(self) -> AcceptanceDecisionBindingV01:
+        if self.binding_id != acceptance_decision_binding_id(
+            self.model_dump(mode="json")
+        ):
+            raise ValueError("acceptance decision binding ID is invalid")
+        return self
+
+
+ACCEPTANCE_DECISION_BINDING_V01_ADAPTER = TypeAdapter(
+    AcceptanceDecisionBindingV01
+)
+
+
 class AcceptanceTransitionReceipt(SignedProtocolModel):
     _signed_domain = "acceptance-transition"
 
@@ -5970,8 +6054,10 @@ class TransitionDecision(ProtocolModel):
 
 
 __all__ = [
+    "ACCEPTANCE_DECISION_BINDING_V01_ADAPTER",
     "ACTION_RECEIPT_ADAPTER",
     "ACTION_RECEIPT_V04_ADAPTER",
+    "AcceptanceDecisionBindingV01",
     "AcceptanceReceipt",
     "ActionBindingManifest",
     "ActionReceipt",
@@ -6058,6 +6144,7 @@ __all__ = [
     "VerificationReasonCodeV05",
     "VerifierBinding",
     "WorkOrder",
+    "acceptance_decision_binding_id",
     "request_arguments_digest",
     "control_contract_id",
     "failure_signature_digest",

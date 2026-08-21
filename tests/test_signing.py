@@ -160,6 +160,7 @@ def test_canonical_domains_are_exact_and_key_order_is_irrelevant() -> None:
             "action-receipt",
             "acceptance-receipt",
             "acceptance-rejection-receipt",
+            "acceptance-decision-binding",
             "acceptance-transition",
             "agent-request",
             "human-decision",
