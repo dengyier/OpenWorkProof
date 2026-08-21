@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
+import sys
 import tempfile
 from typing import Annotated, Any, Literal
+import uuid
 
 import rfc8785
 from pydantic import BeforeValidator, ConfigDict, model_validator
@@ -27,6 +32,7 @@ __all__ = [
     "AcceptanceManifestEntry",
     "AcceptanceManifestV01",
     "compose_acceptance_manifest",
+    "export_acceptance_bundle",
     "validate_acceptance_bundle_manifest",
     "verify_acceptance_bundle_directory",
 ]
@@ -140,6 +146,20 @@ class AcceptanceBundleVerificationResult(ProtocolModel):
 class _ScannedFile:
     payload: bytes
     mode: int
+
+
+@dataclass(frozen=True, slots=True)
+class _AcceptanceExportSnapshot:
+    work_order: Any
+    decision: Any
+    receipts: tuple
+    grants: tuple
+    attempts: tuple
+    reports: tuple
+    committed_evidence: tuple
+    terminal: Any
+    terminal_kind: Literal["accepted", "rejected"]
+    binding: Any
 
 
 def _canonical(value: object) -> bytes:
@@ -338,6 +358,7 @@ def _write_new(
         mode,
     )
     try:
+        os.fchmod(descriptor, mode)
         view = memoryview(payload)
         while view:
             written = os.write(descriptor, view)
@@ -871,3 +892,504 @@ def verify_acceptance_bundle_directory(
         raise AcceptanceBundleError(
             "acceptance bundle verification failed"
         ) from error
+
+
+def _safe_evidence_payload(root: Path, relative: str) -> bytes:
+    relative = _acceptance_relative_path(relative)
+    current = root
+    for part in relative.split("/")[:-1]:
+        current = current / part
+        try:
+            metadata = current.lstat()
+        except OSError as error:
+            raise AcceptanceBundleError(
+                "committed evidence parent is unavailable"
+            ) from error
+        if current.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+            raise AcceptanceBundleError(
+                "committed evidence parent is not a stable directory"
+            )
+    target = root.joinpath(*relative.split("/"))
+    try:
+        resolved = target.resolve(strict=True)
+    except OSError as error:
+        raise AcceptanceBundleError(
+            "committed evidence file is unavailable"
+        ) from error
+    if not resolved.is_relative_to(root):
+        raise AcceptanceBundleError(
+            "committed evidence escapes the evidence root"
+        )
+    return _read_regular(target).payload
+
+
+def _read_acceptance_export_snapshot(
+    ledger_path: Path,
+    evidence_root: Path,
+) -> _AcceptanceExportSnapshot:
+    from openworkproof import acceptance, evidence  # noqa: PLC0415
+    from openworkproof.models import (  # noqa: PLC0415
+        AcceptanceDecisionBindingV01,
+        AcceptanceReceipt,
+    )
+    from openworkproof.policy import CommittedEvidence  # noqa: PLC0415
+    from openworkproof.signing import (  # noqa: PLC0415
+        decode_and_verify_key_binding,
+    )
+
+    path = Path(ledger_path)
+    if not path.is_file():
+        raise AcceptanceBundleError("acceptance export ledger is unavailable")
+    root = _canonical_root(Path(evidence_root))
+    lock_descriptor: int | None = None
+    connection = None
+    snapshot: _AcceptanceExportSnapshot | None = None
+    try:
+        lock_descriptor, _ = evidence._borrow_or_acquire_target_lock(path, None)
+        connection = evidence.connect_ledger(path)
+        connection.execute("BEGIN")
+        work_order, receipts, grant_map, _groups = (
+            evidence._replay_receipt_publication_ledger(connection)
+        )
+        attempt_map = evidence._validated_grant_attempts(
+            connection,
+            work_order,
+            receipts,
+        )
+        grants = tuple(
+            sorted(grant_map.values(), key=lambda item: item.grant_id)
+        )
+        attempts = tuple(
+            sorted(attempt_map.values(), key=lambda item: item.digest)
+        )
+        reports = evidence._validated_composition_reports(connection, work_order)
+        inputs = acceptance._load_acceptance_decision_binding_inputs(
+            connection,
+            path,
+        )
+        if inputs.work_order != work_order:
+            raise AcceptanceBundleError(
+                "acceptance export authority snapshot diverged"
+            )
+        transition_count = sum(
+            connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in (
+                "acceptance_transitions",
+                "acceptance_transitions_v03",
+                "acceptance_transitions_v05",
+            )
+        )
+        if transition_count:
+            raise AcceptanceBundleError(
+                "acceptance bundle 0.1 forbids transition history"
+            )
+        binding_rows = tuple(
+            connection.execute(
+                "SELECT binding_id, binding_json FROM "
+                "acceptance_decision_bindings_v01 ORDER BY rowid"
+            )
+        )
+        if len(binding_rows) != 1:
+            raise AcceptanceBundleError(
+                "acceptance export requires one decision binding"
+            )
+        try:
+            binding = AcceptanceDecisionBindingV01.model_validate_json(
+                binding_rows[0][1]
+            )
+        except Exception as error:
+            raise AcceptanceBundleError(
+                "acceptance decision binding row is malformed"
+            ) from error
+        stored_binding_row = acceptance._binding_row(
+            connection,
+            binding.binding_id,
+        )
+        expected_binding_row = (
+            binding.digest,
+            binding.work_order_digest,
+            binding.verification_decision_id,
+            binding.terminal_kind,
+            binding.terminal_receipt_id,
+            binding.signer_key_id,
+            binding.nonce,
+            rfc8785.dumps(binding.model_dump(mode="json")),
+            binding.bound_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+        if (
+            binding.binding_id != binding_rows[0][0]
+            or stored_binding_row != expected_binding_row
+        ):
+            raise AcceptanceBundleError(
+                "acceptance decision binding row identity is invalid"
+            )
+        acceptance._validate_acceptance_decision_binding(
+            binding,
+            inputs,
+            now=binding.bound_at,
+            require_fresh=False,
+        )
+        references = {}
+        for receipt in receipts:
+            for reference in receipt.evidence_refs:
+                previous = references.setdefault(reference.path, reference)
+                if previous != reference:
+                    raise AcceptanceBundleError(
+                        "committed evidence references conflict"
+                    )
+        committed = []
+        for relative, reference in sorted(
+            references.items(), key=lambda item: item[0].encode("utf-8")
+        ):
+            if not relative.startswith("evidence/"):
+                raise AcceptanceBundleError(
+                    "committed evidence is outside the evidence namespace"
+                )
+            payload = _safe_evidence_payload(
+                root,
+                relative.removeprefix("evidence/"),
+            )
+            if (
+                len(payload) != reference.size_bytes
+                or hashlib.sha256(payload).hexdigest() != reference.sha256
+            ):
+                raise AcceptanceBundleError(
+                    "committed evidence bytes do not match the ledger"
+                )
+            committed.append(
+                CommittedEvidence(reference=reference, payload=payload)
+            )
+        public_keys = {
+            item.key_id: decode_and_verify_key_binding(item)
+            for item in work_order.key_bindings
+        }
+        acceptance.verify_acceptance_bundle(
+            work_order=work_order,
+            report=inputs.report,
+            effective_grants=grants,
+            grant_attempts=attempts,
+            receipts=receipts,
+            committed_evidence=tuple(committed),
+            acceptance_receipt=(
+                inputs.terminal
+                if inputs.terminal_kind == "accepted"
+                else None
+            ),
+            rejection=(
+                inputs.terminal
+                if inputs.terminal_kind == "rejected"
+                else None
+            ),
+            public_keys=public_keys,
+            reports=reports,
+        )
+        if (
+            isinstance(inputs.terminal, AcceptanceReceipt)
+        ) != (inputs.terminal_kind == "accepted"):
+            raise AcceptanceBundleError(
+                "acceptance terminal kind is inconsistent"
+            )
+        connection.execute("ROLLBACK")
+        snapshot = _AcceptanceExportSnapshot(
+            work_order=work_order,
+            decision=inputs.decision,
+            receipts=receipts,
+            grants=grants,
+            attempts=attempts,
+            reports=reports,
+            committed_evidence=tuple(committed),
+            terminal=inputs.terminal,
+            terminal_kind=inputs.terminal_kind,
+            binding=binding,
+        )
+    except AcceptanceBundleError:
+        evidence._best_effort_rollback(connection)
+        raise
+    except Exception as error:
+        evidence._best_effort_rollback(connection)
+        raise AcceptanceBundleError(
+            "acceptance export snapshot is invalid"
+        ) from error
+    finally:
+        close_error = evidence._best_effort_close(connection)
+        _, release_errors = evidence._release_target_lock(lock_descriptor)
+        cleanup_errors = tuple(
+            item
+            for item in (close_error, *release_errors)
+            if item is not None
+        )
+        if cleanup_errors:
+            raise AcceptanceBundleError(
+                "acceptance export snapshot cleanup failed"
+            ) from cleanup_errors[0]
+    if snapshot is None:
+        raise AcceptanceBundleError("acceptance export snapshot is unavailable")
+    return snapshot
+
+
+def _write_acceptance_export_snapshot(
+    stage: Path,
+    snapshot: _AcceptanceExportSnapshot,
+) -> None:
+    from openworkproof import acceptance  # noqa: PLC0415
+
+    for relative, values in (
+        ("acceptance/effective-grants.json", snapshot.grants),
+        ("acceptance/grant-attempts.json", snapshot.attempts),
+        ("acceptance/composition-reports.json", snapshot.reports),
+    ):
+        _write_new(
+            stage,
+            relative,
+            _canonical([item.model_dump(mode="json") for item in values]),
+        )
+    evidence_entries = []
+    for item in snapshot.committed_evidence:
+        bundle_path = f"acceptance/evidence/{item.reference.path}"
+        _write_new(stage, bundle_path, item.payload)
+        evidence_entries.append(
+            {
+                "bundle_path": bundle_path,
+                "reference": item.reference.model_dump(mode="json"),
+            }
+        )
+    _write_new(
+        stage,
+        "acceptance/committed-evidence-index.json",
+        _canonical(
+            {
+                "schema_version": "openworkproof-committed-evidence-index/0.1",
+                "entries": evidence_entries,
+            }
+        ),
+    )
+    _write_new(
+        stage,
+        "acceptance/terminal-receipt.json",
+        _canonical(snapshot.terminal.model_dump(mode="json")),
+    )
+    _write_new(
+        stage,
+        "acceptance/decision-binding.json",
+        _canonical(snapshot.binding.model_dump(mode="json")),
+    )
+    _write_new(stage, "verify.sh", ACCEPTANCE_VERIFY_SCRIPT, mode=0o700)
+
+    files = {
+        path.relative_to(stage).as_posix(): path.read_bytes()
+        for path in stage.rglob("*")
+        if path.is_file() and path.name != "acceptance-manifest.json"
+    }
+    manifest = compose_acceptance_manifest(
+        files,
+        surface_manifest_digest=hashlib.sha256(
+            files["surface/surface-manifest.json"]
+        ).hexdigest(),
+        delivery_manifest_digest=hashlib.sha256(
+            files["surface/delivery-package/manifest.json"]
+        ).hexdigest(),
+        work_order_digest=snapshot.work_order.digest,
+        verification_decision_digest=snapshot.decision.digest,
+        composition_report_digest=acceptance.composition_report_digest(
+            snapshot.reports[-1]
+        ),
+        terminal_decision=snapshot.terminal_kind,
+        terminal_receipt_digest=snapshot.terminal.digest,
+        acceptance_decision_binding_digest=snapshot.binding.digest,
+    )
+    _write_new(
+        stage,
+        "acceptance-manifest.json",
+        _canonical(manifest.model_dump(mode="json")),
+    )
+
+
+def _fsync_acceptance_tree(root: Path) -> None:
+    files = sorted(
+        (path for path in root.rglob("*") if path.is_file()),
+        key=lambda path: path.as_posix().encode("utf-8"),
+    )
+    directories = sorted(
+        (path for path in root.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for path in files:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    for path in (*directories, root):
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def _rename_no_replace(source: Path, destination: Path) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    if sys.platform == "darwin":
+        rename = libc.renameatx_np
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(-2, source_bytes, -2, destination_bytes, 0x00000004)
+    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        rename = libc.renameat2
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(-100, source_bytes, -100, destination_bytes, 1)
+    else:
+        raise AcceptanceBundleError(
+            "atomic no-replace directory rename is unavailable"
+        )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+            raise FileExistsError(
+                error_number,
+                os.strerror(error_number),
+                destination,
+            )
+        raise OSError(
+            error_number,
+            os.strerror(error_number),
+            destination,
+        )
+
+
+def _exact_acceptance_export_readback(
+    destination: Path,
+    expected: AcceptanceManifestV01,
+) -> bool:
+    try:
+        actual = validate_acceptance_bundle_manifest(destination)
+        verified = verify_acceptance_bundle_directory(destination)
+    except Exception:
+        return False
+    return (
+        actual == expected
+        and verified.work_order_digest == expected.work_order_digest
+        and verified.verification_decision_digest
+        == expected.verification_decision_digest
+        and verified.terminal_receipt_digest
+        == expected.terminal_receipt_digest
+        and verified.acceptance_decision_binding_digest
+        == expected.acceptance_decision_binding_digest
+    )
+
+
+def export_acceptance_bundle(
+    ledger: Path,
+    evidence_root: Path,
+    surface_bundle: Path,
+    output: Path,
+) -> AcceptanceManifestV01:
+    """Export one current customer acceptance as an atomic offline bundle."""
+
+    output = Path(output)
+    parent = _canonical_root(output.parent)
+    destination = parent / output.name
+    surface_root = _canonical_root(Path(surface_bundle))
+    if destination.exists() or destination.is_symlink():
+        raise AcceptanceBundleError("acceptance bundle target already exists")
+    for source in (
+        Path(ledger).resolve(),
+        _canonical_root(Path(evidence_root)),
+        surface_root,
+    ):
+        if destination == source or destination.is_relative_to(source):
+            raise AcceptanceBundleError(
+                "acceptance bundle output overlaps an input"
+            )
+    stage = parent / f".{output.name}.openworkproof-acceptance-{uuid.uuid4().hex}.tmp"
+    committed = False
+    try:
+        stage.mkdir(mode=0o700)
+        scanned_surface = _scan_tree(surface_root)
+        for relative, item in scanned_surface.items():
+            _write_new(
+                stage,
+                f"surface/{relative}",
+                item.payload,
+                mode=item.mode,
+            )
+        from openworkproof.surface_bundle import verify_surface_bundle  # noqa: PLC0415
+
+        surface = verify_surface_bundle(stage / "surface")
+        if surface.report.decision_status != "VERIFIED":
+            raise AcceptanceBundleError(
+                "acceptance export requires a VERIFIED surface"
+            )
+        snapshot = _read_acceptance_export_snapshot(ledger, evidence_root)
+        if (
+            surface.report.work_order_digest != snapshot.work_order.digest
+            or surface.report.verification_decision_digests
+            != (snapshot.decision.digest,)
+        ):
+            raise AcceptanceBundleError(
+                "acceptance ledger and surface do not describe one delivery"
+            )
+        _write_acceptance_export_snapshot(stage, snapshot)
+        expected = validate_acceptance_bundle_manifest(stage)
+        verified = verify_acceptance_bundle_directory(stage)
+        if (
+            verified.work_order_digest != snapshot.work_order.digest
+            or verified.acceptance_decision_binding_digest
+            != snapshot.binding.digest
+        ):
+            raise AcceptanceBundleError(
+                "acceptance export self-verification diverged"
+            )
+        _fsync_acceptance_tree(stage)
+        if destination.exists() or destination.is_symlink():
+            raise AcceptanceBundleError(
+                "acceptance bundle target appeared during export"
+            )
+        try:
+            _rename_no_replace(stage, destination)
+            parent_descriptor = os.open(parent, os.O_RDONLY)
+            try:
+                os.fsync(parent_descriptor)
+            finally:
+                os.close(parent_descriptor)
+        except FileExistsError as error:
+            raise AcceptanceBundleError(
+                "acceptance bundle target appeared during export"
+            ) from error
+        except Exception as error:
+            if _exact_acceptance_export_readback(destination, expected):
+                committed = True
+                return expected
+            raise AcceptanceBundleError(
+                "acceptance bundle commit outcome is indeterminate"
+            ) from error
+        committed = True
+        return expected
+    except AcceptanceBundleError:
+        raise
+    except Exception as error:
+        raise AcceptanceBundleError("acceptance bundle export failed") from error
+    finally:
+        if not committed and stage.exists():
+            try:
+                shutil.rmtree(stage)
+            except OSError as error:
+                raise AcceptanceBundleError(
+                    "acceptance bundle export cleanup failed"
+                ) from error

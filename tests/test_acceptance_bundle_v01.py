@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 from types import SimpleNamespace
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import rfc8785
@@ -20,6 +21,7 @@ from test_acceptance_decision_binding_v01 import (
     rejected_v05_case as rejected_v05_case,
     _sign_binding_draft,
     _stub_candidate_execution_snapshot as _stub_candidate_execution_snapshot,
+    _supersede_v05_decision,
 )
 
 
@@ -313,13 +315,26 @@ def _write_canonical(path: Path, value: object) -> None:
     path.write_bytes(_canonical(value))
 
 
+def _build_surface_from_ledger(case, surface: Path) -> None:
+    from openworkproof.delivery_package import export_delivery_package
+    from openworkproof.surface_bundle import build_surface_bundle
+    from test_surface_bundle_v01 import _complete_fingerprint
+
+    package = surface.parent / f"{surface.name}-delivery"
+    export_delivery_package(
+        case["ledger_path"], package, privacy_view="customer_private"
+    )
+    build_surface_bundle(
+        package,
+        (_complete_fingerprint({"keys": case["keys"]}, package),),
+        surface,
+    )
+
+
 def _build_real_acceptance_bundle(case, root: Path):
     import openworkproof.acceptance as acceptance
     import openworkproof.evidence as evidence
-    from openworkproof.delivery_package import export_delivery_package
-    from openworkproof.surface_bundle import build_surface_bundle
     from test_mcp_server import _current_run_tests_context
-    from test_surface_bundle_v01 import _complete_fingerprint
 
     draft = acceptance.prepare_acceptance_decision_binding(
         case["ledger_path"], clock=lambda: case["binding_now"]
@@ -328,19 +343,8 @@ def _build_real_acceptance_bundle(case, root: Path):
     acceptance.commit_acceptance_decision_binding(
         case["ledger_path"], binding, clock=lambda: case["binding_now"]
     )
-    package = root.parent / f"{root.name}-delivery"
     surface = root.parent / f"{root.name}-surface"
-    export_delivery_package(
-        case["ledger_path"], package, privacy_view="customer_private"
-    )
-    surface_case = {
-        "keys": case["keys"],
-    }
-    build_surface_bundle(
-        package,
-        (_complete_fingerprint(surface_case, package),),
-        surface,
-    )
+    _build_surface_from_ledger(case, surface)
     root.mkdir()
     shutil.copytree(surface, root / "surface")
     context = _current_run_tests_context(case, case["binding_now"])
@@ -688,3 +692,340 @@ def test_acceptance_bundle_closes_nested_operational_errors(
     with pytest.raises(bundle.AcceptanceBundleError) as captured:
         bundle.verify_acceptance_bundle_directory(root)
     assert type(captured.value) is bundle.AcceptanceBundleError
+
+
+@pytest.mark.parametrize(
+    ("case_fixture", "expected"),
+    (
+        ("accepted_v05_case", "ACCEPTED"),
+        ("rejected_v05_case", "REJECTED"),
+    ),
+)
+def test_export_acceptance_bundle_round_trips_authoritative_terminal(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    case_fixture: str,
+    expected: str,
+) -> None:
+    case = request.getfixturevalue(case_fixture)
+    prepared = tmp_path / f"prepared-{case_fixture}"
+    _build_real_acceptance_bundle(case, prepared)
+    output = tmp_path / f"exported-{case_fixture}"
+
+    manifest = bundle.export_acceptance_bundle(
+        case["ledger_path"],
+        case["evidence_root"],
+        prepared / "surface",
+        output,
+    )
+
+    verified = bundle.verify_acceptance_bundle_directory(output)
+    assert manifest == bundle.validate_acceptance_bundle_manifest(output)
+    assert verified.terminal_decision == expected
+
+
+def test_export_acceptance_bundle_rejects_missing_binding(
+    accepted_v05_case,
+    tmp_path: Path,
+) -> None:
+    surface = tmp_path / "surface-without-binding"
+    _build_surface_from_ledger(accepted_v05_case, surface)
+    with pytest.raises(bundle.AcceptanceBundleError, match="binding"):
+        bundle.export_acceptance_bundle(
+            accepted_v05_case["ledger_path"],
+            accepted_v05_case["evidence_root"],
+            surface,
+            tmp_path / "missing-binding-export",
+        )
+
+
+def test_export_acceptance_bundle_does_not_create_missing_ledger(
+    accepted_v05_case,
+    tmp_path: Path,
+) -> None:
+    prepared = tmp_path / "prepared-missing-ledger"
+    _build_real_acceptance_bundle(accepted_v05_case, prepared)
+    missing = tmp_path / "missing-ledger.sqlite3"
+    with pytest.raises(bundle.AcceptanceBundleError, match="ledger"):
+        bundle.export_acceptance_bundle(
+            missing,
+            accepted_v05_case["evidence_root"],
+            prepared / "surface",
+            tmp_path / "missing-ledger-output",
+        )
+    assert not missing.exists()
+
+
+def test_export_acceptance_bundle_rejects_transition_history(
+    accepted_v05_case,
+    tmp_path: Path,
+) -> None:
+    import openworkproof.acceptance as acceptance
+    from test_acceptance_v05 import _transition_for_v05
+
+    prepared = tmp_path / "prepared-transition"
+    _build_real_acceptance_bundle(accepted_v05_case, prepared)
+    transition = _transition_for_v05(
+        case=accepted_v05_case,
+        decision=accepted_v05_case["decision"],
+        signed_acceptance_receipt=accepted_v05_case["terminal"],
+        transition="withdrawn",
+    )
+    acceptance.commit_acceptance_transition(
+        accepted_v05_case["ledger_path"], transition
+    )
+    with pytest.raises(bundle.AcceptanceBundleError, match="transition"):
+        bundle.export_acceptance_bundle(
+            accepted_v05_case["ledger_path"],
+            accepted_v05_case["evidence_root"],
+            prepared / "surface",
+            tmp_path / "transition-export",
+        )
+
+
+def test_export_acceptance_bundle_rejects_superseded_current_decision(
+    accepted_v05_case,
+    tmp_path: Path,
+) -> None:
+    prepared = tmp_path / "prepared-superseded"
+    _build_real_acceptance_bundle(accepted_v05_case, prepared)
+    _supersede_v05_decision(accepted_v05_case)
+    with pytest.raises(bundle.AcceptanceBundleError):
+        bundle.export_acceptance_bundle(
+            accepted_v05_case["ledger_path"],
+            accepted_v05_case["evidence_root"],
+            prepared / "surface",
+            tmp_path / "superseded-export",
+        )
+
+
+def test_export_acceptance_bundle_rejects_evidence_escape(
+    accepted_v05_case,
+    tmp_path: Path,
+) -> None:
+    from test_mcp_server import _current_run_tests_context
+
+    prepared = tmp_path / "prepared-escape"
+    _build_real_acceptance_bundle(accepted_v05_case, prepared)
+    context = _current_run_tests_context(
+        accepted_v05_case,
+        accepted_v05_case["binding_now"],
+    )
+    reference = context.committed_evidence[0].reference
+    target = accepted_v05_case["evidence_root"] / reference.path.removeprefix(
+        "evidence/"
+    )
+    escaped = tmp_path / "escaped-evidence"
+    escaped.write_bytes(target.read_bytes())
+    target.unlink()
+    target.symlink_to(escaped)
+    with pytest.raises(bundle.AcceptanceBundleError, match="evidence"):
+        bundle.export_acceptance_bundle(
+            accepted_v05_case["ledger_path"],
+            accepted_v05_case["evidence_root"],
+            prepared / "surface",
+            tmp_path / "escape-export",
+        )
+
+
+def test_export_acceptance_bundle_rejects_input_output_overlap(
+    accepted_v05_case,
+    tmp_path: Path,
+) -> None:
+    prepared = tmp_path / "prepared-overlap"
+    _build_real_acceptance_bundle(accepted_v05_case, prepared)
+    with pytest.raises(bundle.AcceptanceBundleError, match="overlaps"):
+        bundle.export_acceptance_bundle(
+            accepted_v05_case["ledger_path"],
+            accepted_v05_case["evidence_root"],
+            prepared / "surface",
+            prepared / "surface/nested-output",
+        )
+
+
+def test_export_acceptance_bundle_never_overwrites_existing_target(
+    accepted_v05_case,
+    tmp_path: Path,
+) -> None:
+    prepared = tmp_path / "prepared-existing"
+    _build_real_acceptance_bundle(accepted_v05_case, prepared)
+    output = tmp_path / "existing-output"
+    output.mkdir()
+    sentinel = output / "owned.txt"
+    sentinel.write_text("preserve", encoding="utf-8")
+    with pytest.raises(bundle.AcceptanceBundleError, match="exists"):
+        bundle.export_acceptance_bundle(
+            accepted_v05_case["ledger_path"],
+            accepted_v05_case["evidence_root"],
+            prepared / "surface",
+            output,
+        )
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+
+
+def test_export_acceptance_bundle_concurrent_same_target_has_one_winner(
+    accepted_v05_case,
+    tmp_path: Path,
+) -> None:
+    prepared = tmp_path / "prepared-concurrent"
+    _build_real_acceptance_bundle(accepted_v05_case, prepared)
+    output = tmp_path / "concurrent-output"
+
+    def export():
+        try:
+            return bundle.export_acceptance_bundle(
+                accepted_v05_case["ledger_path"],
+                accepted_v05_case["evidence_root"],
+                prepared / "surface",
+                output,
+            )
+        except bundle.AcceptanceBundleError as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = tuple(pool.map(lambda _value: export(), range(2)))
+    assert sum(isinstance(item, bundle.AcceptanceManifestV01) for item in results) == 1
+    assert sum(isinstance(item, bundle.AcceptanceBundleError) for item in results) == 1
+    assert bundle.verify_acceptance_bundle_directory(output).terminal_decision == "ACCEPTED"
+
+
+def test_export_acceptance_bundle_does_not_replace_empty_racing_target(
+    accepted_v05_case,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = tmp_path / "prepared-empty-race"
+    _build_real_acceptance_bundle(accepted_v05_case, prepared)
+    output = tmp_path / "empty-racing-target"
+    real_rename = bundle._rename_no_replace
+
+    def racing_rename(source: Path, destination: Path) -> None:
+        Path(destination).mkdir()
+        real_rename(source, destination)
+
+    monkeypatch.setattr(bundle, "_rename_no_replace", racing_rename)
+    with pytest.raises(bundle.AcceptanceBundleError):
+        bundle.export_acceptance_bundle(
+            accepted_v05_case["ledger_path"],
+            accepted_v05_case["evidence_root"],
+            prepared / "surface",
+            output,
+        )
+    assert output.is_dir()
+    assert not (output / "acceptance-manifest.json").exists()
+
+
+def test_export_acceptance_bundle_recovers_rename_ack_loss(
+    accepted_v05_case,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = tmp_path / "prepared-ack-loss"
+    _build_real_acceptance_bundle(accepted_v05_case, prepared)
+    output = tmp_path / "ack-loss-output"
+    real_rename = bundle._rename_no_replace
+
+    def ack_lost(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        raise OSError("simulated rename acknowledgement loss")
+
+    monkeypatch.setattr(bundle, "_rename_no_replace", ack_lost)
+    manifest = bundle.export_acceptance_bundle(
+        accepted_v05_case["ledger_path"],
+        accepted_v05_case["evidence_root"],
+        prepared / "surface",
+        output,
+    )
+    assert manifest == bundle.validate_acceptance_bundle_manifest(output)
+    assert bundle.verify_acceptance_bundle_directory(output).terminal_decision == "ACCEPTED"
+
+
+def test_export_acceptance_bundle_recovers_parent_fsync_ack_loss(
+    accepted_v05_case,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = tmp_path / "prepared-parent-fsync"
+    _build_real_acceptance_bundle(accepted_v05_case, prepared)
+    output = tmp_path / "parent-fsync-output"
+
+    monkeypatch.setattr(bundle, "_fsync_acceptance_tree", lambda _root: None)
+    real_fsync = bundle.os.fsync
+    injected = False
+
+    def lost_parent_fsync(descriptor: int) -> None:
+        nonlocal injected
+        if output.exists() and not injected:
+            injected = True
+            raise OSError("simulated parent fsync acknowledgement loss")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(bundle.os, "fsync", lost_parent_fsync)
+    manifest = bundle.export_acceptance_bundle(
+        accepted_v05_case["ledger_path"],
+        accepted_v05_case["evidence_root"],
+        prepared / "surface",
+        output,
+    )
+    assert manifest == bundle.validate_acceptance_bundle_manifest(output)
+    assert bundle.verify_acceptance_bundle_directory(output).terminal_decision == "ACCEPTED"
+
+
+def test_export_acceptance_bundle_precommit_failure_is_zero_write(
+    accepted_v05_case,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = tmp_path / "prepared-precommit"
+    _build_real_acceptance_bundle(accepted_v05_case, prepared)
+    output = tmp_path / "precommit-output"
+
+    def fail_verify(_root: Path):
+        raise bundle.AcceptanceBundleError("injected precommit failure")
+
+    monkeypatch.setattr(bundle, "verify_acceptance_bundle_directory", fail_verify)
+    with pytest.raises(bundle.AcceptanceBundleError, match="precommit"):
+        bundle.export_acceptance_bundle(
+            accepted_v05_case["ledger_path"],
+            accepted_v05_case["evidence_root"],
+            prepared / "surface",
+            output,
+        )
+    assert not output.exists()
+    assert not tuple(
+        tmp_path.glob(".precommit-output.openworkproof-acceptance-*.tmp")
+    )
+
+
+def test_export_acceptance_bundle_cleanup_failure_is_closed(
+    accepted_v05_case,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = tmp_path / "prepared-cleanup"
+    _build_real_acceptance_bundle(accepted_v05_case, prepared)
+    output = tmp_path / "cleanup-output"
+
+    def fail_verify(_root: Path):
+        raise bundle.AcceptanceBundleError("injected precommit failure")
+
+    def fail_cleanup(_root: Path):
+        raise OSError("injected cleanup failure")
+
+    monkeypatch.setattr(bundle, "verify_acceptance_bundle_directory", fail_verify)
+    real_cleanup = shutil.rmtree
+    monkeypatch.setattr(bundle.shutil, "rmtree", fail_cleanup)
+    with pytest.raises(bundle.AcceptanceBundleError, match="cleanup"):
+        bundle.export_acceptance_bundle(
+            accepted_v05_case["ledger_path"],
+            accepted_v05_case["evidence_root"],
+            prepared / "surface",
+            output,
+        )
+    assert not output.exists()
+    leftovers = tuple(
+        tmp_path.glob(".cleanup-output.openworkproof-acceptance-*.tmp")
+    )
+    assert len(leftovers) == 1
+    monkeypatch.setattr(bundle.shutil, "rmtree", real_cleanup)
+    real_cleanup(leftovers[0])
