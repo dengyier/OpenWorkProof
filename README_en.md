@@ -104,8 +104,8 @@ top of 1.3: it turns one cross-organization agent job into a deliverable fact
 that is contractable, executable, independently verifiable, customer-acceptable,
 and ready to hand to an external payment party. It is a thin orchestration layer
 above the existing Surface Bundle, Acceptance Bundle and settlement readiness —
-it does not build a marketplace, SaaS console, login, wallet, escrow or
-automatic payment.
+it does not build a marketplace, SaaS console, login, wallet, escrow, or
+automated money movement.
 
 ```bash
 owp delivery-case init CASE_DIR

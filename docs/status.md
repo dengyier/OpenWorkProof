@@ -3,6 +3,48 @@
 > 本文档是项目实现状态的权威记录。README 只保留概览，
 > 「已经完成什么」和「尚未完成什么」的完整清单以本文为准。
 
+## Verified Agent Delivery 0.1 本地实现（2026-08-22）
+
+隔离分支 `codex/verified-agent-delivery` 已按计划实现首个商业产品切片
+`OpenWorkProof Verified Agent Delivery`：`delivery_case.py` 严格闭合模型 +
+安全原子初始化 + 从真实 Surface/Acceptance/Settlement 证据派生状态 +
+确定性摘要与原子导出 + 四条 CLI 命令 + 商业交付模板 + GitHub delivery-case
+composite Action。它只是既有 Surface Bundle、Acceptance Bundle 与 settlement
+readiness 上方的薄编排层，不建设商城、SaaS、登录、钱包、托管或自动付款。
+
+- 实现内容：`delivery_case.py`（闭合模型、`initialize_delivery_case`、
+  `inspect_delivery_case`、`export_delivery_case`、`verify_exported_delivery_case`）、
+  `delivery_case_render.py`（确定性 JSON/Markdown 摘要）、
+  `delivery-case init/inspect/verify/export` CLI（`verify` 退出码闭合为
+  `READY_FOR_SETTLEMENT_REVIEW=0`、`REFUTED=2`、`REJECTED=2`、`UNKNOWN=3`、
+  `operational=4`）、`integrations/github-delivery-case/` composite Action、
+  `docs/commercial/verified-agent-delivery/` 商业模板与 README 双语言入口。
+- 本轮 fresh 测量（控制器 fresh，未复用历史数字）：
+  - 专项 63 测试（`test_delivery_case_v01.py` + `test_delivery_case_cli_v01.py`）
+    fresh：`63 passed`（82.93s）；
+  - focused 七文件门：`213 passed`（217.97s）；
+  - 便携全量：`3975 passed、3 failed、8 skipped`（1362.29s）。8 skip 均为已分类
+    platform/live 边界（AgentTeams 真实环境、candidate artifact root、Landlock、
+    immutable image）。3 failed 中 1 个为 README_en 边界（`automatic payment`
+    字面量），已改为 `automated money movement` 并复跑相关测试通过；另 2 个为
+    `test_current_candidate_inventory_binds_*`（当前 source closure 因
+    `__init__.py` 新增 delivery-case lazy export 而变化，历史 inventory
+    `238d933…` 0 match），需 Task 9 重建 candidate inventory 后闭合；
+  - wheel 隔离安装：`pip wheel . --no-deps` 成功，隔离 venv 安装
+    `openworkproof-1.3.0`，`owp delivery-case --help` 显示四个子命令，
+    `import openworkproof` 无副作用；
+  - `pip check` / `compileall` / `git diff --check`：PASS。
+- 诚实边界不变：不托管资金、不等于付款、不构成法律审计；`READY_FOR_SETTLEMENT_REVIEW`
+  不等于完成结算；客户采用、付费 SOW、定金、外部付款、上游采纳均为
+  `not_evidenced`。自有 fixture 与导出包不计入真实十单、付款方或复购。
+
+```yaml
+customer_adoption: not_evidenced
+paid_sow: not_evidenced
+deposit: not_evidenced
+external_payment: not_evidenced
+```
+
 ## 1.3.0 双入口本地候选（2026-08-21）
 
 - 商业入口：GitHub Action 已能从客户私有 v0.5 Delivery Package 和已签环境
