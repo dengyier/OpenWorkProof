@@ -87,6 +87,41 @@ owp acceptance-bundle-verify DIRECTORY
 
 ---
 
+## 1.4 首个商业产品：Verified Agent Delivery
+
+`OpenWorkProof Verified Agent Delivery`（Agent 可验证交付见证）是 1.3 之上的首个
+商业产品切片：把一次跨组织 Agent 工作转换成可签约、可执行、可独立验证、可由
+客户验收、可交给外部支付方处理的交付事实。它只是现有 Surface Bundle、
+Acceptance Bundle 与 settlement readiness 上方的薄编排层，不建设商城、SaaS、
+登录、钱包、托管或自动付款。
+
+```bash
+owp delivery-case init CASE_DIR
+owp delivery-case inspect CASE_DIR
+owp delivery-case verify CASE_DIR
+owp delivery-case export CASE_DIR --output-directory OUTPUT_DIR
+```
+
+- `init` 生成订单目录、清单和模板；
+- `inspect` 从真实 Surface / Acceptance / Settlement 证据重新派生状态，不信任
+  磁盘预写状态；
+- `verify` 复核导出的交付包并返回闭合退出码
+  （`READY_FOR_SETTLEMENT_REVIEW=0`、`REFUTED=2`、`REJECTED=2`、
+  `UNKNOWN=3`、`operational=4`）；
+- `export` 以确定性摘要 + 完整性 manifest 原子导出第三方可复核的交付包。
+
+`READY_FOR_SETTLEMENT_REVIEW` 不等于付款或完成结算。完整商业模板、准入清单与
+Acceptor 清单见 `docs/commercial/verified-agent-delivery/`。
+
+```text
+customer_adoption: not_evidenced
+paid_sow: not_evidenced
+deposit: not_evidenced
+external_payment: not_evidenced
+```
+
+---
+
 ## 30 秒理解 OpenWorkProof
 
 MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent，AgentTeams 组织 Agent 协作。

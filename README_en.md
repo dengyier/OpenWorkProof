@@ -97,6 +97,45 @@ already-verified terminal fact.
 
 ---
 
+## 1.4 First Commercial Product: Verified Agent Delivery
+
+`OpenWorkProof Verified Agent Delivery` is the first commercial product slice on
+top of 1.3: it turns one cross-organization agent job into a deliverable fact
+that is contractable, executable, independently verifiable, customer-acceptable,
+and ready to hand to an external payment party. It is a thin orchestration layer
+above the existing Surface Bundle, Acceptance Bundle and settlement readiness —
+it does not build a marketplace, SaaS console, login, wallet, escrow or
+automatic payment.
+
+```bash
+owp delivery-case init CASE_DIR
+owp delivery-case inspect CASE_DIR
+owp delivery-case verify CASE_DIR
+owp delivery-case export CASE_DIR --output-directory OUTPUT_DIR
+```
+
+- `init` creates the case directory, manifest and templates;
+- `inspect` re-derives status from real Surface / Acceptance / Settlement
+  evidence, never trusting pre-written on-disk status;
+- `verify` re-checks an exported bundle and returns closed exit codes
+  (`READY_FOR_SETTLEMENT_REVIEW=0`, `REFUTED=2`, `REJECTED=2`,
+  `UNKNOWN=3`, `operational=4`);
+- `export` atomically exports a third-party-reviewable bundle with a
+  deterministic summary and an integrity manifest.
+
+`READY_FOR_SETTLEMENT_REVIEW` is not payment and not completed settlement. The
+full commercial templates, intake form and Acceptor checklist live in
+`docs/commercial/verified-agent-delivery/`.
+
+```text
+customer_adoption: not_evidenced
+paid_sow: not_evidenced
+deposit: not_evidenced
+external_payment: not_evidenced
+```
+
+---
+
 ## 30-Second Overview
 
 MCP connects agents to tools. A2A connects agents to agents. AgentTeams orchestrates agent collaboration.

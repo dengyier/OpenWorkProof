@@ -181,3 +181,40 @@ def test_acceptance_bundle_workflow_and_boundaries_are_documented() -> None:
         "upstream_adoption: not_evidenced",
     ):
         assert boundary in status
+
+
+def test_verified_delivery_docs_close_commercial_boundaries() -> None:
+    root = ROOT / "docs/commercial/verified-agent-delivery"
+    combined = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(root.iterdir())
+    )
+    for literal in (
+        "Delivery Provider",
+        "Customer Acceptor",
+        "not_evidenced",
+        "READY_FOR_SETTLEMENT_REVIEW",
+        "不托管资金",
+        "不等于付款",
+        "停止条件",
+    ):
+        assert literal in combined, f"verified delivery docs missing: {literal}"
+    for forbidden in ("保证回款", "自动付款", "法律公证", "已有客户采用"):
+        assert forbidden not in combined, f"forbidden claim present: {forbidden}"
+
+
+def test_verified_delivery_example_json_is_strictly_closed() -> None:
+    from openworkproof.delivery_case import ExternalEvidenceReferenceV01
+
+    root = ROOT / "docs/commercial/verified-agent-delivery"
+    for name in ("sow-reference.example.json", "payer-status.example.json"):
+        payload = (root / name).read_bytes()
+        import json as _json
+
+        import rfc8785 as _rfc8785
+
+        raw = _json.loads(payload)
+        reference = ExternalEvidenceReferenceV01.model_validate(raw)
+        assert reference.status == "not_evidenced"
+        assert reference.reference_digest is None
+        assert reference.observed_at is None
+        assert _rfc8785.dumps(reference.model_dump(mode="json")) == payload
