@@ -52,6 +52,35 @@ human_acceptance: not_evidenced
 - 以上均为本地工程事实；没有执行新的真实三 Agent 工作流，也没有取得人工客户
   验收、客户采用、付费 SOW、定金或上游采纳证据。
 
+### Acceptance Bundle 0.1 Task 11–12 完成（2026-08-21，HEAD 238d933）
+
+- fresh 门结果（本轮复跑，非历史计数）：
+  - focused 协议门：`365 passed`（278.14s，本轮复跑）；
+  - portable 全量：`3907 passed、0 failed、8 skipped`（1075.71s；8 skip 均为
+    platform/live 边界）；
+  - candidate 两套件（portable）：`180 passed、0 failed、1 skipped`（598.09s；
+    1 skip 为 artifact root）；
+  - required-live 全量：`3914 passed、0 failed、1 skipped`（1378.58s；唯一
+    skip 为未启用的 AgentTeams 真实三 Agent 环境，按 marker 如实记录）。
+- source allowlist 变化（acceptance.py / evidence.py / models.py / signing.py /
+  __init__.py 五文件）使历史 inventory b974722 出现 `0 match`；本轮按
+  prepare_context → buildx → convert_docker_archive → docker load 流程为最终
+  revision 新建不可变 inventory：
+  `supply-chain/images/candidates/238d9339a1d9fa2f00b4adb315a5ee14b51acb7e.json`
+  （唯一变化的 build_inputs 为 helper_src_sha256sums_sha256=ce0ae8ff…；execution
+  digest=sha256:8b926ccb…，helper digest=sha256:fe9a8fb9…）。历史 inventory 未覆盖。
+- 沙箱边界：DSH workspace-write 禁止写规范外部根 /Users/molin/Project/openWorkProof-delivery
+  （升级 danger-full-access 无审批通道，fail closed）；本轮候选在
+  /private/tmp/owp-candidate-delivery 构建，inventory local_root 如实记录该路径；
+  build_inputs 全部 revision-bound，可在规范根复现。首次 required-live 因 Docker
+  Desktop daemon 中途崩溃（7 个 live 测试 "daemon unavailable"）失败，已重启
+  daemon 并复跑通过。
+- 独立双审：规格审查 6 项全部 CONFIRMED（0 Critical / 0 Important）；质量/安全审查
+  APPROVE-WITH-NOTES（0 Critical / 0 Important / 6 Minor，均为回放保真/测试覆盖
+  polish，无可利用缺陷）。
+- 边界不变：真实三 Agent、人工验收、客户采用、付费 SOW、定金、上游采纳：
+  not_evidenced。
+
 `VERIFIED != ACCEPTED != PAID/SETTLED/LEGAL AUDIT/ADOPTION`
 
 ## 当前发布事实（以本次命令和公开回读为准）
