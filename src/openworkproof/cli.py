@@ -394,6 +394,50 @@ def cli_acceptance_bundle_verify(package: str | Path) -> dict:
     )
 
 
+def _delivery_case_result(callable_, *args) -> dict:
+    try:
+        return callable_(*args).model_dump(mode="json")
+    except CliError:
+        raise
+    except Exception as error:
+        raise CliError(str(error)) from error
+
+
+def cli_delivery_case_init(case_directory: str | Path) -> dict:
+    from openworkproof.delivery_case import initialize_delivery_case
+
+    return _delivery_case_result(
+        initialize_delivery_case, Path(case_directory)
+    )
+
+
+def cli_delivery_case_inspect(case_directory: str | Path) -> dict:
+    from openworkproof.delivery_case import inspect_delivery_case
+
+    return _delivery_case_result(
+        inspect_delivery_case, Path(case_directory)
+    )
+
+
+def cli_delivery_case_verify(case_directory: str | Path) -> dict:
+    from openworkproof.delivery_case import verify_exported_delivery_case
+
+    return _delivery_case_result(
+        verify_exported_delivery_case, Path(case_directory)
+    )
+
+
+def cli_delivery_case_export(
+    case_directory: str | Path,
+    output_directory: str | Path,
+) -> dict:
+    from openworkproof.delivery_case import export_delivery_case
+
+    return _delivery_case_result(
+        export_delivery_case, Path(case_directory), Path(output_directory)
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="owp")
     parser.add_argument(
@@ -603,6 +647,19 @@ def build_parser() -> argparse.ArgumentParser:
     package_replay.add_argument(
         "--binding", action="store_true", help="binding replay view"
     )
+
+    delivery_case = sub.add_parser(
+        "delivery-case", help="verified delivery case operations"
+    )
+    delivery_case_sub = delivery_case.add_subparsers(
+        dest="delivery_case_action", required=True
+    )
+    for action in ("init", "inspect", "verify"):
+        command = delivery_case_sub.add_parser(action)
+        command.add_argument("case_directory")
+    export = delivery_case_sub.add_parser("export")
+    export.add_argument("case_directory")
+    export.add_argument("--output-directory", required=True)
     return parser
 
 
@@ -704,10 +761,45 @@ def app(argv: Sequence[str] | None = None) -> int:
             result = cli_audit_compare(args.old_package, args.new_package)
         elif args.command == "settlement-status":
             result = cli_settlement_status(args.ledger)
+        elif args.command == "delivery-case":
+            if args.delivery_case_action == "init":
+                result = cli_delivery_case_init(args.case_directory)
+            elif args.delivery_case_action == "inspect":
+                result = cli_delivery_case_inspect(args.case_directory)
+            elif args.delivery_case_action == "verify":
+                result = cli_delivery_case_verify(args.case_directory)
+            else:
+                result = cli_delivery_case_export(
+                    args.case_directory, args.output_directory
+                )
         else:
             parser.error(f"unknown command: {args.command}")
             return 2
     except CliError as error:
+        if args.command == "delivery-case":
+            print(
+                json.dumps(
+                    {
+                        "schema_version": (
+                            "openworkproof-delivery-case-result/0.1"
+                        ),
+                        "case_stage": None,
+                        "reason_codes": ["OPERATIONAL_ERROR"],
+                        "boundary": (
+                            "not payment, completed settlement, legal audit, "
+                            "or customer adoption"
+                        ),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                )
+            )
+            print(
+                json.dumps({"error": str(error)}, ensure_ascii=False),
+                file=sys.stderr,
+            )
+            return 4
         if args.command in {
             "surface-build",
             "surface-verify",
@@ -832,6 +924,19 @@ def app(argv: Sequence[str] | None = None) -> int:
         "audit-compare",
     } and "current_decision" in result:
         return decision_exit.get(str(result["current_decision"]), 3)
+    if args.command == "delivery-case" and args.delivery_case_action == "verify":
+        return {
+            "READY_FOR_SETTLEMENT_REVIEW": 0,
+            "EXTERNAL_PAYMENT_EVIDENCED": 0,
+            "VERIFIED": 0,
+            "REFUTED": 2,
+            "REJECTED": 2,
+            "UNKNOWN": 3,
+            "SCOPE_DRAFTED": 3,
+            "SOW_REFERENCED": 3,
+            "READY_FOR_ACCEPTANCE": 3,
+            "ACCEPTED": 3,
+        }.get(str(result.get("case_stage")), 4)
     return 0
 
 

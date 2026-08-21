@@ -34,6 +34,31 @@ _LAZY_EXPORTS = {
         "openworkproof.acceptance_bundle",
         "verify_acceptance_bundle_directory",
     ),
+    "DeliveryCaseError": ("openworkproof.delivery_case", "DeliveryCaseError"),
+    "DeliveryCaseManifestV01": (
+        "openworkproof.delivery_case",
+        "DeliveryCaseManifestV01",
+    ),
+    "DeliveryCaseResultV01": (
+        "openworkproof.delivery_case",
+        "DeliveryCaseResultV01",
+    ),
+    "initialize_delivery_case": (
+        "openworkproof.delivery_case",
+        "initialize_delivery_case",
+    ),
+    "inspect_delivery_case": (
+        "openworkproof.delivery_case",
+        "inspect_delivery_case",
+    ),
+    "export_delivery_case": (
+        "openworkproof.delivery_case",
+        "export_delivery_case",
+    ),
+    "verify_exported_delivery_case": (
+        "openworkproof.delivery_case",
+        "verify_exported_delivery_case",
+    ),
 }
 
 
@@ -57,4 +82,11 @@ __all__ = [
     "verify_surface_bundle",
     "verify_acceptance_bundle_directory",
     "validate_evaluation_scope",
+    "DeliveryCaseError",
+    "DeliveryCaseManifestV01",
+    "DeliveryCaseResultV01",
+    "initialize_delivery_case",
+    "inspect_delivery_case",
+    "export_delivery_case",
+    "verify_exported_delivery_case",
 ]
