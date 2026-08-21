@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -652,6 +653,37 @@ def test_acceptance_bundle_rejects_resigned_binding_field_swap(
         bundle.verify_acceptance_bundle_directory(root)
 
 
+def test_exported_acceptance_bundle_contains_no_secret_or_absolute_path(
+    accepted_v05_case,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "privacy-scan"
+    _build_real_acceptance_bundle(accepted_v05_case, root)
+    exported = b"\n".join(
+        path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    )
+    secret_encodings = []
+    for role in accepted_v05_case["keys"].values():
+        for item in role:
+            key = item[0] if isinstance(item, tuple) else item
+            if not hasattr(key, "private_bytes_raw"):
+                continue
+            raw = key.private_bytes_raw()
+            secret_encodings.extend(
+                (raw, base64.b64encode(raw), base64.urlsafe_b64encode(raw))
+            )
+    for forbidden in (
+        str(tmp_path).encode("utf-8"),
+        b"/Users/",
+        b"AGENTTEAMS_MATRIX_TOKEN",
+        b"in-memory-test-token",
+        *secret_encodings,
+    ):
+        assert forbidden not in exported
+
+
 @pytest.mark.parametrize(
     ("relative", "payload"),
     (
@@ -673,6 +705,87 @@ def test_acceptance_bundle_closes_companion_parse_errors(
     _build_real_acceptance_bundle(accepted_v05_case, root)
     root.joinpath(*relative.split("/")).write_bytes(payload)
     _sync_outer_manifest(root, relative)
+    with pytest.raises(bundle.AcceptanceBundleError):
+        bundle.verify_acceptance_bundle_directory(root)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "acceptance/effective-grants.json",
+        "acceptance/composition-reports.json",
+        "acceptance/committed-evidence-index.json",
+    ),
+)
+def test_acceptance_bundle_rejects_valid_object_collection_duplication(
+    accepted_v05_case,
+    tmp_path: Path,
+    relative: str,
+) -> None:
+    root = tmp_path / f"duplicate-{Path(relative).name}"
+    _build_real_acceptance_bundle(accepted_v05_case, root)
+    target = root.joinpath(*relative.split("/"))
+    raw = json.loads(target.read_bytes())
+    if isinstance(raw, list):
+        assert raw
+        raw.append(raw[0])
+    else:
+        assert raw["entries"]
+        raw["entries"].append(raw["entries"][0])
+    target.write_bytes(_canonical(raw))
+    _sync_outer_manifest(root, relative)
+
+    with pytest.raises(bundle.AcceptanceBundleError):
+        bundle.verify_acceptance_bundle_directory(root)
+
+
+def test_acceptance_bundle_rejects_resynced_committed_evidence_tamper(
+    accepted_v05_case,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "resynced-evidence-tamper"
+    _build_real_acceptance_bundle(accepted_v05_case, root)
+    index_relative = "acceptance/committed-evidence-index.json"
+    index_path = root.joinpath(*index_relative.split("/"))
+    index = json.loads(index_path.read_bytes())
+    assert index["entries"]
+    entry = index["entries"][0]
+    evidence_relative = entry["bundle_path"]
+    evidence_path = root.joinpath(*evidence_relative.split("/"))
+    evidence_path.write_bytes(b"attacker-controlled-evidence")
+    entry["reference"]["sha256"] = hashlib.sha256(
+        evidence_path.read_bytes()
+    ).hexdigest()
+    entry["reference"]["size_bytes"] = len(evidence_path.read_bytes())
+    index_path.write_bytes(_canonical(index))
+    _sync_outer_manifest(root, index_relative)
+    _sync_outer_manifest(root, evidence_relative)
+
+    with pytest.raises(bundle.AcceptanceBundleError):
+        bundle.verify_acceptance_bundle_directory(root)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("work_order_digest", "0" * 64),
+        ("verification_decision_digest", "0" * 64),
+        ("composition_report_digest", "0" * 64),
+        ("terminal_decision", "rejected"),
+        ("terminal_receipt_digest", "0" * 64),
+        ("acceptance_decision_binding_digest", "0" * 64),
+    ),
+)
+def test_acceptance_bundle_rejects_outer_summary_semantic_drift(
+    accepted_v05_case,
+    tmp_path: Path,
+    field: str,
+    replacement: str,
+) -> None:
+    root = tmp_path / f"outer-summary-{field}"
+    _build_real_acceptance_bundle(accepted_v05_case, root)
+    _set_outer_summary(root, **{field: replacement})
+
     with pytest.raises(bundle.AcceptanceBundleError):
         bundle.verify_acceptance_bundle_directory(root)
 
@@ -971,6 +1084,36 @@ def test_export_acceptance_bundle_recovers_parent_fsync_ack_loss(
     )
     assert manifest == bundle.validate_acceptance_bundle_manifest(output)
     assert bundle.verify_acceptance_bundle_directory(output).terminal_decision == "ACCEPTED"
+
+
+def test_export_acceptance_bundle_leaves_no_control_residue(
+    accepted_v05_case,
+    tmp_path: Path,
+) -> None:
+    prepared = tmp_path / "prepared-no-residue"
+    _build_real_acceptance_bundle(accepted_v05_case, prepared)
+    output = tmp_path / "no-residue-output"
+
+    bundle.export_acceptance_bundle(
+        accepted_v05_case["ledger_path"],
+        accepted_v05_case["evidence_root"],
+        prepared / "surface",
+        output,
+    )
+
+    siblings = {path.name for path in tmp_path.iterdir()}
+    assert not any(
+        name.startswith(
+            f".{output.name}.openworkproof-acceptance-"
+        )
+        or name in {
+            f"{output.name}.lock",
+            f"{output.name}.backup",
+            f".{output.name}.lock",
+            f".{output.name}.backup",
+        }
+        for name in siblings
+    )
 
 
 def test_export_acceptance_bundle_precommit_failure_is_zero_write(

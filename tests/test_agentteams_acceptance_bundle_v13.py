@@ -255,3 +255,34 @@ def test_provenance_contains_no_paths_tokens_or_message_body(
     assert "token" not in raw.lower()
     assert "body" not in raw.lower()
     assert "private" not in raw.lower()
+
+
+@pytest.mark.parametrize("occupied_kind", ("file", "symlink"))
+def test_provenance_is_never_overwritten_or_followed(
+    tmp_path: Path,
+    occupied_kind: str,
+) -> None:
+    module = _module()
+    wait = module["wait_for_external_acceptance"]
+    acceptance = tmp_path / "accepted"
+    acceptance.mkdir()
+    provenance = tmp_path / "provenance.json"
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text("preserve", encoding="utf-8")
+    if occupied_kind == "file":
+        provenance.write_text("owned", encoding="utf-8")
+    else:
+        provenance.symlink_to(sentinel)
+    _install_verifier(wait, result=_result("ACCEPTED"))
+
+    with pytest.raises(RuntimeError, match="provenance"):
+        wait(
+            acceptance_bundle=acceptance,
+            timeout_seconds=1,
+            provenance_path=provenance,
+            matrix=_Matrix(),
+            room_id="!team:hs",
+        )
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+    if occupied_kind == "file":
+        assert provenance.read_text(encoding="utf-8") == "owned"

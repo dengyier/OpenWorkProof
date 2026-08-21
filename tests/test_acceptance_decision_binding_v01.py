@@ -876,17 +876,23 @@ def test_non_verified_successor_hides_but_does_not_erase_binding(
 
 
 @pytest.mark.parametrize(
-    "field",
+    ("field", "replacement"),
     (
-        "verification_decision_digest",
-        "composition_report_digest",
-        "acceptance_request_receipt_digest",
-        "terminal_receipt_digest",
+        ("work_order_digest", "0" * 64),
+        ("verification_decision_id", "0" * 64),
+        ("verification_decision_digest", "0" * 64),
+        ("composition_report_digest", "0" * 64),
+        ("acceptance_request_receipt_id", "0" * 64),
+        ("acceptance_request_receipt_digest", "0" * 64),
+        ("terminal_kind", "rejected"),
+        ("terminal_receipt_id", "0" * 64),
+        ("terminal_receipt_digest", "0" * 64),
     ),
 )
 def test_binding_commit_rejects_resigned_authoritative_field_drift(
     accepted_v05_case,
     field,
+    replacement,
 ) -> None:
     from openworkproof.models import (
         AcceptanceDecisionBindingV01,
@@ -898,7 +904,7 @@ def test_binding_commit_rejects_resigned_authoritative_field_drift(
         case["ledger_path"], clock=lambda: case["binding_now"]
     )
     payload = dict(draft.payload)
-    payload[field] = "0" * 64
+    payload[field] = replacement
     payload["binding_id"] = acceptance_decision_binding_id(payload)
     drifted = AcceptanceDecisionBindingV01.model_validate(
         sign_payload(
