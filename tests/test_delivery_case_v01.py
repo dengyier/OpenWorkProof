@@ -577,3 +577,162 @@ def test_export_contains_no_secret_or_absolute_path(
     assert str(tmp_path) not in text
     assert "private_key" not in text
     assert "PRIVATE KEY" not in text
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    (
+        ("unknown_field", "unknown"),
+        ("non_canonical", "canonical"),
+        ("bad_digest", "invalid"),
+    ),
+)
+def test_inspect_rejects_bad_case_json(
+    full_delivery_case, mutate: str, match: str
+) -> None:
+    root, _ = full_delivery_case
+    case = root / "case.json"
+    raw = json.loads(case.read_bytes())
+    if mutate == "unknown_field":
+        raw["case_stage"] = "ACCEPTED"
+        case.write_bytes(rfc8785.dumps(raw))
+    elif mutate == "non_canonical":
+        case.write_bytes(json.dumps(raw, indent=2).encode("utf-8"))
+    else:
+        raw["case_id"] = "not-a-digest"
+        case.write_bytes(rfc8785.dumps(raw))
+    with pytest.raises(DeliveryCaseError):
+        inspect_delivery_case(root)
+
+
+def test_inspect_rejects_contradictory_payer_status(full_delivery_case) -> None:
+    root, _ = full_delivery_case
+    payer = root / "commercial" / "payer-status.json"
+    payer.write_bytes(
+        rfc8785.dumps(
+            {
+                "schema_version": "openworkproof-external-evidence/0.1",
+                "status": "not_evidenced",
+                "reference_digest": "4" * 64,
+                "observed_at": None,
+            }
+        )
+    )
+    with pytest.raises(DeliveryCaseError):
+        inspect_delivery_case(root)
+
+
+def test_inspect_rejects_surface_byte_tamper(full_delivery_case) -> None:
+    root, _ = full_delivery_case
+    report = root / "surface" / "report.json"
+    report.write_bytes(report.read_bytes() + b"tamper")
+    with pytest.raises(DeliveryCaseError):
+        inspect_delivery_case(root)
+
+
+def test_inspect_rejects_acceptance_byte_tamper(full_delivery_case) -> None:
+    root, _ = full_delivery_case
+    binding = root / "acceptance" / "acceptance" / "decision-binding.json"
+    binding.write_bytes(binding.read_bytes() + b"tamper")
+    with pytest.raises(DeliveryCaseError):
+        inspect_delivery_case(root)
+
+
+def test_inspect_rejects_file_count_overflow(
+    full_delivery_case, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import openworkproof.delivery_case as delivery_case
+
+    root, _ = full_delivery_case
+    monkeypatch.setattr(delivery_case, "MAX_CASE_FILES", 2)
+    with pytest.raises(DeliveryCaseError, match="count"):
+        inspect_delivery_case(root)
+
+
+def test_inspect_rejects_single_file_overflow(
+    full_delivery_case, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import openworkproof.delivery_case as delivery_case
+
+    root, _ = full_delivery_case
+    monkeypatch.setattr(delivery_case, "MAX_CASE_FILE_BYTES", 1)
+    with pytest.raises(DeliveryCaseError, match="size"):
+        inspect_delivery_case(root)
+
+
+def test_inspect_rejects_total_size_overflow(
+    full_delivery_case, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import openworkproof.delivery_case as delivery_case
+
+    root, _ = full_delivery_case
+    monkeypatch.setattr(delivery_case, "MAX_CASE_TOTAL_BYTES", 2)
+    with pytest.raises(DeliveryCaseError, match="total"):
+        inspect_delivery_case(root)
+
+
+def test_export_precommit_fault_is_zero_write(
+    full_delivery_case, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import openworkproof.delivery_case as delivery_case
+
+    root, _ = full_delivery_case
+    output = tmp_path / "export"
+
+    def failing_rename(source, destination):
+        raise OSError("injected pre-commit fault")
+
+    monkeypatch.setattr(delivery_case, "_rename_no_replace", failing_rename)
+    with pytest.raises(DeliveryCaseError):
+        delivery_case.export_delivery_case(root, output)
+    assert not output.exists()
+
+
+def test_export_cleanup_failure_is_closed(
+    full_delivery_case, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import openworkproof.delivery_case as delivery_case
+
+    root, _ = full_delivery_case
+    output = tmp_path / "export"
+    real_result = inspect_delivery_case(root)
+
+    def fake_inspect(_root):
+        return real_result
+
+    def fail_verify(_root):
+        raise delivery_case.DeliveryCaseError("injected precommit failure")
+
+    def fail_cleanup(path, *args, **kwargs):
+        raise OSError("injected cleanup failure")
+
+    monkeypatch.setattr(delivery_case, "inspect_delivery_case", fake_inspect)
+    monkeypatch.setattr(
+        delivery_case, "verify_exported_delivery_case", fail_verify
+    )
+    monkeypatch.setattr(delivery_case.shutil, "rmtree", fail_cleanup)
+    with pytest.raises(delivery_case.DeliveryCaseError, match="cleanup"):
+        delivery_case.export_delivery_case(root, output)
+    assert not output.exists()
+
+
+def test_export_concurrent_same_target_has_one_winner(
+    full_delivery_case, tmp_path
+) -> None:
+    import openworkproof.delivery_case as delivery_case
+
+    root, _ = full_delivery_case
+    output = tmp_path / "export"
+    from concurrent.futures import ThreadPoolExecutor
+
+    def export_once():
+        try:
+            delivery_case.export_delivery_case(root, output)
+            return True
+        except DeliveryCaseError:
+            return False
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(executor.map(lambda _: export_once(), range(2)))
+    assert sum(outcomes) == 1
+    assert output.is_dir()

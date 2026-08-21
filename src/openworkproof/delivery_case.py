@@ -657,7 +657,12 @@ def inspect_delivery_case(case_root: Path) -> DeliveryCaseResultV01:
             case, DeliveryCaseStage.SOW_REFERENCED, sow=sow, payment=payment,
             reasons=("SURFACE_MISSING",),
         )
-    surface = verify_surface_bundle(root / "surface")
+    try:
+        surface = verify_surface_bundle(root / "surface")
+    except DeliveryCaseError:
+        raise
+    except Exception as error:
+        raise DeliveryCaseError("surface bundle is invalid") from error
     if surface.report.decision_status != "VERIFIED":
         status = surface.report.decision_status
         stage = (
@@ -678,7 +683,12 @@ def inspect_delivery_case(case_root: Path) -> DeliveryCaseResultV01:
             surface_manifest_digest=surface.manifest_digest,
             reasons=("ACCEPTANCE_MISSING",),
         )
-    acceptance = verify_acceptance_bundle_directory(root / "acceptance")
+    try:
+        acceptance = verify_acceptance_bundle_directory(root / "acceptance")
+    except DeliveryCaseError:
+        raise
+    except Exception as error:
+        raise DeliveryCaseError("acceptance bundle is invalid") from error
     if acceptance.surface_manifest_digest != surface.manifest_digest:
         raise DeliveryCaseError(
             "surface and acceptance do not describe one delivery"
