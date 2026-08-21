@@ -26,6 +26,14 @@ _LAZY_EXPORTS = {
         "openworkproof.surface_bundle",
         "verify_surface_bundle",
     ),
+    "export_acceptance_bundle": (
+        "openworkproof.acceptance_bundle",
+        "export_acceptance_bundle",
+    ),
+    "verify_acceptance_bundle_directory": (
+        "openworkproof.acceptance_bundle",
+        "verify_acceptance_bundle_directory",
+    ),
 }
 
 
@@ -45,6 +53,8 @@ __all__ = [
     "compare_observed_scope",
     "load_evaluation_scope",
     "build_surface_bundle",
+    "export_acceptance_bundle",
     "verify_surface_bundle",
+    "verify_acceptance_bundle_directory",
     "validate_evaluation_scope",
 ]

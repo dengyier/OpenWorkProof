@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 
@@ -1029,3 +1031,120 @@ def test_export_acceptance_bundle_cleanup_failure_is_closed(
     assert len(leftovers) == 1
     monkeypatch.setattr(bundle.shutil, "rmtree", real_cleanup)
     real_cleanup(leftovers[0])
+
+
+@pytest.mark.parametrize(
+    ("case_fixture", "exit_code", "terminal"),
+    (
+        ("accepted_v05_case", 0, "ACCEPTED"),
+        ("rejected_v05_case", 2, "REJECTED"),
+    ),
+)
+def test_acceptance_bundle_verify_cli_has_closed_json_and_exit_codes(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    case_fixture: str,
+    exit_code: int,
+    terminal: str,
+) -> None:
+    case = request.getfixturevalue(case_fixture)
+    root = tmp_path / f"cli-{case_fixture}"
+    _build_real_acceptance_bundle(case, root)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "openworkproof.cli",
+            "acceptance-bundle-verify",
+            str(root),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert completed.returncode == exit_code, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["terminal_decision"] == terminal
+    assert result["work_order_digest"] == case["work_order"].digest
+    assert result["boundary"] == "not payment, settlement, legal audit, or adoption"
+    for field in (
+        "surface_manifest_digest",
+        "verification_decision_digest",
+        "terminal_receipt_digest",
+        "acceptance_decision_binding_digest",
+    ):
+        assert len(result[field]) == 64
+
+
+def test_acceptance_bundle_verify_cli_operational_error_is_four(
+    tmp_path: Path,
+) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "openworkproof.cli",
+            "acceptance-bundle-verify",
+            str(tmp_path / "missing"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert completed.returncode == 4
+    assert json.loads(completed.stdout)["terminal_decision"] is None
+
+
+def test_acceptance_bundle_build_cli_exports_and_reports_verified_terminal(
+    accepted_v05_case,
+    tmp_path: Path,
+) -> None:
+    prepared = tmp_path / "cli-build-prepared"
+    _build_real_acceptance_bundle(accepted_v05_case, prepared)
+    output = tmp_path / "cli-build-output"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "openworkproof.cli",
+            "acceptance-bundle-build",
+            str(accepted_v05_case["ledger_path"]),
+            str(prepared / "surface"),
+            "--evidence-root",
+            str(accepted_v05_case["evidence_root"]),
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["terminal_decision"] == "ACCEPTED"
+    assert bundle.verify_acceptance_bundle_directory(output).terminal_decision == "ACCEPTED"
+
+
+def test_acceptance_bundle_generated_verify_script_executes_module_entrypoint(
+    accepted_v05_case,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "verify-script"
+    _build_real_acceptance_bundle(accepted_v05_case, root)
+    environment = dict(os.environ)
+    environment["PATH"] = (
+        f"{Path(sys.executable).parent}{os.pathsep}{environment.get('PATH', '')}"
+    )
+    completed = subprocess.run(
+        [str(root / "verify.sh")],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["terminal_decision"] == "ACCEPTED"

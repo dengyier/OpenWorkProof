@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Literal
 
 from openworkproof import evidence, integrity
+from openworkproof.acceptance_bundle import (
+    export_acceptance_bundle,
+    verify_acceptance_bundle_directory,
+)
 from openworkproof.delivery_package import (
     export_delivery_package,
     verify_delivery_package,
@@ -360,6 +364,26 @@ class OpenWorkProofServices:
             "report": report.model_dump(mode="json"),
             "boundary": "not payment or acceptance",
         }
+
+    def build_acceptance_bundle(
+        self,
+        ledger: Path,
+        evidence_root: Path,
+        surface: Path,
+        output: Path,
+    ) -> dict:
+        export_acceptance_bundle(
+            ledger,
+            evidence_root,
+            surface,
+            output,
+        )
+        return self.verify_acceptance_bundle(output)
+
+    def verify_acceptance_bundle(self, package: Path) -> dict:
+        return verify_acceptance_bundle_directory(package).model_dump(
+            mode="json"
+        )
 
     def validate_population_observation(
         self, payload: Mapping[str, object]

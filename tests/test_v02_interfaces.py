@@ -180,6 +180,68 @@ def test_services_settlement_status_delegates_without_recomputing(
     assert calls == [ledger]
 
 
+def test_services_acceptance_bundle_methods_are_thin_delegates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger = tmp_path / "ledger.sqlite3"
+    evidence_root = tmp_path / "evidence"
+    surface = tmp_path / "surface"
+    output = tmp_path / "acceptance"
+    calls = []
+
+    def export(ledger_value, evidence_value, surface_value, output_value):
+        calls.append(
+            ("export", ledger_value, evidence_value, surface_value, output_value)
+        )
+        return _Dumpable({"schema_version": "openworkproof-acceptance-bundle/0.1"})
+
+    def verify(path):
+        calls.append(("verify", path))
+        return _Dumpable(
+            {
+                "schema_version": "openworkproof-acceptance-bundle-result/0.1",
+                "terminal_decision": "ACCEPTED",
+            }
+        )
+
+    monkeypatch.setattr(services, "export_acceptance_bundle", export)
+    monkeypatch.setattr(services, "verify_acceptance_bundle_directory", verify)
+    facade = OpenWorkProofServices()
+    assert facade.build_acceptance_bundle(
+        ledger,
+        evidence_root,
+        surface,
+        output,
+    ) == {
+        "schema_version": "openworkproof-acceptance-bundle-result/0.1",
+        "terminal_decision": "ACCEPTED",
+    }
+    assert facade.verify_acceptance_bundle(output) == {
+        "schema_version": "openworkproof-acceptance-bundle-result/0.1",
+        "terminal_decision": "ACCEPTED",
+    }
+    assert calls == [
+        ("export", ledger, evidence_root, surface, output),
+        ("verify", output),
+        ("verify", output),
+    ]
+
+
+def test_acceptance_bundle_public_api_is_lazy_and_exact() -> None:
+    import openworkproof
+    from openworkproof.acceptance_bundle import (
+        export_acceptance_bundle,
+        verify_acceptance_bundle_directory,
+    )
+
+    assert openworkproof.export_acceptance_bundle is export_acceptance_bundle
+    assert (
+        openworkproof.verify_acceptance_bundle_directory
+        is verify_acceptance_bundle_directory
+    )
+
+
 def test_services_surface_facade_delegates_to_single_core(
     tmp_path, monkeypatch
 ) -> None:

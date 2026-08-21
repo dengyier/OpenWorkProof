@@ -15,6 +15,8 @@ Commands:
 - ``owp delivery-build``         — export an offline delivery package
 - ``owp surface-build``          — build a signed-evidence surface bundle
 - ``owp surface-verify``         — replay a surface with closed exit codes
+- ``owp acceptance-bundle-build`` — export an offline human acceptance proof
+- ``owp acceptance-bundle-verify`` — replay acceptance with closed exit codes
 - ``owp audit-replay|audit-explain|audit-compare`` — inspect packages offline
 - ``owp settlement-status``      — derive readiness without claiming payment
 - ``owp scope-build|scope-validate|scope-commit|scope-compare`` — v0.3 scope
@@ -370,6 +372,28 @@ def cli_surface_verify(package: str | Path) -> dict:
     )
 
 
+def cli_acceptance_bundle_build(
+    ledger: str | Path,
+    surface: str | Path,
+    evidence_root: str | Path,
+    output: str | Path,
+) -> dict:
+    return _service_result(
+        OpenWorkProofServices().build_acceptance_bundle,
+        Path(ledger),
+        Path(evidence_root),
+        Path(surface),
+        Path(output),
+    )
+
+
+def cli_acceptance_bundle_verify(package: str | Path) -> dict:
+    return _service_result(
+        OpenWorkProofServices().verify_acceptance_bundle,
+        Path(package),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="owp")
     parser.add_argument(
@@ -455,6 +479,33 @@ def build_parser() -> argparse.ArgumentParser:
         "surface-verify", help="verify and replay one surface bundle offline"
     )
     surface_verify.add_argument("surface", help="surface bundle directory")
+
+    acceptance_build = sub.add_parser(
+        "acceptance-bundle-build",
+        help="export an offline-verifiable human acceptance bundle",
+    )
+    acceptance_build.add_argument("ledger", help="path to the SQLite ledger")
+    acceptance_build.add_argument("surface", help="verified surface directory")
+    acceptance_build.add_argument(
+        "--evidence-root",
+        required=True,
+        help="root containing committed evidence bytes",
+    )
+    acceptance_build.add_argument(
+        "--output",
+        dest="output_path",
+        required=True,
+        help="new acceptance bundle directory",
+    )
+
+    acceptance_verify = sub.add_parser(
+        "acceptance-bundle-verify",
+        help="verify and replay one acceptance bundle offline",
+    )
+    acceptance_verify.add_argument(
+        "acceptance_bundle",
+        help="acceptance bundle directory",
+    )
 
     scope_build = sub.add_parser(
         "scope-build", help="build an unsigned v0.3 Evaluation Scope draft"
@@ -636,6 +687,15 @@ def app(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "surface-verify":
             result = cli_surface_verify(args.surface)
+        elif args.command == "acceptance-bundle-build":
+            result = cli_acceptance_bundle_build(
+                args.ledger,
+                args.surface,
+                args.evidence_root,
+                args.output_path,
+            )
+        elif args.command == "acceptance-bundle-verify":
+            result = cli_acceptance_bundle_verify(args.acceptance_bundle)
         elif args.command == "audit-replay":
             result = cli_audit_replay(args.package)
         elif args.command == "audit-explain":
@@ -648,7 +708,39 @@ def app(argv: Sequence[str] | None = None) -> int:
             parser.error(f"unknown command: {args.command}")
             return 2
     except CliError as error:
-        if args.command in {"surface-build", "surface-verify"}:
+        if args.command in {
+            "surface-build",
+            "surface-verify",
+            "acceptance-bundle-build",
+            "acceptance-bundle-verify",
+        }:
+            if args.command.startswith("acceptance-bundle"):
+                print(
+                    json.dumps(
+                        {
+                            "schema_version": (
+                                "openworkproof-acceptance-bundle-result/0.1"
+                            ),
+                            "terminal_decision": None,
+                            "work_order_digest": None,
+                            "surface_manifest_digest": None,
+                            "verification_decision_digest": None,
+                            "terminal_receipt_digest": None,
+                            "acceptance_decision_binding_digest": None,
+                            "boundary": (
+                                "not payment, settlement, legal audit, or adoption"
+                            ),
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        indent=2,
+                    )
+                )
+                print(
+                    json.dumps({"error": str(error)}, ensure_ascii=False),
+                    file=sys.stderr,
+                )
+                return 4
             print(
                 json.dumps(
                     {
@@ -693,11 +785,23 @@ def app(argv: Sequence[str] | None = None) -> int:
                 indent=2,
             )
         )
+    elif args.command in {
+        "acceptance-bundle-build",
+        "acceptance-bundle-verify",
+    }:
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
     else:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
     if args.command in {"surface-build", "surface-verify"}:
         return {"VERIFIED": 0, "REFUTED": 2, "UNKNOWN": 3}[
             str(result["decision_status"])
+        ]
+    if args.command in {
+        "acceptance-bundle-build",
+        "acceptance-bundle-verify",
+    }:
+        return {"ACCEPTED": 0, "REJECTED": 2}[
+            str(result["terminal_decision"])
         ]
     if args.command == "scope-compare":
         return {

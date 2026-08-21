@@ -1393,3 +1393,57 @@ def export_acceptance_bundle(
                 raise AcceptanceBundleError(
                     "acceptance bundle export cleanup failed"
                 ) from error
+
+
+def _main(arguments: list[str] | None = None) -> int:
+    arguments = sys.argv[1:] if arguments is None else arguments
+    if len(arguments) > 1:
+        print(
+            json.dumps(
+                {"error": "usage: python -m openworkproof.acceptance_bundle [DIR]"},
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 4
+    root = Path(arguments[0] if arguments else ".")
+    try:
+        result = verify_acceptance_bundle_directory(root)
+    except AcceptanceBundleError as error:
+        print(
+            json.dumps(
+                {
+                    "schema_version": (
+                        "openworkproof-acceptance-bundle-result/0.1"
+                    ),
+                    "terminal_decision": None,
+                    "work_order_digest": None,
+                    "surface_manifest_digest": None,
+                    "verification_decision_digest": None,
+                    "terminal_receipt_digest": None,
+                    "acceptance_decision_binding_digest": None,
+                    "boundary": (
+                        "not payment, settlement, legal audit, or adoption"
+                    ),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        print(
+            json.dumps({"error": str(error)}, ensure_ascii=False),
+            file=sys.stderr,
+        )
+        return 4
+    print(
+        json.dumps(
+            result.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0 if result.terminal_decision == "ACCEPTED" else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
