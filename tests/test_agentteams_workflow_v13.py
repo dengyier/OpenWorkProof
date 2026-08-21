@@ -428,6 +428,97 @@ def test_demo_preflight_accepts_exact_live_identity_snapshot(
     assert result.room_id == "!team:hs"
 
 
+@pytest.mark.parametrize(
+    ("terminal", "expected_exit"),
+    (("ACCEPTED", 0), ("REJECTED", 2)),
+)
+def test_demo_main_uses_closed_human_acceptance_exit_codes(
+    tmp_path,
+    capsys,
+    terminal,
+    expected_exit,
+) -> None:
+    module = _demo_module()
+    main = module["main"]
+    main.__globals__["run_live_preflight"] = lambda **_kwargs: module[
+        "LivePreflightResult"
+    ](
+        ("Manager", "Developer", "Verifier"),
+        ("@manager:hs", "@developer:hs", "@verifier:hs"),
+        (
+            f"ed25519:{'1' * 64}",
+            f"ed25519:{'2' * 64}",
+            f"ed25519:{'3' * 64}",
+        ),
+        None,
+    )
+    expected = module["AcceptanceBundleVerificationResult"](
+        schema_version="openworkproof-acceptance-bundle-result/0.1",
+        terminal_decision=terminal,
+        work_order_digest="1" * 64,
+        surface_manifest_digest="2" * 64,
+        verification_decision_digest="3" * 64,
+        terminal_receipt_digest="4" * 64,
+        acceptance_decision_binding_digest="5" * 64,
+        boundary="not payment, settlement, legal audit, or adoption",
+    )
+    main.__globals__["wait_for_external_acceptance"] = (
+        lambda **_kwargs: expected
+    )
+
+    exit_code = main(
+        [
+            "--task-file",
+            str(tmp_path / "task.json"),
+            "--acceptance-bundle",
+            str(tmp_path / "acceptance"),
+        ]
+    )
+
+    assert exit_code == expected_exit
+    output = json.loads(capsys.readouterr().out)
+    assert output["human_acceptance"]["terminal_decision"] == terminal
+    if terminal == "REJECTED":
+        assert "success" not in json.dumps(output).lower()
+
+
+def test_demo_main_maps_acceptance_gate_failure_to_operational_exit(
+    tmp_path,
+    capsys,
+) -> None:
+    module = _demo_module()
+    main = module["main"]
+    main.__globals__["run_live_preflight"] = lambda **_kwargs: module[
+        "LivePreflightResult"
+    ](
+        ("Manager", "Developer", "Verifier"),
+        ("@manager:hs", "@developer:hs", "@verifier:hs"),
+        (
+            f"ed25519:{'1' * 64}",
+            f"ed25519:{'2' * 64}",
+            f"ed25519:{'3' * 64}",
+        ),
+        None,
+    )
+    main.__globals__["wait_for_external_acceptance"] = (
+        lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("external acceptance timed out")
+        )
+    )
+
+    exit_code = main(
+        [
+            "--task-file",
+            str(tmp_path / "task.json"),
+            "--acceptance-bundle",
+            str(tmp_path / "acceptance"),
+        ]
+    )
+
+    assert exit_code == 4
+    assert "timed out" in capsys.readouterr().err
+
+
 def test_recording_wrapper_requires_explicit_privacy_attestations() -> None:
     wrapper = (
         ROOT / "agentteams/scripts/record_openworkproof_13_demo.sh"

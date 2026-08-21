@@ -5,12 +5,23 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
+import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
+import time
 from typing import Any
 
+import rfc8785
+
+from openworkproof.acceptance_bundle import (
+    AcceptanceBundleError,
+    AcceptanceBundleVerificationResult,
+    validate_acceptance_bundle_manifest,
+    verify_acceptance_bundle_directory,
+)
 from openworkproof.agentteams_controller_client import (
     AgentTeamsControllerClient,
 )
@@ -28,6 +39,19 @@ class LivePreflightResult:
     matrix_user_ids: tuple[str, ...]
     openworkproof_key_ids: tuple[str, ...]
     room_id: str | None
+
+
+class AcceptanceAnnouncementError(RuntimeError):
+    """An external announcement failed after acceptance was verified."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        verified: AcceptanceBundleVerificationResult,
+    ) -> None:
+        super().__init__(message)
+        self.verified = verified
 
 
 def _load_task(path: Path) -> dict[str, Any]:
@@ -147,6 +171,117 @@ def run_live_preflight(
     return LivePreflightResult(roles, senders, key_ids, room_id)
 
 
+def _write_provenance(path: Path, record: dict[str, Any]) -> None:
+    target = Path(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(target, flags, 0o600)
+    except OSError as error:
+        raise RuntimeError("acceptance provenance cannot be created") from error
+    payload = rfc8785.dumps(record) + b"\n"
+    try:
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise OSError("acceptance provenance write made no progress")
+            offset += written
+        os.fsync(descriptor)
+    except OSError as error:
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        raise RuntimeError("acceptance provenance cannot be written") from error
+    finally:
+        os.close(descriptor)
+
+
+def _acceptance_manifest_digest(bundle: Path) -> str:
+    manifest = validate_acceptance_bundle_manifest(bundle)
+    return hashlib.sha256(
+        rfc8785.dumps(manifest.model_dump(mode="json"))
+    ).hexdigest()
+
+
+def wait_for_external_acceptance(
+    *,
+    acceptance_bundle: Path,
+    timeout_seconds: int | float,
+    provenance_path: Path | None,
+    matrix: AgentTeamsMatrixClient | None,
+    room_id: str | None,
+) -> AcceptanceBundleVerificationResult:
+    """Poll for and verify an external bundle after work is ready to accept."""
+
+    if (
+        type(timeout_seconds) not in {int, float}
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds < 0
+    ):
+        raise RuntimeError("acceptance timeout is invalid")
+    bundle = Path(acceptance_bundle)
+    deadline = time.monotonic() + timeout_seconds
+    while not bundle.exists():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("external acceptance timed out")
+        time.sleep(min(0.2, remaining))
+    if provenance_path is not None and Path(provenance_path).exists():
+        raise RuntimeError("acceptance provenance already exists")
+    try:
+        bundle_digest = _acceptance_manifest_digest(bundle)
+        verified = verify_acceptance_bundle_directory(bundle)
+        if _acceptance_manifest_digest(bundle) != bundle_digest:
+            raise AcceptanceBundleError(
+                "acceptance bundle changed during verification"
+            )
+    except AcceptanceBundleError as error:
+        raise RuntimeError("external acceptance bundle is invalid") from error
+
+    event_digest = None
+    announcement = {
+        "schema_version": "openworkproof-agentteams-acceptance/0.1",
+        "terminal_decision": verified.terminal_decision,
+        "terminal_receipt_digest": verified.terminal_receipt_digest,
+        "acceptance_decision_binding_digest": (
+            verified.acceptance_decision_binding_digest
+        ),
+    }
+    announcement_error = None
+    if matrix is not None and room_id is not None:
+        try:
+            event_id = matrix.send_text(
+                room_id,
+                rfc8785.dumps(announcement).decode("utf-8"),
+            )
+            event_digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()
+        except Exception as error:
+            announcement_error = error
+
+    record = {
+        "schema_version": (
+            "openworkproof-agentteams-acceptance-provenance/0.1"
+        ),
+        "bundle_digest": bundle_digest,
+        "terminal_receipt_digest": verified.terminal_receipt_digest,
+        "acceptance_decision_binding_digest": (
+            verified.acceptance_decision_binding_digest
+        ),
+        "terminal_decision": verified.terminal_decision,
+        "announcement_event_id_digest": event_digest,
+    }
+    if provenance_path is not None:
+        _write_provenance(Path(provenance_path), record)
+    if announcement_error is not None:
+        raise AcceptanceAnnouncementError(
+            "acceptance announcement failed",
+            verified=verified,
+        ) from announcement_error
+    return verified
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--room")
@@ -156,7 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout-seconds", type=int, default=900)
     parser.add_argument("--max-rework", type=int, default=1)
     parser.add_argument("--record-provenance")
-    parser.add_argument("--acceptance-receipt")
+    parser.add_argument("--acceptance-bundle")
     parser.add_argument("--preflight-only", action="store_true")
     return parser
 
@@ -164,20 +299,56 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        result = run_live_preflight(
+        preflight = run_live_preflight(
             task_path=Path(args.task_file),
             room=args.room,
         )
-        if not args.preflight_only:
+        if args.preflight_only:
+            print(json.dumps(asdict(preflight), sort_keys=True))
+            return 0
+        if not args.acceptance_bundle:
             raise RuntimeError(
-                "live demo execution is not enabled until all bounded inputs "
-                "and the human acceptance receipt are available"
+                "an external acceptance bundle is required after work is ready"
             )
+        token = os.environ.get("AGENTTEAMS_MATRIX_TOKEN")
+        matrix = (
+            AgentTeamsMatrixClient(token=token)
+            if preflight.room_id
+            else None
+        )
+        verified = wait_for_external_acceptance(
+            acceptance_bundle=Path(args.acceptance_bundle),
+            timeout_seconds=args.timeout_seconds,
+            provenance_path=(
+                Path(args.record_provenance)
+                if args.record_provenance
+                else None
+            ),
+            matrix=matrix,
+            room_id=preflight.room_id,
+        )
+        print(
+            json.dumps(
+                {
+                    "preflight": asdict(preflight),
+                    "human_acceptance": verified.model_dump(mode="json"),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0 if verified.terminal_decision == "ACCEPTED" else 2
+    except AcceptanceAnnouncementError as error:
+        print(
+            json.dumps(
+                {"human_acceptance": error.verified.model_dump(mode="json")},
+                sort_keys=True,
+            )
+        )
+        print(f"OpenWorkProof AgentTeams demo error: {error}", file=os.sys.stderr)
+        return 4
     except RuntimeError as error:
         print(f"OpenWorkProof AgentTeams demo error: {error}", file=os.sys.stderr)
         return 4
-    print(json.dumps(asdict(result), sort_keys=True))
-    return 0
 
 
 if __name__ == "__main__":
