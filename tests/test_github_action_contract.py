@@ -28,6 +28,8 @@ SCRIPT = ROOT / "integrations/github/run.sh"
 ACTION = ROOT / "integrations/github/action.yml"
 SMOKE = ROOT / ".github/workflows/github-action-smoke.yml"
 EXAMPLE = ROOT / "examples/github-action/.github/workflows/openworkproof.yml"
+DELIVERY_CASE_ACTION = ROOT / "integrations/github-delivery-case/action.yml"
+DELIVERY_CASE_SCRIPT = ROOT / "integrations/github-delivery-case/run.sh"
 
 
 def test_action_never_accepts_private_key_as_cli_argument() -> None:
@@ -387,3 +389,134 @@ def test_action_and_examples_mark_fixture_and_secret_boundaries() -> None:
     assert "secrets.OPENWORKPROOF_COLLECTOR_PRIVATE_KEY" in example
     assert "temporary" in readme.lower()
     assert "not production" in readme.lower()
+
+
+def test_delivery_case_action_accepts_no_private_or_payment_inputs() -> None:
+    action = DELIVERY_CASE_ACTION.read_text(encoding="utf-8")
+    script = DELIVERY_CASE_SCRIPT.read_text(encoding="utf-8")
+    assert "case-directory" in action
+    assert "output-directory" in action
+    assert "actions/upload-artifact@v4" in action
+    assert "if: always()" in action
+    for forbidden in ("private-key", "bank", "wallet", "payment-token"):
+        assert forbidden not in action.lower()
+        assert forbidden not in script.lower()
+
+
+@pytest.mark.parametrize(
+    ("stage", "expected"),
+    (
+        ("READY_FOR_SETTLEMENT_REVIEW", 0),
+        ("REFUTED", 2),
+        ("UNKNOWN", 3),
+        ("OPERATIONAL", 4),
+    ),
+)
+def test_delivery_case_action_preserves_exit_code(
+    tmp_path: Path, stage: str, expected: int
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    python = fake_bin / "python"
+    python.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$3\" = write-delivery-case-summary ]; then\n"
+        "  printf '# delivery case summary\\n' >\"$5\"\n"
+        "  printf 'case_stage=%s\\ncase_id=%s\\nartifact_path=delivery-case-export\\n' "
+        "\"$OWP_TEST_STAGE\" \"$(printf 3%.0s $(seq 1 64))\" >\"$6\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    owp = fake_bin / "owp"
+    owp.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$2\" = export ]; then mkdir -p \"$OWP_CASE_OUTPUT\"; exit 0; fi\n"
+        "printf '{\"case_stage\":\"%s\"}\\n' \"$OWP_TEST_STAGE\"\n"
+        "exit \"$OWP_TEST_EXIT\"\n",
+        encoding="utf-8",
+    )
+    for executable in (python, owp):
+        executable.chmod(0o700)
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    output = tmp_path / "export"
+    summary = tmp_path / "summary.md"
+    outputs = tmp_path / "outputs.txt"
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    environment = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "OWP_TEST_STAGE": stage,
+        "OWP_TEST_EXIT": str(expected),
+        "OWP_CASE_DIRECTORY": str(case_dir),
+        "OWP_CASE_OUTPUT": str(output),
+        "RUNNER_TEMP": str(runner_temp),
+        "GITHUB_STEP_SUMMARY": str(summary),
+        "GITHUB_OUTPUT": str(outputs),
+    }
+    completed = subprocess.run(
+        ["bash", str(DELIVERY_CASE_SCRIPT)],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == expected, completed.stderr
+    assert summary.is_file()
+    assert "artifact_path=delivery-case-export" in outputs.read_text()
+    assert str(case_dir) not in completed.stdout
+    assert str(case_dir) not in completed.stderr
+
+
+def test_delivery_case_write_summary_parses_result_strictly(
+    tmp_path: Path,
+) -> None:
+    result = tmp_path / "result.json"
+    summary = tmp_path / "summary.md"
+    outputs = tmp_path / "outputs.txt"
+    result.write_text(
+        json.dumps(
+            {
+                "schema_version": "openworkproof-delivery-case-result/0.1",
+                "case_id": "3" * 64,
+                "case_stage": "READY_FOR_SETTLEMENT_REVIEW",
+                "verification_decision": "VERIFIED",
+                "acceptance_decision": "ACCEPTED",
+                "settlement_readiness": "ACCEPTED_FOR_SETTLEMENT",
+                "sow_evidence": "external_reference_present",
+                "payment_evidence": "not_evidenced",
+                "surface_manifest_digest": "a" * 64,
+                "acceptance_binding_digest": "b" * 64,
+                "reason_codes": ["PAYMENT_NOT_EVIDENCED"],
+                "boundary": (
+                    "not payment, completed settlement, legal audit, "
+                    "or customer adoption"
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "openworkproof.github_action_cli",
+            "write-delivery-case-summary",
+            str(result),
+            str(summary),
+            str(outputs),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "READY_FOR_SETTLEMENT_REVIEW" in summary.read_text(encoding="utf-8")
+    assert outputs.read_text(encoding="utf-8").splitlines() == [
+        "case_stage=READY_FOR_SETTLEMENT_REVIEW",
+        f"case_id={'3' * 64}",
+        "artifact_path=delivery-case-export",
+    ]

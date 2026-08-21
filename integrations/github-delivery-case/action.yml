@@ -1,0 +1,34 @@
+name: OpenWorkProof Verify Delivery Case
+description: Verify and export an offline-verifiable Agent delivery case
+inputs:
+  case-directory:
+    required: true
+  output-directory:
+    required: false
+    default: delivery-case-export
+outputs:
+  case-stage:
+    value: ${{ steps.verify.outputs.case_stage }}
+  case-id:
+    value: ${{ steps.verify.outputs.case_id }}
+  artifact-path:
+    value: ${{ steps.verify.outputs.artifact_path }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - shell: bash
+      run: python -m pip install "$GITHUB_ACTION_PATH/../.."
+    - id: verify
+      shell: bash
+      env:
+        OWP_CASE_DIRECTORY: ${{ inputs.case-directory }}
+        OWP_CASE_OUTPUT: ${{ inputs.output-directory }}
+      run: "$GITHUB_ACTION_PATH/run.sh"
+    - if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: openworkproof-delivery-case
+        path: ${{ inputs.output-directory }}

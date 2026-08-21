@@ -22,6 +22,7 @@ from openworkproof.adapters.github_surface import (
     GitHubSurfaceError,
     project_github_environment,
 )
+from openworkproof.delivery_case import DeliveryCaseResultV01
 from openworkproof.environment_fingerprint import sign_environment_fingerprint
 from openworkproof.surface_bundle import (
     SurfaceBundleError,
@@ -255,7 +256,67 @@ def build_parser() -> argparse.ArgumentParser:
     summary.add_argument("result")
     summary.add_argument("summary")
     summary.add_argument("outputs")
+    delivery_case = commands.add_parser("write-delivery-case-summary")
+    delivery_case.add_argument("result")
+    delivery_case.add_argument("summary")
+    delivery_case.add_argument("outputs")
     return parser
+
+
+_DELIVERY_CASE_ARTIFACT_PATH = "delivery-case-export"
+
+
+def _load_delivery_case_result(payload: bytes) -> DeliveryCaseResultV01 | dict:
+    try:
+        return DeliveryCaseResultV01.model_validate_json(payload)
+    except Exception:
+        try:
+            raw = json.loads(payload)
+        except Exception as error:
+            raise GitHubActionError(
+                "delivery case result is not valid JSON"
+            ) from error
+        if (
+            type(raw) is not dict
+            or raw.get("schema_version")
+            != "openworkproof-delivery-case-result/0.1"
+            or raw.get("case_stage") is not None
+            or raw.get("reason_codes") != ["OPERATIONAL_ERROR"]
+            or raw.get("boundary")
+            != "not payment, completed settlement, legal audit, or customer adoption"
+        ):
+            raise GitHubActionError("delivery case result is invalid")
+        return raw
+
+
+def write_delivery_case_summary(
+    result_path: Path, summary_path: Path, output_path: Path
+) -> None:
+    payload = _read_regular(result_path, max_bytes=64 * 1024)
+    result = _load_delivery_case_result(payload)
+    if isinstance(result, DeliveryCaseResultV01):
+        case_id = result.case_id
+        case_stage = str(result.case_stage)
+        reasons = ", ".join(result.reason_codes) or "—"
+        boundary = str(result.boundary)
+    else:
+        case_id = ""
+        case_stage = ""
+        reasons = "OPERATIONAL_ERROR"
+        boundary = "not payment, completed settlement, legal audit, or customer adoption"
+    summary = (
+        "# OpenWorkProof Verified Agent Delivery\n\n"
+        f"- Case id: `{(case_id or '—')[:12]}`\n"
+        f"- Case stage: `{case_stage or '—'}`\n"
+        f"- Reason codes: `{reasons}`\n\n"
+        f"Boundary: {boundary}\n"
+    )
+    with summary_path.open("a", encoding="utf-8") as handle:
+        handle.write(summary)
+    with output_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"case_stage={case_stage}\n")
+        handle.write(f"case_id={case_id}\n")
+        handle.write(f"artifact_path={_DELIVERY_CASE_ARTIFACT_PATH}\n")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -270,6 +331,10 @@ def main(argv: list[str] | None = None) -> int:
                 Path(args.output),
             )
             print(json.dumps(result, sort_keys=True))
+        elif args.command == "write-delivery-case-summary":
+            write_delivery_case_summary(
+                Path(args.result), Path(args.summary), Path(args.outputs)
+            )
         else:
             write_summary(
                 Path(args.result), Path(args.summary), Path(args.outputs)
