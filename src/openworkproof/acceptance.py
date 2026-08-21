@@ -30,9 +30,11 @@ from openworkproof.models import (
     JudgmentCommitment,
     SubjectClaim,
     VerificationDecisionV03,
+    VerificationDecisionV05,
     WorkOrder,
     AcceptanceReceipt,
     AcceptanceRejectionReceipt,
+    AcceptanceDecisionBindingV01,
     AcceptanceTransitionReceipt,
     ActionReceiptEnvelope,
     AgentRequest,
@@ -48,6 +50,7 @@ from openworkproof.models import (
     PredicateResult,
     SystemEventReceipt,
     ToolCallReceipt,
+    acceptance_decision_binding_id,
     request_arguments_digest,
 )
 from openworkproof.policy import AuthorizationContext
@@ -70,6 +73,22 @@ class AcceptanceCommittedError(AcceptanceTransactionError):
 
 class AcceptanceCommitIndeterminateError(AcceptanceTransactionError):
     """Readback could prove neither rollback nor the exact commit."""
+
+
+class AcceptanceBindingCommittedError(AcceptanceTransactionError):
+    """The exact acceptance/decision binding is already committed."""
+
+    def __init__(
+        self,
+        message: str,
+        committed: AcceptanceDecisionBindingV01,
+    ) -> None:
+        super().__init__(message)
+        self.committed = committed
+
+
+class AcceptanceBindingCommitIndeterminateError(AcceptanceTransactionError):
+    """The binding commit outcome cannot be proven."""
 
 
 def causal_graph_root(
@@ -154,6 +173,17 @@ class CompositionTransactionResult:
 class AcceptanceSigningDraft:
     signing_domain: Literal["acceptance-receipt"]
     acceptance_id: str
+    payload: FrozenDict
+    canonical_payload: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptanceDecisionBindingSigningDraft:
+    signing_domain: Literal["acceptance-decision-binding"]
+    binding_id: str
+    verification_decision_id: str
+    terminal_receipt_id: str
+    composition_report_digest: str
     payload: FrozenDict
     canonical_payload: bytes
 
@@ -3591,6 +3621,554 @@ def commit_acceptance_transition(
             parsed,
         ) from cleanup_errors[0]
     return parsed
+
+
+@dataclass(frozen=True, slots=True)
+class _AcceptanceDecisionBindingInputs:
+    work_order: WorkOrder
+    decision: VerificationDecisionV05
+    report: CompositionReport
+    request: ApprovalRequestedReceipt
+    terminal: AcceptanceReceipt | AcceptanceRejectionReceipt
+    terminal_kind: Literal["accepted", "rejected"]
+
+
+def _load_acceptance_decision_binding_inputs(
+    connection: sqlite3.Connection,
+    path: Path,
+    *,
+    verification_decision_id: str | None = None,
+) -> _AcceptanceDecisionBindingInputs:
+    work_order, receipts, _, _ = evidence._replay_receipt_publication_ledger(
+        connection
+    )
+    current = _load_current_verification_decision(
+        connection,
+        path=path,
+        work_order=work_order,
+    )
+    if current is None or current[0] != "0.5":
+        raise AcceptanceTransactionError(
+            "acceptance binding requires a current v0.5 decision"
+        )
+    decision = current[1]
+    if verification_decision_id is None:
+        if decision.decision != "VERIFIED":
+            raise AcceptanceTransactionError(
+                "acceptance binding requires the current v0.5 VERIFIED decision"
+            )
+    elif decision.decision_id != verification_decision_id:
+        row = connection.execute(
+            "SELECT decision_digest, decision_json "
+            "FROM verification_decisions_v05 WHERE decision_id = ?",
+            (verification_decision_id,),
+        ).fetchone()
+        if row is None:
+            raise AcceptanceTransactionError(
+                "acceptance binding decision is unavailable"
+            )
+        raw = row[1]
+        try:
+            historical = VerificationDecisionV05.model_validate_json(raw)
+        except Exception as error:
+            raise AcceptanceTransactionError(
+                "acceptance binding decision row is malformed"
+            ) from error
+        canonical = rfc8785.dumps(historical.model_dump(mode="json"))
+        stored = raw.encode("utf-8") if isinstance(raw, str) else raw
+        if (
+            historical.decision_id != verification_decision_id
+            or historical.digest != row[0]
+            or canonical != stored
+            or historical.decision != "VERIFIED"
+        ):
+            raise AcceptanceTransactionError(
+                "acceptance binding decision row is invalid"
+            )
+        decision = historical
+    acceptances = evidence._validated_acceptance_receipts(
+        connection, work_order
+    )
+    rejections = evidence._validated_acceptance_rejections(
+        connection, work_order
+    )
+    if len(acceptances) + len(rejections) != 1:
+        raise AcceptanceTransactionError(
+            "acceptance binding requires one exact terminal receipt"
+        )
+    terminal: AcceptanceReceipt | AcceptanceRejectionReceipt
+    terminal_kind: Literal["accepted", "rejected"]
+    if acceptances:
+        terminal = acceptances[0]
+        terminal_kind = "accepted"
+    else:
+        terminal = rejections[0]
+        terminal_kind = "rejected"
+    reports = evidence._validated_composition_reports(connection, work_order)
+    matching_reports = tuple(
+        report
+        for report in reports
+        if composition_report_digest(report)
+        == terminal.composition_report_digest
+    )
+    if len(matching_reports) != 1:
+        raise AcceptanceTransactionError(
+            "acceptance binding requires one exact composition report"
+        )
+    report = matching_reports[0]
+    if not receipts or not isinstance(receipts[-1], ApprovalRequestedReceipt):
+        raise AcceptanceTransactionError(
+            "acceptance binding requires one final-acceptance request"
+        )
+    request = receipts[-1]
+    if terminal_kind == "accepted":
+        validate_acceptance_bindings(
+            work_order=work_order,
+            report=report,
+            receipts=receipts,
+            acceptance_receipt=terminal,
+        )
+    else:
+        validate_rejection_bindings(
+            work_order=work_order,
+            report=report,
+            receipts=receipts,
+            rejection=terminal,
+        )
+    return _AcceptanceDecisionBindingInputs(
+        work_order=work_order,
+        decision=decision,
+        report=report,
+        request=request,
+        terminal=terminal,
+        terminal_kind=terminal_kind,
+    )
+
+
+def _acceptance_decision_binding_payload(
+    inputs: _AcceptanceDecisionBindingInputs,
+    *,
+    bound_at: datetime,
+    nonce: str,
+) -> dict[str, object]:
+    terminal_id = (
+        inputs.terminal.acceptance_id
+        if inputs.terminal_kind == "accepted"
+        else inputs.terminal.rejection_id
+    )
+    payload: dict[str, object] = {
+        "schema_version": "openworkproof-acceptance-decision-binding/0.1",
+        "protocol_version": "0.1",
+        "work_order_digest": inputs.work_order.digest,
+        "verification_decision_id": inputs.decision.decision_id,
+        "verification_decision_digest": inputs.decision.digest,
+        "composition_report_digest": composition_report_digest(inputs.report),
+        "acceptance_request_receipt_id": inputs.request.receipt_id,
+        "acceptance_request_receipt_digest": inputs.request.digest,
+        "terminal_kind": inputs.terminal_kind,
+        "terminal_receipt_id": terminal_id,
+        "terminal_receipt_digest": inputs.terminal.digest,
+        "bound_at": bound_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "nonce": nonce,
+    }
+    payload["binding_id"] = acceptance_decision_binding_id(payload)
+    return payload
+
+
+def prepare_acceptance_decision_binding(
+    ledger_path: Path,
+    *,
+    clock: Callable[[], datetime],
+) -> AcceptanceDecisionBindingSigningDraft:
+    """Prepare the exact Acceptor-signable decision/terminal binding."""
+
+    path = Path(ledger_path)
+    if not path.is_file():
+        raise AcceptanceTransactionError("acceptance binding ledger is unavailable")
+    lock_descriptor: int | None = None
+    connection: sqlite3.Connection | None = None
+    try:
+        lock_descriptor, _ = evidence._borrow_or_acquire_target_lock(path, None)
+        now = _freeze_second(clock())
+        connection = evidence.connect_ledger(path)
+        connection.execute("BEGIN")
+        inputs = _load_acceptance_decision_binding_inputs(connection, path)
+        payload = _acceptance_decision_binding_payload(
+            inputs,
+            bound_at=now,
+            nonce=secrets.token_hex(32),
+        )
+        connection.execute("ROLLBACK")
+        canonical = rfc8785.dumps(payload)
+        return AcceptanceDecisionBindingSigningDraft(
+            signing_domain="acceptance-decision-binding",
+            binding_id=str(payload["binding_id"]),
+            verification_decision_id=str(payload["verification_decision_id"]),
+            terminal_receipt_id=str(payload["terminal_receipt_id"]),
+            composition_report_digest=str(payload["composition_report_digest"]),
+            payload=FrozenDict(payload),
+            canonical_payload=canonical,
+        )
+    except AcceptanceTransactionError:
+        evidence._best_effort_rollback(connection)
+        raise
+    except Exception as error:
+        evidence._best_effort_rollback(connection)
+        raise AcceptanceTransactionError(
+            "acceptance binding preparation failed"
+        ) from error
+    finally:
+        close_error = evidence._best_effort_close(connection)
+        _, release_errors = evidence._release_target_lock(lock_descriptor)
+        cleanup_errors = tuple(
+            item for item in (close_error, *release_errors) if item is not None
+        )
+        if cleanup_errors:
+            raise AcceptanceBindingCommitIndeterminateError(
+                "acceptance binding preparation cleanup failed"
+            ) from cleanup_errors[0]
+
+
+def _validate_acceptance_decision_binding(
+    binding: AcceptanceDecisionBindingV01,
+    inputs: _AcceptanceDecisionBindingInputs,
+    *,
+    now: datetime,
+    require_fresh: bool,
+) -> None:
+    from openworkproof.signing import (  # noqa: PLC0415
+        decode_and_verify_key_binding,
+        verify_payload,
+    )
+
+    acceptors = tuple(
+        item
+        for item in inputs.work_order.key_bindings
+        if item.role == "Acceptor"
+    )
+    if len(acceptors) != 1 or binding.signer_key_id != acceptors[0].key_id:
+        raise AcceptanceTransactionError(
+            "acceptance binding must be signed by the bound Acceptor"
+        )
+    if not verify_payload(
+        "acceptance-decision-binding",
+        binding.model_dump(mode="json"),
+        decode_and_verify_key_binding(acceptors[0]),
+    ):
+        raise AcceptanceTransactionError(
+            "acceptance binding Acceptor signature is invalid"
+        )
+    expected = _acceptance_decision_binding_payload(
+        inputs,
+        bound_at=binding.bound_at,
+        nonce=binding.nonce,
+    )
+    actual = binding.model_dump(
+        mode="json",
+        exclude={"digest", "signature_alg", "signer_key_id", "signature"},
+    )
+    if actual != expected:
+        raise AcceptanceTransactionError(
+            "acceptance binding does not match authoritative history"
+        )
+    terminal_time = (
+        inputs.terminal.accepted_at
+        if inputs.terminal_kind == "accepted"
+        else inputs.terminal.rejected_at
+    )
+    if (
+        binding.bound_at < inputs.decision.decided_at
+        or binding.bound_at < terminal_time
+        or binding.bound_at > inputs.work_order.deadline
+        or binding.bound_at > now
+    ):
+        raise AcceptanceTransactionError(
+            "acceptance binding time is outside authoritative history"
+        )
+    if require_fresh and (now - binding.bound_at).total_seconds() > 300:
+        raise AcceptanceTransactionError("acceptance binding signature is stale")
+
+
+def _binding_row(
+    connection: sqlite3.Connection,
+    binding_id: str,
+) -> tuple | None:
+    return connection.execute(
+        """
+        SELECT binding_digest, work_order_digest, verification_decision_id,
+               terminal_kind, terminal_receipt_id, signer_key_id, nonce,
+               binding_json, committed_at
+        FROM acceptance_decision_bindings_v01
+        WHERE binding_id = ?
+        """,
+        (binding_id,),
+    ).fetchone()
+
+
+def _exact_acceptance_decision_binding_readback(
+    path: Path,
+    binding: AcceptanceDecisionBindingV01,
+) -> bool:
+    try:
+        connection = evidence.connect_ledger(path)
+        try:
+            inputs = _load_acceptance_decision_binding_inputs(
+                connection,
+                path,
+                verification_decision_id=binding.verification_decision_id,
+            )
+            row = _binding_row(connection, binding.binding_id)
+            if row is None:
+                return False
+            _validate_acceptance_decision_binding(
+                binding,
+                inputs,
+                now=binding.bound_at,
+                require_fresh=False,
+            )
+            expected = (
+                binding.digest,
+                binding.work_order_digest,
+                binding.verification_decision_id,
+                binding.terminal_kind,
+                binding.terminal_receipt_id,
+                binding.signer_key_id,
+                binding.nonce,
+                rfc8785.dumps(binding.model_dump(mode="json")),
+                binding.bound_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
+            return row == expected
+        finally:
+            connection.close()
+    except Exception:
+        return False
+
+
+def load_current_acceptance_decision_binding(
+    ledger_path: Path,
+) -> AcceptanceDecisionBindingV01 | None:
+    """Load the binding only when it still names the current v0.5 decision."""
+
+    path = Path(ledger_path)
+    lock_descriptor: int | None = None
+    connection: sqlite3.Connection | None = None
+    try:
+        lock_descriptor, _ = evidence._borrow_or_acquire_target_lock(path, None)
+        connection = evidence.connect_ledger(path)
+        connection.execute("BEGIN")
+        work_order = evidence.load_authoritative_work_order(connection)
+        current = _load_current_verification_decision(
+            connection,
+            path=path,
+            work_order=work_order,
+        )
+        if (
+            current is None
+            or current[0] != "0.5"
+            or current[1].decision != "VERIFIED"
+        ):
+            connection.execute("ROLLBACK")
+            return None
+        inputs = _load_acceptance_decision_binding_inputs(connection, path)
+        rows = tuple(
+            connection.execute(
+                "SELECT binding_id, binding_json FROM "
+                "acceptance_decision_bindings_v01 ORDER BY rowid"
+            )
+        )
+        if not rows:
+            connection.execute("ROLLBACK")
+            return None
+        if len(rows) != 1:
+            raise AcceptanceTransactionError(
+                "acceptance binding history is ambiguous"
+            )
+        parsed = AcceptanceDecisionBindingV01.model_validate_json(rows[0][1])
+        if parsed.binding_id != rows[0][0]:
+            raise AcceptanceTransactionError(
+                "acceptance binding row is malformed"
+            )
+        if parsed.verification_decision_id != inputs.decision.decision_id:
+            connection.execute("ROLLBACK")
+            return None
+        _validate_acceptance_decision_binding(
+            parsed,
+            inputs,
+            now=parsed.bound_at,
+            require_fresh=False,
+        )
+        if not _exact_acceptance_decision_binding_readback(path, parsed):
+            raise AcceptanceTransactionError(
+                "acceptance binding row failed exact readback"
+            )
+        connection.execute("ROLLBACK")
+        return parsed
+    finally:
+        evidence._best_effort_rollback(connection)
+        close_error = evidence._best_effort_close(connection)
+        _, release_errors = evidence._release_target_lock(lock_descriptor)
+        cleanup_errors = tuple(
+            item for item in (close_error, *release_errors) if item is not None
+        )
+        if cleanup_errors:
+            raise AcceptanceBindingCommitIndeterminateError(
+                "acceptance binding load cleanup failed"
+            ) from cleanup_errors[0]
+
+
+def commit_acceptance_decision_binding(
+    ledger_path: Path,
+    binding: AcceptanceDecisionBindingV01,
+    *,
+    clock: Callable[[], datetime],
+    fault: Literal[
+        "before_commit",
+        "commit_ack_loss",
+        "readback_failure",
+        "cleanup_failure",
+    ]
+    | None = None,
+) -> AcceptanceDecisionBindingV01:
+    """Append one Acceptor-signed acceptance/decision binding."""
+
+    if fault not in {
+        None,
+        "before_commit",
+        "commit_ack_loss",
+        "readback_failure",
+        "cleanup_failure",
+    }:
+        raise AcceptanceTransactionError("unknown acceptance binding fault")
+    path = Path(ledger_path)
+    if not path.is_file():
+        raise AcceptanceTransactionError("acceptance binding ledger is unavailable")
+    try:
+        parsed = AcceptanceDecisionBindingV01.model_validate(
+            binding.model_dump(mode="json")
+        )
+    except Exception as error:
+        raise AcceptanceTransactionError("acceptance binding is malformed") from error
+    lock_descriptor: int | None = None
+    connection: sqlite3.Connection | None = None
+    committed: AcceptanceDecisionBindingV01 | None = None
+    try:
+        lock_descriptor, _ = evidence._borrow_or_acquire_target_lock(path, None)
+        connection = evidence.connect_ledger(path)
+        connection.execute("BEGIN IMMEDIATE")
+        existing = _binding_row(connection, parsed.binding_id)
+        if existing is not None:
+            connection.execute("ROLLBACK")
+            if _exact_acceptance_decision_binding_readback(path, parsed):
+                raise AcceptanceBindingCommittedError(
+                    "the exact acceptance binding is already committed",
+                    parsed,
+                )
+            raise AcceptanceTransactionError(
+                "acceptance binding ID is already used"
+            )
+        now = _freeze_second(clock())
+        inputs = _load_acceptance_decision_binding_inputs(connection, path)
+        _validate_acceptance_decision_binding(
+            parsed,
+            inputs,
+            now=now,
+            require_fresh=True,
+        )
+        if connection.execute(
+            "SELECT 1 FROM acceptance_decision_bindings_v01 "
+            "WHERE terminal_receipt_id = ?",
+            (parsed.terminal_receipt_id,),
+        ).fetchone() is not None:
+            raise AcceptanceTransactionError(
+                "terminal receipt already has an acceptance binding"
+            )
+        connection.execute(
+            """
+            INSERT INTO acceptance_decision_bindings_v01 (
+                binding_id, binding_digest, work_order_digest,
+                verification_decision_id, terminal_kind,
+                terminal_receipt_id, signer_key_id, nonce,
+                binding_json, committed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                parsed.binding_id,
+                parsed.digest,
+                parsed.work_order_digest,
+                parsed.verification_decision_id,
+                parsed.terminal_kind,
+                parsed.terminal_receipt_id,
+                parsed.signer_key_id,
+                parsed.nonce,
+                rfc8785.dumps(parsed.model_dump(mode="json")),
+                parsed.bound_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            ),
+        )
+        if fault == "before_commit":
+            raise AcceptanceTransactionError(
+                "injected acceptance binding fault before commit"
+            )
+        try:
+            connection.execute("COMMIT")
+        except Exception as error:
+            if _exact_acceptance_decision_binding_readback(path, parsed):
+                committed = parsed
+                raise AcceptanceBindingCommittedError(
+                    "acceptance binding committed but acknowledgement was lost",
+                    parsed,
+                ) from error
+            raise AcceptanceBindingCommitIndeterminateError(
+                "acceptance binding commit outcome is indeterminate"
+            ) from error
+        committed = parsed
+        if fault == "commit_ack_loss":
+            raise OSError("injected acceptance binding acknowledgement loss")
+        if fault == "readback_failure":
+            raise AcceptanceBindingCommitIndeterminateError(
+                "acceptance binding readback was unavailable"
+            )
+        if not _exact_acceptance_decision_binding_readback(path, parsed):
+            raise AcceptanceBindingCommitIndeterminateError(
+                "acceptance binding readback could not confirm commit"
+            )
+        return parsed
+    except Exception as error:
+        evidence._best_effort_rollback(connection)
+        if isinstance(error, AcceptanceBindingCommittedError):
+            raise
+        if isinstance(error, AcceptanceBindingCommitIndeterminateError):
+            raise
+        if committed is not None:
+            if _exact_acceptance_decision_binding_readback(path, parsed):
+                raise AcceptanceBindingCommittedError(
+                    "acceptance binding committed but acknowledgement was lost",
+                    parsed,
+                ) from error
+            raise AcceptanceBindingCommitIndeterminateError(
+                "acceptance binding commit outcome is indeterminate"
+            ) from error
+        if isinstance(error, AcceptanceTransactionError):
+            raise
+        raise AcceptanceTransactionError(
+            "acceptance binding transaction failed"
+        ) from error
+    finally:
+        close_error = evidence._best_effort_close(connection)
+        _, release_errors = evidence._release_target_lock(lock_descriptor)
+        cleanup_errors = tuple(
+            item for item in (close_error, *release_errors) if item is not None
+        )
+        if fault == "cleanup_failure":
+            cleanup_errors += (OSError("injected acceptance binding cleanup failure"),)
+        if cleanup_errors:
+            if committed is not None:
+                raise AcceptanceBindingCommittedError(
+                    "acceptance binding committed but cleanup failed",
+                    committed,
+                ) from cleanup_errors[0]
+            raise AcceptanceBindingCommitIndeterminateError(
+                "acceptance binding cleanup failed"
+            ) from cleanup_errors[0]
 
 
 

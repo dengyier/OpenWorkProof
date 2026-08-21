@@ -832,6 +832,45 @@ _SCHEMA = (
     END
     """,
     """
+    CREATE TABLE acceptance_decision_bindings_v01 (
+        binding_id TEXT PRIMARY KEY,
+        binding_digest TEXT NOT NULL,
+        work_order_digest TEXT NOT NULL
+            REFERENCES work_orders(work_order_digest),
+        verification_decision_id TEXT NOT NULL
+            REFERENCES verification_decisions_v05(decision_id),
+        terminal_kind TEXT NOT NULL CHECK (
+            terminal_kind IN ('accepted', 'rejected')
+        ),
+        terminal_receipt_id TEXT NOT NULL UNIQUE,
+        signer_key_id TEXT NOT NULL,
+        nonce TEXT NOT NULL,
+        binding_json BLOB NOT NULL,
+        committed_at TEXT NOT NULL,
+        UNIQUE (signer_key_id, nonce)
+    )
+    """,
+    """
+    CREATE INDEX acceptance_decision_bindings_v01_work_order
+    ON acceptance_decision_bindings_v01 (
+        work_order_digest, committed_at, binding_id
+    )
+    """,
+    """
+    CREATE TRIGGER acceptance_decision_bindings_v01_are_immutable_update
+    BEFORE UPDATE ON acceptance_decision_bindings_v01
+    BEGIN
+        SELECT RAISE(ABORT, 'acceptance decision binding is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER acceptance_decision_bindings_v01_are_immutable_delete
+    BEFORE DELETE ON acceptance_decision_bindings_v01
+    BEGIN
+        SELECT RAISE(ABORT, 'acceptance decision binding is immutable');
+    END
+    """,
+    """
     CREATE TABLE acceptance_transitions_v05 (
         transition_id TEXT PRIMARY KEY,
         transition_digest TEXT NOT NULL UNIQUE,
