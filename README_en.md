@@ -31,8 +31,9 @@ OpenWorkProof 1.3 exposes one verifiable-evidence core through two surfaces:
 - **Ecosystem surface — AgentTeams / MCP:** Manager, Developer, and Verifier share
   one task while retaining separate roles, keys, Matrix events, and evidence.
 
-The five-minute path requires an existing Delivery Package, a Verifier key file,
-a toolchain lock, and a sandbox policy. The private key must not enter the repo:
+The five-minute path after 1.3.0 is published requires an existing Delivery
+Package, a Verifier key file, a toolchain lock, and a sandbox policy. The private
+key must not enter the repo:
 
 ```yaml
 - name: Verify Agent delivery
@@ -683,9 +684,16 @@ OpenWorkProof/
 - Rich #4196 full five-role E2E demo (Acceptor TCP signing + offline verification)
 - Dify #33013 full five-role E2E demo (AI application platform, cross-project-type generality)
 - **Historical 1.2.0 release-gate snapshot:** v0.5 focused 401 passed; candidate live 176 passed; required-live 3494 passed, 0 failed, 0 skipped
-- **Current 1.3.0 branch fresh gates:** pending Task 14; historical counts are not reused
+- **Current 1.3.0 branch fresh gates:** focused **207 passed / 1 skipped**;
+  frozen compatibility **167 passed**; portable full suite **3766 passed / 8
+  skipped**; candidate live **180 passed / 0 skipped**; required-live full suite
+  **3773 passed / 1 skipped**, with no unhandled-thread warning. The only
+  required-live skip is the unenabled live three-Agent AgentTeams environment,
+  so the strict release gate is not yet closed.
 
-**Not yet complete:** remaining ToolCall handler closures, event submission.
+**Not yet complete:** live three-Agent AgentTeams execution and a human Acceptor
+terminal state, independent dual review, remaining ToolCall handler closures,
+and event submission.
 
 > We state "what's not yet done" as clearly as "what is done."
 > This isn't modesty — it's the standard of evidence a protocol project demands.

@@ -14,9 +14,16 @@
 - AgentTeams 真实运行目前只完成安全 preflight。当前环境缺 Matrix token，且
   Worker 模型端曾返回额度不足；没有真实三 Agent 工作结果，也没有人工
   Acceptor 终态。
-- Task 14 fresh 发布门尚未执行，本文不沿用 1.2.0 的历史计数宣称 1.3.0 已发布。
+- Task 14 已完成本地 focused、冻结兼容、candidate live 与 required-live 运行：
+  focused `207 passed / 1 skipped`；冻结兼容 `167 passed`；portable 全量
+  `3766 passed / 8 skipped`（均为已分类 platform/live 条件）；candidate live
+  `180 passed / 0 skipped`；required-live 全量 `3773 passed / 1 skipped`，无
+  unhandled-thread warning。required-live 唯一 skip 为未启用的 AgentTeams 真实
+  三 Agent 环境。
+- 因 Task 11 真实三 Agent 执行、人工 Acceptor 终态与独立双审仍未取证，Task 14
+  的严格 `0 skipped` 发布门尚未闭合；1.3.0 仍是本地候选，未发布。
 - 下文凡将 1.2.0 写作“当前”或“待发布”的段落均是带日期的历史快照；当前
-  状态以本节为准，Task 14 完成后再统一回填 fresh 计数。
+  状态以本节为准。
 
 ```yaml
 customer_adoption: not_evidenced

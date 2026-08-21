@@ -30,8 +30,8 @@ OpenWorkProof 1.3 把同一套可验证证据核心做成两个入口：
 - **生态入口｜AgentTeams / MCP**：让 Manager、Developer、Verifier 三个角色
   共享同一任务但保持角色、密钥、事件和证据边界，为更多编排器提供协议适配面。
 
-最短接入路径（需要现成的 Delivery Package、Verifier 私钥文件、工具链锁和
-沙箱策略；私钥不进入仓库）：
+发布 1.3.0 后的最短接入路径（需要现成的 Delivery Package、Verifier 私钥文件、
+工具链锁和沙箱策略；私钥不进入仓库）：
 
 ```yaml
 - name: Verify Agent delivery
@@ -666,10 +666,14 @@ OpenWorkProof/
 - Rich #4196 完整五角色端到端演示（Acceptor TCP 签名 + 离线验签）
 - Dify #33013 完整五角色端到端演示（AI 应用平台类，跨项目类型通用性验证）
 - **1.2.0 历史发布门快照**：v0.5 focused 401 passed；candidate live 176 passed；required-live 3494 passed、0 failed、0 skipped
-- **1.3.0 当前分支 fresh 门**：待 Task 14 完成后填写，不沿用历史计数
+- **1.3.0 当前分支 fresh 门**：focused **207 passed / 1 skipped**；冻结兼容
+  **167 passed**；portable 全量 **3766 passed / 8 skipped**；candidate live
+  **180 passed / 0 skipped**；required-live 全量 **3773 passed / 1 skipped**，无
+  unhandled-thread warning。required-live 唯一 skip 是未启用 AgentTeams 真实三
+  Agent 环境，因此严格发布门尚未闭合。
 
-**尚未完成：** 其他 ToolCall handler 与 evidence publication 的调用闭包、
-正式赛事提交。
+**尚未完成：** AgentTeams 真实三 Agent 执行与人工 Acceptor 终态、独立双审、
+其他 ToolCall handler 与 evidence publication 的调用闭包、正式赛事提交。
 
 > 我们把「尚未完成什么」写得和「已经完成什么」一样清楚。
 > 这不是谦虚，这是协议项目应有的证据标准。

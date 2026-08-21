@@ -1435,7 +1435,7 @@ git commit -m "docs: publish openworkproof 1.3 surfaces"
 - Create candidate inventory under `supply-chain/images/candidates/` if source allowlist changed
 - Update `docs/status.md` only with fresh results
 
-- [ ] **Step 1: 运行 focused 门**
+- [x] **Step 1: 运行 focused 门**
 
 ```bash
 ./.venv/bin/python -m pytest -q \
@@ -1451,7 +1451,7 @@ git commit -m "docs: publish openworkproof 1.3 surfaces"
 
 Expected：0 failed；记录实际 passed/skipped/warnings。
 
-- [ ] **Step 2: 运行冻结兼容与便携全量**
+- [x] **Step 2: 运行冻结兼容与便携全量**
 
 ```bash
 ./.venv/bin/python -m pytest -q \
@@ -1469,7 +1469,7 @@ spec 审查逐条映射设计 §3–§15；quality/security 攻击：自签公�
 分叉、路径穿越、archive bomb、GitHub source drift、Matrix sender 冒充、
 ACK 丢失、三态退出码吞并、secret 泄露。任一 Critical/Important 未关闭不得继续。
 
-- [ ] **Step 4: 按最终 revision 重建 candidate inventory**
+- [x] **Step 4: 按最终 revision 重建 candidate inventory**
 
 仅当 source allowlist 变化时执行既有供应链流程；历史 inventory 不覆盖。运行：
 
@@ -1497,7 +1497,7 @@ OPENWORKPROOF_DOCKER_TEST_IMAGE="$FULLY_QUALIFIED_REPODIGEST" \
 Expected：0 failed、0 skipped、无 unhandled-thread warning。不得以中止运行、
 历史运行或 focused 运行替代。
 
-- [ ] **Step 6: 非测试门与状态回填**
+- [x] **Step 6: 非测试门与状态回填**
 
 ```bash
 ./.venv/bin/python -m pip check
