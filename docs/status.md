@@ -34,6 +34,26 @@ agentteams_live_execution: not_evidenced
 human_acceptance: not_evidenced
 ```
 
+### Acceptance Bundle 0.1 本地实现（2026-08-21）
+
+- 本地分支已实现 `AcceptanceDecisionBindingV01`：Verifier 的 v0.5 Decision 与
+  Acceptor 的 ACCEPTED/REJECTED 终态分别签名，再由 Acceptor companion binding
+  精确绑定 WorkOrder、Decision、CompositionReport、验收请求和终态 receipt。
+- 已实现 `prepare → sign → commit` 追加式事务、Acceptance Bundle 原子导出、
+  纯离线目录重放、Python/Services/CLI 接口与闭合退出码：`ACCEPTED=0`、
+  `REJECTED=2`、`operational=4`。缺失或不匹配 binding 时 fail closed。
+- AgentTeams 演示参数已从裸 receipt 改为 `--acceptance-bundle DIRECTORY`；外部
+  人工验收门只调用核心 verifier，Matrix announcement 失败不改变已验证终态，
+  但进程以 operational error 报告通知失败。
+- 本轮 Task 9 三文件攻击/隐私矩阵 fresh：`134 passed`。覆盖 companion binding
+  关联字段、有效签名对象集合重组、外层摘要同步篡改、committed evidence 篡改、
+  链接/FIFO/容量/读时漂移、并发、ACK-loss、cleanup、provenance 不覆盖与秘密/
+  绝对路径扫描。
+- 以上均为本地工程事实；没有执行新的真实三 Agent 工作流，也没有取得人工客户
+  验收、客户采用、付费 SOW、定金或上游采纳证据。
+
+`VERIFIED != ACCEPTED != PAID/SETTLED/LEGAL AUDIT/ADOPTION`
+
 ## 当前发布事实（以本次命令和公开回读为准）
 
 - 干净基线 revision（Task 1 起点，不含候选改动）：

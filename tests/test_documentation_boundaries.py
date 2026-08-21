@@ -146,3 +146,38 @@ def test_portable_ci_runs_tests_and_frozen_compatibility() -> None:
     assert "python -m pip check" in workflow
     assert "python -m compileall -q src tests" in workflow
     assert "OPENWORKPROOF_REQUIRE_LIVE" not in workflow
+
+
+def test_acceptance_bundle_workflow_and_boundaries_are_documented() -> None:
+    chinese = _text("README.md")
+    english = _text("README_en.md")
+    status = _text("docs/status.md")
+
+    for text in (chinese, english):
+        for literal in (
+            "AcceptanceDecisionBindingV01",
+            "prepare → sign → commit",
+            "owp acceptance-bundle-build",
+            "owp acceptance-bundle-verify",
+            "ACCEPTED=0",
+            "REJECTED=2",
+            "operational=4",
+            "--acceptance-bundle",
+            "VERIFIED != ACCEPTED != PAID/SETTLED/LEGAL AUDIT/ADOPTION",
+        ):
+            assert literal in text, f"acceptance docs missing: {literal}"
+    assert "双签" in chinese
+    assert "缺失 binding" in chinese
+    assert "dual signature" in english
+    assert "missing binding" in english
+    assert "外部人工验收" in chinese
+    assert "external human acceptance" in english
+    for boundary in (
+        "agentteams_live_execution: not_evidenced",
+        "human_acceptance: not_evidenced",
+        "customer_adoption: not_evidenced",
+        "paid_sow: not_evidenced",
+        "deposit: not_evidenced",
+        "upstream_adoption: not_evidenced",
+    ):
+        assert boundary in status

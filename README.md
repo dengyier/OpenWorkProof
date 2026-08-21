@@ -59,6 +59,32 @@ AgentTeams 三角色演示目前完成了配置、角色绑定、Matrix 事件 I
 录屏前置检查；真实 Worker 执行与人工 Acceptor 闭环仍为
 `agentteams_live_execution: not_evidenced`、`human_acceptance: not_evidenced`。
 
+### 离线人工验收：验证结论与客户决定分别签名
+
+`VERIFIED` 只说明 Verifier 按冻结范围和证据得出了验证结论；是否接受交付，必须
+由 WorkOrder 绑定的 Acceptor 独立决定。OpenWorkProof 因此采用双签：Verifier
+签署 `VerificationDecisionV05`，Acceptor 再签署
+`AcceptanceDecisionBindingV01`，把 WorkOrder、Decision、CompositionReport、
+验收请求和最终 ACCEPTED/REJECTED receipt 精确绑定。这样可阻止把两份各自有效、
+但彼此无关的验证与验收结果拼成一次交付；缺失 binding 一律拒绝。
+
+Acceptor 私钥不进入 AgentTeams 或 exporter。签署流程是
+`prepare → sign → commit`：系统先生成无密钥草稿，外部 Acceptor 签名，再由追加式
+事务提交。随后导出并离线复核：
+
+```bash
+owp acceptance-bundle-build LEDGER SURFACE \
+  --evidence-root PATH --output DIRECTORY
+owp acceptance-bundle-verify DIRECTORY
+```
+
+验证退出码闭合为 `ACCEPTED=0`、`REJECTED=2`、`operational=4`。AgentTeams 的
+外部人工验收入口使用 `--acceptance-bundle DIRECTORY`：只轮询外部目录并调用同一
+核心 verifier，不生成 key、receipt 或 binding。合法 REJECTED 是可验证终态，
+不能写成“交付成功”；通知失败也不会抹掉已经验证的终态事实。
+
+**VERIFIED != ACCEPTED != PAID/SETTLED/LEGAL AUDIT/ADOPTION**
+
 ---
 
 ## 30 秒理解 OpenWorkProof

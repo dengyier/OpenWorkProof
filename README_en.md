@@ -65,6 +65,36 @@ binding, and recording preflight. Real Worker execution and human acceptance
 remain `agentteams_live_execution: not_evidenced` and
 `human_acceptance: not_evidenced`.
 
+### Offline Human Acceptance: Separate Verification and Customer Signatures
+
+`VERIFIED` means only that a Verifier reached a decision against frozen scope
+and evidence. Delivery acceptance remains an independent decision by the
+WorkOrder-bound Acceptor. OpenWorkProof therefore requires a dual signature:
+the Verifier signs `VerificationDecisionV05`, then the Acceptor signs
+`AcceptanceDecisionBindingV01`, exactly binding the WorkOrder, Decision,
+CompositionReport, acceptance request, and terminal ACCEPTED/REJECTED receipt.
+This prevents two individually valid but unrelated proofs from being spliced
+into one delivery. A missing binding is rejected.
+
+The Acceptor key never enters AgentTeams or the exporter. The signing flow is
+`prepare → sign → commit`: produce a keyless draft, sign outside the process,
+then append the signed object transactionally. Export and verify the result:
+
+```bash
+owp acceptance-bundle-build LEDGER SURFACE \
+  --evidence-root PATH --output DIRECTORY
+owp acceptance-bundle-verify DIRECTORY
+```
+
+Exit codes are closed: `ACCEPTED=0`, `REJECTED=2`, and `operational=4`.
+AgentTeams external human acceptance uses `--acceptance-bundle DIRECTORY`; it
+polls only for the external directory and calls the same core verifier. It does
+not generate a key, receipt, or binding. A valid REJECTED bundle is a verified
+terminal, not delivery success. Announcement failure does not erase the
+already-verified terminal fact.
+
+**VERIFIED != ACCEPTED != PAID/SETTLED/LEGAL AUDIT/ADOPTION**
+
 ---
 
 ## 30-Second Overview
