@@ -600,7 +600,7 @@ git commit -m "docs: explain offline human acceptance"
   `supply-chain/images/candidates/<final-revision>.json`
 - Modify: `docs/status.md` only with fresh exact results
 
-- [ ] **Step 1: 聚焦协议门**
+- [x] **Step 1: 聚焦协议门**
 
 ```bash
 ./.venv/bin/python -m pytest -q \
@@ -613,7 +613,7 @@ git commit -m "docs: explain offline human acceptance"
   tests/test_signing.py tests/test_v02_interfaces.py
 ```
 
-- [ ] **Step 2: portable 全量**
+- [x] **Step 2: portable 全量**
 
 ```bash
 ./.venv/bin/python -m pytest -q
@@ -622,19 +622,19 @@ git commit -m "docs: explain offline human acceptance"
 记录真实 passed/failed/skipped/warnings 和耗时。任何失败必须归因并闭环，不能用历史
 计数覆盖。
 
-- [ ] **Step 3: candidate 两套件**
+- [x] **Step 3: candidate 两套件**
 
 先运行现有静态和 live candidate tests。若 source allowlist 改动导致 inventory 0 match，
 按仓库既有 `prepare_context.py`、OCI/Docker archive、
 `convert_docker_archive.py` 流程为最终 revision 新建不可变 inventory；不得覆盖历史文件。
 
-- [ ] **Step 4: required-live 全量**
+- [x] **Step 4: required-live 全量**
 
 从被唯一选中的 inventory 读取 fully-qualified RepoDigest 与 artifact root，设置仓库要求
 的 `OPENWORKPROOF_REQUIRE_LIVE` 等环境变量，运行完整 pytest。目标是 0 failed；是否允许
 AgentTeams live skip 必须按当前 marker/规则如实记录，不擅自改规则迎合数字。
 
-- [ ] **Step 5: 非测试门**
+- [x] **Step 5: 非测试门**
 
 ```bash
 ./.venv/bin/python -m pip check
@@ -645,7 +645,7 @@ docker volume ls --filter label=openworkproof --format '{{.Name}}'
 git status --short --branch
 ```
 
-- [ ] **Step 6: 供应链与状态提交**
+- [x] **Step 6: 供应链与状态提交**
 
 只在 inventory/状态确有变化时提交：
 
@@ -662,7 +662,7 @@ git commit -m "build: bind acceptance bundle candidate inventory"
 - Modify only files required by proven review findings
 - Modify: this plan checkboxes after evidence exists
 
-- [ ] **Step 1: 独立规格审查**
+- [x] **Step 1: 独立规格审查**
 
 审查者逐条对照设计第 1–9 节，重点证明：
 
@@ -673,17 +673,17 @@ git commit -m "build: bind acceptance bundle candidate inventory"
 - transition history fail closed；
 - AgentTeams 不自动验收。
 
-- [ ] **Step 2: 独立质量/安全审查**
+- [x] **Step 2: 独立质量/安全审查**
 
 检查 COMMIT-ACK、并发、历史回放、schema interoperability、path/TOCTOU、secret 泄漏、
 CLI exit code 和测试是否真正命中语义层。Critical/Important 必须先 RED 后修；Minor
 逐项说明处理或明确非阻断理由。
 
-- [ ] **Step 3: 复跑受影响门并更新勾选**
+- [x] **Step 3: 复跑受影响门并更新勾选**
 
 所有勾选必须有命令、revision 和结果证据。不得把“计划已写”当成“实现已完成”。
 
-- [ ] **Step 4: 分支交付选择**
+- [x] **Step 4: 分支交付选择**
 
 实现、验证和双审全部完成后，使用 `superpowers:finishing-a-development-branch`，向用户
 提供：保持本地、推远端分支/PR、或合并 main。没有用户明确授权不得 push/merge/tag/
@@ -693,19 +693,19 @@ publish。
 
 ## Final Checklist
 
-- [ ] 旧 v0.1–v0.5 schema/hash/signing bytes 未变化
-- [ ] companion schema 双目录逐字节一致
-- [ ] Acceptor terminal 与 cross-version binding 均为显式独立签名
-- [ ] 同 WorkOrder 拼接攻击被离线 verifier 拒绝
-- [ ] accepted/rejected round-trip 在全新临时目录通过
-- [ ] 缺 binding、旧 terminal、transition history 均 fail closed
-- [ ] exporter exact snapshot、self-verify、no-replace、ACK-loss 闭环
-- [ ] CLI 0/2/4 退出码与 JSON 输出闭合
-- [ ] AgentTeams 不接收裸 receipt、不持私钥、不自动验收
-- [ ] 导出物无 token、私钥、消息全文和绝对路径
-- [ ] focused、portable、candidate、required-live 结果均为 fresh evidence
-- [ ] pip check、compileall、diff check 与 Docker 残留门通过
-- [ ] 独立规格审查 READY
-- [ ] 独立质量/安全审查 READY
-- [ ] README/README_en/status 与真实实现和证据一致
-- [ ] 未经授权未 push、merge、tag、发布或宣称外部采用
+- [x] 旧 v0.1–v0.5 schema/hash/signing bytes 未变化
+- [x] companion schema 双目录逐字节一致
+- [x] Acceptor terminal 与 cross-version binding 均为显式独立签名
+- [x] 同 WorkOrder 拼接攻击被离线 verifier 拒绝
+- [x] accepted/rejected round-trip 在全新临时目录通过
+- [x] 缺 binding、旧 terminal、transition history 均 fail closed
+- [x] exporter exact snapshot、self-verify、no-replace、ACK-loss 闭环
+- [x] CLI 0/2/4 退出码与 JSON 输出闭合
+- [x] AgentTeams 不接收裸 receipt、不持私钥、不自动验收
+- [x] 导出物无 token、私钥、消息全文和绝对路径
+- [x] focused、portable、candidate、required-live 结果均为 fresh evidence
+- [x] pip check、compileall、diff check 与 Docker 残留门通过
+- [x] 独立规格审查 READY
+- [x] 独立质量/安全审查 READY
+- [x] README/README_en/status 与真实实现和证据一致
+- [x] 未经授权未 push、merge、tag、发布或宣称外部采用
