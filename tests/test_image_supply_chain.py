@@ -21,6 +21,12 @@ BASE_IMAGE = (
     "57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de"
 )
 CANDIDATE_PATHS = tuple(sorted((IMAGE_ROOT / "candidates").glob("*.json")))
+# The frozen 0.1 candidate is referenced explicitly: newer candidates are added
+# over time, so the alphabetically-last candidate is not guaranteed to remain a
+# 0.1 inventory (and must not be treated as one).
+_V01_CANDIDATE = IMAGE_ROOT / "candidates" / (
+    "ed2da68a1009dd8b333025404e7198dc5a12660e.json"
+)
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 IMAGE_ID_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
@@ -899,7 +905,7 @@ def test_candidate_inventory_is_closed_and_claims_only_local_evidence(
 
 
 def test_inventory_v01_remains_valid_without_runner_digest(tmp_path: Path) -> None:
-    inventory = copy.deepcopy(_load_candidate_inventory(CANDIDATE_PATHS[-1]))
+    inventory = copy.deepcopy(_load_candidate_inventory(_V01_CANDIDATE))
 
     assert inventory["schema_version"] == (
         "openworkproof-image-candidate-inventory/0.1"
@@ -1086,7 +1092,7 @@ def test_inventory_loader_rejects_helper_source_manifest_not_derived_from_revisi
 def test_inventory_loader_rejects_source_revision_drift_to_head(
     tmp_path: Path,
 ) -> None:
-    inventory = copy.deepcopy(_load_candidate_inventory(CANDIDATE_PATHS[-1]))
+    inventory = copy.deepcopy(_load_candidate_inventory(_V01_CANDIDATE))
     head = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=ROOT,
