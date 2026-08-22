@@ -38,6 +38,31 @@ readiness 上方的薄编排层，不建设商城、SaaS、登录、钱包、托
   不等于完成结算；客户采用、付费 SOW、定金、外部付款、上游采纳均为
   `not_evidenced`。自有 fixture 与导出包不计入真实十单、付款方或复购。
 
+### Task 9 candidate 收口（2026-08-22，HEAD d74a68e）
+
+- source closure 分析：`SOURCE_ALLOWLIST` 文件列表未变（`delivery_case.py` 不进入
+  trusted-helper 镜像）；但 `__init__.py` 在 allowlist 内且已变更，`helper_src_sha256sums_sha256`
+  由 `ce0ae8ff…` 变为 `a79640fb…`，必须重建不可变 inventory。
+- 沙箱：DSH 禁止写 `~/.docker/buildx/activity`，用 `DOCKER_CONFIG=/private/tmp/owp-docker-config`
+  使 buildx 可写 activity；candidate 在 `/private/tmp/owp-candidate-delivery` 构建
+  （`external_layout.local_root` 如实记录，build_inputs 全部 revision-bound）。
+- 不可变 inventory：`supply-chain/images/candidates/f81f2e840fa568d41919821b14b9d8d27f2eec3e.json`；
+  4 个 archive tar + `SHA256SUMS` + inventory copy + sidecar。execution
+  `local_image_id=sha256:f3d8907a…` / `oci_manifest_digest=sha256:b36f2f56…`；
+  trusted-helper `local_image_id=sha256:b6751863…` / `oci_manifest_digest=sha256:cc104df2…`。
+- fresh 门（本轮控制器 fresh，非历史计数）：
+  - candidate 两套件（live Docker + artifact root）：`182 passed、0 failed、0 skipped`；
+  - required-live 全量：`3986 passed、0 failed、1 skipped`（唯一 skip 为未启用的
+    AgentTeams 真实三 Agent 环境，按 marker 如实记录）；
+  - 便携全量（candidate 重建后复跑）：`3979 passed、0 failed、8 skipped`；
+  - `pip check` / `compileall` / `git diff --check` / wheel 隔离安装：PASS。
+- 契约测试修正：新 candidate `f81f2e8…`（hex 以 `f` 开头）按字典序排在冻结 v0.1
+  candidate `ed2da68a…`（hex 以 `e` 开头）之后，`test_inventory_v01_remains_valid_without_runner_digest`
+  与 `test_inventory_loader_rejects_source_revision_drift_to_head` 两处以
+  `CANDIDATE_PATHS[-1]` 隐式取 v0.1 candidate 的断言会误取 v0.2 新 candidate。
+  已在 `2425dbd` 改为显式引用 `ed2da68a…`（测试意图不变，未跳过/未放宽/未改写历史库存）。
+- 未执行：merge / rebase / push / tag / GitHub Release / PyPI / MCP Registry 发布。
+
 ```yaml
 customer_adoption: not_evidenced
 paid_sow: not_evidenced
