@@ -55,9 +55,17 @@ OpenWorkProof 1.3 把同一套可验证证据核心做成两个入口：
 `owp surface-verify PATH` 可在不接入原账本、不访问执行环境的情况下离线复核
 签名 Surface Bundle。三态结论不等于客户验收、付款、结算或法律判断。
 
-AgentTeams 三角色演示目前完成了配置、角色绑定、Matrix 事件 ID 绑定和安全
-录屏前置检查；真实 Worker 执行与人工 Acceptor 闭环仍为
-`agentteams_live_execution: not_evidenced`、`human_acceptance: not_evidenced`。
+AgentTeams 真实环境前置检查已在本地候选上通过：Manager、Developer、Verifier
+均处于运行状态，且分别绑定不同的 Matrix 身份与 OpenWorkProof key id。该结果证明
+真实三角色环境和 live preflight 可用，不证明一次新的 Manager → Developer →
+Verifier 业务执行已经完成，也不证明外部人工验收：
+
+```text
+agentteams_live_environment: evidenced
+agentteams_three_role_preflight: evidenced
+agentteams_end_to_end_business_execution: not_evidenced
+human_acceptance: not_evidenced
+```
 
 ### 离线人工验收：验证结论与客户决定分别签名
 
@@ -726,15 +734,17 @@ OpenWorkProof/
 - Docker 生产执行器（STARTED_UNCONFIRMED 恢复）
 - Rich #4196 完整五角色端到端演示（Acceptor TCP 签名 + 离线验签）
 - Dify #33013 完整五角色端到端演示（AI 应用平台类，跨项目类型通用性验证）
+- Verified Agent Delivery：交付案件模型、CLI、确定性导出、GitHub Action、商业
+  准入模板，以及从 Surface / Acceptance / Settlement 证据 fail-closed 派生状态；
+  `READY_FOR_SETTLEMENT_REVIEW` 不等于付款或完成结算
 - **1.2.0 历史发布门快照**：v0.5 focused 401 passed；candidate live 176 passed；required-live 3494 passed、0 failed、0 skipped
-- **1.3.0 当前分支 fresh 门**：focused **207 passed / 1 skipped**；冻结兼容
-  **167 passed**；portable 全量 **3766 passed / 8 skipped**；candidate live
-  **180 passed / 0 skipped**；required-live 全量 **3773 passed / 1 skipped**，无
-  unhandled-thread warning。required-live 唯一 skip 是未启用 AgentTeams 真实三
-  Agent 环境，因此严格发布门尚未闭合。
+- **1.3.0 本地候选 fresh required-live 门**：同时启用 live Docker、当前
+  candidate inventory 与 `OPENWORKPROOF_AGENTTEAMS_REQUIRED=1`，全量
+  **3987 passed、0 failed、0 skipped**；真实三角色 preflight 在严格门内通过。
 
-**尚未完成：** AgentTeams 真实三 Agent 执行与人工 Acceptor 终态、独立双审、
-其他 ToolCall handler 与 evidence publication 的调用闭包、正式赛事提交。
+**尚未完成或尚无外部证据：** 新的 Manager → Developer → Verifier 真实业务执行、
+外部人工 Acceptor 终态、客户采用/付费/结算、其他 ToolCall handler 与 evidence
+publication 的调用闭包，以及正式赛事提交。
 
 > 我们把「尚未完成什么」写得和「已经完成什么」一样清楚。
 > 这不是谦虚，这是协议项目应有的证据标准。

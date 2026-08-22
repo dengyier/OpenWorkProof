@@ -60,10 +60,18 @@ The four-question report leads with buyer language:
 live ledger or execution environment. The three-state result is not customer
 acceptance, payment, settlement, or a legal judgment.
 
-The AgentTeams three-agent demo has configuration, role binding, Matrix event-ID
-binding, and recording preflight. Real Worker execution and human acceptance
-remain `agentteams_live_execution: not_evidenced` and
-`human_acceptance: not_evidenced`.
+The live AgentTeams preflight now passes for the local candidate: Manager,
+Developer, and Verifier are running and bind distinct Matrix identities and
+OpenWorkProof key IDs. This proves that the live three-role environment and its
+preflight are available. It does not prove that a fresh Manager → Developer →
+Verifier business run or an external human acceptance has completed:
+
+```text
+agentteams_live_environment: evidenced
+agentteams_three_role_preflight: evidenced
+agentteams_end_to_end_business_execution: not_evidenced
+human_acceptance: not_evidenced
+```
 
 ### Offline Human Acceptance: Separate Verification and Customer Signatures
 
@@ -752,17 +760,20 @@ OpenWorkProof/
 - Docker production executor (STARTED_UNCONFIRMED recovery)
 - Rich #4196 full five-role E2E demo (Acceptor TCP signing + offline verification)
 - Dify #33013 full five-role E2E demo (AI application platform, cross-project-type generality)
+- Verified Agent Delivery: delivery-case model, CLI, deterministic export,
+  GitHub Action, commercial intake templates, and fail-closed status derivation
+  from Surface / Acceptance / Settlement evidence;
+  `READY_FOR_SETTLEMENT_REVIEW` is not payment or completed settlement
 - **Historical 1.2.0 release-gate snapshot:** v0.5 focused 401 passed; candidate live 176 passed; required-live 3494 passed, 0 failed, 0 skipped
-- **Current 1.3.0 branch fresh gates:** focused **207 passed / 1 skipped**;
-  frozen compatibility **167 passed**; portable full suite **3766 passed / 8
-  skipped**; candidate live **180 passed / 0 skipped**; required-live full suite
-  **3773 passed / 1 skipped**, with no unhandled-thread warning. The only
-  required-live skip is the unenabled live three-Agent AgentTeams environment,
-  so the strict release gate is not yet closed.
+- **Local 1.3.0 candidate fresh required-live gate:** with live Docker, the
+  current candidate inventory, and `OPENWORKPROOF_AGENTTEAMS_REQUIRED=1`
+  enabled, the full suite reports **3987 passed, 0 failed, 0 skipped**; the live
+  three-role preflight passes inside the strict gate.
 
-**Not yet complete:** live three-Agent AgentTeams execution and a human Acceptor
-terminal state, independent dual review, remaining ToolCall handler closures,
-and event submission.
+**Not yet complete or not externally evidenced:** a fresh Manager → Developer →
+Verifier business run, an external human Acceptor terminal state, customer
+adoption/payment/settlement, remaining ToolCall handler and evidence-publication
+closures, and formal competition submission.
 
 > We state "what's not yet done" as clearly as "what is done."
 > This isn't modesty — it's the standard of evidence a protocol project demands.
