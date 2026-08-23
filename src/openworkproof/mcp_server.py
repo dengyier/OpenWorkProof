@@ -337,6 +337,7 @@ class _StoredRunTestsExecution:
     authorization_prefix_digest: str
     reserved_at: datetime
     state: Literal["RESERVED", "STARTED_UNCONFIRMED"]
+    agency_binding: str | None = None
 
 
 def _canonical_agent_request(request: AgentRequest) -> bytes:
@@ -348,14 +349,29 @@ def _canonical_agent_request(request: AgentRequest) -> bytes:
     return encoded
 
 
+_LEGACY_AUTHORIZATION_PREFIX_DOMAIN = (
+    "openworkproof/authorization-ledger-prefix/v0.1"
+)
+_AGENCY_AUTHORIZATION_PREFIX_DOMAIN = (
+    "openworkproof/authorization-ledger-prefix-agency/v0.1"
+)
+
+
 def _authorization_prefix_digest(
     prefix: AuthorizationLedgerPrefix,
+    *,
+    domain: str = _LEGACY_AUTHORIZATION_PREFIX_DOMAIN,
 ) -> str:
     if type(prefix) is not AuthorizationLedgerPrefix:
         raise ValueError("authorization prefix is invalid")
+    if domain not in {
+        _LEGACY_AUTHORIZATION_PREFIX_DOMAIN,
+        _AGENCY_AUTHORIZATION_PREFIX_DOMAIN,
+    }:
+        raise ValueError("authorization prefix domain is invalid")
     encoded = rfc8785.dumps(
         {
-            "domain": "openworkproof/authorization-ledger-prefix/v0.1",
+            "domain": domain,
             "effective_grants": [
                 grant.model_dump(mode="json")
                 for grant in prefix.effective_grants
@@ -373,6 +389,21 @@ def _authorization_prefix_digest(
     if not 1 <= len(encoded) <= _MAX_AUTHORIZATION_PREFIX_BYTES:
         raise ValueError("authorization prefix exceeds its byte limit")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _agency_binding_prefix_domain(agency_binding: str | None) -> str:
+    """Map a stored journal agency binding to its authorization domain.
+
+    NULL maps to the legacy domain; the fixed exact marker maps to the
+    domain-separated agency domain. Any other value fails closed so a marker
+    flip without a matching domain digest cannot be laundered as bound.
+    """
+
+    if agency_binding is None:
+        return _LEGACY_AUTHORIZATION_PREFIX_DOMAIN
+    if agency_binding == evidence._HANDLER_AGENCY_BINDING_MARKER:
+        return _AGENCY_AUTHORIZATION_PREFIX_DOMAIN
+    raise HandlerCoordinationError("RECOVERY_REQUIRED")
 
 
 def _decode_canonical_agent_request(raw: object) -> AgentRequest:
@@ -434,13 +465,66 @@ def _ensure_handler_execution_schema(
     """Idempotently ensure the handler execution journal schema (C).
 
     This bookkeeping step runs inside the target lock before the incoming
-    request's base/agency authorization gate. It only creates or migrates an
-    empty journal table; it never executes a handler, writes a receipt, or
-    changes business state, so it is excluded from the denied new-action
+    request's base/agency authorization gate. It creates the current journal
+    table, drops an empty predecessor, or atomically rebuilds the immediately
+    previous schema while preserving any nonempty row with a NULL agency
+    binding; it never executes a handler, writes a receipt, or changes
+    business state, so it is excluded from the denied new-action
     no-business-write invariant.
     """
 
     expected = evidence._HANDLER_EXECUTION_SCHEMA
+    previous = evidence._HANDLER_EXECUTION_SCHEMA_V3
+
+    def _rebuild_with_agency_binding(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "ALTER TABLE handler_executions "
+            "RENAME TO handler_executions_agency_migrate"
+        )
+        connection.execute(expected)
+        connection.execute(
+            """
+            INSERT INTO handler_executions (
+                execution_id,
+                work_order_digest,
+                request_digest,
+                nonce,
+                grant_id,
+                tool_name,
+                arguments_digest,
+                execution_context_id,
+                container_instance_id_digest,
+                controller_id,
+                reserved_at,
+                state,
+                authorization_prefix_digest,
+                agency_binding,
+                request_json,
+                execution_contract_json,
+                execution_contract_digest
+            )
+            SELECT
+                execution_id,
+                work_order_digest,
+                request_digest,
+                nonce,
+                grant_id,
+                tool_name,
+                arguments_digest,
+                execution_context_id,
+                container_instance_id_digest,
+                controller_id,
+                reserved_at,
+                state,
+                authorization_prefix_digest,
+                NULL,
+                request_json,
+                execution_contract_json,
+                execution_contract_digest
+            FROM handler_executions_agency_migrate
+            """
+        )
+        connection.execute("DROP TABLE handler_executions_agency_migrate")
 
     def ensure(connection: sqlite3.Connection) -> None:
         row = connection.execute(
@@ -457,6 +541,15 @@ def _ensure_handler_execution_schema(
             raise ValueError("handler execution journal schema is invalid")
         actual = _normalized_sql(row[0])
         if actual == _normalized_sql(expected):
+            return
+        if actual == _normalized_sql(previous):
+            if connection.execute(
+                "SELECT COUNT(*) FROM handler_executions"
+            ).fetchone() == (0,):
+                connection.execute("DROP TABLE handler_executions")
+                connection.execute(expected)
+                return
+            _rebuild_with_agency_binding(connection)
             return
         predecessors = (
             evidence._LEGACY_HANDLER_EXECUTION_SCHEMA,
@@ -611,12 +704,15 @@ def _reserve_handler_execution(
     request: AgentRequest,
     execution_facts: ProspectiveExecutionFacts,
     execution_contract: repo_tools.RunTestsExecutionContract | None,
+    *,
+    agency_bound: bool = False,
 ) -> str:
     execution_id = _handler_execution_id(request, execution_facts)
     request_json: str | None = None
     contract_json: str | None = None
     contract_digest: str | None = None
     authorization_prefix_digest: str | None = None
+    agency_binding: str | None = None
     if request.tool_name == "owp.run_tests":
         if type(execution_contract) is not repo_tools.RunTestsExecutionContract:
             raise HandlerCoordinationError("RECOVERY_REQUIRED")
@@ -640,9 +736,13 @@ def _reserve_handler_execution(
         request_json = request_bytes.decode("utf-8")
         contract_json = contract_bytes.decode("utf-8")
         contract_digest = hashlib.sha256(contract_bytes).hexdigest()
+        agency_binding = (
+            evidence._HANDLER_AGENCY_BINDING_MARKER if agency_bound else None
+        )
         try:
             authorization_prefix_digest = _authorization_prefix_digest(
-                context.ledger_prefix
+                context.ledger_prefix,
+                domain=_agency_binding_prefix_domain(agency_binding),
             )
         except (TypeError, ValueError) as error:
             raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
@@ -673,11 +773,12 @@ def _reserve_handler_execution(
                 reserved_at,
                 state,
                 authorization_prefix_digest,
+                agency_binding,
                 request_json,
                 execution_contract_json,
                 execution_contract_digest
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?, ?, ?
             )
             """,
             (
@@ -693,6 +794,7 @@ def _reserve_handler_execution(
                 execution_facts.controller_id,
                 context.transaction_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 authorization_prefix_digest,
+                agency_binding,
                 request_json,
                 contract_json,
                 contract_digest,
@@ -732,6 +834,7 @@ def _load_stored_run_tests_execution(
                 reserved_at,
                 state,
                 authorization_prefix_digest,
+                agency_binding,
                 request_json,
                 execution_contract_json,
                 execution_contract_digest
@@ -760,6 +863,7 @@ def _load_stored_run_tests_execution(
             reserved_at_raw,
             state,
             authorization_prefix_digest,
+            agency_binding,
             request_json,
             contract_json,
             contract_digest,
@@ -794,6 +898,10 @@ def _load_stored_run_tests_execution(
             is None
         ):
             raise ValueError("stored authorization prefix digest is invalid")
+        if agency_binding is not None and agency_binding != (
+            evidence._HANDLER_AGENCY_BINDING_MARKER
+        ):
+            raise ValueError("stored agency binding marker is invalid")
         facts = ProspectiveExecutionFacts(
             execution_context_id=execution_context_id,
             container_instance_id_digest=container_instance_id_digest,
@@ -823,6 +931,7 @@ def _load_stored_run_tests_execution(
             authorization_prefix_digest=authorization_prefix_digest,
             reserved_at=reserved_at,
             state=state,
+            agency_binding=agency_binding,
         )
 
     result = _journal_transaction(ledger_path, lock_descriptor, load)
@@ -937,10 +1046,12 @@ def _recovery_authorization_context(
     )
     if stored.request.work_order_digest != context.work_order.digest:
         raise HandlerCoordinationError("RECOVERY_REQUIRED")
+    domain = _agency_binding_prefix_domain(stored.agency_binding)
     if receipt_state == "ABSENT":
         try:
             current_prefix_digest = _authorization_prefix_digest(
-                context.ledger_prefix
+                context.ledger_prefix,
+                domain=domain,
             )
         except (TypeError, ValueError) as error:
             raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
@@ -980,7 +1091,7 @@ def _recovery_authorization_context(
                 receipts=historical_receipts,
             )
             try:
-                digest = _authorization_prefix_digest(candidate)
+                digest = _authorization_prefix_digest(candidate, domain=domain)
             except (TypeError, ValueError) as error:
                 raise HandlerCoordinationError(
                     "RECOVERY_REQUIRED"
@@ -1515,6 +1626,7 @@ def _recover_run_tests_execution(
     sidecar_private_key: Ed25519PrivateKey,
     execution_driver: repo_tools.RunTestsExecutionDriver,
     now: datetime,
+    agency_authorize: Callable[[], PolicyDecision] | None = None,
 ) -> ToolCallReceipt | None:
     """Finalize a previously RESERVED/STARTED_UNCONFIRMED run-tests (B).
 
@@ -1522,9 +1634,12 @@ def _recover_run_tests_execution(
     stored request truth instead of re-authorizing against the current
     profile, so a later revocation is not retroactive. On success it either
     publishes the stored receipt and clears the journal row, or clears an
-    already-committed receipt and returns None.
+    already-committed receipt and returns None. A protected caller recovering
+    a legacy-unbound stored action still finalizes the truth but must not
+    receive it as a protected result.
     """
 
+    protected = agency_authorize is not None
     if (
         key_id(sidecar_private_key.public_key())
         != stored.execution_facts.controller_id
@@ -1660,6 +1775,8 @@ def _recover_run_tests_execution(
     _delete_handler_execution(
         ledger_path, lock_descriptor, stored.execution_id
     )
+    if protected and stored.agency_binding is None:
+        raise HandlerCoordinationError("AGENCY_UNBOUND_RECOVERY")
     return receipt
 
 
@@ -1708,6 +1825,7 @@ def execute_run_tests(
                 sidecar_private_key,
                 execution_driver,
                 now,
+                agency_authorize,
             )
             if receipt is not None:
                 _, release_errors = evidence._release_target_lock(
@@ -1802,6 +1920,7 @@ def execute_run_tests(
             request,
             execution_facts,
             execution_contract,
+            agency_bound=(agency_authorize is not None),
         )
         try:
             snapshot = repo_tools.prepare_candidate_execution_snapshot(

@@ -72,6 +72,22 @@ truth，因此后续 revoke 不追溯；幂等的 bookkeeping/schema/evidence re
 2. 另立任务实现具备相同 lock/reservation/publication/recovery 语义的
    `execute_apply_patch`。
 
+### run-tests 混合模式 recovery 绑定
+
+run-tests journal 新增向后兼容的 agency binding，防止 legacy `agency_authorize=None` 的未受
+保护预约被后续受保护 call 恢复并“洗白”为受保护结果：
+
+- legacy 预约存 `agency_binding=NULL`，digest 沿用
+  `openworkproof/authorization-ledger-prefix/v0.1`；受保护预约在 `_enforce` 成功后存固定
+  exact marker `openworkproof/handler-agency-bound/v0.1`，digest 换为域分离的
+  `openworkproof/authorization-ledger-prefix-agency/v0.1`。marker 翻转或域不匹配 fail closed。
+- recovery 不针对当前 profile 重新授权存储请求：受保护 caller 恢复 agency-bound 存储 action
+  时正常 finalize/return 且不重复调用 callback；受保护 caller 恢复 legacy-unbound 的
+  CLOSED_RESULT/ABSENT 时，先发布 receipt、cleanup 并删除 journal，再抛
+  `HandlerCoordinationError('AGENCY_UNBOUND_RECOVERY')`；legacy caller 可恢复任一类。
+- schema 迁移：空 predecessor 按原样 drop/rebuild；紧邻前一个 schema 的非空行原子重建为
+  `agency_binding=NULL` 并保留该行；更旧 schema 的非空行保持 fail closed。
+
 ## Task 6 真实性审查结论
 
 设计要求 bundle 包含受 profile 约束的 request/decision/receipt，但当前协议存在两个事实：

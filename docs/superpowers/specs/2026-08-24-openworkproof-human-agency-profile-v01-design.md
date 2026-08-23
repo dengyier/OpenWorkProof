@@ -353,6 +353,20 @@ bookkeeping/schema/evidence recovery（C）可在本次请求的 agency 门之�
 “拒绝的新 action 零业务写入”不变量中排除。callback 默认 `None`，旧 executor 未选择
 protected 模式时行为不变。
 
+`owp.run_tests` 的 handler journal 额外持久化 agency binding：legacy（`agency_authorize=None`）
+预约写入 `agency_binding=NULL`，authorization-prefix digest 沿用既有域
+`openworkproof/authorization-ledger-prefix/v0.1`；受保护预约在 `_enforce` 成功后写入固定
+exact marker `openworkproof/handler-agency-bound/v0.1`，并把 digest 换成域分离的
+`openworkproof/authorization-ledger-prefix-agency/v0.1`。marker 与 digest 域必须一致，任一
+方向翻转或域不匹配都 fail closed（在历史授权前缀重建时校验）。recovery（B）仍不针对当前
+profile 重新授权存储请求，但：受保护 caller 恢复 agency-bound 存储 action 时正常
+finalize/return 且不重复调用 callback；受保护 caller 恢复 legacy-unbound 的
+CLOSED_RESULT/ABSENT 时，先发布 receipt、cleanup 并删除 journal，再抛
+`HandlerCoordinationError('AGENCY_UNBOUND_RECOVERY')`，使 truth 既不被滞留、也不被当作受
+保护结果返回；legacy caller 可恢复任一类。journal schema 迁移对空 predecessor 按原样
+drop/rebuild；对紧邻前一个 schema 的非空行原子重建为 `agency_binding=NULL` 并保留该行；更旧
+schema 的非空行保持 fail closed。
+
 protected dispatcher 不自行持锁或提前解析 history，只按已签名的
 `AgentRequest.tool_name` 选择 executor，并向 executor 传入延迟加载 callback。时间只来自
 已构造的 `AuthorizationContext.transaction_time`，不得额外接收调用方自报的 `tool_name`

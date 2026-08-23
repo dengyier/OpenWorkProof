@@ -529,6 +529,15 @@ git commit -m "feat: commit human agency history atomically"
 
 > **2026-08-24 Owner 决策：** 采用 executor 锁内 opt-in callback；不得使用锁外闭包。
 > 同时补真实 `execute_apply_patch`，完成前不声称 supersede 后 apply-patch 可安全执行。
+>
+> **2026-08-24 mixed-mode recovery：** run-tests journal 增加 agency binding（固定 exact
+> marker `openworkproof/handler-agency-bound/v0.1` + 域分离 digest
+> `openworkproof/authorization-ledger-prefix-agency/v0.1`；legacy 与 repo-read/rollback 存
+> NULL 并沿用 `openworkproof/authorization-ledger-prefix/v0.1`）。marker 翻转或域不匹配
+> fail closed。受保护 caller 恢复 legacy-unbound 的 CLOSED_RESULT/ABSENT 时，先发布
+> receipt、cleanup、删除 journal，再抛 `HandlerCoordinationError('AGENCY_UNBOUND_RECOVERY')`；
+> 恢复 agency-bound 时不重复调用 callback。schema 对紧邻前一个 schema 的非空行原子重建为
+> `agency_binding=NULL` 并保留该行。Task5 Steps 1–3 仅在全部新增测试通过时保持勾选。
 
 **Files:**
 - Create: `tests/test_agency_end_to_end_v01.py`

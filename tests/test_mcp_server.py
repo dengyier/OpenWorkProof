@@ -1054,7 +1054,7 @@ def test_authorization_prefix_digest_binds_all_canonical_components(
 
 
 def test_current_handler_schema_has_a_named_prefix_predecessor() -> None:
-    assert hasattr(evidence, "_HANDLER_EXECUTION_SCHEMA_V2")
+    assert hasattr(evidence, "_HANDLER_EXECUTION_SCHEMA_V3")
 
 
 def test_handler_journal_recovery_fields_are_closed_by_tool(
@@ -1130,6 +1130,7 @@ def test_handler_journal_recovery_fields_are_closed_by_tool(
 @pytest.mark.parametrize(
     "predecessor",
     (
+        evidence._HANDLER_EXECUTION_SCHEMA_V3,
         evidence._HANDLER_EXECUTION_SCHEMA_V2,
         evidence._HANDLER_EXECUTION_SCHEMA_V1,
         evidence._LEGACY_HANDLER_EXECUTION_SCHEMA,
@@ -1251,6 +1252,137 @@ def test_handler_journal_schema_rejects_nonempty_predecessors(
             )
     finally:
         evidence._release_target_lock(lock_descriptor)
+
+
+def test_handler_journal_schema_migrates_nonempty_previous_preserving_row(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        connection.execute("DROP TABLE handler_executions")
+        connection.execute(evidence._HANDLER_EXECUTION_SCHEMA_V3)
+        connection.execute(
+            """
+            INSERT INTO handler_executions (
+                execution_id, work_order_digest, request_digest, nonce,
+                grant_id, tool_name, arguments_digest, execution_context_id,
+                container_instance_id_digest, controller_id, reserved_at,
+                state, authorization_prefix_digest, request_json,
+                execution_contract_json, execution_contract_digest
+            ) VALUES (?, ?, ?, ?, ?, 'owp.run_tests', ?, ?, ?, ?, ?,
+                      'RESERVED', ?, ?, ?, ?)
+            """,
+            (
+                "0" * 64,
+                case["work_order"].digest,
+                case["request"].digest,
+                case["request"].nonce,
+                case["verifier"].grant_id,
+                case["request"].arguments_digest,
+                "4" * 64,
+                "5" * 64,
+                case["facts"].controller_id,
+                fixed_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "6" * 64,
+                "{}",
+                "{}",
+                "7" * 64,
+            ),
+        )
+    finally:
+        connection.close()
+    lock_descriptor = evidence._acquire_target_lock(case["ledger_path"])
+    try:
+        mcp_server._ensure_handler_execution_schema(
+            case["ledger_path"], lock_descriptor
+        )
+    finally:
+        evidence._release_target_lock(lock_descriptor)
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        stored = connection.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'table' AND name = 'handler_executions'
+            """
+        ).fetchone()
+        row = connection.execute(
+            """
+            SELECT execution_id, agency_binding, authorization_prefix_digest,
+                   request_json, execution_contract_json,
+                   execution_contract_digest
+            FROM handler_executions
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+    assert stored is not None
+    assert mcp_server._normalized_sql(stored[0]) == mcp_server._normalized_sql(
+        evidence._HANDLER_EXECUTION_SCHEMA
+    )
+    assert row == ("0" * 64, None, "6" * 64, "{}", "{}", "7" * 64)
+
+
+def test_handler_journal_schema_rejects_invalid_agency_binding_marker(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO handler_executions (
+                    execution_id, work_order_digest, request_digest, nonce,
+                    grant_id, tool_name, arguments_digest,
+                    execution_context_id, container_instance_id_digest,
+                    controller_id, reserved_at, state,
+                    authorization_prefix_digest, agency_binding, request_json,
+                    execution_contract_json, execution_contract_digest
+                ) VALUES (?, ?, ?, ?, ?, 'owp.run_tests', ?, ?, ?, ?, ?,
+                          'RESERVED', ?, ?, ?, ?, ?)
+                """,
+                (
+                    "0" * 64,
+                    case["work_order"].digest,
+                    "1" * 64,
+                    "2" * 64,
+                    case["verifier"].grant_id,
+                    "3" * 64,
+                    "4" * 64,
+                    "5" * 64,
+                    case["facts"].controller_id,
+                    fixed_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "6" * 64,
+                    "invalid-agency-binding-marker",
+                    "{}",
+                    "{}",
+                    "7" * 64,
+                ),
+            )
+    finally:
+        connection.close()
 
 
 def test_handler_journal_persists_and_loads_exact_recovery_fields(

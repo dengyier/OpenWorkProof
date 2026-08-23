@@ -59,9 +59,11 @@ from openworkproof.signing import sign_payload
 from conftest import SHA256_A, SHA256_D
 from test_mcp_server import (
     _FakeRunTestsExecutionDriver,
+    _closed_run_tests_outcome,
     _current_run_tests_context,
     _rollback_case,
     _run_tests_case,
+    _run_tests_contract,
     _run_tests_snapshot_request,
 )
 from test_repo_read_transaction import (
@@ -253,44 +255,56 @@ def _counting_handler(manifest_digest: str):
     return handler, calls
 
 
-def _insert_stale_reserved_row(
-    case,
-    *,
-    tool_name: str,
-    grant_id: str,
-    now,
-) -> None:
-    """Insert a provably stale RESERVED journal row with no matching receipt."""
+def _reserve_stale_handler_execution(case, context, request) -> None:
+    """Reserve a provably stale RESERVED row through the production seam.
 
-    connection = evidence.connect_ledger(case["ledger_path"])
+    The row has no matching receipt, so the pre-agency recovery boundary must
+    clean it up without executing a handler or writing business state.
+    """
+
+    lock_descriptor = evidence._acquire_target_lock(case["ledger_path"])
     try:
-        connection.execute(
-            """
-            INSERT INTO handler_executions (
-                execution_id, work_order_digest, request_digest, nonce,
-                grant_id, tool_name, arguments_digest, execution_context_id,
-                container_instance_id_digest, controller_id, reserved_at,
-                state, authorization_prefix_digest, request_json,
-                execution_contract_json, execution_contract_digest
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED',
-                      NULL, NULL, NULL, NULL)
-            """,
-            (
-                "a" * 64,
-                case["work_order"].digest,
-                "b" * 64,
-                "c" * 64,
-                grant_id,
-                tool_name,
-                "d" * 64,
-                "e" * 64,
-                "f" * 64,
-                case["facts"].controller_id,
-                now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            ),
+        mcp_server._reserve_handler_execution(
+            case["ledger_path"],
+            lock_descriptor,
+            context,
+            request,
+            case["facts"],
+            None,
         )
     finally:
-        connection.close()
+        evidence._release_target_lock(lock_descriptor)
+
+
+def _reserve_run_tests_execution_bound(
+    case,
+    *,
+    agency_bound: bool,
+    started: bool = False,
+):
+    """Reserve a run-tests execution through the production seam with an
+    explicit agency binding."""
+    contract = _run_tests_contract(case)
+    lock_descriptor = evidence._acquire_target_lock(case["ledger_path"])
+    try:
+        mcp_server._reserve_handler_execution(
+            case["ledger_path"],
+            lock_descriptor,
+            case["context"],
+            case["request"],
+            case["facts"],
+            contract,
+            agency_bound=agency_bound,
+        )
+        if started:
+            mcp_server._mark_handler_started(
+                case["ledger_path"],
+                lock_descriptor,
+                contract.execution_id,
+            )
+    finally:
+        evidence._release_target_lock(lock_descriptor)
+    return contract
 
 
 # --- repo-read: reserved deny is fail-closed with zero handler calls ---
@@ -602,18 +616,6 @@ def test_acceptor_revocation_waits_for_executor_lock_and_next_call_sees_it(
     executor_outcome: dict[str, object] = {}
     revocation_outcome: dict[str, object] = {}
 
-    real_acquire = evidence._acquire_target_lock
-
-    def traced_acquire(ledger_path):
-        # Only the revoker thread's acquisition signals: the executor's
-        # initial free acquisition and any later borrowed-lock validation
-        # must not count as lock contention.
-        if threading.current_thread().name == "revoker":
-            revoker_reached_acquire.set()
-        return real_acquire(ledger_path)
-
-    monkeypatch.setattr(evidence, "_acquire_target_lock", traced_acquire)
-
     def agency_authorize_hold():
         # The executor already holds the target lock when this runs.
         entered.set()
@@ -643,6 +645,27 @@ def test_acceptor_revocation_waits_for_executor_lock_and_next_call_sees_it(
 
     def run_revocation():
         try:
+            # The revoker itself observes nonblocking flock failure before
+            # signaling, proving the executor still holds the target lock, and
+            # only then enters the real blocking acquire.
+            probe_fd = os.open(
+                evidence._target_lock_path(case["ledger_path"]),
+                os.O_RDWR | os.O_CREAT,
+                0o600,
+            )
+            try:
+                try:
+                    fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    revoker_reached_acquire.set()
+                else:
+                    fcntl.flock(probe_fd, fcntl.LOCK_UN)
+                    revocation_outcome["error"] = AssertionError(
+                        "revoker observed no target-lock contention"
+                    )
+                    return
+            finally:
+                os.close(probe_fd)
             commit_agency_profile_transition(case["ledger_path"], revoke)
         except Exception as error:  # pragma: no cover - diagnostic only
             revocation_outcome["error"] = error
@@ -653,28 +676,14 @@ def test_acceptor_revocation_waits_for_executor_lock_and_next_call_sees_it(
     executor_thread.start()
     assert entered.wait(timeout=20)
 
-    # Confirm the executor actually holds the target lock before the revoker
-    # starts, so the revoker's acquisition below is genuine contention rather
-    # than a free acquisition.
-    probe_fd = os.open(
-        evidence._target_lock_path(case["ledger_path"]),
-        os.O_RDWR | os.O_CREAT,
-        0o600,
-    )
-    try:
-        with pytest.raises(BlockingIOError):
-            fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    finally:
-        os.close(probe_fd)
-
     revocation_thread = threading.Thread(target=run_revocation, name="revoker")
     revocation_thread.start()
     assert revoker_reached_acquire.wait(timeout=20)
 
-    # The revoker reached ``_acquire_target_lock`` and is now blocked in its
-    # flock while the executor callback still holds the same target lock, so
-    # the Acceptor transition commit cannot have completed. Deterministic: no
-    # sleeps and no thread-start-only signal.
+    # The revoker observed its own nonblocking flock fail and signaled before
+    # entering the real blocking acquire, while the executor callback still
+    # holds the same target lock, so the Acceptor transition commit cannot
+    # have completed. Deterministic: no sleeps and no thread-start-only signal.
     assert not commit_finished.is_set()
 
     proceed.set()
@@ -914,15 +923,10 @@ def test_repo_read_denied_with_stale_reserved_journal_cleans_then_denies(
         reserved=(("scope_or_criteria_change", ("owp.repo_read",)),),
     )
     commit_human_agency_profile(case["ledger_path"], profile)
-    _insert_stale_reserved_row(
-        case,
-        tool_name="owp.repo_read",
-        grant_id=case["developer"].grant_id,
-        now=fixed_now,
-    )
     request, arguments = _repo_read_request(
         case, context, ephemeral_role_keys, fixed_now, path="src/app.py"
     )
+    _reserve_stale_handler_execution(case, context, request)
     manifest_digest = context.replay_checkpoint.workspace_manifest_digest
     handler, calls = _counting_handler(manifest_digest)
 
@@ -978,12 +982,7 @@ def test_rollback_denied_with_stale_reserved_journal_cleans_then_denies(
         reserved=(("scope_or_criteria_change", ("owp.rollback_patch",)),),
     )
     commit_human_agency_profile(case["ledger_path"], profile)
-    _insert_stale_reserved_row(
-        case,
-        tool_name="owp.rollback_patch",
-        grant_id=case["developer"].grant_id,
-        now=fixed_now,
-    )
+    _reserve_stale_handler_execution(case, case["context"], case["request"])
     calls: list[object] = []
 
     def handler(command):
@@ -1015,3 +1014,246 @@ def test_rollback_denied_with_stale_reserved_journal_cleans_then_denies(
     del before["handler_executions"]
     del after["handler_executions"]
     assert after == before
+
+
+# --- mixed-mode run-tests recovery binding ---
+
+
+def test_protected_caller_rejects_legacy_unbound_recovery(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    contract = _run_tests_contract(case)
+    _reserve_run_tests_execution_bound(case, agency_bound=False)
+    agency_authorize, invocations = _counting_agency_authorize(
+        case["ledger_path"], case["context"], case["request"]
+    )
+    driver = _FakeRunTestsExecutionDriver(
+        reconciliation_outcomes=(
+            _closed_run_tests_outcome(contract, actual_exit_code=0),
+        )
+    )
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError, match="AGENCY_UNBOUND_RECOVERY"
+    ) as caught:
+        mcp_server.execute_run_tests(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=case["request"],
+            request_arguments=case["arguments"],
+            execution_facts=case["facts"],
+            candidate_snapshot_request=_run_tests_snapshot_request(
+                case, tmp_path.resolve()
+            ),
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            execution_driver=driver,
+            clock=lambda: fixed_now,
+            agency_authorize=agency_authorize,
+        )
+    assert str(caught.value) == "AGENCY_UNBOUND_RECOVERY"
+    # The callback is never re-invoked; the stored truth is finalized (receipt
+    # committed) and the journal is cleaned, so the unprotected prior result is
+    # neither stranded nor returned to the protected caller.
+    assert invocations == []
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE nonce = ?",
+            (case["request"].nonce,),
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+def test_protected_agency_bound_reservation_finalizes_after_revoke_without_callback(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    profile = _mk_profile(
+        case["work_order"],
+        ephemeral_role_keys,
+        SHA256_A,
+        delegated=("owp.run_tests",),
+    )
+    commit_human_agency_profile(case["ledger_path"], profile)
+    contract = _reserve_run_tests_execution_bound(case, agency_bound=True)
+    revoke = _mk_transition(
+        case["work_order"],
+        ephemeral_role_keys,
+        target=profile,
+        transition="revoked",
+    )
+    commit_agency_profile_transition(case["ledger_path"], revoke)
+    agency_authorize, invocations = _counting_agency_authorize(
+        case["ledger_path"], case["context"], case["request"]
+    )
+    driver = _FakeRunTestsExecutionDriver(
+        reconciliation_outcomes=(
+            _closed_run_tests_outcome(contract, actual_exit_code=0),
+        )
+    )
+    receipt = mcp_server.execute_run_tests(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=case["context"],
+        request=case["request"],
+        request_arguments=case["arguments"],
+        execution_facts=case["facts"],
+        candidate_snapshot_request=_run_tests_snapshot_request(
+            case, tmp_path.resolve()
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        execution_driver=driver,
+        clock=lambda: fixed_now,
+        agency_authorize=agency_authorize,
+    )
+    # A later revocation is non-retroactive: the stored agency-bound truth is
+    # replayed and finalized without re-invoking the (now-deny) callback.
+    assert invocations == []
+    assert receipt.nonce == case["request"].nonce
+    assert receipt.policy_decision == "allow"
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("agency_bound", [False, True])
+def test_legacy_caller_recovers_stored_reservation(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    agency_bound: bool,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    contract = _reserve_run_tests_execution_bound(
+        case, agency_bound=agency_bound
+    )
+    driver = _FakeRunTestsExecutionDriver(
+        reconciliation_outcomes=(
+            _closed_run_tests_outcome(contract, actual_exit_code=0),
+        )
+    )
+    receipt = mcp_server.execute_run_tests(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=case["context"],
+        request=case["request"],
+        request_arguments=case["arguments"],
+        execution_facts=case["facts"],
+        candidate_snapshot_request=_run_tests_snapshot_request(
+            case, tmp_path.resolve()
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        execution_driver=driver,
+        clock=lambda: fixed_now,
+    )
+    assert receipt.nonce == case["request"].nonce
+    assert receipt.policy_decision == "allow"
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ("bound_to_unbound", "unbound_to_bound", "bound_legacy_digest"),
+)
+def test_agency_binding_marker_flip_or_domain_mismatch_fails_closed(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    tamper: str,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    _reserve_run_tests_execution_bound(
+        case,
+        agency_bound=(tamper != "unbound_to_bound"),
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        if tamper == "bound_to_unbound":
+            connection.execute(
+                "UPDATE handler_executions SET agency_binding = NULL"
+            )
+        elif tamper == "unbound_to_bound":
+            connection.execute(
+                "UPDATE handler_executions SET agency_binding = ?",
+                (evidence._HANDLER_AGENCY_BINDING_MARKER,),
+            )
+        else:
+            connection.execute(
+                "UPDATE handler_executions "
+                "SET authorization_prefix_digest = ?",
+                (
+                    mcp_server._authorization_prefix_digest(
+                        case["context"].ledger_prefix
+                    ),
+                ),
+            )
+    finally:
+        connection.close()
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError, match="RECOVERY_REQUIRED"
+    ):
+        mcp_server.execute_run_tests(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=case["request"],
+            request_arguments=case["arguments"],
+            execution_facts=case["facts"],
+            candidate_snapshot_request=_run_tests_snapshot_request(
+                case, tmp_path.resolve()
+            ),
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            execution_driver=_FakeRunTestsExecutionDriver(),
+            clock=lambda: fixed_now,
+        )
