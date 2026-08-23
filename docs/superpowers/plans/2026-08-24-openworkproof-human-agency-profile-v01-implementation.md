@@ -451,7 +451,8 @@ CREATE TABLE human_agency_profiles_v01 (
     profile_digest TEXT NOT NULL UNIQUE,
     profile_json TEXT NOT NULL,
     nonce TEXT NOT NULL UNIQUE,
-    issued_at TEXT NOT NULL
+    issued_at TEXT NOT NULL,
+    committed_at TEXT NOT NULL
 );
 CREATE TABLE agency_profile_transitions_v01 (
     transition_id TEXT PRIMARY KEY,
@@ -464,7 +465,8 @@ CREATE TABLE agency_profile_transitions_v01 (
     transition_digest TEXT NOT NULL UNIQUE,
     transition_json TEXT NOT NULL,
     nonce TEXT NOT NULL UNIQUE,
-    transitioned_at TEXT NOT NULL
+    transitioned_at TEXT NOT NULL,
+    committed_at TEXT NOT NULL
 );
 CREATE TABLE agency_appeals_v01 (
     appeal_id TEXT PRIMARY KEY,
@@ -476,12 +478,14 @@ CREATE TABLE agency_appeals_v01 (
     appeal_digest TEXT NOT NULL UNIQUE,
     appeal_json TEXT NOT NULL,
     nonce TEXT NOT NULL UNIQUE,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    committed_at TEXT NOT NULL
 );
 ```
 
-每表保存 canonical JSON、digest、work_order_digest、nonce、signed time；nonce 在对象类型内
-唯一。不得用 update/delete 表示替换或撤销。
+每表保存 canonical JSON、digest、work_order_digest、nonce、signed time 与独立的
+`committed_at` 操作时间；nonce 在对象类型内唯一。`committed_at` 不进入签名对象或
+离线协议真理，只用于账本运维追踪。不得用 update/delete 表示替换或撤销。
 
 - [ ] **Step 3: 实现三类 commit 与只读 load**
 
