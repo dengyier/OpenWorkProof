@@ -177,6 +177,7 @@ def test_canonical_domains_are_exact_and_key_order_is_irrelevant() -> None:
             "human-agency-profile",
             "agency-profile-transition",
             "agency-appeal",
+            "handler-agency-binding",
         }
     )
     assert ALLOWED_SIGNED_DOMAINS == ALLOWED_CANONICAL_DOMAINS - {
@@ -195,6 +196,51 @@ def test_canonical_domains_are_exact_and_key_order_is_irrelevant() -> None:
     )
     with pytest.raises(ValueError):
         canonical_bytes("unknown", {"a": 1})
+
+
+def test_handler_agency_binding_domain_is_scoped_to_v01(role_keys) -> None:
+    """The internal recovery binding signs only under the v0.1 domain.
+
+    ``handler-agency-binding`` must be a v0.1-signed domain (so a reservation
+    envelope can be signed) but must not leak into the 0.3/0.4/0.5 domain
+    sets, which use their own explicit registries.
+    """
+
+    private_key = role_keys["Sidecar"][0]
+    public_key = private_key.public_key()
+    payload = {
+        "claim_type": "handler-agency-binding",
+        "work_order_digest": SHA256_A,
+        "execution_id": SHA256_B,
+        "request_digest": SHA256_C,
+        "authorization_prefix_digest": SHA256_D,
+        "agency_marker": "openworkproof/handler-agency-bound/v0.1",
+        "controller_key_id": key_id(public_key),
+        "reserved_at": "2026-01-01T00:00:05Z",
+    }
+    signed = sign_payload(
+        "handler-agency-binding", payload, private_key, version="0.1"
+    )
+    assert verify_payload(
+        "handler-agency-binding", signed, public_key, version="0.1"
+    )
+    assert canonical_bytes(
+        "handler-agency-binding", payload, version="0.1"
+    ).startswith(b'{"domain":"openworkproof/handler-agency-binding/v0.1"')
+    for version in ("0.3", "0.4", "0.5"):
+        with pytest.raises(ValueError):
+            sign_payload(
+                "handler-agency-binding",
+                payload,
+                private_key,
+                version=version,  # type: ignore[arg-type]
+            )
+        assert not verify_payload(
+            "handler-agency-binding",
+            signed,
+            public_key,
+            version=version,  # type: ignore[arg-type]
+        )
 
 
 def test_unsigned_payload_excludes_only_digest_and_signature() -> None:

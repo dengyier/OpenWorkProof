@@ -74,19 +74,29 @@ truth，因此后续 revoke 不追溯；幂等的 bookkeeping/schema/evidence re
 
 ### run-tests 混合模式 recovery 绑定
 
-run-tests journal 新增向后兼容的 agency binding，防止 legacy `agency_authorize=None` 的未受
-保护预约被后续受保护 call 恢复并“洗白”为受保护结果：
+run-tests journal 新增向后兼容的 Sidecar 签名 agency binding，防止 legacy
+`agency_authorize=None` 的未受保护预约被后续受保护 call 恢复并“洗白”为受保护结果：
 
-- legacy 预约存 `agency_binding=NULL`，digest 沿用
+- legacy 预约存 `agency_binding=NULL` 且 `agency_binding_json=NULL`，digest 沿用
   `openworkproof/authorization-ledger-prefix/v0.1`；受保护预约在 `_enforce` 成功后存固定
-  exact marker `openworkproof/handler-agency-bound/v0.1`，digest 换为域分离的
-  `openworkproof/authorization-ledger-prefix-agency/v0.1`。marker 翻转或域不匹配 fail closed。
+  exact marker `openworkproof/handler-agency-bound/v0.1`，并把 canonical envelope 写入
+  `agency_binding_json`，digest 换为域分离的
+  `openworkproof/authorization-ledger-prefix-agency/v0.1`（仅 defense-in-depth）。envelope 由
+  execute_run_tests 已验证的 Ed25519 Sidecar 私钥在内置签名域
+  `openworkproof/handler-agency-binding/v0.1`（仅限 v0.1）签名，至少绑定 domain/claim type、
+  `work_order_digest`、`execution_id`、`request_digest`、`authorization_prefix_digest`、agency
+  marker、controller/signer key id 与 `reserved_at`；load/recovery 按权威 WorkOrder 的精确
+  Sidecar KeyBinding 校验，身份不匹配、非 canonical/重复键/超限 JSON、错误角色或密钥、
+  digest/signature 无效一律 fail closed（RECOVERY_REQUIRED）。
 - recovery 不针对当前 profile 重新授权存储请求：受保护 caller 恢复 agency-bound 存储 action
   时正常 finalize/return 且不重复调用 callback；受保护 caller 恢复 legacy-unbound 的
   CLOSED_RESULT/ABSENT 时，先发布 receipt、cleanup 并删除 journal，再抛
   `HandlerCoordinationError('AGENCY_UNBOUND_RECOVERY')`；legacy caller 可恢复任一类。
-- schema 迁移：空 predecessor 按原样 drop/rebuild；紧邻前一个 schema 的非空行原子重建为
-  `agency_binding=NULL` 并保留该行；更旧 schema 的非空行保持 fail closed。
+- schema 迁移：空 predecessor 按原样 drop/rebuild；紧邻前一个 unsigned-marker schema 的非空
+  NULL-marker 行原子重建为 unbound 并保留；非空非 NULL-marker 行不可信，fail closed 且绝不
+  伪造签名；更旧 schema 的非空行保持 fail closed。
+- 威胁边界：agency binding 是 executor 锁内 recovery 协调的内部控制，ActionReceipt 本身不
+  携带 Agency 证明；不向外宣称受保护结果。
 
 ## Task 6 真实性审查结论
 

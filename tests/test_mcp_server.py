@@ -52,7 +52,11 @@ from openworkproof.repo_tools import (
     resolution_manifest_digest,
     workspace_manifest_digest,
 )
-from openworkproof.signing import sign_payload
+from openworkproof.signing import (
+    decode_and_verify_key_binding,
+    sign_payload,
+    verify_payload,
+)
 
 from test_receipt_chain import (
     _activate_ledger_root,
@@ -1055,6 +1059,7 @@ def test_authorization_prefix_digest_binds_all_canonical_components(
 
 def test_current_handler_schema_has_a_named_prefix_predecessor() -> None:
     assert hasattr(evidence, "_HANDLER_EXECUTION_SCHEMA_V3")
+    assert hasattr(evidence, "_HANDLER_EXECUTION_SCHEMA_V4")
 
 
 def test_handler_journal_recovery_fields_are_closed_by_tool(
@@ -1130,6 +1135,7 @@ def test_handler_journal_recovery_fields_are_closed_by_tool(
 @pytest.mark.parametrize(
     "predecessor",
     (
+        evidence._HANDLER_EXECUTION_SCHEMA_V4,
         evidence._HANDLER_EXECUTION_SCHEMA_V3,
         evidence._HANDLER_EXECUTION_SCHEMA_V2,
         evidence._HANDLER_EXECUTION_SCHEMA_V1,
@@ -1319,7 +1325,8 @@ def test_handler_journal_schema_migrates_nonempty_previous_preserving_row(
         ).fetchone()
         row = connection.execute(
             """
-            SELECT execution_id, agency_binding, authorization_prefix_digest,
+            SELECT execution_id, agency_binding, agency_binding_json,
+                   authorization_prefix_digest,
                    request_json, execution_contract_json,
                    execution_contract_digest
             FROM handler_executions
@@ -1331,7 +1338,152 @@ def test_handler_journal_schema_migrates_nonempty_previous_preserving_row(
     assert mcp_server._normalized_sql(stored[0]) == mcp_server._normalized_sql(
         evidence._HANDLER_EXECUTION_SCHEMA
     )
-    assert row == ("0" * 64, None, "6" * 64, "{}", "{}", "7" * 64)
+    assert row == ("0" * 64, None, None, "6" * 64, "{}", "{}", "7" * 64)
+
+
+def test_handler_journal_schema_migrates_nonempty_unsigned_marker_predecessor(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    """The immediately prior unsigned-marker schema migrates NULL-marker rows.
+
+    A nonempty predecessor row that stores only the fixed marker (no
+    signature) but with ``agency_binding = NULL`` is trusted to be an
+    unbound reservation and is rebuilt with both marker and envelope NULL.
+    """
+
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        connection.execute("DROP TABLE handler_executions")
+        connection.execute(evidence._HANDLER_EXECUTION_SCHEMA_V4)
+        connection.execute(
+            """
+            INSERT INTO handler_executions (
+                execution_id, work_order_digest, request_digest, nonce,
+                grant_id, tool_name, arguments_digest, execution_context_id,
+                container_instance_id_digest, controller_id, reserved_at,
+                state, authorization_prefix_digest, agency_binding,
+                request_json, execution_contract_json, execution_contract_digest
+            ) VALUES (?, ?, ?, ?, ?, 'owp.run_tests', ?, ?, ?, ?, ?,
+                      'RESERVED', ?, NULL, ?, ?, ?)
+            """,
+            (
+                "0" * 64,
+                case["work_order"].digest,
+                case["request"].digest,
+                case["request"].nonce,
+                case["verifier"].grant_id,
+                case["request"].arguments_digest,
+                "4" * 64,
+                "5" * 64,
+                case["facts"].controller_id,
+                fixed_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "6" * 64,
+                "{}",
+                "{}",
+                "7" * 64,
+            ),
+        )
+    finally:
+        connection.close()
+    lock_descriptor = evidence._acquire_target_lock(case["ledger_path"])
+    try:
+        mcp_server._ensure_handler_execution_schema(
+            case["ledger_path"], lock_descriptor
+        )
+    finally:
+        evidence._release_target_lock(lock_descriptor)
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        row = connection.execute(
+            """
+            SELECT execution_id, agency_binding, agency_binding_json,
+                   authorization_prefix_digest
+            FROM handler_executions
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row == ("0" * 64, None, None, "6" * 64)
+
+
+def test_handler_journal_schema_rejects_nonnull_unsigned_marker_predecessor(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    """A non-NULL unsigned marker cannot be trusted and must fail closed.
+
+    The immediately prior schema stored only the fixed marker without a
+    signature envelope. Such a row could have been forged by coordinated
+    SQLite tampering, so migration must not fabricate a signature: any
+    nonempty predecessor row with a non-NULL marker refuses migration.
+    """
+
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        connection.execute("DROP TABLE handler_executions")
+        connection.execute(evidence._HANDLER_EXECUTION_SCHEMA_V4)
+        connection.execute(
+            """
+            INSERT INTO handler_executions (
+                execution_id, work_order_digest, request_digest, nonce,
+                grant_id, tool_name, arguments_digest, execution_context_id,
+                container_instance_id_digest, controller_id, reserved_at,
+                state, authorization_prefix_digest, agency_binding,
+                request_json, execution_contract_json, execution_contract_digest
+            ) VALUES (?, ?, ?, ?, ?, 'owp.run_tests', ?, ?, ?, ?, ?,
+                      'RESERVED', ?, ?, ?, ?, ?)
+            """,
+            (
+                "0" * 64,
+                case["work_order"].digest,
+                case["request"].digest,
+                case["request"].nonce,
+                case["verifier"].grant_id,
+                case["request"].arguments_digest,
+                "4" * 64,
+                "5" * 64,
+                case["facts"].controller_id,
+                fixed_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "6" * 64,
+                evidence._HANDLER_AGENCY_BINDING_MARKER,
+                "{}",
+                "{}",
+                "7" * 64,
+            ),
+        )
+    finally:
+        connection.close()
+    lock_descriptor = evidence._acquire_target_lock(case["ledger_path"])
+    try:
+        with pytest.raises(
+            HandlerCoordinationError, match="RECOVERY_REQUIRED"
+        ):
+            mcp_server._ensure_handler_execution_schema(
+                case["ledger_path"], lock_descriptor
+            )
+    finally:
+        evidence._release_target_lock(lock_descriptor)
 
 
 def test_handler_journal_schema_rejects_invalid_agency_binding_marker(
@@ -1380,6 +1532,95 @@ def test_handler_journal_schema_rejects_invalid_agency_binding_marker(
                     "{}",
                     "7" * 64,
                 ),
+            )
+    finally:
+        connection.close()
+
+
+def test_handler_journal_schema_closes_agency_binding_by_tool(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    """The schema enforces the agency-binding pair by tool.
+
+    Unbound run-tests means marker NULL and envelope JSON NULL; bound means
+    the exact marker and a non-NULL envelope; repo-read/rollback must store
+    both NULL.
+    """
+
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    connection = evidence.connect_ledger(case["ledger_path"])
+    marker = evidence._HANDLER_AGENCY_BINDING_MARKER
+    run_tests = (
+        "0" * 64,
+        case["work_order"].digest,
+        "1" * 64,
+        "2" * 64,
+        case["verifier"].grant_id,
+        "owp.run_tests",
+        "3" * 64,
+        "4" * 64,
+        "5" * 64,
+        case["facts"].controller_id,
+        fixed_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "6" * 64,
+    )
+    rollback = (
+        "7" * 64,
+        case["work_order"].digest,
+        "8" * 64,
+        "9" * 64,
+        case["developer"].grant_id,
+        "owp.rollback_patch",
+        "a" * 64,
+        "b" * 64,
+        "c" * 64,
+        case["facts"].controller_id,
+        fixed_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        None,
+    )
+    insert = """
+        INSERT INTO handler_executions (
+            execution_id, work_order_digest, request_digest, nonce,
+            grant_id, tool_name, arguments_digest, execution_context_id,
+            container_instance_id_digest, controller_id, reserved_at, state,
+            authorization_prefix_digest, agency_binding, agency_binding_json,
+            request_json, execution_contract_json, execution_contract_digest
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?, ?, ?, ?)
+    """
+    try:
+        # run-tests bound with an envelope but a NULL marker is malformed.
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                insert, (*run_tests, None, "{}", "{}", "{}", "d" * 64)
+            )
+        # run-tests marker without an envelope is malformed.
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                insert, (*run_tests, marker, None, "{}", "{}", "d" * 64)
+            )
+        # run-tests bound marker + envelope is schema-valid.
+        connection.execute(
+            insert, (*run_tests, marker, "{}", "{}", "{}", "d" * 64)
+        )
+        connection.execute("DELETE FROM handler_executions")
+        # rollback/repo-read must store both NULL.
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                insert, (*rollback, marker, "{}", None, None, None)
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                insert, (*rollback, None, "{}", None, None, None)
             )
     finally:
         connection.close()
@@ -1449,6 +1690,87 @@ def test_handler_journal_persists_and_loads_exact_recovery_fields(
         request_bytes.decode("utf-8"),
         contract_bytes.decode("utf-8"),
         hashlib.sha256(contract_bytes).hexdigest(),
+    )
+
+
+def test_handler_journal_bound_reservation_signs_and_loads_envelope(
+    tmp_path: Path,
+    signed_work_order: WorkOrder,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now: datetime,
+) -> None:
+    """A protected reservation stores a Sidecar-signed agency binding.
+
+    The canonical envelope binds the claim type, work order, execution,
+    request, authorization-prefix digest, agency marker, controller/signer key
+    id, and reserved_at; it verifies against the exact Sidecar KeyBinding of
+    the authoritative WorkOrder.
+    """
+
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    contract = _run_tests_contract(case)
+    lock_descriptor = evidence._acquire_target_lock(case["ledger_path"])
+    try:
+        execution_id = mcp_server._reserve_handler_execution(
+            case["ledger_path"],
+            lock_descriptor,
+            case["context"],
+            case["request"],
+            case["facts"],
+            contract,
+            agency_bound=True,
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        )
+        stored = mcp_server._load_stored_run_tests_execution(
+            case["ledger_path"], lock_descriptor
+        )
+    finally:
+        evidence._release_target_lock(lock_descriptor)
+    assert stored is not None
+    assert stored.agency_binding == evidence._HANDLER_AGENCY_BINDING_MARKER
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        row = connection.execute(
+            """
+            SELECT agency_binding, agency_binding_json,
+                   authorization_prefix_digest, reserved_at
+            FROM handler_executions
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+    marker, envelope_json, digest, reserved_at = row
+    assert marker == evidence._HANDLER_AGENCY_BINDING_MARKER
+    assert envelope_json is not None
+    envelope = json.loads(envelope_json)
+    assert envelope["claim_type"] == "handler-agency-binding"
+    assert envelope["agency_marker"] == evidence._HANDLER_AGENCY_BINDING_MARKER
+    assert envelope["work_order_digest"] == case["work_order"].digest
+    assert envelope["execution_id"] == execution_id
+    assert envelope["request_digest"] == case["request"].digest
+    assert envelope["controller_key_id"] == case["facts"].controller_id
+    assert envelope["reserved_at"] == reserved_at
+    assert envelope["authorization_prefix_digest"] == digest
+    assert digest == mcp_server._authorization_prefix_digest(
+        case["context"].ledger_prefix,
+        domain=mcp_server._AGENCY_AUTHORIZATION_PREFIX_DOMAIN,
+    )
+    sidecar_binding = next(
+        binding
+        for binding in case["work_order"].key_bindings
+        if binding.role == "Sidecar"
+    )
+    public_key = decode_and_verify_key_binding(sidecar_binding)
+    assert sidecar_binding.key_id == case["facts"].controller_id
+    assert verify_payload(
+        "handler-agency-binding", envelope, public_key, version="0.1"
     )
 
 

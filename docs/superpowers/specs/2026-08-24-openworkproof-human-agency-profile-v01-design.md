@@ -353,19 +353,35 @@ bookkeeping/schema/evidence recovery（C）可在本次请求的 agency 门之�
 “拒绝的新 action 零业务写入”不变量中排除。callback 默认 `None`，旧 executor 未选择
 protected 模式时行为不变。
 
-`owp.run_tests` 的 handler journal 额外持久化 agency binding：legacy（`agency_authorize=None`）
-预约写入 `agency_binding=NULL`，authorization-prefix digest 沿用既有域
-`openworkproof/authorization-ledger-prefix/v0.1`；受保护预约在 `_enforce` 成功后写入固定
-exact marker `openworkproof/handler-agency-bound/v0.1`，并把 digest 换成域分离的
-`openworkproof/authorization-ledger-prefix-agency/v0.1`。marker 与 digest 域必须一致，任一
-方向翻转或域不匹配都 fail closed（在历史授权前缀重建时校验）。recovery（B）仍不针对当前
-profile 重新授权存储请求，但：受保护 caller 恢复 agency-bound 存储 action 时正常
-finalize/return 且不重复调用 callback；受保护 caller 恢复 legacy-unbound 的
+`owp.run_tests` 的 handler journal 额外持久化受 Sidecar 签名的 agency binding 信封：legacy
+（`agency_authorize=None`）预约写入 `agency_binding=NULL` 且 `agency_binding_json=NULL`，
+authorization-prefix digest 沿用既有域 `openworkproof/authorization-ledger-prefix/v0.1`；受
+保护预约在 `_enforce` 成功后写入固定 exact marker
+`openworkproof/handler-agency-bound/v0.1`，并把 canonical envelope 写入
+`agency_binding_json`，同时把 digest 换成域分离的
+`openworkproof/authorization-ledger-prefix-agency/v0.1`（后者仅作 defense-in-depth）。
+
+envelope 由内部信任字段构造，用 execute_run_tests 已验证的 Ed25519 Sidecar 私钥在内置签名域
+`openworkproof/handler-agency-binding/v0.1`（仅限 v0.1）签名，至少密码学绑定：domain/claim
+type、`work_order_digest`、`execution_id`、`request_digest`、`authorization_prefix_digest`、
+agency marker、controller/signer key id 与 `reserved_at`。load/recovery 时按权威 WorkOrder 中
+精确的 Sidecar KeyBinding 校验签名与字段：身份不匹配、非 canonical/重复键/超限 JSON、错误
+角色或密钥、digest/signature 无效一律 fail closed（RECOVERY_REQUIRED）。因此协同篡改（翻转
+legacy 行 marker 并重算公开 digest、编辑任一签名字段后重算普通 JSON/digest、跨 execution/
+request 复制合法信封）均无法伪造绑定。schema CHECK 约束 unbound run-tests 为 marker NULL 且
+JSON NULL、bound 为 exact marker 且 JSON NOT NULL、repo-read/rollback 两者皆 NULL。
+
+recovery（B）仍不针对当前 profile 重新授权存储请求，但：受保护 caller 恢复 agency-bound 存储
+action 时正常 finalize/return 且不重复调用 callback；受保护 caller 恢复 legacy-unbound 的
 CLOSED_RESULT/ABSENT 时，先发布 receipt、cleanup 并删除 journal，再抛
 `HandlerCoordinationError('AGENCY_UNBOUND_RECOVERY')`，使 truth 既不被滞留、也不被当作受
-保护结果返回；legacy caller 可恢复任一类。journal schema 迁移对空 predecessor 按原样
-drop/rebuild；对紧邻前一个 schema 的非空行原子重建为 `agency_binding=NULL` 并保留该行；更旧
+保护结果返回；legacy caller 可恢复任一类。journal schema 迁移把紧邻前一个 unsigned-marker
+schema 作为 predecessor：空表按原样 drop/rebuild；非空且 marker 为 NULL 的行原子重建为
+unbound 并保留；非空且 marker 非 NULL 的行不可信（无签名），fail closed 且绝不伪造签名；更旧
 schema 的非空行保持 fail closed。
+
+威胁边界：agency binding 只是 executor 锁内 recovery 协调的内部控制；ActionReceipt 本身并不
+携带 Agency 证明，也不向外宣称受保护结果。
 
 protected dispatcher 不自行持锁或提前解析 history，只按已签名的
 `AgentRequest.tool_name` 选择 executor，并向 executor 传入延迟加载 callback。时间只来自

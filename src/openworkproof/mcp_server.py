@@ -72,7 +72,13 @@ from openworkproof.repo_tools import (
     RollbackRequest as WorkspaceRollbackRequest,
     rollback_candidate_workspace,
 )
-from openworkproof.signing import key_id, sign_payload, verify_nested_claim
+from openworkproof.signing import (
+    decode_and_verify_key_binding,
+    key_id,
+    sign_payload,
+    verify_nested_claim,
+    verify_payload,
+)
 
 
 class ToolCallDenied(RuntimeError):
@@ -271,6 +277,7 @@ def make_candidate_rollback_handler(
 _MAX_RECEIPT_BYTES = 64 * 1024
 _MAX_AGENT_REQUEST_BYTES = 8_192
 _MAX_AUTHORIZATION_PREFIX_BYTES = 8 * 1024 * 1024
+_MAX_AGENCY_BINDING_BYTES = 4_096
 
 
 def _digest(value: object) -> str:
@@ -406,6 +413,147 @@ def _agency_binding_prefix_domain(agency_binding: str | None) -> str:
     raise HandlerCoordinationError("RECOVERY_REQUIRED")
 
 
+def _decode_canonical_agency_binding(raw: object) -> dict[str, object]:
+    """Canonically decode a stored agency-binding envelope.
+
+    Duplicate keys, noncanonical bytes, oversized payloads, and invalid JSON
+    constants all fail closed so a tampered envelope cannot be laundered as a
+    valid Sidecar-signed binding.
+    """
+
+    if type(raw) is not str:
+        raise ValueError("stored agency binding JSON is invalid")
+    encoded = raw.encode("utf-8")
+    if not 1 <= len(encoded) <= _MAX_AGENCY_BINDING_BYTES:
+        raise ValueError("stored agency binding exceeds its byte limit")
+
+    def reject_duplicates(
+        pairs: list[tuple[str, object]],
+    ) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("stored agency binding has duplicate keys")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"invalid JSON constant: {value}")
+
+    value = json.loads(
+        raw,
+        object_pairs_hook=reject_duplicates,
+        parse_constant=reject_constant,
+    )
+    if type(value) is not dict:
+        raise ValueError("stored agency binding is not an object")
+    if rfc8785.dumps(value) != encoded:
+        raise ValueError("stored agency binding is not canonical")
+    return value
+
+
+def _build_agency_binding_envelope(
+    *,
+    work_order_digest: str,
+    execution_id: str,
+    request_digest: str,
+    authorization_prefix_digest: str,
+    controller_key_id: str,
+    reserved_at: str,
+    sidecar_private_key: Ed25519PrivateKey,
+) -> str:
+    """Sidecar-sign the canonical protected-reservation agency binding.
+
+    The envelope is built internally from trusted fields only and signed in
+    the v0.1 ``handler-agency-binding`` domain. The signer key id must match
+    the execution controller, which is the exact Sidecar key binding.
+    """
+
+    if not isinstance(sidecar_private_key, Ed25519PrivateKey):
+        raise HandlerCoordinationError("RECOVERY_REQUIRED")
+    if key_id(sidecar_private_key.public_key()) != controller_key_id:
+        raise HandlerCoordinationError("RECOVERY_REQUIRED")
+    payload = {
+        "claim_type": "handler-agency-binding",
+        "work_order_digest": work_order_digest,
+        "execution_id": execution_id,
+        "request_digest": request_digest,
+        "authorization_prefix_digest": authorization_prefix_digest,
+        "agency_marker": evidence._HANDLER_AGENCY_BINDING_MARKER,
+        "controller_key_id": controller_key_id,
+        "reserved_at": reserved_at,
+    }
+    try:
+        signed = sign_payload(
+            "handler-agency-binding",
+            payload,
+            sidecar_private_key,
+            version="0.1",
+        )
+        encoded = rfc8785.dumps(signed)
+    except (ValueError, TypeError, OverflowError) as error:
+        raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+    if not 1 <= len(encoded) <= _MAX_AGENCY_BINDING_BYTES:
+        raise HandlerCoordinationError("RECOVERY_REQUIRED")
+    return encoded.decode("utf-8")
+
+
+def _verify_agency_binding_envelope(
+    envelope: dict[str, object],
+    work_order: WorkOrder,
+    *,
+    work_order_digest: str,
+    execution_id: str,
+    request_digest: str,
+    authorization_prefix_digest: str,
+    controller_id: str,
+    reserved_at: str,
+) -> None:
+    """Verify a stored agency-binding envelope against the authoritative row.
+
+    The signature is checked against the exact Sidecar KeyBinding of the
+    authoritative WorkOrder; every bound field must equal the stored journal
+    row. Any identity mismatch, wrong role/key, bad digest, or bad signature
+    fails closed.
+    """
+
+    sidecar_binding = next(
+        (
+            binding
+            for binding in work_order.key_bindings
+            if binding.role == "Sidecar"
+        ),
+        None,
+    )
+    if sidecar_binding is None or sidecar_binding.key_id != controller_id:
+        raise ValueError("stored agency binding controller is not the Sidecar")
+    try:
+        public_key = decode_and_verify_key_binding(sidecar_binding)
+        valid = verify_payload(
+            "handler-agency-binding",
+            envelope,
+            public_key,
+            version="0.1",
+        )
+    except (ValueError, TypeError):
+        valid = False
+    if not valid:
+        raise ValueError("stored agency binding signature is invalid")
+    if (
+        envelope.get("claim_type") != "handler-agency-binding"
+        or envelope.get("agency_marker")
+        != evidence._HANDLER_AGENCY_BINDING_MARKER
+        or envelope.get("work_order_digest") != work_order_digest
+        or envelope.get("execution_id") != execution_id
+        or envelope.get("request_digest") != request_digest
+        or envelope.get("authorization_prefix_digest")
+        != authorization_prefix_digest
+        or envelope.get("controller_key_id") != controller_id
+        or envelope.get("reserved_at") != reserved_at
+    ):
+        raise ValueError("stored agency binding fields disagree")
+
+
 def _decode_canonical_agent_request(raw: object) -> AgentRequest:
     if type(raw) is not str:
         raise ValueError("stored AgentRequest JSON is invalid")
@@ -466,17 +614,17 @@ def _ensure_handler_execution_schema(
 
     This bookkeeping step runs inside the target lock before the incoming
     request's base/agency authorization gate. It creates the current journal
-    table, drops an empty predecessor, or atomically rebuilds the immediately
-    previous schema while preserving any nonempty row with a NULL agency
-    binding; it never executes a handler, writes a receipt, or changes
-    business state, so it is excluded from the denied new-action
-    no-business-write invariant.
+    table, drops an empty predecessor, or atomically rebuilds a trusted
+    predecessor while preserving any nonempty unbound row; it never executes
+    a handler, writes a receipt, or changes business state, so it is excluded
+    from the denied new-action no-business-write invariant.
     """
 
     expected = evidence._HANDLER_EXECUTION_SCHEMA
-    previous = evidence._HANDLER_EXECUTION_SCHEMA_V3
+    previous_unsigned_marker = evidence._HANDLER_EXECUTION_SCHEMA_V4
+    previous_unmarked = evidence._HANDLER_EXECUTION_SCHEMA_V3
 
-    def _rebuild_with_agency_binding(connection: sqlite3.Connection) -> None:
+    def _rebuild_unbound(connection: sqlite3.Connection) -> None:
         connection.execute(
             "ALTER TABLE handler_executions "
             "RENAME TO handler_executions_agency_migrate"
@@ -499,6 +647,7 @@ def _ensure_handler_execution_schema(
                 state,
                 authorization_prefix_digest,
                 agency_binding,
+                agency_binding_json,
                 request_json,
                 execution_contract_json,
                 execution_contract_digest
@@ -517,6 +666,7 @@ def _ensure_handler_execution_schema(
                 reserved_at,
                 state,
                 authorization_prefix_digest,
+                NULL,
                 NULL,
                 request_json,
                 execution_contract_json,
@@ -542,14 +692,30 @@ def _ensure_handler_execution_schema(
         actual = _normalized_sql(row[0])
         if actual == _normalized_sql(expected):
             return
-        if actual == _normalized_sql(previous):
+        if actual == _normalized_sql(previous_unsigned_marker):
+            if connection.execute(
+                "SELECT COUNT(*) FROM handler_executions "
+                "WHERE agency_binding IS NOT NULL"
+            ).fetchone() != (0,):
+                raise ValueError(
+                    "unsigned agency binding marker cannot be trusted"
+                )
             if connection.execute(
                 "SELECT COUNT(*) FROM handler_executions"
             ).fetchone() == (0,):
                 connection.execute("DROP TABLE handler_executions")
                 connection.execute(expected)
                 return
-            _rebuild_with_agency_binding(connection)
+            _rebuild_unbound(connection)
+            return
+        if actual == _normalized_sql(previous_unmarked):
+            if connection.execute(
+                "SELECT COUNT(*) FROM handler_executions"
+            ).fetchone() == (0,):
+                connection.execute("DROP TABLE handler_executions")
+                connection.execute(expected)
+                return
+            _rebuild_unbound(connection)
             return
         predecessors = (
             evidence._LEGACY_HANDLER_EXECUTION_SCHEMA,
@@ -706,13 +872,20 @@ def _reserve_handler_execution(
     execution_contract: repo_tools.RunTestsExecutionContract | None,
     *,
     agency_bound: bool = False,
+    sidecar_private_key: Ed25519PrivateKey | None = None,
 ) -> str:
+    if agency_bound and sidecar_private_key is None:
+        raise HandlerCoordinationError("RECOVERY_REQUIRED")
+    if not agency_bound and sidecar_private_key is not None:
+        raise HandlerCoordinationError("RECOVERY_REQUIRED")
     execution_id = _handler_execution_id(request, execution_facts)
+    reserved_at = context.transaction_time.strftime("%Y-%m-%dT%H:%M:%SZ")
     request_json: str | None = None
     contract_json: str | None = None
     contract_digest: str | None = None
     authorization_prefix_digest: str | None = None
     agency_binding: str | None = None
+    agency_binding_json: str | None = None
     if request.tool_name == "owp.run_tests":
         if type(execution_contract) is not repo_tools.RunTestsExecutionContract:
             raise HandlerCoordinationError("RECOVERY_REQUIRED")
@@ -746,6 +919,16 @@ def _reserve_handler_execution(
             )
         except (TypeError, ValueError) as error:
             raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+        if agency_bound:
+            agency_binding_json = _build_agency_binding_envelope(
+                work_order_digest=context.work_order.digest,
+                execution_id=execution_id,
+                request_digest=request.digest,
+                authorization_prefix_digest=authorization_prefix_digest,
+                controller_key_id=execution_facts.controller_id,
+                reserved_at=reserved_at,
+                sidecar_private_key=sidecar_private_key,
+            )
     elif request.tool_name in {"owp.rollback_patch", "owp.repo_read"}:
         if execution_contract is not None:
             raise HandlerCoordinationError("RECOVERY_REQUIRED")
@@ -774,11 +957,12 @@ def _reserve_handler_execution(
                 state,
                 authorization_prefix_digest,
                 agency_binding,
+                agency_binding_json,
                 request_json,
                 execution_contract_json,
                 execution_contract_digest
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?, ?, ?, ?
             )
             """,
             (
@@ -792,9 +976,10 @@ def _reserve_handler_execution(
                 execution_facts.execution_context_id,
                 execution_facts.container_instance_id_digest,
                 execution_facts.controller_id,
-                context.transaction_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                reserved_at,
                 authorization_prefix_digest,
                 agency_binding,
+                agency_binding_json,
                 request_json,
                 contract_json,
                 contract_digest,
@@ -835,6 +1020,7 @@ def _load_stored_run_tests_execution(
                 state,
                 authorization_prefix_digest,
                 agency_binding,
+                agency_binding_json,
                 request_json,
                 execution_contract_json,
                 execution_contract_digest
@@ -864,6 +1050,7 @@ def _load_stored_run_tests_execution(
             state,
             authorization_prefix_digest,
             agency_binding,
+            agency_binding_json,
             request_json,
             contract_json,
             contract_digest,
@@ -902,6 +1089,20 @@ def _load_stored_run_tests_execution(
             evidence._HANDLER_AGENCY_BINDING_MARKER
         ):
             raise ValueError("stored agency binding marker is invalid")
+        if agency_binding is not None:
+            if agency_binding_json is None:
+                raise ValueError("stored agency binding envelope is missing")
+            envelope = _decode_canonical_agency_binding(agency_binding_json)
+            _verify_agency_binding_envelope(
+                envelope,
+                work_order,
+                work_order_digest=work_order_digest,
+                execution_id=execution_id,
+                request_digest=request_digest,
+                authorization_prefix_digest=authorization_prefix_digest,
+                controller_id=controller_id,
+                reserved_at=reserved_at_raw,
+            )
         facts = ProspectiveExecutionFacts(
             execution_context_id=execution_context_id,
             container_instance_id_digest=container_instance_id_digest,
@@ -1921,6 +2122,9 @@ def execute_run_tests(
             execution_facts,
             execution_contract,
             agency_bound=(agency_authorize is not None),
+            sidecar_private_key=(
+                sidecar_private_key if agency_authorize is not None else None
+            ),
         )
         try:
             snapshot = repo_tools.prepare_candidate_execution_snapshot(

@@ -25,6 +25,8 @@ dispatcher will later plug into:
 from __future__ import annotations
 
 import fcntl
+import hashlib
+import json
 import os
 import sqlite3
 import threading
@@ -32,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import rfc8785
 
 import openworkproof.evidence as evidence
 import openworkproof.mcp_server as mcp_server
@@ -54,7 +57,7 @@ from openworkproof.agency_policy import (
     authorize_agency_profile_layer,
 )
 from openworkproof.models import WorkOrder
-from openworkproof.signing import sign_payload
+from openworkproof.signing import key_id, sign_payload
 
 from conftest import SHA256_A, SHA256_D
 from test_mcp_server import (
@@ -280,6 +283,7 @@ def _reserve_run_tests_execution_bound(
     case,
     *,
     agency_bound: bool,
+    sidecar_private_key=None,
     started: bool = False,
 ):
     """Reserve a run-tests execution through the production seam with an
@@ -295,6 +299,7 @@ def _reserve_run_tests_execution_bound(
             case["facts"],
             contract,
             agency_bound=agency_bound,
+            sidecar_private_key=sidecar_private_key,
         )
         if started:
             mcp_server._mark_handler_started(
@@ -305,6 +310,35 @@ def _reserve_run_tests_execution_bound(
     finally:
         evidence._release_target_lock(lock_descriptor)
     return contract
+
+
+def _stored_agency_binding_json(path: Path) -> str:
+    connection = evidence.connect_ledger(path)
+    try:
+        row = connection.execute(
+            "SELECT agency_binding_json FROM handler_executions"
+        ).fetchone()
+        return row[0]
+    finally:
+        connection.close()
+
+
+def _overwrite_agency_binding_json(path: Path, value: str) -> None:
+    connection = evidence.connect_ledger(path)
+    try:
+        connection.execute(
+            "UPDATE handler_executions SET agency_binding_json = ?",
+            (value,),
+        )
+    finally:
+        connection.close()
+
+
+def _agency_prefix_digest(case) -> str:
+    return mcp_server._authorization_prefix_digest(
+        case["context"].ledger_prefix,
+        domain=mcp_server._AGENCY_AUTHORIZATION_PREFIX_DOMAIN,
+    )
 
 
 # --- repo-read: reserved deny is fail-closed with zero handler calls ---
@@ -1100,7 +1134,11 @@ def test_protected_agency_bound_reservation_finalizes_after_revoke_without_callb
         delegated=("owp.run_tests",),
     )
     commit_human_agency_profile(case["ledger_path"], profile)
-    contract = _reserve_run_tests_execution_bound(case, agency_bound=True)
+    contract = _reserve_run_tests_execution_bound(
+        case,
+        agency_bound=True,
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+    )
     revoke = _mk_transition(
         case["work_order"],
         ephemeral_role_keys,
@@ -1162,7 +1200,11 @@ def test_legacy_caller_recovers_stored_reservation(
         now=fixed_now,
     )
     contract = _reserve_run_tests_execution_bound(
-        case, agency_bound=agency_bound
+        case,
+        agency_bound=agency_bound,
+        sidecar_private_key=(
+            ephemeral_role_keys["Sidecar"][0] if agency_bound else None
+        ),
     )
     driver = _FakeRunTestsExecutionDriver(
         reconciliation_outcomes=(
@@ -1196,9 +1238,15 @@ def test_legacy_caller_recovers_stored_reservation(
 
 @pytest.mark.parametrize(
     "tamper",
-    ("bound_to_unbound", "unbound_to_bound", "bound_legacy_digest"),
+    (
+        "malformed",
+        "noncanonical_duplicate",
+        "edited_stale_signature",
+        "recomputed_digest_wrong_signer",
+        "borrowed_valid_envelope",
+    ),
 )
-def test_agency_binding_marker_flip_or_domain_mismatch_fails_closed(
+def test_agency_binding_envelope_tamper_fails_closed(
     tmp_path,
     signed_work_order,
     ephemeral_role_keys,
@@ -1206,6 +1254,8 @@ def test_agency_binding_marker_flip_or_domain_mismatch_fails_closed(
     fixed_now,
     tamper: str,
 ) -> None:
+    """Editing any signed envelope field without a valid Sidecar signature,
+    or supplying malformed/noncanonical/borrowed JSON, must fail closed."""
     case = _run_tests_case(
         tmp_path=tmp_path,
         signed_work_order=signed_work_order,
@@ -1215,29 +1265,147 @@ def test_agency_binding_marker_flip_or_domain_mismatch_fails_closed(
     )
     _reserve_run_tests_execution_bound(
         case,
-        agency_bound=(tamper != "unbound_to_bound"),
+        agency_bound=True,
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
     )
+    original = _stored_agency_binding_json(case["ledger_path"])
+    envelope = json.loads(original)
+    if tamper == "malformed":
+        _overwrite_agency_binding_json(case["ledger_path"], '{"claim_type":')
+    elif tamper == "noncanonical_duplicate":
+        raw = original.replace(
+            '"claim_type":', '"claim_type":"x","claim_type":', 1
+        )
+        _overwrite_agency_binding_json(case["ledger_path"], raw)
+    elif tamper == "edited_stale_signature":
+        envelope["request_digest"] = "f" * 64
+        _overwrite_agency_binding_json(
+            case["ledger_path"], rfc8785.dumps(envelope)
+        )
+    elif tamper == "recomputed_digest_wrong_signer":
+        payload = {
+            "claim_type": envelope["claim_type"],
+            "work_order_digest": envelope["work_order_digest"],
+            "execution_id": envelope["execution_id"],
+            "request_digest": "f" * 64,
+            "authorization_prefix_digest": envelope[
+                "authorization_prefix_digest"
+            ],
+            "agency_marker": envelope["agency_marker"],
+            "controller_key_id": envelope["controller_key_id"],
+            "reserved_at": envelope["reserved_at"],
+        }
+        wrong = sign_payload(
+            "handler-agency-binding",
+            payload,
+            ephemeral_role_keys["Maintainer"][0],
+            version="0.1",
+        )
+        _overwrite_agency_binding_json(
+            case["ledger_path"], rfc8785.dumps(wrong)
+        )
+    else:
+        borrowed = mcp_server._build_agency_binding_envelope(
+            work_order_digest=case["work_order"].digest,
+            execution_id="9" * 64,
+            request_digest="8" * 64,
+            authorization_prefix_digest=(
+                mcp_server._authorization_prefix_digest(
+                    case["context"].ledger_prefix,
+                    domain=mcp_server._AGENCY_AUTHORIZATION_PREFIX_DOMAIN,
+                )
+            ),
+            controller_key_id=case["facts"].controller_id,
+            reserved_at="2026-01-01T00:00:05Z",
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        )
+        _overwrite_agency_binding_json(case["ledger_path"], borrowed)
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError, match="RECOVERY_REQUIRED"
+    ):
+        mcp_server.execute_run_tests(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=case["request"],
+            request_arguments=case["arguments"],
+            execution_facts=case["facts"],
+            candidate_snapshot_request=_run_tests_snapshot_request(
+                case, tmp_path.resolve()
+            ),
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            execution_driver=_FakeRunTestsExecutionDriver(),
+            clock=lambda: fixed_now,
+        )
+
+
+@pytest.mark.parametrize(
+    "binding_json_kind",
+    ("malformed", "borrowed", "edited"),
+)
+def test_legacy_row_flipped_to_bound_recomputing_digest_fails_closed(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    binding_json_kind: str,
+) -> None:
+    """Coordinated tamper: flip a legacy row to the marker, recompute the
+    public agency-domain authorization-prefix digest, and supply a forged
+    (malformed/borrowed/edited) binding JSON — all fail closed without a valid
+    Sidecar signature."""
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    _reserve_run_tests_execution_bound(case, agency_bound=False)
+    agency_digest = _agency_prefix_digest(case)
+    if binding_json_kind == "malformed":
+        binding_json = '{"claim_type":'
+    elif binding_json_kind == "borrowed":
+        binding_json = mcp_server._build_agency_binding_envelope(
+            work_order_digest=case["work_order"].digest,
+            execution_id="9" * 64,
+            request_digest="8" * 64,
+            authorization_prefix_digest=agency_digest,
+            controller_key_id=case["facts"].controller_id,
+            reserved_at="2026-01-01T00:00:05Z",
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        )
+    else:
+        valid = mcp_server._build_agency_binding_envelope(
+            work_order_digest=case["work_order"].digest,
+            execution_id=mcp_server._handler_execution_id(
+                case["request"], case["facts"]
+            ),
+            request_digest=case["request"].digest,
+            authorization_prefix_digest=agency_digest,
+            controller_key_id=case["facts"].controller_id,
+            reserved_at="2026-01-01T00:00:05Z",
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        )
+        edited = json.loads(valid)
+        edited["request_digest"] = "f" * 64
+        binding_json = rfc8785.dumps(edited)
     connection = evidence.connect_ledger(case["ledger_path"])
     try:
-        if tamper == "bound_to_unbound":
-            connection.execute(
-                "UPDATE handler_executions SET agency_binding = NULL"
-            )
-        elif tamper == "unbound_to_bound":
-            connection.execute(
-                "UPDATE handler_executions SET agency_binding = ?",
-                (evidence._HANDLER_AGENCY_BINDING_MARKER,),
-            )
-        else:
-            connection.execute(
-                "UPDATE handler_executions "
-                "SET authorization_prefix_digest = ?",
-                (
-                    mcp_server._authorization_prefix_digest(
-                        case["context"].ledger_prefix
-                    ),
-                ),
-            )
+        connection.execute(
+            """
+            UPDATE handler_executions
+            SET agency_binding = ?,
+                agency_binding_json = ?,
+                authorization_prefix_digest = ?
+            """,
+            (
+                evidence._HANDLER_AGENCY_BINDING_MARKER,
+                binding_json,
+                agency_digest,
+            ),
+        )
     finally:
         connection.close()
     with pytest.raises(

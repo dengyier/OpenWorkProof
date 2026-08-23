@@ -452,13 +452,19 @@ CREATE TABLE handler_executions (
 
 # Fixed exact marker stored in ``handler_executions.agency_binding`` for a
 # protected (agency-bound) run-tests reservation. Legacy/unbound reservations
-# and every repo-read/rollback row store NULL. The marker must be paired with
-# the domain-separated authorization-prefix digest in ``agency_binding``
-# validation; a marker flip without the matching domain fails closed.
+# and every repo-read/rollback row store NULL. The marker is paired with a
+# Sidecar-signed agency-binding envelope in ``agency_binding_json`` and the
+# domain-separated authorization-prefix digest as defense-in-depth; a marker
+# flip without the matching signed envelope and digest domain fails closed.
 _HANDLER_AGENCY_BINDING_MARKER = "openworkproof/handler-agency-bound/v0.1"
 
 
-_HANDLER_EXECUTION_SCHEMA = """
+# The immediately prior unsigned-marker schema: it stored the fixed marker in
+# ``agency_binding`` but no signature envelope. It is a migration predecessor
+# whose nonempty NULL-marker rows migrate as unbound and whose nonempty
+# non-NULL-marker rows fail closed (a marker without a signature cannot be
+# trusted, and a signature is never fabricated).
+_HANDLER_EXECUTION_SCHEMA_V4 = """
 CREATE TABLE handler_executions (
     execution_id TEXT PRIMARY KEY,
     work_order_digest TEXT NOT NULL
@@ -507,6 +513,70 @@ CREATE TABLE handler_executions (
     CHECK (
         agency_binding IS NULL
         OR agency_binding = 'openworkproof/handler-agency-bound/v0.1'
+    )
+)
+"""
+
+
+_HANDLER_EXECUTION_SCHEMA = """
+CREATE TABLE handler_executions (
+    execution_id TEXT PRIMARY KEY,
+    work_order_digest TEXT NOT NULL
+        REFERENCES work_orders(work_order_digest),
+    request_digest TEXT NOT NULL UNIQUE,
+    nonce TEXT NOT NULL UNIQUE,
+    grant_id TEXT NOT NULL REFERENCES grants(grant_id),
+    tool_name TEXT NOT NULL CHECK (
+        tool_name IN (
+            'owp.run_tests',
+            'owp.rollback_patch',
+            'owp.repo_read'
+        )
+    ),
+    arguments_digest TEXT NOT NULL,
+    execution_context_id TEXT NOT NULL UNIQUE,
+    container_instance_id_digest TEXT NOT NULL UNIQUE,
+    controller_id TEXT NOT NULL,
+    reserved_at TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (
+        state IN ('RESERVED', 'STARTED_UNCONFIRMED')
+    ),
+    authorization_prefix_digest TEXT,
+    agency_binding TEXT,
+    agency_binding_json TEXT,
+    request_json TEXT,
+    execution_contract_json TEXT,
+    execution_contract_digest TEXT,
+    CHECK (
+        (
+            tool_name = 'owp.run_tests'
+            AND authorization_prefix_digest IS NOT NULL
+            AND request_json IS NOT NULL
+            AND execution_contract_json IS NOT NULL
+            AND execution_contract_digest IS NOT NULL
+        )
+        OR
+        (
+            tool_name IN ('owp.rollback_patch', 'owp.repo_read')
+            AND agency_binding IS NULL
+            AND agency_binding_json IS NULL
+            AND authorization_prefix_digest IS NULL
+            AND request_json IS NULL
+            AND execution_contract_json IS NULL
+            AND execution_contract_digest IS NULL
+        )
+    ),
+    CHECK (
+        (
+            agency_binding IS NULL
+            AND agency_binding_json IS NULL
+        )
+        OR
+        (
+            agency_binding IS NOT NULL
+            AND agency_binding = 'openworkproof/handler-agency-bound/v0.1'
+            AND agency_binding_json IS NOT NULL
+        )
     )
 )
 """
