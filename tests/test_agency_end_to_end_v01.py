@@ -38,6 +38,7 @@ import rfc8785
 
 import openworkproof.evidence as evidence
 import openworkproof.mcp_server as mcp_server
+import openworkproof.repo_tools as repo_tools
 from openworkproof.agency import (
     AgencyProfileTransitionV01,
     HumanAgencyProfileV01,
@@ -74,6 +75,7 @@ from test_repo_read_transaction import (
     _repo_read_request,
     _repo_read_success_case,
 )
+from test_sandbox import _candidate_git
 
 # The fixed_now fixture from conftest is 2026-01-01T00:00:05Z. Profiles below
 # are valid from 00:00:01Z through 23:59:59Z, so they are active at fixed_now.
@@ -1603,10 +1605,7 @@ def test_apply_patch_superseded_allow_reaches_handler(
     ephemeral_role_keys,
     fixed_now,
 ) -> None:
-    from test_apply_patch_transaction import (
-        _apply_patch_request,
-        _fake_patch_handler,
-    )
+    from test_apply_patch_transaction import _apply_patch_request
 
     case = _apply_patch_agency_case(
         tmp_path,
@@ -1645,20 +1644,29 @@ def test_apply_patch_superseded_allow_reaches_handler(
         fixed_now,
         patch_bytes=case["patch_bytes"],
     )
-    handler, calls = _fake_patch_handler(case)
+    before_head = case["candidate"].head_commit
 
     receipt = _execute_apply_patch_with_agency(
         case,
         ephemeral_role_keys,
         fixed_now,
-        handler=handler,
+        handler=repo_tools.apply_patch_in_candidate_workspace,
         agency_authorize=_agency_authorize(
             case["ledger_path"], case["context"], request
         ),
     )
     assert receipt.policy_decision == "allow"
     assert receipt.execution_status == "succeeded"
-    assert len(calls) == 1
+    # The real handler genuinely mutated the candidate workspace.
+    assert (case["candidate"].worktree / "src" / "app.py").read_bytes() == (
+        b"patched\n"
+    )
+    assert (
+        _candidate_git(case["candidate"], "rev-parse", "HEAD")
+        .decode()
+        .strip()
+        != before_head
+    )
 
 
 def test_apply_patch_revocation_deny_zero_handler(
@@ -1727,7 +1735,6 @@ def test_apply_patch_started_unconfirmed_recovery_without_callback(
 ) -> None:
     from test_apply_patch_transaction import (
         _apply_patch_request,
-        _fake_patch_handler,
         _execute_apply_patch,
     )
 
@@ -1750,7 +1757,7 @@ def test_apply_patch_started_unconfirmed_recovery_without_callback(
     def fail_cleanup(*_):
         raise mcp_server.HandlerCoordinationError("injected cleanup failure")
 
-    handler, _ = _fake_patch_handler(case)
+    handler = repo_tools.apply_patch_in_candidate_workspace
     monkeypatch.setattr(
         mcp_server, "_finalize_handler_execution", fail_cleanup
     )

@@ -9,6 +9,8 @@ concurrency, and the V5->V6 handler journal migration).
 
 from __future__ import annotations
 
+import copy
+from datetime import timedelta
 import hashlib
 import sqlite3
 import threading
@@ -18,10 +20,13 @@ import pytest
 
 import openworkproof.evidence as evidence
 import openworkproof.mcp_server as mcp_server
+import openworkproof.policy as policy
 import openworkproof.repo_tools as repo_tools
 from openworkproof.models import (
     AgentRequest,
     ApplyPatchArguments,
+    PolicyDecision,
+    SubjectClaim,
     request_arguments_digest,
 )
 from openworkproof.policy import (
@@ -342,6 +347,33 @@ def _user_table_snapshot(path):
         connection.close()
 
 
+def _business_tables(path):
+    snapshot = _user_table_snapshot(path)
+    snapshot.pop("handler_executions", None)
+    return snapshot
+
+
+def _allow_decision() -> PolicyDecision:
+    return PolicyDecision(
+        allowed=True,
+        decision="allow",
+        error_code=None,
+        reason="test-agency-allow",
+    )
+
+
+def _workspace_state(case):
+    """Return the candidate workspace's visible bytes and HEAD for comparison."""
+    files = {}
+    for path in sorted(case["candidate"].worktree.rglob("*")):
+        if path.is_file():
+            files[path.relative_to(case["candidate"].worktree).as_posix()] = (
+                path.read_bytes()
+            )
+    head = _candidate_git(case["candidate"], "rev-parse", "HEAD").decode().strip()
+    return files, head
+
+
 # --- success against a real candidate git workspace ---
 
 
@@ -393,6 +425,394 @@ def test_execute_apply_patch_success_with_real_workspace(
         ).read_bytes()
         assert len(payload) == reference.size_bytes
         assert hashlib.sha256(payload).hexdigest() == reference.sha256
+
+
+# --- authority: a non-Sidecar controller must be rejected before execution ---
+
+
+def _forged_result(result, *, candidate_commit=None, manifest_digest=None, changed_paths=None):
+    evidence_updates: dict[str, object] = {}
+    if candidate_commit is not None:
+        evidence_updates["candidate_commit"] = candidate_commit
+    if manifest_digest is not None:
+        evidence_updates["workspace_manifest_digest"] = manifest_digest
+    return repo_tools.PatchResult(
+        parent_commit=result.parent_commit,
+        parent_manifest_digest=result.parent_manifest_digest,
+        candidate_commit=(
+            candidate_commit if candidate_commit is not None else result.candidate_commit
+        ),
+        workspace_manifest_digest=(
+            manifest_digest if manifest_digest is not None else result.workspace_manifest_digest
+        ),
+        patch_digest=result.patch_digest,
+        patch_size_bytes=result.patch_size_bytes,
+        changed_paths=(
+            changed_paths if changed_paths is not None else result.changed_paths
+        ),
+        evidence=result.evidence.model_copy(update=evidence_updates),
+    )
+
+
+def _assert_recovery_without_receipt(case, *, handler_calls):
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT tool_name, state FROM handler_executions"
+        ).fetchone() == ("owp.apply_patch", "STARTED_UNCONFIRMED")
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts "
+            "WHERE receipt_json LIKE '%owp.apply_patch%'"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+    assert len(handler_calls) == 1
+
+
+def test_execute_apply_patch_v01_rejects_non_sidecar_controller(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    case = _apply_patch_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    before = _business_tables(case["ledger_path"])
+    before_workspace = _workspace_state(case)
+    agency_calls: list[object] = []
+    handler_calls: list[object] = []
+    request, arguments = _apply_patch_request(
+        case,
+        ephemeral_role_keys,
+        fixed_now,
+        patch_bytes=case["patch_bytes"],
+    )
+    facts = ProspectiveExecutionFacts(
+        execution_context_id="1" * 64,
+        container_instance_id_digest="2" * 64,
+        controller_id=ephemeral_role_keys["Developer"][1]["key_id"],
+    )
+    with pytest.raises(policy.AuthorizationPolicyError, match="not the Sidecar"):
+        mcp_server.execute_apply_patch(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=request,
+            request_arguments=arguments,
+            execution_facts=facts,
+            sidecar_private_key=ephemeral_role_keys["Developer"][0],
+            patch_bytes=case["patch_bytes"],
+            candidate_workspace=case["candidate"],
+            handler=lambda command: (
+                handler_calls.append(command)
+                or repo_tools.apply_patch_in_candidate_workspace(command)
+            ),
+            clock=lambda: fixed_now,
+            agency_authorize=lambda: (
+                agency_calls.append(True) or _allow_decision()
+            ),
+        )
+
+    assert agency_calls == []
+    assert handler_calls == []
+    assert _business_tables(case["ledger_path"]) == before
+    assert _workspace_state(case) == before_workspace
+
+
+def _apply_patch_v04_case(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+    scope_payload,
+):
+    from openworkproof.binding import canonical_test_profile_digest  # noqa: PLC0415
+    from openworkproof.binding_transactions import (  # noqa: PLC0415
+        JudgmentAuthorityContext,
+        commit_action_binding_manifest,
+        commit_judgment_commitment,
+    )
+    from openworkproof.verification import commit_evaluation_scope  # noqa: PLC0415
+    from test_binding_gateway_v04 import _resign_v04_request  # noqa: PLC0415
+    from test_binding_manifest_transactions_v04 import (  # noqa: PLC0415
+        _profile_from_axes,
+        _signed_judgment,
+        _signed_manifest,
+        _signed_scope,
+    )
+
+    now = fixed_now + timedelta(seconds=5)
+    case = _apply_patch_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        now,
+    )
+    work_order = case["work_order"]
+    claim = SubjectClaim.model_validate(
+        sign_payload(
+            "subject-claim",
+            {
+                "schema_version": "openworkproof-subject-claim/0.1",
+                "claim_id": "7" * 64,
+                "work_order_digest": work_order.digest,
+                "claim_statement": (
+                    "The frozen verifier tests pass for this delivery."
+                ),
+                "delivery_target": "customer/release-candidate",
+                "source_revision": work_order.source_commit,
+                "acceptance_conditions": ["artifact_digest_matches", "tests_passed"],
+                "excluded_scope": ["payment_status"],
+                "required_artifacts": ["evidence", "results"],
+                "customer_acceptor_key_id": work_order.acceptor_key_ids[0],
+                "created_at": "2026-01-01T00:00:05Z",
+                "nonce": "8" * 64,
+            },
+            ephemeral_role_keys["Manager"][0],
+        )
+    )
+    scope_payload = copy.deepcopy(scope_payload)
+    for member in scope_payload["members"]:
+        member["source_revision"] = work_order.source_commit
+    scope = _signed_scope(
+        payload=scope_payload,
+        manager_key=ephemeral_role_keys["Manager"][0],
+        work_order=work_order,
+        claim=claim,
+    )
+    test_digests = tuple(
+        sorted(
+            canonical_test_profile_digest(profile)
+            for profile in work_order.test_profiles
+        )
+    )
+    profile, projection = _profile_from_axes(
+        allowed_tool_names=("owp.apply_patch",),
+        allowed_action_kinds=("patch",),
+        allowed_path_roots=("src",),
+        required_test_profile_digests=test_digests,
+    )
+    judgment = _signed_judgment(
+        work_order=work_order,
+        scope=scope,
+        acceptor_key=ephemeral_role_keys["Acceptor"][0],
+        projection=projection,
+    )
+    manifest = _signed_manifest(
+        work_order=work_order,
+        scope=scope,
+        judgment=judgment,
+        projection=projection,
+        manager_key=ephemeral_role_keys["Manager"][0],
+    )
+    commit_evaluation_scope(case["ledger_path"], claim, scope)
+    commit_judgment_commitment(
+        case["ledger_path"],
+        judgment,
+        JudgmentAuthorityContext(
+            authority_namespace=judgment.authority_namespace,
+            authority_binding=next(
+                item
+                for item in work_order.key_bindings
+                if item.role == "Acceptor"
+            ),
+            transaction_time=now - timedelta(seconds=3),
+        ),
+    )
+    commit_action_binding_manifest(
+        case["ledger_path"],
+        manifest,
+        profile,
+        transaction_time=now - timedelta(seconds=1),
+    )
+    request_v01, arguments = _apply_patch_request(
+        case,
+        ephemeral_role_keys,
+        now,
+        patch_bytes=case["patch_bytes"],
+    )
+    request_v04 = _resign_v04_request(
+        request_v01,
+        ephemeral_role_keys["Developer"][0],
+        judgment_id=judgment.commitment_id,
+        judgment_digest=judgment.digest,
+        manifest_id=manifest.binding_manifest_id,
+        manifest_digest=manifest.digest,
+    )
+    case.update(
+        {
+            "now": now,
+            "request_v04": request_v04,
+            "arguments": arguments,
+        }
+    )
+    return case
+
+
+def test_execute_apply_patch_v04_rejects_non_sidecar_controller(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+    evaluation_scope_payload_v03,
+) -> None:
+    case = _apply_patch_v04_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        fixed_now,
+        evaluation_scope_payload_v03,
+    )
+    before = _business_tables(case["ledger_path"])
+    before_workspace = _workspace_state(case)
+    agency_calls: list[object] = []
+    handler_calls: list[object] = []
+    facts = ProspectiveExecutionFacts(
+        execution_context_id="1" * 64,
+        container_instance_id_digest="2" * 64,
+        controller_id=ephemeral_role_keys["Developer"][1]["key_id"],
+    )
+    with pytest.raises(mcp_server.ToolCallDenied) as caught:
+        mcp_server.execute_apply_patch(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=case["request_v04"],
+            request_arguments=case["arguments"],
+            execution_facts=facts,
+            sidecar_private_key=ephemeral_role_keys["Developer"][0],
+            patch_bytes=case["patch_bytes"],
+            candidate_workspace=case["candidate"],
+            handler=lambda command: (
+                handler_calls.append(command)
+                or repo_tools.apply_patch_in_candidate_workspace(command)
+            ),
+            clock=lambda: case["now"],
+            agency_authorize=lambda: (
+                agency_calls.append(True) or _allow_decision()
+            ),
+        )
+
+    assert caught.value.decision.error_code == "AUTH_SUBJECT_MISMATCH"
+    assert agency_calls == []
+    assert handler_calls == []
+    assert _business_tables(case["ledger_path"]) == before
+    assert _workspace_state(case) == before_workspace
+
+
+# --- untrusted handler postconditions fail closed before publication ---
+
+
+def test_execute_apply_patch_rejects_forged_self_consistent_result(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    case = _apply_patch_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    before = _business_tables(case["ledger_path"])
+    handler, calls = _fake_patch_handler(case)
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError, match="RECOVERY_REQUIRED"
+    ):
+        _execute_apply_patch(case, ephemeral_role_keys, fixed_now, handler=handler)
+    _assert_recovery_without_receipt(case, handler_calls=calls)
+    assert _business_tables(case["ledger_path"]) == before
+
+
+def test_execute_apply_patch_rejects_forged_candidate_commit(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    case = _apply_patch_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    calls: list[object] = []
+
+    def handler(command):
+        calls.append(command)
+        result = repo_tools.apply_patch_in_candidate_workspace(command)
+        return _forged_result(result, candidate_commit="f" * 40)
+
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError, match="RECOVERY_REQUIRED"
+    ):
+        _execute_apply_patch(case, ephemeral_role_keys, fixed_now, handler=handler)
+    _assert_recovery_without_receipt(case, handler_calls=calls)
+
+
+def test_execute_apply_patch_rejects_forged_manifest_and_changed_paths(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    case = _apply_patch_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    calls: list[object] = []
+
+    def handler(command):
+        calls.append(command)
+        result = repo_tools.apply_patch_in_candidate_workspace(command)
+        return _forged_result(
+            result,
+            manifest_digest="0" * 64,
+            changed_paths=("src/forged.py",),
+        )
+
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError, match="RECOVERY_REQUIRED"
+    ):
+        _execute_apply_patch(case, ephemeral_role_keys, fixed_now, handler=handler)
+    _assert_recovery_without_receipt(case, handler_calls=calls)
+
+
+def test_execute_apply_patch_rejects_extra_undeclared_path_mutation(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    case = _apply_patch_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    calls: list[object] = []
+    extra = case["candidate"].worktree / "extra.txt"
+
+    def handler(command):
+        calls.append(command)
+        result = repo_tools.apply_patch_in_candidate_workspace(command)
+        extra.write_bytes(b"undeclared\n")
+        return result
+
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError, match="RECOVERY_REQUIRED"
+    ):
+        _execute_apply_patch(case, ephemeral_role_keys, fixed_now, handler=handler)
+    _assert_recovery_without_receipt(case, handler_calls=calls)
+    # Production detects but does not silently bless; clean up for isolation.
+    extra.unlink(missing_ok=True)
 
 
 # --- handler failure leaves truth unresolved and zero business writes ---
@@ -519,6 +939,92 @@ def test_execute_apply_patch_recovers_committed_receipt_after_cleanup_failure(
         connection.close()
 
 
+def test_execute_apply_patch_commit_ack_loss_recovers_without_rerunning_handler(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    """A lost COMMIT-ACK leaves exactly one committed receipt on readback.
+
+    Publication performs the real commit and then the acknowledgement is lost;
+    a retry must observe the committed truth and never rerun the handler.
+    """
+    case = _apply_patch_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    real_publish = evidence.complete_receipt_publication
+    handler_calls: list[object] = []
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        before_total = connection.execute(
+            "SELECT COUNT(*) FROM receipts"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+
+    def recording_handler(command):
+        handler_calls.append(command)
+        return repo_tools.apply_patch_in_candidate_workspace(command)
+
+    def publish_then_lose_ack(*args, **kwargs):
+        real_publish(*args, **kwargs)
+        raise mcp_server.HandlerCoordinationError("COMMIT-ACK lost after publication")
+
+    monkeypatch.setattr(evidence, "complete_receipt_publication", publish_then_lose_ack)
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError,
+        match="COMMIT-ACK lost after publication",
+    ):
+        _execute_apply_patch(
+            case, ephemeral_role_keys, fixed_now, handler=recording_handler
+        )
+    monkeypatch.setattr(evidence, "complete_receipt_publication", real_publish)
+
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        committed = connection.execute(
+            "SELECT COUNT(*), MAX(sequence) FROM receipts"
+        ).fetchone()
+        assert committed[0] == before_total + 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts "
+            "WHERE receipt_json LIKE '%owp.apply_patch%'"
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT tool_name, state FROM handler_executions"
+        ).fetchone() == ("owp.apply_patch", "STARTED_UNCONFIRMED")
+    finally:
+        connection.close()
+
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError,
+        match="current ledger snapshot",
+    ):
+        _execute_apply_patch(
+            case,
+            ephemeral_role_keys,
+            fixed_now,
+            handler=lambda _: pytest.fail("committed patch restarted"),
+        )
+
+    assert len(handler_calls) == 1
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*), MAX(sequence) FROM receipts"
+        ).fetchone() == committed
+    finally:
+        connection.close()
+
+
 # --- pre-COMMIT failure writes no business state ---
 
 
@@ -544,6 +1050,82 @@ def test_execute_apply_patch_precommit_failure_is_zero_write(
     del before["handler_executions"]
     del after["handler_executions"]
     assert after == before
+
+
+def test_execute_apply_patch_precommit_publication_injection_is_zero_write(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    """A raise before COMMIT writes zero business/evidence state.
+
+    Unlike a handler failure, the real handler here succeeds (the workspace is
+    genuinely patched), but the publication coordinator raises before the
+    receipt commit, so no receipt or evidence is written and only the allowed
+    unresolved journal bookkeeping remains.
+    """
+    case = _apply_patch_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    before = _business_tables(case["ledger_path"])
+    before_head = case["candidate"].head_commit
+    calls: list[object] = []
+
+    def fail_before_commit(*args, **kwargs):
+        raise mcp_server.HandlerCoordinationError("pre-COMMIT publication injection")
+
+    monkeypatch.setattr(
+        evidence,
+        "stage_pending_evidence_group",
+        fail_before_commit,
+    )
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError,
+        match="pre-COMMIT publication injection",
+    ):
+        _execute_apply_patch(
+            case,
+            ephemeral_role_keys,
+            fixed_now,
+            handler=lambda command: (
+                calls.append(command)
+                or repo_tools.apply_patch_in_candidate_workspace(command)
+            ),
+        )
+
+    assert len(calls) == 1
+    # The handler genuinely succeeded (distinct from a handler failure)...
+    assert (case["candidate"].worktree / "src" / "app.py").read_bytes() == (
+        b"patched\n"
+    )
+    assert (
+        _candidate_git(case["candidate"], "rev-parse", "HEAD")
+        .decode()
+        .strip()
+        != before_head
+    )
+    # ...but no receipt or evidence was committed.
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT tool_name, state FROM handler_executions"
+        ).fetchone() == ("owp.apply_patch", "STARTED_UNCONFIRMED")
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts "
+            "WHERE receipt_json LIKE '%owp.apply_patch%'"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+    assert _business_tables(case["ledger_path"]) == before
+    evidence_files = [
+        path for path in case["evidence_root"].rglob("*") if path.is_file()
+    ]
+    assert evidence_files == []
 
 
 # --- evidence drift/tamper fails closed ---
@@ -604,7 +1186,7 @@ def test_execute_apply_patch_concurrency_is_serialized(
         ephemeral_role_keys,
         fixed_now,
     )
-    handler, calls = _fake_patch_handler(case)
+    before_head = case["candidate"].head_commit
     outcomes: list[object] = []
     barrier = threading.Barrier(2)
 
@@ -616,7 +1198,7 @@ def test_execute_apply_patch_concurrency_is_serialized(
                     case,
                     ephemeral_role_keys,
                     fixed_now,
-                    handler=handler,
+                    handler=repo_tools.apply_patch_in_candidate_workspace,
                 )
             )
         except Exception as error:  # pragma: no cover - diagnostic only
@@ -633,13 +1215,30 @@ def test_execute_apply_patch_concurrency_is_serialized(
     ]
     errors = [outcome for outcome in outcomes if isinstance(outcome, Exception)]
     assert len(receipts) == 1 and len(errors) == 1
-    assert len(calls) == 1
+    assert all(
+        isinstance(error, mcp_server.HandlerCoordinationError)
+        and "current ledger snapshot" in str(error)
+        for error in errors
+    )
+    # Exactly one real patch was applied, not a no-op claim.
+    assert (case["candidate"].worktree / "src" / "app.py").read_bytes() == (
+        b"patched\n"
+    )
+    assert (
+        _candidate_git(case["candidate"], "rev-parse", "HEAD")
+        .decode()
+        .strip()
+        != before_head
+    )
     connection = evidence.connect_ledger(case["ledger_path"])
     try:
         assert connection.execute(
             "SELECT COUNT(*) FROM receipts WHERE receipt_json LIKE "
             "'%owp.apply_patch%'"
         ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
     finally:
         connection.close()
 
@@ -647,18 +1246,55 @@ def test_execute_apply_patch_concurrency_is_serialized(
 # --- schema migration: V5 -> V6 adds owp.apply_patch verbatim ---
 
 
-def test_handler_journal_schema_v5_migrates_to_v6_preserving_signed_row(
+def test_handler_journal_schema_v5_migrates_to_v6_preserving_signed_run_tests_row(
     tmp_path,
     signed_work_order,
     ephemeral_role_keys,
     fixed_now,
+    sidecar_receipt_factory,
 ) -> None:
-    case = _apply_patch_case(
-        tmp_path,
-        signed_work_order,
-        ephemeral_role_keys,
-        fixed_now,
+    """V5 -> V6 preserves a genuinely Sidecar-signed run-tests agency binding.
+
+    The row carries a non-NULL agency binding marker plus its canonical
+    Sidecar-signed envelope, and a subsequent load must verify both against the
+    authoritative WorkOrder instead of laundering an unbound NULL row.
+    """
+    from test_mcp_server import _run_tests_case, _run_tests_contract  # noqa: PLC0415
+
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
     )
+    request = case["request"]
+    facts = case["facts"]
+    work_order = case["work_order"]
+    context = case["context"]
+    contract = _run_tests_contract(case)
+
+    execution_id = mcp_server._handler_execution_id(request, facts)
+    reserved_at = context.transaction_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    request_json = mcp_server._canonical_agent_request(request).decode("utf-8")
+    contract_bytes = repo_tools.encode_run_tests_execution_contract(contract)
+    contract_json = contract_bytes.decode("utf-8")
+    contract_digest = hashlib.sha256(contract_bytes).hexdigest()
+    agency_binding = evidence._HANDLER_AGENCY_BINDING_MARKER
+    authorization_prefix_digest = mcp_server._authorization_prefix_digest(
+        context.ledger_prefix,
+        domain=mcp_server._agency_binding_prefix_domain(agency_binding),
+    )
+    agency_binding_json = mcp_server._build_agency_binding_envelope(
+        work_order_digest=work_order.digest,
+        execution_id=execution_id,
+        request_digest=request.digest,
+        authorization_prefix_digest=authorization_prefix_digest,
+        controller_key_id=facts.controller_id,
+        reserved_at=reserved_at,
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+    )
+
     connection = evidence.connect_ledger(case["ledger_path"])
     try:
         connection.execute("DROP TABLE handler_executions")
@@ -669,20 +1305,32 @@ def test_handler_journal_schema_v5_migrates_to_v6_preserving_signed_row(
                 execution_id, work_order_digest, request_digest, nonce,
                 grant_id, tool_name, arguments_digest,
                 execution_context_id, container_instance_id_digest,
-                controller_id, reserved_at, state
-            ) VALUES (?, ?, ?, ?, ?, 'owp.repo_read', ?, ?, ?, ?, ?, 'RESERVED')
+                controller_id, reserved_at, state,
+                authorization_prefix_digest, agency_binding,
+                agency_binding_json, request_json,
+                execution_contract_json, execution_contract_digest
+            ) VALUES (
+                ?, ?, ?, ?, ?, 'owp.run_tests', ?, ?, ?, ?, ?, 'RESERVED',
+                ?, ?, ?, ?, ?, ?
+            )
             """,
             (
-                "0" * 64,
-                case["work_order"].digest,
-                "1" * 64,
-                "2" * 64,
-                case["developer"].grant_id,
-                "3" * 64,
-                "4" * 64,
-                "5" * 64,
-                case["facts"]["controller_id"],
-                fixed_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                execution_id,
+                work_order.digest,
+                request.digest,
+                request.nonce,
+                request.grant_id,
+                request.arguments_digest,
+                facts.execution_context_id,
+                facts.container_instance_id_digest,
+                facts.controller_id,
+                reserved_at,
+                authorization_prefix_digest,
+                agency_binding,
+                agency_binding_json,
+                request_json,
+                contract_json,
+                contract_digest,
             ),
         )
     finally:
@@ -694,6 +1342,7 @@ def test_handler_journal_schema_v5_migrates_to_v6_preserving_signed_row(
         )
     finally:
         evidence._release_target_lock(lock_descriptor)
+
     connection = evidence.connect_ledger(case["ledger_path"])
     try:
         stored = connection.execute(
@@ -703,14 +1352,38 @@ def test_handler_journal_schema_v5_migrates_to_v6_preserving_signed_row(
             """
         ).fetchone()
         row = connection.execute(
-            "SELECT execution_id, tool_name FROM handler_executions"
+            """
+            SELECT execution_id, tool_name, agency_binding, agency_binding_json
+            FROM handler_executions
+            """
         ).fetchone()
     finally:
         connection.close()
     assert mcp_server._normalized_sql(stored[0]) == mcp_server._normalized_sql(
         evidence._HANDLER_EXECUTION_SCHEMA
     )
-    assert row == ("0" * 64, "owp.repo_read")
+    assert row == (
+        execution_id,
+        "owp.run_tests",
+        evidence._HANDLER_AGENCY_BINDING_MARKER,
+        agency_binding_json,
+    )
+
+    # Subsequent load/verification replays the stored request truth and
+    # verifies the Sidecar-signed envelope against the authoritative WorkOrder.
+    lock_descriptor = evidence._acquire_target_lock(case["ledger_path"])
+    try:
+        stored_execution = mcp_server._load_stored_run_tests_execution(
+            case["ledger_path"], lock_descriptor
+        )
+    finally:
+        evidence._release_target_lock(lock_descriptor)
+    assert stored_execution is not None
+    assert stored_execution.execution_id == execution_id
+    assert (
+        stored_execution.agency_binding
+        == evidence._HANDLER_AGENCY_BINDING_MARKER
+    )
 
 
 def test_handler_journal_schema_accepts_apply_patch_reservation(

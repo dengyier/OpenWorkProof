@@ -650,6 +650,30 @@ handler failure 与 cleanup failure 语义要与 repo-read/run-tests/rollback �
 > definition 含 `evidence.py`，本分支早期 agency 提交已改变其字节，历史 inventory 0
 > match，需 Task 9 重建 candidate inventory，非 Step 4 回归）；`pip check`/`compileall`/
 > `git diff --check` PASS。
+>
+> > **2026-08-24 review-blocker 修复（commit `fix: verify apply patch authority and
+> > postconditions`）：**
+> > 补齐两处 review blocker，未实现 dispatcher/bundle/schema registry、未 merge/push、
+> > 未大范围重构。P1-1 授权先行：`execute_apply_patch` 现把 `execution_facts` 传入
+> > v0.1 `authorize_tool_call` 与 v0.4 `_require_bound_action`，policy 在 handler 前证明
+> > `controller_id` 是权威 WorkOrder 的 Sidecar key（非 Sidecar 合法角色 key：v0.1
+> > `AuthorizationPolicyError`、v0.4 `ToolCallDenied(AUTH_SUBJECT_MISMATCH)`，先于 agency
+> > callback 与 handler，工作区/业务表零变化），Sidecar 私钥↔controller 显式校验保留。
+> > P1-2 不可信 handler postcondition：新增公开
+> > `repo_tools.validate_patch_result_against_candidate`，handler 返回后、证据/receipt
+> > 发布前独立重算并比对全部 `PatchResult`/`PatchResultEvidence` 字段（含 changed_paths），
+> > 并校验 live candidate workspace 恰在期望 head/tree/manifest、无多余/隐藏改动；伪造
+> > 自洽 result、伪造 commit/manifest/changed_paths、额外未声明路径写入均
+> > `RECOVERY_REQUIRED` 且不发布 receipt。agency superseded-allow 与并发测试改用真实
+> > repo_tools handler。P2 测试证据：新增真实 COMMIT-ACK-loss（真提交后丢 ACK，重试
+> > 收敛为一条 committed receipt 且不重跑 handler）与真实 pre-COMMIT 注入（commit 前抛错，
+> > 业务表/证据零写入、仅保留 journal bookkeeping，且与 handler 失败区分）；V5→V6 迁移
+> > 测试升级为保留真正非 NULL 的 Sidecar 签名 run-tests agency_binding + canonical
+> > agency_binding_json 并证明后续 load/verification。focused：apply-patch/agency/mcp/
+> > repo-read 129 passed；policy/agency/sandbox 560 passed 4 skipped；recomposition/
+> > receipt_chain/binding 588 passed；全量 4130 passed 2 failed 8 skipped（2 failed
+> > 均为既有 `test_current_candidate_inventory_binds_*`，需 Task 9 重建）。Task5 不
+> > 标记 READY：全量 inventory boundary 仍待 Task 9 重建。
 
 - [ ] **Step 5: 实现最小 protected dispatcher 与完整状态链**
 

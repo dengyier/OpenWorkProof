@@ -296,7 +296,9 @@ def _validate_tool_authorization_inputs(
     if isinstance(request_arguments, RunTestsArguments):
         if execution_facts is None:
             raise _fail("test execution facts are required")
-    elif execution_facts is not None:
+    elif execution_facts is not None and not isinstance(
+        request_arguments, ApplyPatchArguments
+    ):
         raise _fail("execution facts are forbidden for this tool")
     if (
         request.work_order_digest != context.work_order.digest

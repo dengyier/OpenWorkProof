@@ -5,39 +5,61 @@
 
 ## Human Agency Profile 0.1：受保护 apply-patch executor（2026-08-24）
 
-隔离分支 `codex/human-agency-profile-v01`（HEAD `336eee9` 起）新增真实
-`execute_apply_patch` 事务入口，复用 `repo_tools.apply_patch_in_candidate_workspace`
-与既有 `PatchRequest`/`PatchResult`，与 repo-read/run-tests/rollback 同一锁域与
-fail-closed/idempotent 语义（current-context → 基础授权 → opt-in `agency_authorize`
-profile callback → receipt preflight → handler reservation/started → patch handler →
-`PatchResultEvidence` + patch/result EvidenceRefs → Sidecar 签名 receipt →
+隔离分支 `codex/human-agency-profile-v01` 新增真实 `execute_apply_patch` 事务入口，
+复用 `repo_tools.apply_patch_in_candidate_workspace` 与既有 `PatchRequest`/`PatchResult`，
+与 repo-read/run-tests/rollback 同一锁域与 fail-closed/idempotent 语义（current-context
+→ 基础授权 → opt-in `agency_authorize` profile callback → receipt preflight → handler
+reservation/started → patch handler → 独立 postcondition 校验 → `PatchResultEvidence` +
+patch/result EvidenceRefs → Sidecar 签名 receipt →
 `complete_receipt_publication(..., _borrowed_lock_descriptor=...)` → cleanup）。
+`aec4b68`（`fix: verify apply patch authority and postconditions`）修复 review blockers：
 
 - 签名精确校验 `request.tool_name == "owp.apply_patch"` 与 `arguments_digest`，
   patch 字节 digest/size 与 `ApplyPatchArguments` 精确一致，Sidecar key 匹配
   execution controller。deny 时 handler 不调用、业务表零写入（bookkeeping 除外）。
+- 授权先行（P1-1）：`execution_facts` 现传入 v0.1 `authorize_tool_call` 与 v0.4
+  `_require_bound_action` 两条授权路径，policy 在 handler 之前证明 `controller_id`
+  是权威 WorkOrder 的 Sidecar key。非 Sidecar 的合法角色 key：v0.1 抛
+  `AuthorizationPolicyError("prospective execution controller is not the Sidecar")`、
+  v0.4 抛 `ToolCallDenied(AUTH_SUBJECT_MISMATCH)`，先于 agency callback 与 handler，
+  工作区字节+HEAD 与业务表零变化；Sidecar 私钥 key_id 匹配权威 controller 的显式
+  校验保持不变。正确 Sidecar 路径保持绿色。
+- 不可信 handler postcondition（P1-2）：新增公开
+  `repo_tools.validate_patch_result_against_candidate(request, result)`，在 handler
+  返回后、证据/receipt 发布前调用。它独立重解析 canonical patch、重读 parent files、
+  重放 apply phase，重算期望 candidate commit/tree/manifest/changed_paths/evidence，
+  逐字段比对 `PatchResult`/`PatchResultEvidence`（含 changed_paths），再独立校验
+  live candidate workspace 恰好处于期望 head/tree/manifest、无多余/隐藏改动。自洽
+  但伪造的 result、伪造 commit/manifest/changed_paths、额外未声明路径写入均
+  `RECOVERY_REQUIRED`，receipt 不发布，journal 仅保留 STARTED_UNCONFIRMED 作
+  fail-closed 协调；真实 `apply_patch_in_candidate_workspace` 保持绿色。
 - handler journal 最小兼容扩展：V6 schema 增加 `owp.apply_patch`；V5（紧邻前一个
   签名绑定 schema）非空行原子重建逐列保留（绝不伪造签名），空表 drop/rebuild；
   旧 V3/V4 及更旧 predecessor 迁移行为不变。apply_patch 与 repo-read/rollback 同为
   非 typed-driver 工具，recovery (B) 走 `_recover_handler_executions` 不针对当前
   profile 重新授权，不产生 mixed-mode 歧义，故不引入 run-tests 的 Sidecar 签名
   agency binding；`ActionReceipt` 本身不携带 Human Agency 证明（binding 仅作 executor
-  锁内 recovery 协调）。
+  锁内 recovery 协调）。V5→V6 迁移测试现保留真正非 NULL 的 Sidecar 签名 run-tests
+  agency_binding + canonical agency_binding_json，并证明后续 load/verification。
 - 本轮 fresh 测量（控制器 fresh，未复用历史数字）：
-  - 专项 `tests/test_apply_patch_transaction.py`：`8 passed`；
-  - `test_agency_end_to_end_v01.py` apply-patch seam 新增：`4 passed`；
-  - focused 四文件门（apply-patch/agency/mcp/repo-read）：`120 passed`；
-  - policy/agency/sandbox：`532 passed, 4 skipped`；
-  - delivery_m2/receipt_chain：`418 passed`；
-  - 全量：`4121 passed, 2 failed, 8 skipped`；2 failed 均为既有的
-    `test_current_candidate_inventory_binds_*`（candidate definition 含
-    `evidence.py`，本分支早期 agency 提交已改变其源码字节，历史 inventory 0 match，
-    需 Task 9 重建 candidate inventory 后闭合，非 Step 4 回归）；8 skipped 均为已
-    分类 platform/live 边界；
+  - 专项 `tests/test_apply_patch_transaction.py`：`16 passed`（含 v0.1/v0.4 非 Sidecar
+    授权拒绝、伪造 postcondition、真实 COMMIT-ACK-loss、真实 pre-COMMIT 注入、
+    V5→V6 签名 run-tests 迁移）；
+  - `test_agency_end_to_end_v01.py`：`28 passed`（superseded-allow 与 recovery 均用
+    真实 repo_tools handler）；
+  - focused 四文件门（apply-patch/agency/mcp/repo-read）：`129 passed`；
+  - policy/agency/sandbox：`560 passed, 4 skipped`；
+  - recomposition/receipt_chain/binding：`588 passed`；
+  - 全量：`4130 passed, 2 failed, 8 skipped`；2 failed 均为既有
+    `test_current_candidate_inventory_binds_*`（candidate definition 已变化，历史
+    inventory 0 match，需 Task 9 重建），非本 fix 回归；8 skipped 均为已分类
+    platform/live 边界；
   - `pip check` / `compileall` / `git diff --check`：PASS。
 - 诚实边界不变：apply-patch executor 完成前不得声称 supersede 后 apply-patch 已可
   安全执行；`owp.apply_patch` 仍以 reserved profile 在人类决策处保留，只有 Acceptor
-  签署 supersede 后执行；不宣称 ActionReceipt 携带 Agency 证明。
+  签署 supersede 后执行；不宣称 ActionReceipt 携带 Agency 证明；全量 inventory
+  boundary（`test_current_candidate_inventory_binds_*` 因 candidate definition 变化
+  需 Task 9 重建）仍未闭合，不标记 READY。
 
 ## Verified Agent Delivery 0.1 本地实现（2026-08-22）
 

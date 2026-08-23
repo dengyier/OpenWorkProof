@@ -4189,6 +4189,92 @@ def apply_patch_in_candidate_workspace(request: PatchRequest) -> PatchResult:
     )
 
 
+def validate_patch_result_against_candidate(
+    request: PatchRequest,
+    result: PatchResult,
+) -> None:
+    """Independently verify a patch handler result against the live candidate.
+
+    The trusted coordinator calls this immediately after a patch handler
+    returns and before any evidence or receipt is published. It does not trust
+    the handler's returned fields: it re-parses the canonical patch, re-reads
+    the parent files from Git, re-applies the patch in memory, and re-derives
+    the expected candidate commit/tree/manifest/evidence. It then compares
+    every ``PatchResult`` and ``PatchResultEvidence`` field (including
+    ``changed_paths``) and finally verifies the live candidate workspace is
+    exactly at the expected candidate head/tree/manifest with no extra or
+    hidden changes.
+    """
+
+    if type(request) is not PatchRequest:
+        raise CandidateWorkspaceError("candidate patch request is invalid")
+    if type(result) is not PatchResult:
+        raise CandidateWorkspaceError("candidate patch result is invalid")
+    workspace = request.workspace
+    _validate_candidate_layout(workspace)
+    if (
+        not isinstance(request.replay_profile, ReplayProfile)
+        or request.replay_profile.source_artifact_sha256
+        != workspace.source_artifact_sha256
+    ):
+        raise CandidateWorkspaceError("candidate replay profile is unbound")
+    patch = parse_patch_phase_a(
+        request.patch_bytes,
+        expected_patch_digest=request.expected_patch_digest,
+        expected_patch_size_bytes=request.expected_patch_size_bytes,
+        declared_target_paths=request.declared_target_paths,
+    )
+    parent_files = _candidate_files_from_git(workspace, request.parent_commit)
+    application = apply_patch_phase_b(
+        patch,
+        parent_files,
+        parent_commit=request.parent_commit,
+        parent_manifest_digest=request.parent_manifest_digest,
+        workspace_manifest_digest="0" * 64,
+        occurred_at=request.occurred_at,
+        replay_profile=request.replay_profile,
+        replay_profile_digest=request.replay_profile_digest,
+        observed_manifest_delta_paths=patch.derived_patch_paths,
+    )
+    try:
+        _, expected_manifest_digest = _replay_workspace_manifest(
+            application.files,
+            application.candidate_commit,
+        )
+    except ReplayError as error:
+        raise CandidateWorkspaceError(
+            "candidate result manifest is invalid"
+        ) from error
+    expected_result = PatchResult(
+        parent_commit=request.parent_commit,
+        parent_manifest_digest=request.parent_manifest_digest,
+        candidate_commit=application.candidate_commit,
+        workspace_manifest_digest=expected_manifest_digest,
+        patch_digest=patch.patch_digest,
+        patch_size_bytes=patch.patch_size_bytes,
+        changed_paths=application.changed_paths,
+        evidence=PatchResultEvidence(
+            schema_version="openworkproof-patch-result/0.1",
+            parent_commit=request.parent_commit,
+            parent_manifest_digest=request.parent_manifest_digest,
+            candidate_commit=application.candidate_commit,
+            workspace_manifest_digest=expected_manifest_digest,
+            patch_digest=patch.patch_digest,
+            patch_size_bytes=patch.patch_size_bytes,
+            replay_profile_digest=request.replay_profile_digest,
+        ),
+    )
+    if result != expected_result:
+        raise CandidateWorkspaceError(
+            "candidate patch result does not match authority"
+        )
+    _verify_candidate_checkpoint(
+        workspace,
+        head_commit=application.candidate_commit,
+        manifest_digest=expected_manifest_digest,
+    )
+
+
 def rollback_candidate_workspace(request: RollbackRequest) -> RollbackResult:
     """Restore one frozen failure target to its exact parent checkpoint."""
 

@@ -3603,6 +3603,7 @@ def execute_apply_patch(
                 context,
                 request,
                 request_arguments,
+                execution_facts,
             )
         else:
             _require_bound_action(path, context, request, request_arguments)
@@ -3610,7 +3611,7 @@ def execute_apply_patch(
                 context,
                 request,
                 request_arguments,
-                None,
+                execution_facts,
             )
         if not decision.allowed:
             raise ToolCallDenied(decision)
@@ -3655,24 +3656,10 @@ def execute_apply_patch(
             raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
         if type(result) is not repo_tools.PatchResult:
             raise HandlerCoordinationError("RECOVERY_REQUIRED")
-        if (
-            result.patch_digest != request_arguments.patch_digest
-            or result.patch_size_bytes != request_arguments.patch_size_bytes
-            or result.parent_commit != context.replay_checkpoint.head_commit
-            or result.parent_manifest_digest
-            != context.replay_checkpoint.workspace_manifest_digest
-            or result.evidence.replay_profile_digest
-            != context.work_order.replay_profile_digest
-            or result.evidence.patch_digest != result.patch_digest
-            or result.evidence.patch_size_bytes != result.patch_size_bytes
-            or result.evidence.parent_commit != result.parent_commit
-            or result.evidence.parent_manifest_digest
-            != result.parent_manifest_digest
-            or result.evidence.candidate_commit != result.candidate_commit
-            or result.evidence.workspace_manifest_digest
-            != result.workspace_manifest_digest
-        ):
-            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        try:
+            repo_tools.validate_patch_result_against_candidate(command, result)
+        except Exception as error:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
         result_bytes = rfc8785.dumps(
             result.evidence.model_dump(mode="json")
         )
