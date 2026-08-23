@@ -344,9 +344,14 @@ authorize_tool_call_with_agency_profile(
 包装器先持锁再调用 executor 又会在第二个文件描述符上重复 `flock`，形成自锁死。
 
 因此 profile-only 判定必须作为 opt-in callback 进入 repo-read、run-tests、rollback 与新增
-apply-patch executor 已持有的同一 target-lock 临界区。顺序固定为：existing context 与基础
-授权通过 → 在锁内延迟加载完整 profile history → profile-only 判定 → preflight/reservation →
-handler。callback 默认 `None`，旧 executor 未选择 protected 模式时行为不变。
+apply-patch executor 已持有的同一 target-lock 临界区。对全新 action（A）顺序固定为：
+existing context 与基础授权通过 → 在锁内延迟加载完整 profile history → profile-only 判定 →
+preflight/reservation → handler → 签名 receipt 写入。对先前已 RESERVED 或
+STARTED_UNCONFIRMED action 的 reconciliation/finalization（B）不得针对当前 profile 重新
+授权，而是按存储的 request truth 重放，因此后续 revoke 不追溯；幂等的
+bookkeeping/schema/evidence recovery（C）可在本次请求的 agency 门之前发生，并从
+“拒绝的新 action 零业务写入”不变量中排除。callback 默认 `None`，旧 executor 未选择
+protected 模式时行为不变。
 
 protected dispatcher 不自行持锁或提前解析 history，只按已签名的
 `AgentRequest.tool_name` 选择 executor，并向 executor 传入延迟加载 callback。时间只来自

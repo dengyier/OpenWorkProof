@@ -128,12 +128,19 @@ def _require_bound_action(
 def _enforce_agency_authorization(
     agency_authorize: Callable[[], PolicyDecision] | None,
 ) -> None:
-    """Run the opt-in agency boundary inside the already-held target lock.
+    """Enforce the opt-in agency boundary for a brand-new action (A).
 
-    The callback is invoked exactly once after the existing context and the
-    complete base authorization have allowed the call, and before any
-    preflight, reservation, handler, or business write. A malformed return
-    value fails closed; a deny raises the normal ToolCallDenied.
+    This runs inside the already-held target lock, on the new-action path
+    only: after the existing context and the complete base authorization have
+    allowed the call, and before any preflight, reservation, handler, or
+    receipt write. Reconciliation/finalization of a previously RESERVED or
+    STARTED_UNCONFIRMED action (B) is not re-authorized against the current
+    profile — recovery replays the stored request truth, so a later
+    revocation is not retroactive. Idempotent bookkeeping/schema/evidence
+    recovery (C) runs before this gate and is therefore excluded from the
+    denied new-action no-business-write invariant. The callback is invoked
+    exactly once; a malformed return value fails closed and a deny raises the
+    normal ToolCallDenied.
     """
 
     if agency_authorize is None:
@@ -424,6 +431,15 @@ def _ensure_handler_execution_schema(
     ledger_path: Path,
     lock_descriptor: int,
 ) -> None:
+    """Idempotently ensure the handler execution journal schema (C).
+
+    This bookkeeping step runs inside the target lock before the incoming
+    request's base/agency authorization gate. It only creates or migrates an
+    empty journal table; it never executes a handler, writes a receipt, or
+    changes business state, so it is excluded from the denied new-action
+    no-business-write invariant.
+    """
+
     expected = evidence._HANDLER_EXECUTION_SCHEMA
 
     def ensure(connection: sqlite3.Connection) -> None:
@@ -520,6 +536,17 @@ def _recover_handler_executions(
     ledger_path: Path,
     lock_descriptor: int,
 ) -> None:
+    """Reconcile a previously reserved generic action before the agency gate.
+
+    This is the (B)/(C) recovery boundary for repo-read and rollback: a
+    RESERVED row with no matching receipt is a provably stale reservation and
+    is cleaned up (C); a STARTED_UNCONFIRMED row whose receipt already
+    committed is finalized (B). Neither path re-authorizes the stored request
+    against the current profile — a later revocation is not retroactive — and
+    neither runs a handler or writes a new receipt. run-tests rows are refused
+    here because they require the typed driver reconciliation.
+    """
+
     def recover(connection: sqlite3.Connection) -> None:
         rows = tuple(
             connection.execute(
@@ -680,6 +707,12 @@ def _load_stored_run_tests_execution(
     ledger_path: Path,
     lock_descriptor: int,
 ) -> _StoredRunTestsExecution | None:
+    """Load a prior run-tests reservation for reconciliation (B).
+
+    The stored request, contract, and authorization prefix are replayed
+    verbatim; the loaded row is not re-authorized against the current profile.
+    """
+
     def load(
         connection: sqlite3.Connection,
     ) -> _StoredRunTestsExecution | None:
@@ -888,6 +921,13 @@ def _recovery_authorization_context(
     now: datetime,
     lock_descriptor: int,
 ) -> AuthorizationContext:
+    """Rebuild the historical authorization context for a stored action (B).
+
+    The prefix is reconstructed so its digest matches the reservation-time
+    authorization prefix digest; the stored request is never re-authorized
+    against the current profile.
+    """
+
     _require_current_context(
         ledger_path,
         evidence_root,
@@ -1476,6 +1516,15 @@ def _recover_run_tests_execution(
     execution_driver: repo_tools.RunTestsExecutionDriver,
     now: datetime,
 ) -> ToolCallReceipt | None:
+    """Finalize a previously RESERVED/STARTED_UNCONFIRMED run-tests (B).
+
+    Reconciliation reconstructs the historical authorization prefix from the
+    stored request truth instead of re-authorizing against the current
+    profile, so a later revocation is not retroactive. On success it either
+    publishes the stored receipt and clears the journal row, or clears an
+    already-committed receipt and returns None.
+    """
+
     if (
         key_id(sidecar_private_key.public_key())
         != stored.execution_facts.controller_id

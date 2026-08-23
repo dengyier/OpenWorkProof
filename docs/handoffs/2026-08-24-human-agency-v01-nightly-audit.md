@@ -57,10 +57,14 @@ tests/test_mcp_server.py
   revoke/supersede，形成 TOCTOU；
 - 当前只有 repo-read、run-tests、rollback 的事务 executor，没有 `execute_apply_patch`。
 
-推荐的最小可靠方案是：在现有 executor 已持有的 target-lock 临界区内，完成基础授权后、
-任何 preflight/reservation/handler 调用前，执行可选的 profile-only authorization callback。
-callback 默认 `None`，保持旧 API 默认语义不变；protected dispatcher 只负责传入延迟加载的
-callback，不在锁外预先解析 history。
+推荐的最小可靠方案是：对全新 action（A）在现有 executor 已持有的 target-lock 临界区内，
+完成基础授权后、任何 preflight/reservation/handler/receipt 写入前，执行可选的
+profile-only authorization callback。先前已 RESERVED / STARTED_UNCONFIRMED action 的
+reconciliation/finalization（B）不得针对当前 profile 重新授权，而是重放存储的 request
+truth，因此后续 revoke 不追溯；幂等的 bookkeeping/schema/evidence recovery（C）可在本次
+请求的 agency 门之前发生，并从“拒绝的新 action 零业务写入”不变量中排除。callback 默认
+`None`，保持旧 API 默认语义不变；protected dispatcher 只负责传入延迟加载的 callback，
+不在锁外预先解析 history。
 
 `apply_patch` 必须二选一：
 

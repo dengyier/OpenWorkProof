@@ -535,7 +535,7 @@ git commit -m "feat: commit human agency history atomically"
 - Modify: `src/openworkproof/mcp_server.py`
 - Modify: `src/openworkproof/agency_policy.py`
 
-- [ ] **Step 1: 拆出 profile-only 判定并写 RED 测试**
+- [x] **Step 1: 拆出 profile-only 判定并写 RED 测试**
 
 在 `agency_policy.py` 新增：
 
@@ -552,7 +552,7 @@ def authorize_agency_profile_layer(
 `authorize_tool_call_with_agency_profile` 先运行基础 policy；基础 allow 后复用该函数，保持
 基础安全错误优先。测试覆盖现有错误码矩阵和允许结果一致性。
 
-- [ ] **Step 2: 在现有三个 executor 的同一锁域接入 callback**
+- [x] **Step 2: 在现有三个 executor 的同一锁域接入 callback**
 
 为 `execute_repo_read`、`execute_run_tests`、`execute_rollback` 增加仅关键字可选参数：
 
@@ -560,8 +560,8 @@ def authorize_agency_profile_layer(
 agency_authorize: Callable[[], PolicyDecision] | None = None
 ```
 
-三个 executor 都必须在已持有 target lock、existing context 与基础授权通过之后，且在任何
-preflight、reservation、handler 或业务写入之前执行：
+三个 executor 对全新 action（A）都必须在已持有 target lock、existing context 与基础授权
+通过之后，且在任何 preflight、reservation、handler 或 receipt 写入之前执行：
 
 ```python
 if agency_authorize is not None:
@@ -570,10 +570,15 @@ if agency_authorize is not None:
         raise ToolCallDenied(agency_decision)
 ```
 
+先前已 RESERVED / STARTED_UNCONFIRMED action 的 reconciliation/finalization（B）不针对
+当前 profile 重新授权，而是重放存储的 request truth；幂等的 bookkeeping/schema/evidence
+recovery（C）可在本次请求的 agency 门之前发生，因此 callback 不再声明先于
+prior-action recovery/repair。
+
 callback 必须延迟加载 ledger history；不得在 executor 加锁前捕获 profile 快照。默认
 `None` 的旧调用路径必须通过原有测试，证明默认语义不变。
 
-- [ ] **Step 3: 写锁内原子性与撤销竞态测试**
+- [x] **Step 3: 写锁内原子性与撤销竞态测试**
 
 使用真实初始化 ledger 与记录型 handler。对 repo-read/run-tests/rollback 至少证明：
 

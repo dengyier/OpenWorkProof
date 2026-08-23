@@ -6,16 +6,26 @@ dispatcher will later plug into:
 
 * a reserved or not-delegated decision raises ``ToolCallDenied`` before any
   handler call and leaves every user table byte-for-byte unchanged;
-* an allow decision reaches the handler exactly once;
+* an allow decision reaches the handler exactly once and invokes the agency
+  callback exactly once;
+* a rollback reserved deny leaves the handler uncalled and the business
+  snapshot unchanged, while an allow reaches the handler once;
 * the default ``None`` keeps legacy execution unchanged;
 * the callback is validated fail-closed;
 * an Acceptor transition commit deterministically waits while the executor
   callback holds the target lock, and the next protected call observes the
-  revocation (no sleep-based winner).
+  revocation (no sleep-based winner);
+* a denied brand-new run-tests leaves the handler execution journal empty and
+  never calls the driver;
+* a denied repo-read or rollback over a provably stale RESERVED journal row
+  performs only the intended recovery cleanup (C) before denying, with no new
+  handler/receipt/business execution.
 """
 
 from __future__ import annotations
 
+import fcntl
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -23,6 +33,7 @@ from typing import Any
 
 import pytest
 
+import openworkproof.evidence as evidence
 import openworkproof.mcp_server as mcp_server
 from openworkproof.agency import (
     AgencyProfileTransitionV01,
@@ -49,6 +60,7 @@ from conftest import SHA256_A, SHA256_D
 from test_mcp_server import (
     _FakeRunTestsExecutionDriver,
     _current_run_tests_context,
+    _rollback_case,
     _run_tests_case,
     _run_tests_snapshot_request,
 )
@@ -63,6 +75,45 @@ from test_repo_read_transaction import (
 _PROFILE_VALID_FROM = "2026-01-01T00:00:01Z"
 _PROFILE_EXPIRES_AT = "2026-01-01T23:59:59Z"
 _PROFILE_ISSUED_AT = "2026-01-01T00:00:00Z"
+
+
+@pytest.fixture(autouse=True)
+def _stub_candidate_execution_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stub candidate snapshot preparation for rollback seam coverage.
+
+    ``_rollback_case`` runs a full run-tests execution before building the
+    rollback request; this mirrors test_mcp_server's autouse snapshot stub so
+    that preparation succeeds without touching the real filesystem.
+    """
+
+    from openworkproof import repo_tools
+
+    def prepare(request):
+        return repo_tools.CandidateExecutionSnapshot(
+            head_commit=request.expected_head_commit,
+            workspace_manifest_digest=(
+                request.expected_workspace_manifest_digest
+            ),
+            plan=repo_tools.ExecutionSnapshotPlan(
+                files=(),
+                read_only=True,
+                owner_uid=65532,
+                owner_gid=65532,
+                atime_unix_seconds=0,
+                mtime_unix_seconds=0,
+                clear_extended_attributes=True,
+                clear_posix_acls=True,
+                clear_file_capabilities=True,
+            ),
+        )
+
+    monkeypatch.setattr(
+        repo_tools,
+        "prepare_candidate_execution_snapshot",
+        prepare,
+    )
 
 
 def _delegated(tool: str) -> dict[str, Any]:
@@ -178,6 +229,19 @@ def _agency_authorize(ledger_path: Path, context, request):
     return callback
 
 
+def _counting_agency_authorize(ledger_path: Path, context, request):
+    """Wrap the lazy agency callback with an invocation counter."""
+
+    invocations: list[object] = []
+    inner = _agency_authorize(ledger_path, context, request)
+
+    def callback():
+        invocations.append(True)
+        return inner()
+
+    return callback, invocations
+
+
 def _counting_handler(manifest_digest: str):
     calls: list[object] = []
     inner = _read_handler(manifest_digest)
@@ -187,6 +251,46 @@ def _counting_handler(manifest_digest: str):
         return inner(command)
 
     return handler, calls
+
+
+def _insert_stale_reserved_row(
+    case,
+    *,
+    tool_name: str,
+    grant_id: str,
+    now,
+) -> None:
+    """Insert a provably stale RESERVED journal row with no matching receipt."""
+
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        connection.execute(
+            """
+            INSERT INTO handler_executions (
+                execution_id, work_order_digest, request_digest, nonce,
+                grant_id, tool_name, arguments_digest, execution_context_id,
+                container_instance_id_digest, controller_id, reserved_at,
+                state, authorization_prefix_digest, request_json,
+                execution_contract_json, execution_contract_digest
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED',
+                      NULL, NULL, NULL, NULL)
+            """,
+            (
+                "a" * 64,
+                case["work_order"].digest,
+                "b" * 64,
+                "c" * 64,
+                grant_id,
+                tool_name,
+                "d" * 64,
+                "e" * 64,
+                "f" * 64,
+                case["facts"].controller_id,
+                now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            ),
+        )
+    finally:
+        connection.close()
 
 
 # --- repo-read: reserved deny is fail-closed with zero handler calls ---
@@ -292,6 +396,15 @@ def test_run_tests_not_delegated_deny_has_zero_driver_calls_and_no_writes(
     assert caught.value.decision.error_code == AGENCY_ACTION_NOT_DELEGATED
     assert driver.calls == []
     assert _all_user_table_snapshot(case["ledger_path"]) == before
+    # Recovery boundary: a denied brand-new run-tests leaves the handler
+    # execution journal empty (no RESERVED/STARTED_UNCONFIRMED residue).
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
 
 
 # --- allow reaches the handler exactly once ---
@@ -325,6 +438,9 @@ def test_repo_read_allow_reaches_handler(
     )
     manifest_digest = context.replay_checkpoint.workspace_manifest_digest
     handler, calls = _counting_handler(manifest_digest)
+    agency_authorize, invocations = _counting_agency_authorize(
+        case["ledger_path"], context, request
+    )
 
     receipt = mcp_server.execute_repo_read(
         case["ledger_path"],
@@ -337,13 +453,12 @@ def test_repo_read_allow_reaches_handler(
         candidate_runtime_root=tmp_path,
         handler=handler,
         clock=lambda: fixed_now,
-        agency_authorize=_agency_authorize(
-            case["ledger_path"], context, request
-        ),
+        agency_authorize=agency_authorize,
     )
     assert receipt.policy_decision == "allow"
     assert receipt.execution_status == "succeeded"
     assert len(calls) == 1
+    assert len(invocations) == 1
 
 
 # --- default None regression: legacy path ignores any committed profile ---
@@ -482,9 +597,22 @@ def test_acceptor_revocation_waits_for_executor_lock_and_next_call_sees_it(
 
     entered = threading.Event()
     proceed = threading.Event()
-    commit_started = threading.Event()
+    revoker_reached_acquire = threading.Event()
     commit_finished = threading.Event()
     executor_outcome: dict[str, object] = {}
+    revocation_outcome: dict[str, object] = {}
+
+    real_acquire = evidence._acquire_target_lock
+
+    def traced_acquire(ledger_path):
+        # Only the revoker thread's acquisition signals: the executor's
+        # initial free acquisition and any later borrowed-lock validation
+        # must not count as lock contention.
+        if threading.current_thread().name == "revoker":
+            revoker_reached_acquire.set()
+        return real_acquire(ledger_path)
+
+    monkeypatch.setattr(evidence, "_acquire_target_lock", traced_acquire)
 
     def agency_authorize_hold():
         # The executor already holds the target lock when this runs.
@@ -514,20 +642,39 @@ def test_acceptor_revocation_waits_for_executor_lock_and_next_call_sees_it(
             executor_outcome["error"] = error
 
     def run_revocation():
-        commit_started.set()
-        commit_agency_profile_transition(case["ledger_path"], revoke)
-        commit_finished.set()
+        try:
+            commit_agency_profile_transition(case["ledger_path"], revoke)
+        except Exception as error:  # pragma: no cover - diagnostic only
+            revocation_outcome["error"] = error
+        finally:
+            commit_finished.set()
 
-    executor_thread = threading.Thread(target=run_executor)
+    executor_thread = threading.Thread(target=run_executor, name="executor")
     executor_thread.start()
     assert entered.wait(timeout=20)
-    revocation_thread = threading.Thread(target=run_revocation)
-    revocation_thread.start()
-    assert commit_started.wait(timeout=20)
 
-    # The executor callback still holds the target lock, so the Acceptor
-    # transition commit cannot have completed. This is deterministic: the
-    # commit needs the same target lock the callback is holding.
+    # Confirm the executor actually holds the target lock before the revoker
+    # starts, so the revoker's acquisition below is genuine contention rather
+    # than a free acquisition.
+    probe_fd = os.open(
+        evidence._target_lock_path(case["ledger_path"]),
+        os.O_RDWR | os.O_CREAT,
+        0o600,
+    )
+    try:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(probe_fd)
+
+    revocation_thread = threading.Thread(target=run_revocation, name="revoker")
+    revocation_thread.start()
+    assert revoker_reached_acquire.wait(timeout=20)
+
+    # The revoker reached ``_acquire_target_lock`` and is now blocked in its
+    # flock while the executor callback still holds the same target lock, so
+    # the Acceptor transition commit cannot have completed. Deterministic: no
+    # sleeps and no thread-start-only signal.
     assert not commit_finished.is_set()
 
     proceed.set()
@@ -535,6 +682,7 @@ def test_acceptor_revocation_waits_for_executor_lock_and_next_call_sees_it(
     revocation_thread.join(timeout=20)
 
     assert "error" not in executor_outcome
+    assert "error" not in revocation_outcome
     receipt = executor_outcome["receipt"]
     assert receipt is not None
     assert getattr(receipt, "policy_decision", None) == "allow"
@@ -573,3 +721,297 @@ def test_acceptor_revocation_waits_for_executor_lock_and_next_call_sees_it(
         )
     assert caught.value.decision.error_code == "AGENCY_PROFILE_REQUIRED"
     assert after_calls == []
+
+
+# --- rollback seam: reserved deny / allow reach the handler correctly ---
+
+
+def _rollback_failed_result(case):
+    before = case["context"].replay_checkpoint.head_commit
+    manifest = case["context"].replay_checkpoint.workspace_manifest_digest
+    return mcp_server.RollbackHandlerResult(
+        execution_status="failed",
+        before_commit=before,
+        after_commit=before,
+        after_manifest_digest=manifest,
+    )
+
+
+def test_rollback_reserved_deny_has_zero_handler_calls_and_no_writes(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case = _rollback_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    profile = _mk_profile(
+        case["work_order"],
+        ephemeral_role_keys,
+        SHA256_A,
+        delegated=("owp.run_tests",),
+        reserved=(("scope_or_criteria_change", ("owp.rollback_patch",)),),
+    )
+    commit_human_agency_profile(case["ledger_path"], profile)
+    calls: list[object] = []
+
+    def handler(command):
+        calls.append(command)
+        return _rollback_failed_result(case)
+
+    before = _all_user_table_snapshot(case["ledger_path"])
+    with pytest.raises(mcp_server.ToolCallDenied) as caught:
+        mcp_server.execute_rollback(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=case["request"],
+            execution_facts=case["facts"],
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            handler=handler,
+            clock=lambda: fixed_now,
+            agency_authorize=_agency_authorize(
+                case["ledger_path"], case["context"], case["request"]
+            ),
+        )
+    assert caught.value.decision.error_code == AGENCY_HUMAN_DECISION_REQUIRED
+    assert calls == []
+    assert _all_user_table_snapshot(case["ledger_path"]) == before
+
+
+def test_rollback_allow_reaches_handler_once_and_callback_once(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case = _rollback_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    profile = _mk_profile(
+        case["work_order"],
+        ephemeral_role_keys,
+        SHA256_A,
+        delegated=("owp.rollback_patch",),
+    )
+    commit_human_agency_profile(case["ledger_path"], profile)
+    calls: list[object] = []
+    agency_authorize, invocations = _counting_agency_authorize(
+        case["ledger_path"], case["context"], case["request"]
+    )
+
+    def handler(command):
+        calls.append(command)
+        return _rollback_failed_result(case)
+
+    receipt = mcp_server.execute_rollback(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=case["context"],
+        request=case["request"],
+        execution_facts=case["facts"],
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        handler=handler,
+        clock=lambda: fixed_now,
+        agency_authorize=agency_authorize,
+    )
+    assert receipt.execution_status == "failed"
+    assert len(calls) == 1
+    assert len(invocations) == 1
+
+
+# --- run-tests allow reaches the driver exactly once and the callback once ---
+
+
+def test_run_tests_allow_reaches_driver_once_and_callback_once(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    profile = _mk_profile(
+        case["work_order"],
+        ephemeral_role_keys,
+        SHA256_A,
+        delegated=("owp.run_tests",),
+    )
+    commit_human_agency_profile(case["ledger_path"], profile)
+    driver = _FakeRunTestsExecutionDriver()
+    agency_authorize, invocations = _counting_agency_authorize(
+        case["ledger_path"], case["context"], case["request"]
+    )
+
+    receipt = mcp_server.execute_run_tests(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=case["context"],
+        request=case["request"],
+        request_arguments=case["arguments"],
+        execution_facts=case["facts"],
+        candidate_snapshot_request=_run_tests_snapshot_request(
+            case, tmp_path.resolve()
+        ),
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+        execution_driver=driver,
+        clock=lambda: fixed_now,
+        agency_authorize=agency_authorize,
+    )
+    assert receipt.policy_decision == "allow"
+    assert [call[0] for call in driver.calls] == [
+        "prepare",
+        "start_and_wait",
+        "cleanup",
+    ]
+    assert len(invocations) == 1
+
+
+# --- recovery boundary: stale RESERVED journal rows are cleaned, not executed ---
+
+
+def test_repo_read_denied_with_stale_reserved_journal_cleans_then_denies(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, context = _repo_read_success_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    profile = _mk_profile(
+        case["work_order"],
+        ephemeral_role_keys,
+        SHA256_A,
+        delegated=("owp.run_tests",),
+        reserved=(("scope_or_criteria_change", ("owp.repo_read",)),),
+    )
+    commit_human_agency_profile(case["ledger_path"], profile)
+    _insert_stale_reserved_row(
+        case,
+        tool_name="owp.repo_read",
+        grant_id=case["developer"].grant_id,
+        now=fixed_now,
+    )
+    request, arguments = _repo_read_request(
+        case, context, ephemeral_role_keys, fixed_now, path="src/app.py"
+    )
+    manifest_digest = context.replay_checkpoint.workspace_manifest_digest
+    handler, calls = _counting_handler(manifest_digest)
+
+    before = _all_user_table_snapshot(case["ledger_path"])
+    assert before["handler_executions"] != ()
+
+    with pytest.raises(mcp_server.ToolCallDenied) as caught:
+        mcp_server.execute_repo_read(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=context,
+            request=request,
+            request_arguments=arguments,
+            execution_facts=case["facts"],
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            candidate_runtime_root=tmp_path,
+            handler=handler,
+            clock=lambda: fixed_now,
+            agency_authorize=_agency_authorize(
+                case["ledger_path"], context, request
+            ),
+        )
+    assert caught.value.decision.error_code == AGENCY_HUMAN_DECISION_REQUIRED
+    assert calls == []
+
+    after = _all_user_table_snapshot(case["ledger_path"])
+    assert after["handler_executions"] == ()
+    del before["handler_executions"]
+    del after["handler_executions"]
+    assert after == before
+
+
+def test_rollback_denied_with_stale_reserved_journal_cleans_then_denies(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case = _rollback_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    profile = _mk_profile(
+        case["work_order"],
+        ephemeral_role_keys,
+        SHA256_A,
+        delegated=("owp.run_tests",),
+        reserved=(("scope_or_criteria_change", ("owp.rollback_patch",)),),
+    )
+    commit_human_agency_profile(case["ledger_path"], profile)
+    _insert_stale_reserved_row(
+        case,
+        tool_name="owp.rollback_patch",
+        grant_id=case["developer"].grant_id,
+        now=fixed_now,
+    )
+    calls: list[object] = []
+
+    def handler(command):
+        calls.append(command)
+        return _rollback_failed_result(case)
+
+    before = _all_user_table_snapshot(case["ledger_path"])
+    assert before["handler_executions"] != ()
+
+    with pytest.raises(mcp_server.ToolCallDenied) as caught:
+        mcp_server.execute_rollback(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=case["request"],
+            execution_facts=case["facts"],
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            handler=handler,
+            clock=lambda: fixed_now,
+            agency_authorize=_agency_authorize(
+                case["ledger_path"], case["context"], case["request"]
+            ),
+        )
+    assert caught.value.decision.error_code == AGENCY_HUMAN_DECISION_REQUIRED
+    assert calls == []
+
+    after = _all_user_table_snapshot(case["ledger_path"])
+    assert after["handler_executions"] == ()
+    del before["handler_executions"]
+    del after["handler_executions"]
+    assert after == before
