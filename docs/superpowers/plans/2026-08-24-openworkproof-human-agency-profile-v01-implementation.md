@@ -612,7 +612,7 @@ assert _all_user_table_snapshot(ledger) == before
 并发测试用事件屏障而非 sleep：protected executor 持锁进入 callback 后，Acceptor revoke
 必须等待；executor 只可依据同一锁域内已加载的历史执行。下一次调用必须观察 revoke 并拒绝。
 
-- [ ] **Step 4: 实现真实 `execute_apply_patch` 事务入口**
+- [x] **Step 4: 实现真实 `execute_apply_patch` 事务入口**
 
 签名沿用现有 executor 风格：接收 ledger/evidence root、`AuthorizationContext`、签名
 `AgentRequest`、`ApplyPatchArguments`、`ProspectiveExecutionFacts`、Sidecar 私钥、candidate
@@ -624,6 +624,32 @@ patch handler → `PatchResultEvidence` 与 patch/result EvidenceRefs → Sideca
 `complete_receipt_publication(..., _borrowed_lock_descriptor=lock_descriptor)` → cleanup/recovery。
 不得复制测试中的手工 receipt fixture 作为生产实现；COMMIT-ACK、STARTED_UNCONFIRMED、
 handler failure 与 cleanup failure 语义要与 repo-read/run-tests/rollback 对齐。
+
+> **2026-08-24 已实现（commit `feat: execute protected apply patch`）：**
+> `execute_apply_patch` 复用 `repo_tools.apply_patch_in_candidate_workspace` 与
+> `PatchRequest`/`PatchResult`，按 repo-read/rollback 同一锁域执行 current-context →
+> 基础授权 → agency callback → patch receipt preflight → reservation/started →
+> handler → `PatchResultEvidence` + patch/result EvidenceRefs → Sidecar 签名 receipt →
+> `complete_receipt_publication(..., trusted_resolution_manifest=..., _borrowed_lock_descriptor=...)`
+> → journal cleanup。签名校验 `request.tool_name` 与 `arguments_digest` 精确一致，
+> patch 字节 digest/size 与 `ApplyPatchArguments` 精确一致，Sidecar key 匹配 controller。
+> handler journal 新增 V6 schema（`tool_name` 增加 `owp.apply_patch`，repo-read/rollback
+> 分支同列扩为 `owp.apply_patch`，二者 agency 域均为 NULL），V5（紧邻前一个签名绑定
+> schema）非空行原子重建并逐列保留（不伪造签名），空表 drop/rebuild；旧 V3/V4 及更旧
+> predecessor 行为不变。apply_patch 与 repo-read/rollback 同为非 typed-driver 工具，其
+> recovery (B) 走 `_recover_handler_executions`（RESERVED 无 receipt → 清理 C；
+> STARTED_UNCONFIRMED + committed receipt → finalize B），不针对当前 profile 重新授权，
+> 不产生 mixed-mode 歧义，故无需 run-tests 的 Sidecar 签名 agency binding；ActionReceipt
+> 本身仍不携带 Agency 证明。覆盖测试：真实 temp workspace 成功、reserved deny 零
+> handler/零业务写入、superseded allow、revoke deny、handler failure、pre-COMMIT 零写入、
+> COMMIT-ACK recovery、STARTED_UNCONFIRMED 无 callback recovery、cleanup failure 保留
+> committed truth、patch digest drift fail closed、并发恰好一个结果、V5→V6 迁移、旧路径
+> 不受影响。focused：apply-patch/agency/mcp/repo-read 120 passed；policy/agency/sandbox
+> 532 passed 4 skipped；delivery_m2/receipt_chain 418 passed；全量 4121 passed 2 failed
+> 8 skipped（2 failed 均为既有 `test_current_candidate_inventory_binds_*`，candidate
+> definition 含 `evidence.py`，本分支早期 agency 提交已改变其字节，历史 inventory 0
+> match，需 Task 9 重建 candidate inventory，非 Step 4 回归）；`pip check`/`compileall`/
+> `git diff --check` PASS。
 
 - [ ] **Step 5: 实现最小 protected dispatcher 与完整状态链**
 

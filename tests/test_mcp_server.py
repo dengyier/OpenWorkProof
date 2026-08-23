@@ -1060,6 +1060,7 @@ def test_authorization_prefix_digest_binds_all_canonical_components(
 def test_current_handler_schema_has_a_named_prefix_predecessor() -> None:
     assert hasattr(evidence, "_HANDLER_EXECUTION_SCHEMA_V3")
     assert hasattr(evidence, "_HANDLER_EXECUTION_SCHEMA_V4")
+    assert hasattr(evidence, "_HANDLER_EXECUTION_SCHEMA_V5")
 
 
 def test_handler_journal_recovery_fields_are_closed_by_tool(
@@ -1135,6 +1136,7 @@ def test_handler_journal_recovery_fields_are_closed_by_tool(
 @pytest.mark.parametrize(
     "predecessor",
     (
+        evidence._HANDLER_EXECUTION_SCHEMA_V5,
         evidence._HANDLER_EXECUTION_SCHEMA_V4,
         evidence._HANDLER_EXECUTION_SCHEMA_V3,
         evidence._HANDLER_EXECUTION_SCHEMA_V2,

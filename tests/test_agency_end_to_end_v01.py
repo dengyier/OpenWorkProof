@@ -1492,3 +1492,325 @@ def test_legacy_row_flipped_to_bound_recomputing_digest_fails_closed(
             execution_driver=_FakeRunTestsExecutionDriver(),
             clock=lambda: fixed_now,
         )
+
+
+# --- apply-patch protected executor seam ---
+
+
+def _apply_patch_agency_case(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+):
+    from test_apply_patch_transaction import _apply_patch_case
+
+    return _apply_patch_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+
+
+def _execute_apply_patch_with_agency(
+    case,
+    role_keys,
+    fixed_now,
+    *,
+    handler,
+    agency_authorize,
+):
+    from test_apply_patch_transaction import (
+        _apply_patch_request,
+        _prospective_facts,
+    )
+
+    request, arguments = _apply_patch_request(
+        case,
+        role_keys,
+        fixed_now,
+        patch_bytes=case["patch_bytes"],
+    )
+    return mcp_server.execute_apply_patch(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=case["context"],
+        request=request,
+        request_arguments=arguments,
+        execution_facts=_prospective_facts(case),
+        sidecar_private_key=role_keys["Sidecar"][0],
+        patch_bytes=case["patch_bytes"],
+        candidate_workspace=case["candidate"],
+        handler=handler,
+        clock=lambda: fixed_now,
+        agency_authorize=agency_authorize,
+    )
+
+
+def test_apply_patch_reserved_deny_zero_handler_and_no_writes(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    from test_apply_patch_transaction import (
+        _apply_patch_request,
+        _fake_patch_handler,
+    )
+
+    case = _apply_patch_agency_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    profile = _mk_profile(
+        case["work_order"],
+        ephemeral_role_keys,
+        SHA256_A,
+        delegated=("owp.repo_read",),
+        reserved=(("scope_or_criteria_change", ("owp.apply_patch",)),),
+    )
+    commit_human_agency_profile(case["ledger_path"], profile)
+    request, _ = _apply_patch_request(
+        case,
+        ephemeral_role_keys,
+        fixed_now,
+        patch_bytes=case["patch_bytes"],
+    )
+    handler, calls = _fake_patch_handler(case)
+
+    before = _all_user_table_snapshot(case["ledger_path"])
+    with pytest.raises(mcp_server.ToolCallDenied) as caught:
+        _execute_apply_patch_with_agency(
+            case,
+            ephemeral_role_keys,
+            fixed_now,
+            handler=handler,
+            agency_authorize=_agency_authorize(
+                case["ledger_path"], case["context"], request
+            ),
+        )
+    assert caught.value.decision.error_code == AGENCY_HUMAN_DECISION_REQUIRED
+    assert calls == []
+    assert _all_user_table_snapshot(case["ledger_path"]) == before
+
+
+def test_apply_patch_superseded_allow_reaches_handler(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    from test_apply_patch_transaction import (
+        _apply_patch_request,
+        _fake_patch_handler,
+    )
+
+    case = _apply_patch_agency_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    reserved = _mk_profile(
+        case["work_order"],
+        ephemeral_role_keys,
+        SHA256_A,
+        delegated=("owp.repo_read",),
+        reserved=(("scope_or_criteria_change", ("owp.apply_patch",)),),
+    )
+    replacement = _mk_profile(
+        case["work_order"],
+        ephemeral_role_keys,
+        "b" * 64,
+        delegated=("owp.apply_patch",),
+    )
+    commit_human_agency_profile(case["ledger_path"], reserved)
+    commit_human_agency_profile(case["ledger_path"], replacement)
+    commit_agency_profile_transition(
+        case["ledger_path"],
+        _mk_transition(
+            case["work_order"],
+            ephemeral_role_keys,
+            target=reserved,
+            transition="superseded",
+            replacement=replacement,
+        ),
+    )
+    request, _ = _apply_patch_request(
+        case,
+        ephemeral_role_keys,
+        fixed_now,
+        patch_bytes=case["patch_bytes"],
+    )
+    handler, calls = _fake_patch_handler(case)
+
+    receipt = _execute_apply_patch_with_agency(
+        case,
+        ephemeral_role_keys,
+        fixed_now,
+        handler=handler,
+        agency_authorize=_agency_authorize(
+            case["ledger_path"], case["context"], request
+        ),
+    )
+    assert receipt.policy_decision == "allow"
+    assert receipt.execution_status == "succeeded"
+    assert len(calls) == 1
+
+
+def test_apply_patch_revocation_deny_zero_handler(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    from test_apply_patch_transaction import (
+        _apply_patch_request,
+        _fake_patch_handler,
+    )
+
+    case = _apply_patch_agency_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    profile = _mk_profile(
+        case["work_order"],
+        ephemeral_role_keys,
+        SHA256_A,
+        delegated=("owp.apply_patch",),
+    )
+    commit_human_agency_profile(case["ledger_path"], profile)
+    commit_agency_profile_transition(
+        case["ledger_path"],
+        _mk_transition(
+            case["work_order"],
+            ephemeral_role_keys,
+            target=profile,
+            transition="revoked",
+        ),
+    )
+    request, _ = _apply_patch_request(
+        case,
+        ephemeral_role_keys,
+        fixed_now,
+        patch_bytes=case["patch_bytes"],
+    )
+    handler, calls = _fake_patch_handler(case)
+
+    before = _all_user_table_snapshot(case["ledger_path"])
+    with pytest.raises(mcp_server.ToolCallDenied) as caught:
+        _execute_apply_patch_with_agency(
+            case,
+            ephemeral_role_keys,
+            fixed_now,
+            handler=handler,
+            agency_authorize=_agency_authorize(
+                case["ledger_path"], case["context"], request
+            ),
+        )
+    assert caught.value.decision.error_code == "AGENCY_PROFILE_REQUIRED"
+    assert calls == []
+    assert _all_user_table_snapshot(case["ledger_path"]) == before
+
+
+def test_apply_patch_started_unconfirmed_recovery_without_callback(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from test_apply_patch_transaction import (
+        _apply_patch_request,
+        _fake_patch_handler,
+        _execute_apply_patch,
+    )
+
+    case = _apply_patch_agency_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    profile = _mk_profile(
+        case["work_order"],
+        ephemeral_role_keys,
+        SHA256_A,
+        delegated=("owp.apply_patch",),
+    )
+    commit_human_agency_profile(case["ledger_path"], profile)
+
+    real_finalize = mcp_server._finalize_handler_execution
+
+    def fail_cleanup(*_):
+        raise mcp_server.HandlerCoordinationError("injected cleanup failure")
+
+    handler, _ = _fake_patch_handler(case)
+    monkeypatch.setattr(
+        mcp_server, "_finalize_handler_execution", fail_cleanup
+    )
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError, match="injected cleanup failure"
+    ):
+        _execute_apply_patch(
+            case, ephemeral_role_keys, fixed_now, handler=handler
+        )
+    monkeypatch.setattr(
+        mcp_server, "_finalize_handler_execution", real_finalize
+    )
+
+    # Revoke: a fresh agency callback would now deny the (already committed)
+    # action, but recovery replays stored truth and never re-invokes it.
+    commit_agency_profile_transition(
+        case["ledger_path"],
+        _mk_transition(
+            case["work_order"],
+            ephemeral_role_keys,
+            target=profile,
+            transition="revoked",
+        ),
+    )
+    request, _ = _apply_patch_request(
+        case,
+        ephemeral_role_keys,
+        fixed_now,
+        patch_bytes=case["patch_bytes"],
+    )
+    agency_authorize, invocations = _counting_agency_authorize(
+        case["ledger_path"], case["context"], request
+    )
+    before_connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        before_receipts = before_connection.execute(
+            "SELECT COUNT(*) FROM receipts"
+        ).fetchone()[0]
+    finally:
+        before_connection.close()
+
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError, match="current ledger snapshot"
+    ):
+        _execute_apply_patch_with_agency(
+            case,
+            ephemeral_role_keys,
+            fixed_now,
+            handler=handler,
+            agency_authorize=agency_authorize,
+        )
+
+    assert invocations == []
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts"
+        ).fetchone() == (before_receipts,)
+    finally:
+        connection.close()

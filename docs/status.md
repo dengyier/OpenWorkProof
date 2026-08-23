@@ -3,6 +3,42 @@
 > 本文档是项目实现状态的权威记录。README 只保留概览，
 > 「已经完成什么」和「尚未完成什么」的完整清单以本文为准。
 
+## Human Agency Profile 0.1：受保护 apply-patch executor（2026-08-24）
+
+隔离分支 `codex/human-agency-profile-v01`（HEAD `336eee9` 起）新增真实
+`execute_apply_patch` 事务入口，复用 `repo_tools.apply_patch_in_candidate_workspace`
+与既有 `PatchRequest`/`PatchResult`，与 repo-read/run-tests/rollback 同一锁域与
+fail-closed/idempotent 语义（current-context → 基础授权 → opt-in `agency_authorize`
+profile callback → receipt preflight → handler reservation/started → patch handler →
+`PatchResultEvidence` + patch/result EvidenceRefs → Sidecar 签名 receipt →
+`complete_receipt_publication(..., _borrowed_lock_descriptor=...)` → cleanup）。
+
+- 签名精确校验 `request.tool_name == "owp.apply_patch"` 与 `arguments_digest`，
+  patch 字节 digest/size 与 `ApplyPatchArguments` 精确一致，Sidecar key 匹配
+  execution controller。deny 时 handler 不调用、业务表零写入（bookkeeping 除外）。
+- handler journal 最小兼容扩展：V6 schema 增加 `owp.apply_patch`；V5（紧邻前一个
+  签名绑定 schema）非空行原子重建逐列保留（绝不伪造签名），空表 drop/rebuild；
+  旧 V3/V4 及更旧 predecessor 迁移行为不变。apply_patch 与 repo-read/rollback 同为
+  非 typed-driver 工具，recovery (B) 走 `_recover_handler_executions` 不针对当前
+  profile 重新授权，不产生 mixed-mode 歧义，故不引入 run-tests 的 Sidecar 签名
+  agency binding；`ActionReceipt` 本身不携带 Human Agency 证明（binding 仅作 executor
+  锁内 recovery 协调）。
+- 本轮 fresh 测量（控制器 fresh，未复用历史数字）：
+  - 专项 `tests/test_apply_patch_transaction.py`：`8 passed`；
+  - `test_agency_end_to_end_v01.py` apply-patch seam 新增：`4 passed`；
+  - focused 四文件门（apply-patch/agency/mcp/repo-read）：`120 passed`；
+  - policy/agency/sandbox：`532 passed, 4 skipped`；
+  - delivery_m2/receipt_chain：`418 passed`；
+  - 全量：`4121 passed, 2 failed, 8 skipped`；2 failed 均为既有的
+    `test_current_candidate_inventory_binds_*`（candidate definition 含
+    `evidence.py`，本分支早期 agency 提交已改变其源码字节，历史 inventory 0 match，
+    需 Task 9 重建 candidate inventory 后闭合，非 Step 4 回归）；8 skipped 均为已
+    分类 platform/live 边界；
+  - `pip check` / `compileall` / `git diff --check`：PASS。
+- 诚实边界不变：apply-patch executor 完成前不得声称 supersede 后 apply-patch 已可
+  安全执行；`owp.apply_patch` 仍以 reserved profile 在人类决策处保留，只有 Acceptor
+  签署 supersede 后执行；不宣称 ActionReceipt 携带 Agency 证明。
+
 ## Verified Agent Delivery 0.1 本地实现（2026-08-22）
 
 隔离分支 `codex/verified-agent-delivery` 已按计划实现首个商业产品切片

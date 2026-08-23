@@ -518,7 +518,11 @@ CREATE TABLE handler_executions (
 """
 
 
-_HANDLER_EXECUTION_SCHEMA = """
+# The immediately prior signed-binding schema: it stored the exact Sidecar
+# signature envelope but only knew the three original tools. It is a migration
+# predecessor whose nonempty rows are already trusted (signed or unbound) and
+# are rebuilt verbatim into the current schema that adds ``owp.apply_patch``.
+_HANDLER_EXECUTION_SCHEMA_V5 = """
 CREATE TABLE handler_executions (
     execution_id TEXT PRIMARY KEY,
     work_order_digest TEXT NOT NULL
@@ -558,6 +562,75 @@ CREATE TABLE handler_executions (
         OR
         (
             tool_name IN ('owp.rollback_patch', 'owp.repo_read')
+            AND agency_binding IS NULL
+            AND agency_binding_json IS NULL
+            AND authorization_prefix_digest IS NULL
+            AND request_json IS NULL
+            AND execution_contract_json IS NULL
+            AND execution_contract_digest IS NULL
+        )
+    ),
+    CHECK (
+        (
+            agency_binding IS NULL
+            AND agency_binding_json IS NULL
+        )
+        OR
+        (
+            agency_binding IS NOT NULL
+            AND agency_binding = 'openworkproof/handler-agency-bound/v0.1'
+            AND agency_binding_json IS NOT NULL
+        )
+    )
+)
+"""
+
+
+_HANDLER_EXECUTION_SCHEMA = """
+CREATE TABLE handler_executions (
+    execution_id TEXT PRIMARY KEY,
+    work_order_digest TEXT NOT NULL
+        REFERENCES work_orders(work_order_digest),
+    request_digest TEXT NOT NULL UNIQUE,
+    nonce TEXT NOT NULL UNIQUE,
+    grant_id TEXT NOT NULL REFERENCES grants(grant_id),
+    tool_name TEXT NOT NULL CHECK (
+        tool_name IN (
+            'owp.run_tests',
+            'owp.rollback_patch',
+            'owp.repo_read',
+            'owp.apply_patch'
+        )
+    ),
+    arguments_digest TEXT NOT NULL,
+    execution_context_id TEXT NOT NULL UNIQUE,
+    container_instance_id_digest TEXT NOT NULL UNIQUE,
+    controller_id TEXT NOT NULL,
+    reserved_at TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (
+        state IN ('RESERVED', 'STARTED_UNCONFIRMED')
+    ),
+    authorization_prefix_digest TEXT,
+    agency_binding TEXT,
+    agency_binding_json TEXT,
+    request_json TEXT,
+    execution_contract_json TEXT,
+    execution_contract_digest TEXT,
+    CHECK (
+        (
+            tool_name = 'owp.run_tests'
+            AND authorization_prefix_digest IS NOT NULL
+            AND request_json IS NOT NULL
+            AND execution_contract_json IS NOT NULL
+            AND execution_contract_digest IS NOT NULL
+        )
+        OR
+        (
+            tool_name IN (
+                'owp.rollback_patch',
+                'owp.repo_read',
+                'owp.apply_patch'
+            )
             AND agency_binding IS NULL
             AND agency_binding_json IS NULL
             AND authorization_prefix_digest IS NULL

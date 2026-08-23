@@ -33,8 +33,10 @@ from openworkproof.models import (
     ActionReceiptEnvelope,
     AgentRequest,
     AgentRequestV04,
+    ApplyPatchArguments,
     EvidenceRef,
     GrantIssuedReceipt,
+    PatchResultEvidence,
     POLICY_ERROR_CODES,
     POLICY_ERROR_CODES_V04,
     PolicyDecision,
@@ -69,7 +71,10 @@ from openworkproof.predicates import (
 )
 from openworkproof.repo_tools import (
     CandidateWorkspace,
+    ResolutionManifest,
+    ResolutionManifestEntry,
     RollbackRequest as WorkspaceRollbackRequest,
+    resolution_manifest_digest,
     rollback_candidate_workspace,
 )
 from openworkproof.signing import (
@@ -621,6 +626,7 @@ def _ensure_handler_execution_schema(
     """
 
     expected = evidence._HANDLER_EXECUTION_SCHEMA
+    previous_signed = evidence._HANDLER_EXECUTION_SCHEMA_V5
     previous_unsigned_marker = evidence._HANDLER_EXECUTION_SCHEMA_V4
     previous_unmarked = evidence._HANDLER_EXECUTION_SCHEMA_V3
 
@@ -676,6 +682,63 @@ def _ensure_handler_execution_schema(
         )
         connection.execute("DROP TABLE handler_executions_agency_migrate")
 
+    def _rebuild_preserving(connection: sqlite3.Connection) -> None:
+        # The immediately prior signed-binding schema already enforced the
+        # exact agency marker/envelope pair, so every nonempty row is trusted
+        # (signed-bound run-tests or unbound repo-read/rollback). Rebuilding
+        # verbatim into the schema that additionally allows owp.apply_patch
+        # changes no column semantics and fabricates no trusted state.
+        connection.execute(
+            "ALTER TABLE handler_executions "
+            "RENAME TO handler_executions_agency_migrate"
+        )
+        connection.execute(expected)
+        connection.execute(
+            """
+            INSERT INTO handler_executions (
+                execution_id,
+                work_order_digest,
+                request_digest,
+                nonce,
+                grant_id,
+                tool_name,
+                arguments_digest,
+                execution_context_id,
+                container_instance_id_digest,
+                controller_id,
+                reserved_at,
+                state,
+                authorization_prefix_digest,
+                agency_binding,
+                agency_binding_json,
+                request_json,
+                execution_contract_json,
+                execution_contract_digest
+            )
+            SELECT
+                execution_id,
+                work_order_digest,
+                request_digest,
+                nonce,
+                grant_id,
+                tool_name,
+                arguments_digest,
+                execution_context_id,
+                container_instance_id_digest,
+                controller_id,
+                reserved_at,
+                state,
+                authorization_prefix_digest,
+                agency_binding,
+                agency_binding_json,
+                request_json,
+                execution_contract_json,
+                execution_contract_digest
+            FROM handler_executions_agency_migrate
+            """
+        )
+        connection.execute("DROP TABLE handler_executions_agency_migrate")
+
     def ensure(connection: sqlite3.Connection) -> None:
         row = connection.execute(
             """
@@ -691,6 +754,15 @@ def _ensure_handler_execution_schema(
             raise ValueError("handler execution journal schema is invalid")
         actual = _normalized_sql(row[0])
         if actual == _normalized_sql(expected):
+            return
+        if actual == _normalized_sql(previous_signed):
+            if connection.execute(
+                "SELECT COUNT(*) FROM handler_executions"
+            ).fetchone() == (0,):
+                connection.execute("DROP TABLE handler_executions")
+                connection.execute(expected)
+                return
+            _rebuild_preserving(connection)
             return
         if actual == _normalized_sql(previous_unsigned_marker):
             if connection.execute(
@@ -797,13 +869,14 @@ def _recover_handler_executions(
 ) -> None:
     """Reconcile a previously reserved generic action before the agency gate.
 
-    This is the (B)/(C) recovery boundary for repo-read and rollback: a
-    RESERVED row with no matching receipt is a provably stale reservation and
-    is cleaned up (C); a STARTED_UNCONFIRMED row whose receipt already
-    committed is finalized (B). Neither path re-authorizes the stored request
-    against the current profile — a later revocation is not retroactive — and
-    neither runs a handler or writes a new receipt. run-tests rows are refused
-    here because they require the typed driver reconciliation.
+    This is the (B)/(C) recovery boundary for repo-read, apply-patch, and
+    rollback: a RESERVED row with no matching receipt is a provably stale
+    reservation and is cleaned up (C); a STARTED_UNCONFIRMED row whose receipt
+    already committed is finalized (B). Neither path re-authorizes the stored
+    request against the current profile — a later revocation is not
+    retroactive — and neither runs a handler or writes a new receipt.
+    run-tests rows are refused here because they require the typed driver
+    reconciliation.
     """
 
     def recover(connection: sqlite3.Connection) -> None:
@@ -929,7 +1002,11 @@ def _reserve_handler_execution(
                 reserved_at=reserved_at,
                 sidecar_private_key=sidecar_private_key,
             )
-    elif request.tool_name in {"owp.rollback_patch", "owp.repo_read"}:
+    elif request.tool_name in {
+        "owp.rollback_patch",
+        "owp.repo_read",
+        "owp.apply_patch",
+    }:
         if execution_contract is not None:
             raise HandlerCoordinationError("RECOVERY_REQUIRED")
     else:
@@ -2534,6 +2611,7 @@ __all__ = [
     "RollbackCommand",
     "RollbackHandlerResult",
     "ToolCallDenied",
+    "execute_apply_patch",
     "execute_rollback",
     "execute_run_tests",
     "make_candidate_rollback_handler",
@@ -3073,6 +3151,558 @@ def execute_repo_read(
             receipt=receipt,
             payloads={},
             clock=lambda: now,
+            _borrowed_lock_descriptor=lock_descriptor,
+        )
+        _finalize_handler_execution(path, lock_descriptor)
+    except Exception as error:
+        primary_error = error
+    _, release_errors = evidence._release_target_lock(lock_descriptor)
+    if primary_error is not None:
+        if release_errors:
+            raise HandlerCoordinationError(
+                "handler coordination and lock release both failed"
+            ) from primary_error
+        raise primary_error
+    if release_errors:
+        raise HandlerCoordinationError(
+            "handler coordination lock release failed"
+        ) from release_errors[0]
+    assert receipt is not None
+    return receipt
+
+
+def _apply_patch_resolution_manifest(
+    context: AuthorizationContext,
+    arguments: ApplyPatchArguments,
+) -> ResolutionManifest:
+    """Build the trusted patch resolution manifest for the parent checkpoint.
+
+    The manifest is bound to the parent workspace manifest (the patch applies
+    on top of it), and every declared target path resolves to itself so the
+    path_allowed predicates and the publication authority replay agree exactly.
+    """
+
+    return ResolutionManifest(
+        schema_version="openworkproof-resolution-manifest/0.1",
+        workspace_manifest_digest=(
+            context.replay_checkpoint.workspace_manifest_digest
+        ),
+        requested_paths=tuple(arguments.target_paths),
+        resolved_entries=tuple(
+            ResolutionManifestEntry(
+                requested_path=path,
+                resolved_relative_path=path,
+            )
+            for path in arguments.target_paths
+        ),
+    )
+
+
+def _apply_patch_parents(
+    context: AuthorizationContext,
+    request: AgentRequest,
+) -> tuple[str, ...]:
+    """Causal parents for an apply-patch receipt.
+
+    Mirrors the frozen causal replay rule: the authorizing grant issuance plus
+    the latest repo-read on the same grant when one already exists (the patch
+    causally depends on the read). There is no active patch yet, so the
+    issuance is always the publication tip.
+    """
+
+    receipts = context.ledger_prefix.receipts
+    issuance = next(
+        (
+            receipt
+            for receipt in receipts
+            if isinstance(receipt, GrantIssuedReceipt)
+            and receipt.policy_decision == "allow"
+            and receipt.issued_grant_id == request.grant_id
+        ),
+        None,
+    )
+    if issuance is None:
+        raise HandlerCoordinationError(
+            "apply-patch causal parents are unavailable"
+        )
+    parents: dict[str, ActionReceiptEnvelope] = {
+        issuance.receipt_id: issuance
+    }
+    prior_read = next(
+        (
+            item
+            for item in reversed(receipts)
+            if isinstance(item, ToolCallReceipt)
+            and item.tool_name == "owp.repo_read"
+            and item.grant_id == request.grant_id
+        ),
+        None,
+    )
+    if prior_read is not None:
+        parents[prior_read.receipt_id] = prior_read
+    return tuple(
+        receipt.receipt_id
+        for receipt in sorted(
+            parents.values(),
+            key=lambda item: item.sequence,
+        )
+    )
+
+
+def _apply_patch_predicate_results(
+    context: AuthorizationContext,
+    request: AgentRequest,
+    arguments: ApplyPatchArguments,
+    manifest_digest: str,
+) -> tuple:
+    """Construct the exact predicate results for an apply-patch receipt."""
+    selected = select_required_predicates(
+        work_order=context.work_order,
+        tool_name="owp.apply_patch",
+        policy_decision="allow",
+        execution_status="succeeded",
+        test_mode="developer",
+    )
+    remaining_before = _remaining_tool_calls(context, request.grant_id)
+    tip = context.ledger_prefix.receipts[-1]
+    inputs: dict[str, object] = {}
+    for spec in selected:
+        if spec.name == "tool_allowed":
+            inputs[spec.predicate_id] = {
+                "actual_tool_name": "owp.apply_patch"
+            }
+        elif spec.name == "quota_remaining":
+            inputs[spec.predicate_id] = {
+                "grant_id": request.grant_id,
+                "metric": "tool_calls",
+                "amount": 1,
+                "grant_remaining_before": remaining_before,
+                "ledger_prefix_digest": tip.digest,
+            }
+        elif spec.name == "path_allowed":
+            inputs[spec.predicate_id] = {
+                "requested_paths": list(arguments.target_paths),
+                "resolved_entries": [
+                    {
+                        "requested_path": path,
+                        "resolved_relative_path": path,
+                    }
+                    for path in arguments.target_paths
+                ],
+                "resolution_manifest_digest": manifest_digest,
+            }
+        else:
+            raise HandlerCoordinationError(
+                "apply-patch predicate has no offline authority rule"
+            )
+    results = evaluate_required_predicates(
+        selected,
+        EvaluationContext(
+            inputs=inputs,
+            authoritative_inputs=inputs,
+            authoritative_ledger_prefix_digests={
+                request.grant_id: tip.digest,
+            },
+        ),
+    )
+    return tuple(
+        result.model_dump(mode="json") for result in results
+    )
+
+
+def _next_patch_evidence_references(
+    context: AuthorizationContext,
+    patch_bytes: bytes,
+    result_bytes: bytes,
+) -> tuple[EvidenceRef, EvidenceRef]:
+    """Select the exact patch-input/patch-result evidence slots.
+
+    The diff slot and the matching-ordinal result slot must both be unused and
+    within their WorkOrder size bounds; anything else fails closed.
+    """
+
+    used_paths = {
+        reference.path
+        for receipt in context.ledger_prefix.receipts
+        for reference in receipt.evidence_refs
+    }
+    artifacts = context.work_order.evidence_policy.artifacts
+    diff_slot = next(
+        (
+            artifact
+            for artifact in artifacts
+            if artifact.purpose == "patch_input"
+            and f"evidence/{artifact.path}" not in used_paths
+        ),
+        None,
+    )
+    if diff_slot is None or len(patch_bytes) > diff_slot.max_size_bytes:
+        raise HandlerCoordinationError("EVIDENCE_SLOT_UNAVAILABLE")
+    result_slot = next(
+        (
+            artifact
+            for artifact in artifacts
+            if artifact.purpose == "patch_result"
+            and artifact.ordinal == diff_slot.ordinal
+            and f"evidence/{artifact.path}" not in used_paths
+        ),
+        None,
+    )
+    if result_slot is None or len(result_bytes) > result_slot.max_size_bytes:
+        raise HandlerCoordinationError("EVIDENCE_SLOT_UNAVAILABLE")
+    diff_ref = EvidenceRef(
+        path=f"evidence/{diff_slot.path}",
+        sha256=hashlib.sha256(patch_bytes).hexdigest(),
+        media_type=diff_slot.media_type,
+        size_bytes=len(patch_bytes),
+    )
+    result_ref = EvidenceRef(
+        path=f"evidence/{result_slot.path}",
+        sha256=hashlib.sha256(result_bytes).hexdigest(),
+        media_type=result_slot.media_type,
+        size_bytes=len(result_bytes),
+    )
+    return diff_ref, result_ref
+
+
+def _build_apply_patch_receipt(
+    context: AuthorizationContext,
+    request: AgentRequest,
+    arguments: ApplyPatchArguments,
+    result: repo_tools.PatchResult,
+    sidecar_private_key: Ed25519PrivateKey,
+    execution_facts: ProspectiveExecutionFacts,
+    diff_ref: EvidenceRef,
+    result_ref: EvidenceRef,
+    manifest_digest: str,
+) -> ToolCallReceipt:
+    remaining_before = _remaining_tool_calls(context, request.grant_id)
+    sidecar_key_id = key_id(sidecar_private_key.public_key())
+    result_bytes = rfc8785.dumps(result.evidence.model_dump(mode="json"))
+    output_digest = hashlib.sha256(result_bytes).hexdigest()
+    raw = {
+        "protocol_version": (
+            "0.4" if type(request) is AgentRequestV04 else "0.1"
+        ),
+        "receipt_id": _digest(
+            {
+                "domain": "openworkproof/receipt-id/v0.1",
+                "request_digest": request.digest,
+                "entropy": secrets.token_hex(32),
+            }
+        ),
+        "work_order_digest": context.work_order.digest,
+        "actor_type": "agent",
+        "actor_id": request.actor_id,
+        "actor_key_id": request.actor_key_id,
+        "nested_claim_type": "agent-request",
+        "nested_claim_digest": request.digest,
+        "nested_claim": request.model_dump(mode="json"),
+        "gateway_signer_key_id": sidecar_key_id,
+        "event_type": "tool_call",
+        "policy_decision": "allow",
+        "policy_error_code": None,
+        "execution_status": "succeeded",
+        "execution_error_code": None,
+        "quota_charge": {
+            "grant_id": request.grant_id,
+            "metric": "tool_calls",
+            "amount": 1,
+            "remaining_after": remaining_before - 1,
+        },
+        "state_before": context.current_state,
+        "state_after": context.current_state,
+        "parent_receipt_ids": list(_apply_patch_parents(context, request)),
+        "correlation_factors": {
+            "model_id": request.model_id,
+            "model_version": request.model_version,
+            "prompt_template_digest": request.prompt_template_digest,
+            "context_source_digest": request.context_source_digest,
+            "toolchain_id": _digest(
+                {
+                    "domain": "openworkproof/toolchain/v0.1",
+                    "tool_name": "owp.apply_patch",
+                    "tool_version": "0.1",
+                }
+            ),
+            "execution_context_id": execution_facts.execution_context_id,
+            "container_instance_id_digest": (
+                execution_facts.container_instance_id_digest
+            ),
+            "controller_id": execution_facts.controller_id,
+            "fixed_test_source_digest": None,
+        },
+        "evidence_refs": [
+            diff_ref.model_dump(mode="json"),
+            result_ref.model_dump(mode="json"),
+        ],
+        "occurred_at": context.transaction_time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "sequence": len(context.ledger_prefix.receipts) + 1,
+        "nonce": request.nonce,
+        "previous_receipt_digest": (
+            context.ledger_prefix.receipts[-1].digest
+        ),
+        "grant_id": request.grant_id,
+        "tool_name": "owp.apply_patch",
+        "tool_version": "0.1",
+        "request_arguments": arguments.model_dump(mode="json"),
+        "arguments_digest": request.arguments_digest,
+        "output_digest": output_digest,
+        "predicate_results": list(
+            _apply_patch_predicate_results(
+                context,
+                request,
+                arguments,
+                manifest_digest,
+            )
+        ),
+    }
+    receipt_type = (
+        ToolCallReceiptV04
+        if type(request) is AgentRequestV04
+        else ToolCallReceipt
+    )
+    return receipt_type.model_validate(
+        sign_payload(
+            "action-receipt",
+            raw,
+            sidecar_private_key,
+            version=("0.4" if type(request) is AgentRequestV04 else "0.1"),
+        )
+    )
+
+
+def _preflight_apply_patch_receipts(
+    context: AuthorizationContext,
+    request: AgentRequest,
+    arguments: ApplyPatchArguments,
+    patch_bytes: bytes,
+    sidecar_private_key: Ed25519PrivateKey,
+    execution_facts: ProspectiveExecutionFacts,
+    manifest_digest: str,
+) -> None:
+    alternate = (
+        "2" * 40
+        if context.replay_checkpoint.head_commit != "2" * 40
+        else "3" * 40
+    )
+    representative = repo_tools.PatchResult(
+        parent_commit=context.replay_checkpoint.head_commit,
+        parent_manifest_digest=(
+            context.replay_checkpoint.workspace_manifest_digest
+        ),
+        candidate_commit=alternate,
+        workspace_manifest_digest="0" * 64,
+        patch_digest=arguments.patch_digest,
+        patch_size_bytes=arguments.patch_size_bytes,
+        changed_paths=tuple(arguments.target_paths),
+        evidence=PatchResultEvidence(
+            schema_version="openworkproof-patch-result/0.1",
+            parent_commit=context.replay_checkpoint.head_commit,
+            parent_manifest_digest=(
+                context.replay_checkpoint.workspace_manifest_digest
+            ),
+            candidate_commit=alternate,
+            workspace_manifest_digest="0" * 64,
+            patch_digest=arguments.patch_digest,
+            patch_size_bytes=arguments.patch_size_bytes,
+            replay_profile_digest=context.work_order.replay_profile_digest,
+        ),
+    )
+    result_bytes = rfc8785.dumps(
+        representative.evidence.model_dump(mode="json")
+    )
+    diff_ref, result_ref = _next_patch_evidence_references(
+        context,
+        patch_bytes,
+        result_bytes,
+    )
+    receipt = _build_apply_patch_receipt(
+        context,
+        request,
+        arguments,
+        representative,
+        sidecar_private_key,
+        execution_facts,
+        diff_ref,
+        result_ref,
+        manifest_digest,
+    )
+    if (
+        len(rfc8785.dumps(receipt.model_dump(mode="json")))
+        > _MAX_RECEIPT_BYTES
+    ):
+        raise HandlerCoordinationError("BUNDLE_CAPACITY_EXCEEDED")
+
+
+def execute_apply_patch(
+    ledger_path: Path,
+    *,
+    evidence_root: Path,
+    context: AuthorizationContext,
+    request: AgentRequest,
+    request_arguments: ApplyPatchArguments,
+    execution_facts: ProspectiveExecutionFacts,
+    sidecar_private_key: Ed25519PrivateKey,
+    patch_bytes: bytes,
+    candidate_workspace: CandidateWorkspace,
+    handler: Callable[[repo_tools.PatchRequest], repo_tools.PatchResult],
+    clock: Callable[[], datetime],
+    agency_authorize: Callable[[], PolicyDecision] | None = None,
+) -> ToolCallReceipt:
+    """Authorize, execute, sign, and commit one apply-patch attempt."""
+
+    if (
+        not callable(handler)
+        or type(candidate_workspace) is not CandidateWorkspace
+        or not isinstance(request_arguments, ApplyPatchArguments)
+    ):
+        raise HandlerCoordinationError("HANDLER_UNAVAILABLE")
+    if type(patch_bytes) is not bytes or not 1 <= len(patch_bytes) <= 65_536:
+        raise HandlerCoordinationError("HANDLER_UNAVAILABLE")
+    if (
+        request.tool_name != "owp.apply_patch"
+        or request.arguments_digest
+        != request_arguments_digest("owp.apply_patch", request_arguments)
+        or hashlib.sha256(patch_bytes).hexdigest()
+        != request_arguments.patch_digest
+        or len(patch_bytes) != request_arguments.patch_size_bytes
+    ):
+        raise HandlerCoordinationError(
+            "apply-patch request or patch payload binding is invalid"
+        )
+    path = Path(ledger_path)
+    root = Path(evidence_root)
+    evidence.recover_evidence_publications(path, evidence_root=root)
+    lock_descriptor = evidence._acquire_target_lock(path)
+    primary_error: Exception | None = None
+    receipt: ToolCallReceipt | None = None
+    try:
+        _ensure_handler_execution_schema(path, lock_descriptor)
+        _recover_handler_executions(path, lock_descriptor)
+        now = evidence._freeze_trusted_utc_second(clock())
+        if (
+            key_id(sidecar_private_key.public_key())
+            != execution_facts.controller_id
+        ):
+            raise HandlerCoordinationError(
+                "Sidecar signing key does not match execution controller"
+            )
+        _require_current_context(
+            path,
+            root,
+            context,
+            now,
+            lock_descriptor,
+        )
+        if type(request) is AgentRequestV04:
+            decision = _require_bound_action(
+                path,
+                context,
+                request,
+                request_arguments,
+            )
+        else:
+            _require_bound_action(path, context, request, request_arguments)
+            decision = authorize_tool_call(
+                context,
+                request,
+                request_arguments,
+                None,
+            )
+        if not decision.allowed:
+            raise ToolCallDenied(decision)
+        _enforce_agency_authorization(agency_authorize)
+        manifest = _apply_patch_resolution_manifest(context, request_arguments)
+        manifest_digest = resolution_manifest_digest(manifest)
+        _preflight_apply_patch_receipts(
+            context,
+            request,
+            request_arguments,
+            patch_bytes,
+            sidecar_private_key,
+            execution_facts,
+            manifest_digest,
+        )
+        command = repo_tools.PatchRequest(
+            workspace=candidate_workspace,
+            patch_bytes=patch_bytes,
+            expected_patch_digest=request_arguments.patch_digest,
+            expected_patch_size_bytes=request_arguments.patch_size_bytes,
+            declared_target_paths=tuple(request_arguments.target_paths),
+            parent_commit=context.replay_checkpoint.head_commit,
+            parent_manifest_digest=(
+                context.replay_checkpoint.workspace_manifest_digest
+            ),
+            occurred_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            replay_profile=context.work_order.replay_profile,
+            replay_profile_digest=context.work_order.replay_profile_digest,
+        )
+        execution_id = _reserve_handler_execution(
+            path,
+            lock_descriptor,
+            context,
+            request,
+            execution_facts,
+            None,
+        )
+        _mark_handler_started(path, lock_descriptor, execution_id)
+        try:
+            result = handler(command)
+        except Exception as error:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED") from error
+        if type(result) is not repo_tools.PatchResult:
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        if (
+            result.patch_digest != request_arguments.patch_digest
+            or result.patch_size_bytes != request_arguments.patch_size_bytes
+            or result.parent_commit != context.replay_checkpoint.head_commit
+            or result.parent_manifest_digest
+            != context.replay_checkpoint.workspace_manifest_digest
+            or result.evidence.replay_profile_digest
+            != context.work_order.replay_profile_digest
+            or result.evidence.patch_digest != result.patch_digest
+            or result.evidence.patch_size_bytes != result.patch_size_bytes
+            or result.evidence.parent_commit != result.parent_commit
+            or result.evidence.parent_manifest_digest
+            != result.parent_manifest_digest
+            or result.evidence.candidate_commit != result.candidate_commit
+            or result.evidence.workspace_manifest_digest
+            != result.workspace_manifest_digest
+        ):
+            raise HandlerCoordinationError("RECOVERY_REQUIRED")
+        result_bytes = rfc8785.dumps(
+            result.evidence.model_dump(mode="json")
+        )
+        diff_ref, result_ref = _next_patch_evidence_references(
+            context,
+            patch_bytes,
+            result_bytes,
+        )
+        receipt = _build_apply_patch_receipt(
+            context,
+            request,
+            request_arguments,
+            result,
+            sidecar_private_key,
+            execution_facts,
+            diff_ref,
+            result_ref,
+            manifest_digest,
+        )
+        payloads = {
+            diff_ref.path: patch_bytes,
+            result_ref.path: result_bytes,
+        }
+        evidence.complete_receipt_publication(
+            path,
+            evidence_root=root,
+            receipt=receipt,
+            payloads=payloads,
+            clock=lambda: now,
+            trusted_resolution_manifest=manifest,
             _borrowed_lock_descriptor=lock_descriptor,
         )
         _finalize_handler_execution(path, lock_descriptor)
