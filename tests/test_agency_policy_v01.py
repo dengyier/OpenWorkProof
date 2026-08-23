@@ -20,6 +20,7 @@ from openworkproof.agency import (
 from openworkproof.agency_policy import (
     AGENCY_ACTION_NOT_DELEGATED,
     AGENCY_HUMAN_DECISION_REQUIRED,
+    authorize_agency_profile_layer,
     authorize_tool_call_with_agency_profile,
 )
 from openworkproof.models import (
@@ -27,6 +28,7 @@ from openworkproof.models import (
     RepoReadArguments,
     WorkOrder,
 )
+from openworkproof.policy import authorize_tool_call
 from openworkproof.signing import sign_payload
 
 from test_policy import _prospective_context, _signed_tool_request
@@ -151,24 +153,37 @@ def _history(
     return AgencyProfileHistory(profiles=profiles, transitions=transitions)
 
 
-def _authorize(
-    case: _PolicyCase,
-    history: AgencyProfileHistory,
-    arguments: Any,
-) -> Any:
-    request = _signed_tool_request(
+def _request(case: _PolicyCase, arguments: Any) -> Any:
+    return _signed_tool_request(
         case.work_order,
         case.developer_grant,
         arguments,
         case.keys,
         case.context.transaction_time,
     )
+
+
+def _authorize(
+    case: _PolicyCase,
+    history: AgencyProfileHistory,
+    arguments: Any,
+) -> Any:
+    request = _request(case, arguments)
     return authorize_tool_call_with_agency_profile(
         case.context,
         history,
         request,
         arguments,
     )
+
+
+def _authorize_profile_layer(
+    case: _PolicyCase,
+    history: AgencyProfileHistory,
+    arguments: Any,
+) -> Any:
+    request = _request(case, arguments)
+    return authorize_agency_profile_layer(case.context, history, request)
 
 
 def test_all_three_layers_allow_repo_read(policy_case: _PolicyCase) -> None:
@@ -325,3 +340,154 @@ def test_base_policy_denial_takes_precedence(
     )
     assert decision.allowed is False
     assert decision.error_code == "CAPABILITY_DENIED"
+
+
+# --- profile-only layer: reserved / not-delegated / invalid / expired /
+# --- binding failures, without rerunning the base policy. ---
+
+
+def test_profile_layer_reserved_action_is_denied(
+    policy_case: _PolicyCase,
+) -> None:
+    profile = _mk_profile(
+        policy_case,
+        SHA256_A,
+        delegated=("owp.repo_read",),
+        reserved=(("scope_or_criteria_change", ("owp.apply_patch",)),),
+    )
+    decision = _authorize_profile_layer(
+        policy_case,
+        _history((profile,)),
+        ApplyPatchArguments(
+            target_paths=("src/app.py",),
+            patch_digest=SHA256_B,
+            patch_size_bytes=1,
+        ),
+    )
+    assert decision.allowed is False
+    assert decision.error_code == AGENCY_HUMAN_DECISION_REQUIRED
+
+
+def test_profile_layer_undelegated_action_is_denied(
+    policy_case: _PolicyCase,
+) -> None:
+    profile = _mk_profile(policy_case, SHA256_A, delegated=("owp.repo_read",))
+    decision = _authorize_profile_layer(
+        policy_case,
+        _history((profile,)),
+        ApplyPatchArguments(
+            target_paths=("src/app.py",),
+            patch_digest=SHA256_B,
+            patch_size_bytes=1,
+        ),
+    )
+    assert decision.allowed is False
+    assert decision.error_code == AGENCY_ACTION_NOT_DELEGATED
+
+
+def test_profile_layer_missing_profile_fails_closed(
+    policy_case: _PolicyCase,
+) -> None:
+    decision = _authorize_profile_layer(
+        policy_case, _history(), RepoReadArguments(path="src")
+    )
+    assert decision.allowed is False
+    assert decision.error_code == "AGENCY_PROFILE_REQUIRED"
+
+
+def test_profile_layer_invalid_history_fails_closed(
+    policy_case: _PolicyCase,
+) -> None:
+    first = _mk_profile(policy_case, SHA256_A, delegated=("owp.repo_read",))
+    second = _mk_profile(policy_case, SHA256_B, delegated=("owp.repo_read",))
+    decision = _authorize_profile_layer(
+        policy_case,
+        _history((first, second)),
+        RepoReadArguments(path="src"),
+    )
+    assert decision.allowed is False
+    assert decision.error_code == "AGENCY_PROFILE_HISTORY_INVALID"
+
+
+def test_profile_layer_expired_profile_fails_closed(
+    policy_case: _PolicyCase,
+) -> None:
+    profile = _mk_profile(
+        policy_case,
+        SHA256_A,
+        delegated=("owp.repo_read",),
+        expires_at="2026-01-01T00:00:04Z",
+    )
+    decision = _authorize_profile_layer(
+        policy_case, _history((profile,)), RepoReadArguments(path="src")
+    )
+    assert decision.allowed is False
+    assert decision.error_code == "AGENCY_PROFILE_EXPIRED"
+
+
+def test_profile_layer_binding_invalid_fails_closed(
+    policy_case: _PolicyCase,
+) -> None:
+    profile = _mk_profile(
+        policy_case,
+        SHA256_A,
+        delegated=("owp.repo_read",),
+        work_order_digest=SHA256_C,
+    )
+    decision = _authorize_profile_layer(
+        policy_case, _history((profile,)), RepoReadArguments(path="src")
+    )
+    assert decision.allowed is False
+    assert decision.error_code == "AGENCY_PROFILE_BINDING_INVALID"
+
+
+def test_profile_layer_allows_delegated_action(
+    policy_case: _PolicyCase,
+) -> None:
+    profile = _mk_profile(policy_case, SHA256_A, delegated=("owp.repo_read",))
+    decision = _authorize_profile_layer(
+        policy_case, _history((profile,)), RepoReadArguments(path="src")
+    )
+    assert decision.allowed is True
+    assert decision.error_code is None
+
+
+def test_profile_layer_does_not_rerun_base_policy(
+    policy_case: _PolicyCase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _mk_profile(policy_case, SHA256_A, delegated=("owp.repo_read",))
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("base policy must not rerun inside profile layer")
+
+    monkeypatch.setattr(
+        "openworkproof.agency_policy.authorize_tool_call", _explode
+    )
+    decision = _authorize_profile_layer(
+        policy_case, _history((profile,)), RepoReadArguments(path="src")
+    )
+    assert decision.allowed is True
+
+
+def test_combined_function_preserves_base_allow_decision(
+    policy_case: _PolicyCase,
+) -> None:
+    profile = _mk_profile(policy_case, SHA256_A, delegated=("owp.repo_read",))
+    arguments = RepoReadArguments(path="src")
+    request = _request(policy_case, arguments)
+    base_decision = authorize_tool_call(
+        policy_case.context,
+        request,
+        arguments,
+        None,
+    )
+    assert base_decision.allowed is True
+    combined = authorize_tool_call_with_agency_profile(
+        policy_case.context,
+        _history((profile,)),
+        request,
+        arguments,
+    )
+    assert combined.allowed is True
+    assert combined == base_decision

@@ -29,6 +29,7 @@ from openworkproof.policy import (
 __all__ = [
     "AGENCY_ACTION_NOT_DELEGATED",
     "AGENCY_HUMAN_DECISION_REQUIRED",
+    "authorize_agency_profile_layer",
     "authorize_tool_call_with_agency_profile",
 ]
 
@@ -54,23 +55,30 @@ def _deny(error_code: str, reason: str) -> PolicyDecision:
     )
 
 
-def authorize_tool_call_with_agency_profile(
+def _allow() -> PolicyDecision:
+    return PolicyDecision(
+        allowed=True,
+        decision="allow",
+        error_code=None,
+        reason="HUMAN_AGENCY_PROFILE_AUTHORIZED",
+    )
+
+
+def authorize_agency_profile_layer(
     context: AuthorizationContext,
     profile_history: AgencyProfileHistory,
     request: AgentRequest,
-    request_arguments: ToolRequestArguments,
-    execution_facts: ProspectiveExecutionFacts | None = None,
 ) -> PolicyDecision:
-    """Authorize a tool call against the base policy plus the active profile."""
+    """Resolve and apply only the human agency profile layer.
 
-    base_decision = authorize_tool_call(
-        context,
-        request,
-        request_arguments,
-        execution_facts,
-    )
-    if not base_decision.allowed:
-        return base_decision
+    This function never reruns the base ``authorize_tool_call`` policy. It
+    assumes the caller has already established that the base WorkOrder/Grant
+    authorization allowed the request, and computes only the agency boundary:
+    resolve the unique current profile from the signed history, then deny when
+    the tool is reserved for a human decision, not delegated, or when the
+    history is missing, invalid, expired, revoked, or bound to another
+    WorkOrder. On success it returns an allow decision.
+    """
 
     if not isinstance(profile_history, AgencyProfileHistory):
         return _deny(
@@ -125,4 +133,38 @@ def authorize_tool_call_with_agency_profile(
             AGENCY_ACTION_NOT_DELEGATED,
             "human agency profile does not delegate this action",
         )
+    return _allow()
+
+
+def authorize_tool_call_with_agency_profile(
+    context: AuthorizationContext,
+    profile_history: AgencyProfileHistory,
+    request: AgentRequest,
+    request_arguments: ToolRequestArguments,
+    execution_facts: ProspectiveExecutionFacts | None = None,
+) -> PolicyDecision:
+    """Authorize a tool call against the base policy plus the active profile.
+
+    The base policy runs first so an existing security error (bad signature,
+    bad WorkOrder/Grant, freshness, quota) always wins over any agency-specific
+    code. Only after the base policy allows the call is the profile-only layer
+    consulted, and the exact base allow decision is preserved on success.
+    """
+
+    base_decision = authorize_tool_call(
+        context,
+        request,
+        request_arguments,
+        execution_facts,
+    )
+    if not base_decision.allowed:
+        return base_decision
+
+    profile_decision = authorize_agency_profile_layer(
+        context,
+        profile_history,
+        request,
+    )
+    if not profile_decision.allowed:
+        return profile_decision
     return base_decision

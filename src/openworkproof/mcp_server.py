@@ -125,6 +125,28 @@ def _require_bound_action(
     return decision
 
 
+def _enforce_agency_authorization(
+    agency_authorize: Callable[[], PolicyDecision] | None,
+) -> None:
+    """Run the opt-in agency boundary inside the already-held target lock.
+
+    The callback is invoked exactly once after the existing context and the
+    complete base authorization have allowed the call, and before any
+    preflight, reservation, handler, or business write. A malformed return
+    value fails closed; a deny raises the normal ToolCallDenied.
+    """
+
+    if agency_authorize is None:
+        return
+    decision = agency_authorize()
+    if type(decision) is not PolicyDecision:
+        raise HandlerCoordinationError(
+            "agency authorization returned a malformed decision"
+        )
+    if not decision.allowed:
+        raise ToolCallDenied(decision)
+
+
 @dataclass(frozen=True, slots=True)
 class RollbackCommand:
     target_patch_receipt_id: str
@@ -1604,6 +1626,7 @@ def execute_run_tests(
     sidecar_private_key: Ed25519PrivateKey,
     execution_driver: repo_tools.RunTestsExecutionDriver,
     clock: Callable[[], datetime],
+    agency_authorize: Callable[[], PolicyDecision] | None = None,
 ) -> ToolCallReceipt:
     """Authorize, execute, sign, publish, and commit one test call."""
 
@@ -1679,6 +1702,7 @@ def execute_run_tests(
             )
         if not decision.allowed:
             raise ToolCallDenied(decision)
+        _enforce_agency_authorization(agency_authorize)
         if (
             request_arguments.test_mode != "verifier"
             or request_arguments.command_digest
@@ -2042,6 +2066,7 @@ def execute_rollback(
     sidecar_private_key: Ed25519PrivateKey,
     handler: Callable[[RollbackCommand], RollbackHandlerResult],
     clock: Callable[[], datetime],
+    agency_authorize: Callable[[], PolicyDecision] | None = None,
 ) -> RollbackReceipt:
     """Authorize, execute, sign, and commit one rollback attempt."""
 
@@ -2078,6 +2103,7 @@ def execute_rollback(
             decision = validate_rollback(context, request)
         if not decision.allowed:
             raise ToolCallDenied(decision)
+        _enforce_agency_authorization(agency_authorize)
         _preflight_rollback_receipts(
             context,
             request,
@@ -2598,6 +2624,7 @@ def execute_repo_read(
     candidate_runtime_root: Path,
     handler: Callable[[repo_tools.CandidateReadRequest], repo_tools.CandidateReadResult],
     clock: Callable[[], datetime],
+    agency_authorize: Callable[[], PolicyDecision] | None = None,
 ) -> ToolCallReceipt:
     """Authorize, execute, sign, and commit one repo-read attempt."""
     if (
@@ -2636,6 +2663,7 @@ def execute_repo_read(
             )
         if not decision.allowed:
             raise ToolCallDenied(decision)
+        _enforce_agency_authorization(agency_authorize)
         _preflight_repo_read_receipts(
             context,
             request,
