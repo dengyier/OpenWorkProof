@@ -163,7 +163,9 @@ required_role: Acceptor
 没有对应工具的决定（如外部付款）可以被 profile 声明并离线展示，但不得被宣传为
 OWP 已拦截现实支付。`blocked_tools` 可以为空；非空时必须排序、唯一并且全部属于
 WorkOrder `allowed_tools`。同一工具不得同时出现在 `delegated_actions` 和任何
-`blocked_tools` 中。
+`blocked_tools` 中。每个 `decision_kind` 在同一 profile 中最多出现一次，因此
+`reserved_decisions` 最多 5 条；同类决定需要保留多个工具时合并到同一条
+`blocked_tools`，不得用重复条目扩大签名载荷。
 
 ### 5.3 `EscalationConditionV01`
 
@@ -224,7 +226,8 @@ digest: <sha256>
 4. `issued_at <= valid_from < expires_at <= WorkOrder.deadline`；
 5. 至少一个 delegated action 或 reserved decision；两者不能同时为空；
 6. profile 只能收紧 WorkOrder，不得引入额外工具或扩权；
-7. 规范字节、digest、签名、WorkOrder 绑定任一不匹配即拒绝。
+7. `reserved_decisions` 的 `decision_kind` 必须唯一，总数不超过闭合枚举的 5 条；
+8. 规范字节、digest、签名、WorkOrder 绑定任一不匹配即拒绝。
 
 ### 5.6 `AgencyProfileTransitionV01`
 

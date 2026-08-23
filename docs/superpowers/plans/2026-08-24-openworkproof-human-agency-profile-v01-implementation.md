@@ -239,6 +239,8 @@ class AgencyAppealV01(SignedProtocolModel):
 辅助嵌套对象必须 `extra="forbid"`、immutable、UTF-8 sorted unique，并限制文本长度。
 `delegated_actions` 按 `tool_name` 排序且唯一；`reserved_decisions` 可包含不映射工具的
 声明性条目，但 `blocked_tools` 中的每个值都必须属于当前 WorkOrder `allowed_tools`。
+同一 profile 中 `reserved_decisions.decision_kind` 必须唯一且最多 5 条；同类决定的
+多个工具合并进同一条 `blocked_tools`，防止冗余条目无界放大签名载荷。
 `appeal_roles` 必须固定为 `("Developer", "Manager", "Verifier")`，不得由调用者扩展。
 `profile_id`、`transition_id`、`appeal_id` 及 delegated/decision 子对象 ID 必须按设计
 §5 的独立 domain，由不含自身 ID、digest、signature 的 canonical payload 唯一推导；
