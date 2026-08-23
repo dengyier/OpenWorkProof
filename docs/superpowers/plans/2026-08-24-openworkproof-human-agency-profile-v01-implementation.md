@@ -50,8 +50,8 @@
 3. 受保护的 repo-read 正常提交；受保护的 apply-patch 返回
    `AGENCY_HUMAN_DECISION_REQUIRED`，handler 调用数为 0，账本全表快照不变。
 4. Manager appeal 只被记录，不改变权限。
-5. Acceptor 签名的新 profile 与 replacement transition 生效后，apply-patch 才能执行。
-6. Acceptor revoke transition 生效后，受保护入口返回 `AGENCY_PROFILE_REQUIRED`。
+5. Acceptor 签名的新 profile 与 `superseded` transition 生效后，apply-patch 才能执行。
+6. Acceptor `revoked` transition 生效后，受保护入口返回 `AGENCY_PROFILE_REQUIRED`。
 7. 导出的 bundle 在无数据库、无私钥环境中能验证 WorkOrder/profile/history/appeal
    的签名、摘要、链结构与当前状态；任意篡改均失败。
 
@@ -72,7 +72,7 @@ required-live 或修改历史 candidate inventory 来换取绿灯。
 | `src/openworkproof/agency_schema_registry.py` | 独立 agency-v0.1 schema registry，不触碰冻结主 registry |
 | `src/openworkproof/schemas/agency-v0.1/*.json` | 三对象与 registry 的冻结 JSON Schema |
 | `tests/test_agency_models_v01.py` | 模型、签名、WorkOrder/角色绑定 |
-| `tests/test_agency_history_v01.py` | replace/revoke/fork/cycle/current resolver |
+| `tests/test_agency_history_v01.py` | supersede/revoke/fork/cycle/current resolver |
 | `tests/test_agency_policy_v01.py` | 三层交集、错误码、reserved/delegated 互斥 |
 | `tests/test_agency_ledger_v01.py` | 原子提交、nonce、并发、ACK 丢失回读 |
 | `tests/test_agency_bundle_v01.py` | 离线验签、确定性、路径安全、篡改矩阵 |
@@ -123,8 +123,8 @@ Expected：记录真实 passed/failed/skipped；除已确认规格与计划外�
 ```python
 def test_profile_requires_sorted_disjoint_tool_sets() -> None:
     payload = _signed_profile_payload(
-        delegated_actions=("owp.repo_read",),
-        reserved_tool_names=("owp.repo_read",),
+        delegated_actions=(_delegated_action("owp.repo_read"),),
+        reserved_decisions=(_reserved_decision("owp.repo_read"),),
     )
     with pytest.raises(ValidationError, match="disjoint"):
         HumanAgencyProfileV01.model_validate(payload)
@@ -150,12 +150,48 @@ Expected：导入失败或对象不存在，测试为 RED。
 `agency.py` 使用 `ProtocolModel` / `SignedProtocolModel`，模型字段固定为：
 
 ```python
+class DelegatedActionV01(ProtocolModel):
+    action_id: Digest64
+    tool_name: str
+    autonomy: Literal["delegated"]
+
+
+class ReservedDecisionV01(ProtocolModel):
+    decision_id: Digest64
+    decision_kind: Literal[
+        "scope_or_criteria_change",
+        "external_publication",
+        "external_communication",
+        "acceptance",
+        "payment_or_settlement",
+    ]
+    blocked_tools: tuple[str, ...]
+    required_role: Literal["Acceptor"]
+
+
+class EscalationConditionV01(ProtocolModel):
+    condition_code: Literal[
+        "reserved_decision_requested",
+        "scope_change_requested",
+        "evidence_incomplete",
+        "verifier_conflict",
+        "authorization_revoked",
+        "deadline_or_quota_exceeded",
+    ]
+
+
+class RevocationAndAppealPolicyV01(ProtocolModel):
+    revocation_mode: Literal["acceptor_signed_transition"]
+    appeal_mode: Literal["signed_request_then_acceptor_decision"]
+    appeal_roles: tuple[Literal["Developer", "Manager", "Verifier"], ...]
+
+
 class HumanAgencyProfileV01(SignedProtocolModel):
     _signed_domain = "human-agency-profile"
     schema_version: Literal["openworkproof-human-agency-profile/0.1"]
     profile_id: Digest64
     work_order_digest: Digest64
-    delegated_actions: tuple[str, ...]
+    delegated_actions: tuple[DelegatedActionV01, ...]
     reserved_decisions: tuple[ReservedDecisionV01, ...]
     escalation_conditions: tuple[EscalationConditionV01, ...]
     revocation_and_appeal: RevocationAndAppealPolicyV01
@@ -170,11 +206,13 @@ class AgencyProfileTransitionV01(SignedProtocolModel):
     schema_version: Literal["openworkproof-agency-profile-transition/0.1"]
     transition_id: Digest64
     work_order_digest: Digest64
-    previous_profile_id: Digest64
-    action: Literal["replace", "revoke"]
+    target_profile_id: Digest64
+    target_profile_digest: Digest64
+    transition: Literal["revoked", "superseded"]
     replacement_profile_id: Digest64 | None
-    reason_code: Literal["policy_update", "risk_change", "appeal_upheld", "manual_revoke"]
-    occurred_at: CanonicalUTCTime
+    replacement_profile_digest: Digest64 | None
+    reason_code: Literal["human_withdrawal", "scope_changed", "risk_changed", "correction"]
+    transitioned_at: CanonicalUTCTime
     nonce: Digest64
 
 
@@ -184,18 +222,28 @@ class AgencyAppealV01(SignedProtocolModel):
     appeal_id: Digest64
     work_order_digest: Digest64
     profile_id: Digest64
+    profile_digest: Digest64
     appellant_role: Literal["Manager", "Developer", "Verifier"]
     appellant_subject_id: Identifier
-    requested_tool_name: str | None
-    reason: Annotated[str, _strict_bounded_text(2048, "reason")]
-    submitted_at: CanonicalUTCTime
+    requested_change_digest: Digest64
+    reason_code: Literal[
+        "task_blocked",
+        "scope_mismatch",
+        "evidence_available",
+        "verifier_disagreement",
+    ]
+    created_at: CanonicalUTCTime
     nonce: Digest64
 ```
 
 辅助嵌套对象必须 `extra="forbid"`、immutable、UTF-8 sorted unique，并限制文本长度。
-`reserved_decisions` 可包含不映射工具的声明性条目，但 `blocked_tools` 中的每个值都
-必须是当前协议认识的 tool name。`profile_id`、`transition_id`、`appeal_id` 必须由
-不含自身 ID、digest、signature 的 canonical payload 唯一推导。
+`delegated_actions` 按 `tool_name` 排序且唯一；`reserved_decisions` 可包含不映射工具的
+声明性条目，但 `blocked_tools` 中的每个值都必须属于当前 WorkOrder `allowed_tools`。
+`appeal_roles` 必须固定为 `("Developer", "Manager", "Verifier")`，不得由调用者扩展。
+`profile_id`、`transition_id`、`appeal_id` 及 delegated/decision 子对象 ID 必须按设计
+§5 的独立 domain，由不含自身 ID、digest、signature 的 canonical payload 唯一推导。
+`requested_change_digest` 绑定 proposed delegated/reserved closed JSON；原始理由不进入
+协议真理。
 
 - [ ] **Step 4: 增加三个独立签名域**
 
@@ -236,7 +284,7 @@ git commit -m "feat: define human agency profile objects"
 
 - [ ] **Step 1: 写历史 RED 矩阵**
 
-覆盖 genesis、replace、revoke、缺 replacement、replacement digest 不一致、时间倒流、
+覆盖 genesis、supersede、revoke、缺 replacement、replacement digest 不一致、时间倒流、
 cycle、一个前驱两条 transition、多个 genesis、多终点、过期 profile。关键断言：
 
 ```python
@@ -269,8 +317,8 @@ def resolve_current_human_agency_profile(
 ) -> ResolvedAgencyProfile
 ```
 
-解析顺序必须由 signed graph 决定，不允许用最大时间戳兜底。`replace` 必须找到 exact
-replacement；`revoke` 必须 `replacement_profile_id is None` 且成为唯一终点。
+解析顺序必须由 signed graph 决定，不允许用最大时间戳兜底。`superseded` 必须找到 exact
+replacement id/digest；`revoked` 必须 replacement id/digest 均为 `None` 且成为唯一终点。
 
 - [ ] **Step 3: 运行测试与提交**
 
@@ -317,9 +365,17 @@ def test_reserved_action_is_denied_after_base_policy_allows() -> None:
 profile：
 
 ```python
-if request.tool_name in profile.reserved_tool_names:
+delegated_tool_names = frozenset(
+    action.tool_name for action in profile.delegated_actions
+)
+reserved_tool_names = frozenset(
+    tool_name
+    for decision in profile.reserved_decisions
+    for tool_name in decision.blocked_tools
+)
+if request.tool_name in reserved_tool_names:
     return AgencyPolicyDecision.deny("AGENCY_HUMAN_DECISION_REQUIRED")
-if request.tool_name not in profile.delegated_actions:
+if request.tool_name not in delegated_tool_names:
     return AgencyPolicyDecision.deny("AGENCY_ACTION_NOT_DELEGATED")
 return AgencyPolicyDecision.allow(base_decision)
 ```
@@ -350,7 +406,7 @@ git commit -m "feat: enforce human agency authorization intersection"
 
 覆盖：profile commit、transition commit、appeal commit、重复 nonce、重复 ID、错误 signer、
 错误 WorkOrder、before-commit 注入全表零写入、commit-ack loss exact readback、readback
-failure indeterminate、双线程同一前驱只有一个 replacement 成功、cleanup failure 不改已提交
+failure indeterminate、双线程同一 target 只有一个 supersession 成功、cleanup failure 不改已提交
 真相。
 
 - [ ] **Step 2: 以幂等方式增加三表**
@@ -369,22 +425,27 @@ CREATE TABLE human_agency_profiles_v01 (
 CREATE TABLE agency_profile_transitions_v01 (
     transition_id TEXT PRIMARY KEY,
     work_order_digest TEXT NOT NULL,
-    previous_profile_id TEXT NOT NULL UNIQUE,
+    target_profile_id TEXT NOT NULL UNIQUE,
+    target_profile_digest TEXT NOT NULL,
     replacement_profile_id TEXT,
-    action TEXT NOT NULL,
+    replacement_profile_digest TEXT,
+    transition TEXT NOT NULL,
     transition_digest TEXT NOT NULL UNIQUE,
     transition_json TEXT NOT NULL,
     nonce TEXT NOT NULL UNIQUE,
-    occurred_at TEXT NOT NULL
+    transitioned_at TEXT NOT NULL
 );
 CREATE TABLE agency_appeals_v01 (
     appeal_id TEXT PRIMARY KEY,
     work_order_digest TEXT NOT NULL,
     profile_id TEXT NOT NULL,
+    profile_digest TEXT NOT NULL,
+    requested_change_digest TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
     appeal_digest TEXT NOT NULL UNIQUE,
     appeal_json TEXT NOT NULL,
     nonce TEXT NOT NULL UNIQUE,
-    submitted_at TEXT NOT NULL
+    created_at TEXT NOT NULL
 );
 ```
 
@@ -478,10 +539,10 @@ def execute_agency_protected_tool(
 `execute_authorized` 闭包只在 profile decision allowed 后调用。首版不做通用动态反射
 dispatcher，避免把所有 MCP 参数复制一遍。
 
-- [ ] **Step 3: 完成 replace/revoke/appeal 全闭环**
+- [ ] **Step 3: 完成 supersede/revoke/appeal 全闭环**
 
 同一测试依次证明：repo-read allowed；apply-patch reserved；appeal 后仍 reserved；Acceptor
-replacement 后 apply-patch allowed；revoke 后所有 protected tool 返回
+supersession 后 apply-patch allowed；revoke 后所有 protected tool 返回
 `AGENCY_PROFILE_REQUIRED`。同时回归旧 `execute_repo_read`，证明未选择新入口时行为不变。
 
 - [ ] **Step 4: 运行测试与提交**
@@ -723,7 +784,7 @@ appeal 不授权、Acceptor 绑定、fork/cycle fail closed、bundle 无私钥�
 - [ ] WorkOrder ∩ Grant ∩ profile 三层均允许才执行。
 - [ ] reserved tool 在 handler 前拒绝，handler 0 calls，全表零写入。
 - [ ] appeal 可验证但不授权；只有 Acceptor transition 改变 current profile。
-- [ ] replace/revoke 链对 fork、cycle、缺失对象、多终点和时间倒流 fail closed。
+- [ ] supersede/revoke 链对 fork、cycle、缺失对象、多终点和时间倒流 fail closed。
 - [ ] COMMIT-ACK 丢失可 exact readback；不确定时显式 indeterminate。
 - [ ] bundle 无私钥、可离线验证、确定性、抗路径与篡改攻击。
 - [ ] 中英文文档不宣称法律结论、客户采用、付款、托管或市场已成立。
