@@ -563,16 +563,17 @@ evidence recovery 或业务写入之前完成：加载 authority WorkOrder → �
 def execute_agency_protected_tool(
     ledger_path: Path,
     *,
-    tool_name: Literal[
-        "owp.repo_read",
-        "owp.apply_patch",
-        "owp.run_tests",
-        "owp.rollback_patch",
-    ],
-    now: datetime,
+    context: AuthorizationContext,
+    request: AgentRequest,
+    request_arguments: ToolRequestArguments,
     execute_authorized: Callable[[], ActionReceiptEnvelope],
+    execution_facts: ProspectiveExecutionFacts | None = None,
 ) -> ActionReceiptEnvelope
 ```
+
+不得额外接收调用方自报的 `tool_name` 或 `now`：工具名来自签名 request，时间来自
+`context.transaction_time`。包装器先核对 ledger 权威 WorkOrder 与 context，再加载完整
+history 并授权；只允许上述四个 tool name，其他工具 fail closed。
 
 `execute_authorized` 闭包只在 profile decision allowed 后调用。首版不做通用动态反射
 dispatcher，避免把所有 MCP 参数复制一遍。

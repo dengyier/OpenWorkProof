@@ -339,6 +339,14 @@ authorize_tool_call_with_agency_profile(
 `owp.rollback_patch`。Manager direct tools、acceptance 事务和外部副作用工具不在
 本切片中被重新实现。
 
+受保护执行包装器不接受独立的 `tool_name` 或 `now` 参数：工具名只能来自已签名的
+`AgentRequest.tool_name`，时间只能来自已构造的
+`AuthorizationContext.transaction_time`，避免调用方制造两套授权事实。包装器接收
+`context`、`request`、`request_arguments`、可选 `execution_facts` 与零参数
+`execute_authorized` 闭包；它从 ledger 加载完整 profile history，调用上述授权入口，
+只有 allow 后才执行闭包。ledger 中的权威 WorkOrder 必须与 `context.work_order`
+一致。
+
 ## 8. 账本与离线验证
 
 新增三组 append-only 表：
