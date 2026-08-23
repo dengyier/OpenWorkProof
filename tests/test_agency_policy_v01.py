@@ -1,0 +1,272 @@
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass
+from typing import Any
+
+import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from conftest import SHA256_A, SHA256_B, SHA256_C
+from openworkproof.agency import (
+    AgencyProfileHistory,
+    HumanAgencyProfileV01,
+    delegated_action_id,
+    human_agency_profile_id,
+    reserved_decision_id,
+)
+from openworkproof.agency_policy import (
+    AGENCY_ACTION_NOT_DELEGATED,
+    AGENCY_HUMAN_DECISION_REQUIRED,
+    authorize_tool_call_with_agency_profile,
+)
+from openworkproof.models import (
+    ApplyPatchArguments,
+    RepoReadArguments,
+    WorkOrder,
+)
+from openworkproof.signing import sign_payload
+
+from test_policy import _prospective_context, _signed_tool_request
+
+
+@dataclass(frozen=True)
+class _PolicyCase:
+    context: Any
+    developer_grant: Any
+    work_order: WorkOrder
+    keys: dict[str, tuple[Ed25519PrivateKey, dict[str, str]]]
+
+
+@pytest.fixture
+def policy_case(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+) -> _PolicyCase:
+    context, developer = _prospective_context(
+        tmp_path=tmp_path,
+        label="agency-policy",
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+    )
+    return _PolicyCase(
+        context=context,
+        developer_grant=developer,
+        work_order=signed_work_order,
+        keys=copy.deepcopy(ephemeral_role_keys),
+    )
+
+
+def _delegated(tool: str) -> dict[str, Any]:
+    body = {"tool_name": tool, "autonomy": "delegated"}
+    return {"action_id": delegated_action_id(body), **body}
+
+
+def _reserved(kind: str, blocked: tuple[str, ...]) -> dict[str, Any]:
+    body = {
+        "decision_kind": kind,
+        "blocked_tools": list(blocked),
+        "required_role": "Acceptor",
+    }
+    return {"decision_id": reserved_decision_id(body), **body}
+
+
+def _mk_profile(
+    case: _PolicyCase,
+    nonce: str,
+    *,
+    delegated: tuple[str, ...] = (),
+    reserved: tuple[tuple[str, tuple[str, ...]], ...] = (),
+    work_order_digest: str | None = None,
+    expires_at: str = "2026-01-01T23:59:59Z",
+    signer: str = "Acceptor",
+) -> HumanAgencyProfileV01:
+    payload = {
+        "schema_version": "openworkproof-human-agency-profile/0.1",
+        "work_order_digest": work_order_digest or case.work_order.digest,
+        "delegated_actions": [_delegated(tool) for tool in delegated],
+        "reserved_decisions": [
+            _reserved(kind, blocked) for kind, blocked in reserved
+        ],
+        "escalation_conditions": [{"condition_code": "reserved_decision_requested"}],
+        "revocation_and_appeal": {
+            "revocation_mode": "acceptor_signed_transition",
+            "appeal_mode": "signed_request_then_acceptor_decision",
+            "appeal_roles": ["Developer", "Manager", "Verifier"],
+        },
+        "valid_from": "2026-01-01T00:00:01Z",
+        "expires_at": expires_at,
+        "issued_at": "2026-01-01T00:00:00Z",
+        "nonce": nonce,
+    }
+    payload["profile_id"] = human_agency_profile_id(payload)
+    return HumanAgencyProfileV01.model_validate(
+        sign_payload("human-agency-profile", payload, case.keys[signer][0])
+    )
+
+
+def _history(
+    profiles: tuple[HumanAgencyProfileV01, ...] = (),
+) -> AgencyProfileHistory:
+    return AgencyProfileHistory(profiles=profiles, transitions=())
+
+
+def _authorize(
+    case: _PolicyCase,
+    history: AgencyProfileHistory,
+    arguments: Any,
+) -> Any:
+    request = _signed_tool_request(
+        case.work_order,
+        case.developer_grant,
+        arguments,
+        case.keys,
+        case.context.transaction_time,
+    )
+    return authorize_tool_call_with_agency_profile(
+        case.context,
+        history,
+        request,
+        arguments,
+    )
+
+
+def test_all_three_layers_allow_repo_read(policy_case: _PolicyCase) -> None:
+    profile = _mk_profile(policy_case, SHA256_A, delegated=("owp.repo_read",))
+    decision = _authorize(
+        policy_case, _history((profile,)), RepoReadArguments(path="src")
+    )
+    assert decision.allowed is True
+
+
+def test_reserved_action_is_denied_after_base_policy_allows(
+    policy_case: _PolicyCase,
+) -> None:
+    profile = _mk_profile(
+        policy_case,
+        SHA256_A,
+        delegated=("owp.repo_read",),
+        reserved=(("scope_or_criteria_change", ("owp.apply_patch",)),),
+    )
+    decision = _authorize(
+        policy_case,
+        _history((profile,)),
+        ApplyPatchArguments(
+            target_paths=("src/app.py",),
+            patch_digest=SHA256_B,
+            patch_size_bytes=1,
+        ),
+    )
+    assert decision.allowed is False
+    assert decision.error_code == AGENCY_HUMAN_DECISION_REQUIRED
+
+
+def test_undelegated_action_is_denied(policy_case: _PolicyCase) -> None:
+    profile = _mk_profile(policy_case, SHA256_A, delegated=("owp.repo_read",))
+    decision = _authorize(
+        policy_case,
+        _history((profile,)),
+        ApplyPatchArguments(
+            target_paths=("src/app.py",),
+            patch_digest=SHA256_B,
+            patch_size_bytes=1,
+        ),
+    )
+    assert decision.allowed is False
+    assert decision.error_code == AGENCY_ACTION_NOT_DELEGATED
+
+
+def test_declarative_reserved_decision_does_not_block_unrelated_tool(
+    policy_case: _PolicyCase,
+) -> None:
+    profile = _mk_profile(
+        policy_case,
+        SHA256_A,
+        delegated=("owp.repo_read",),
+        reserved=(("payment_or_settlement", ()),),
+    )
+    decision = _authorize(
+        policy_case, _history((profile,)), RepoReadArguments(path="src")
+    )
+    assert decision.allowed is True
+
+
+def test_missing_profile_fails_closed(policy_case: _PolicyCase) -> None:
+    decision = _authorize(
+        policy_case, _history(), RepoReadArguments(path="src")
+    )
+    assert decision.allowed is False
+    assert decision.error_code == "AGENCY_PROFILE_REQUIRED"
+
+
+def test_invalid_history_fails_closed(policy_case: _PolicyCase) -> None:
+    first = _mk_profile(policy_case, SHA256_A, delegated=("owp.repo_read",))
+    second = _mk_profile(policy_case, SHA256_B, delegated=("owp.repo_read",))
+    decision = _authorize(
+        policy_case, _history((first, second)), RepoReadArguments(path="src")
+    )
+    assert decision.allowed is False
+    assert decision.error_code == "AGENCY_PROFILE_HISTORY_INVALID"
+
+
+def test_expired_profile_fails_closed(policy_case: _PolicyCase) -> None:
+    profile = _mk_profile(
+        policy_case,
+        SHA256_A,
+        delegated=("owp.repo_read",),
+        expires_at="2026-01-01T00:00:04Z",
+    )
+    decision = _authorize(
+        policy_case, _history((profile,)), RepoReadArguments(path="src")
+    )
+    assert decision.allowed is False
+    assert decision.error_code == "AGENCY_PROFILE_EXPIRED"
+
+
+def test_binding_invalid_fails_closed(policy_case: _PolicyCase) -> None:
+    profile = _mk_profile(
+        policy_case,
+        SHA256_A,
+        delegated=("owp.repo_read",),
+        work_order_digest=SHA256_C,
+    )
+    decision = _authorize(
+        policy_case, _history((profile,)), RepoReadArguments(path="src")
+    )
+    assert decision.allowed is False
+    assert decision.error_code == "AGENCY_PROFILE_BINDING_INVALID"
+
+
+def test_base_policy_denial_takes_precedence(
+    tmp_path,
+    signed_work_order,
+    signed_root_grant,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    capability_context, capability_grant = _prospective_context(
+        tmp_path=tmp_path,
+        label="agency-policy-precedence",
+        signed_work_order=signed_work_order,
+        signed_root_grant=signed_root_grant,
+        ephemeral_role_keys=ephemeral_role_keys,
+        fixed_now=fixed_now,
+        child_updates={"allowed_tools": ["owp.apply_patch"]},
+    )
+    case = _PolicyCase(
+        context=capability_context,
+        developer_grant=capability_grant,
+        work_order=signed_work_order,
+        keys=copy.deepcopy(ephemeral_role_keys),
+    )
+    profile = _mk_profile(case, SHA256_A, delegated=("owp.repo_read",))
+    decision = _authorize(
+        case, _history((profile,)), RepoReadArguments(path="src")
+    )
+    assert decision.allowed is False
+    assert decision.error_code == "CAPABILITY_DENIED"
