@@ -11,7 +11,9 @@ WorkOrder role/subject/key the object declares.
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Literal, Mapping
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Literal, Mapping, Sequence
 
 import rfc8785
 from pydantic import model_validator
@@ -32,22 +34,43 @@ from openworkproof.signing import (
 
 
 __all__ = [
+    "AGENCY_PROFILE_BINDING_INVALID",
+    "AGENCY_PROFILE_EXPIRED",
+    "AGENCY_PROFILE_HISTORY_INVALID",
+    "AGENCY_PROFILE_REQUIRED",
     "AgencyAppealV01",
+    "AgencyProfileHistory",
+    "AgencyProfileHistoryError",
     "AgencyProfileTransitionV01",
     "DelegatedActionV01",
     "EscalationConditionV01",
     "HumanAgencyProfileV01",
     "ReservedDecisionV01",
+    "ResolvedAgencyProfile",
     "RevocationAndAppealPolicyV01",
     "agency_appeal_id",
     "agency_profile_transition_id",
     "delegated_action_id",
     "human_agency_profile_id",
     "reserved_decision_id",
+    "resolve_current_human_agency_profile",
     "verify_agency_appeal",
     "verify_agency_profile_transition",
     "verify_human_agency_profile",
 ]
+
+AGENCY_PROFILE_REQUIRED = "AGENCY_PROFILE_REQUIRED"
+AGENCY_PROFILE_HISTORY_INVALID = "AGENCY_PROFILE_HISTORY_INVALID"
+AGENCY_PROFILE_EXPIRED = "AGENCY_PROFILE_EXPIRED"
+AGENCY_PROFILE_BINDING_INVALID = "AGENCY_PROFILE_BINDING_INVALID"
+
+
+class AgencyProfileHistoryError(RuntimeError):
+    """The signed profile history cannot resolve to one current profile."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 _AgencyToolName = Literal[
     "owp.activate_root_grant",
@@ -437,4 +460,180 @@ def verify_agency_appeal(
         "agency-appeal",
         appeal.model_dump(mode="json"),
         public_key,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedAgencyProfile:
+    status: Literal["active", "revoked"]
+    current_profile: HumanAgencyProfileV01 | None
+    ordered_profile_ids: tuple[str, ...]
+    ordered_transition_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AgencyProfileHistory:
+    profiles: tuple[HumanAgencyProfileV01, ...]
+    transitions: tuple[AgencyProfileTransitionV01, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.profiles) is not tuple or type(self.transitions) is not tuple:
+            raise AgencyProfileHistoryError(
+                AGENCY_PROFILE_HISTORY_INVALID,
+                "agency profile history collections must be exact tuples",
+            )
+        if any(
+            not isinstance(profile, HumanAgencyProfileV01)
+            for profile in self.profiles
+        ) or any(
+            not isinstance(transition, AgencyProfileTransitionV01)
+            for transition in self.transitions
+        ):
+            raise AgencyProfileHistoryError(
+                AGENCY_PROFILE_HISTORY_INVALID,
+                "agency profile history contains a malformed entry",
+            )
+
+
+def resolve_current_human_agency_profile(
+    work_order: WorkOrder,
+    profiles: Sequence[HumanAgencyProfileV01],
+    transitions: Sequence[AgencyProfileTransitionV01],
+    *,
+    now: datetime,
+) -> ResolvedAgencyProfile:
+    """Resolve the unique current profile from a signed append-only history.
+
+    The resolution is decided by the signed graph only: superseded edges are
+    followed to a unique terminal, revoked edges close the chain, and any
+    fork, cycle, missing replacement, digest mismatch, time reversal, or
+    multiple genesis fails closed. Timestamps never select a "latest" profile.
+    """
+
+    if not isinstance(work_order, WorkOrder):
+        raise AgencyProfileHistoryError(
+            AGENCY_PROFILE_HISTORY_INVALID, "work order is malformed"
+        )
+    profile_tuple = tuple(profiles)
+    transition_tuple = tuple(transitions)
+    if any(
+        not isinstance(profile, HumanAgencyProfileV01)
+        for profile in profile_tuple
+    ) or any(
+        not isinstance(transition, AgencyProfileTransitionV01)
+        for transition in transition_tuple
+    ):
+        raise AgencyProfileHistoryError(
+            AGENCY_PROFILE_HISTORY_INVALID, "agency profile history is malformed"
+        )
+
+    if not profile_tuple:
+        raise AgencyProfileHistoryError(
+            AGENCY_PROFILE_REQUIRED, "no human agency profile is available"
+        )
+
+    profiles_by_id: dict[str, HumanAgencyProfileV01] = {}
+    for profile in profile_tuple:
+        if profile.work_order_digest != work_order.digest:
+            raise AgencyProfileHistoryError(
+                AGENCY_PROFILE_BINDING_INVALID,
+                "agency profile is bound to a different WorkOrder",
+            )
+        if profile.profile_id in profiles_by_id:
+            raise AgencyProfileHistoryError(
+                AGENCY_PROFILE_HISTORY_INVALID,
+                "duplicate agency profile id",
+            )
+        profiles_by_id[profile.profile_id] = profile
+
+    outgoing: dict[str, AgencyProfileTransitionV01] = {}
+    replacement_targets: set[str] = set()
+    for transition in transition_tuple:
+        if transition.work_order_digest != work_order.digest:
+            raise AgencyProfileHistoryError(
+                AGENCY_PROFILE_BINDING_INVALID,
+                "agency profile transition is bound to a different WorkOrder",
+            )
+        target = profiles_by_id.get(transition.target_profile_id)
+        if target is None:
+            raise AgencyProfileHistoryError(
+                AGENCY_PROFILE_HISTORY_INVALID,
+                "transition targets an unknown profile",
+            )
+        if transition.target_profile_digest != target.digest:
+            raise AgencyProfileHistoryError(
+                AGENCY_PROFILE_HISTORY_INVALID,
+                "transition target digest does not match profile",
+            )
+        if transition.transitioned_at < target.issued_at:
+            raise AgencyProfileHistoryError(
+                AGENCY_PROFILE_HISTORY_INVALID,
+                "transition precedes the target profile issuance",
+            )
+        if transition.target_profile_id in outgoing:
+            raise AgencyProfileHistoryError(
+                AGENCY_PROFILE_HISTORY_INVALID,
+                "profile has multiple outgoing transitions",
+            )
+        outgoing[transition.target_profile_id] = transition
+        if transition.transition == "superseded":
+            replacement = profiles_by_id.get(transition.replacement_profile_id)
+            if replacement is None:
+                raise AgencyProfileHistoryError(
+                    AGENCY_PROFILE_HISTORY_INVALID,
+                    "superseded transition names a missing replacement",
+                )
+            if transition.replacement_profile_digest != replacement.digest:
+                raise AgencyProfileHistoryError(
+                    AGENCY_PROFILE_HISTORY_INVALID,
+                    "superseded transition replacement digest does not match",
+                )
+            replacement_targets.add(transition.replacement_profile_id)
+
+    genesis = [
+        profile
+        for profile in profile_tuple
+        if profile.profile_id not in replacement_targets
+    ]
+    if len(genesis) != 1:
+        raise AgencyProfileHistoryError(
+            AGENCY_PROFILE_HISTORY_INVALID,
+            "profile history must contain exactly one genesis profile",
+        )
+
+    ordered_profile_ids: list[str] = []
+    ordered_transition_ids: list[str] = []
+    current = genesis[0]
+    visited: set[str] = set()
+    while True:
+        if current.profile_id in visited:
+            raise AgencyProfileHistoryError(
+                AGENCY_PROFILE_HISTORY_INVALID,
+                "profile history contains a supersession cycle",
+            )
+        visited.add(current.profile_id)
+        ordered_profile_ids.append(current.profile_id)
+        transition = outgoing.get(current.profile_id)
+        if transition is None:
+            break
+        ordered_transition_ids.append(transition.transition_id)
+        if transition.transition == "revoked":
+            return ResolvedAgencyProfile(
+                status="revoked",
+                current_profile=None,
+                ordered_profile_ids=tuple(ordered_profile_ids),
+                ordered_transition_ids=tuple(ordered_transition_ids),
+            )
+        current = profiles_by_id[transition.replacement_profile_id]
+
+    if not current.valid_from <= now <= current.expires_at:
+        raise AgencyProfileHistoryError(
+            AGENCY_PROFILE_EXPIRED,
+            "agency profile is outside its validity window",
+        )
+    return ResolvedAgencyProfile(
+        status="active",
+        current_profile=current,
+        ordered_profile_ids=tuple(ordered_profile_ids),
+        ordered_transition_ids=tuple(ordered_transition_ids),
     )
