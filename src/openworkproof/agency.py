@@ -260,9 +260,18 @@ class HumanAgencyProfileV01(SignedProtocolModel):
         reserved_ids = tuple(
             decision.decision_id for decision in self.reserved_decisions
         )
+        if len(self.reserved_decisions) > 5:
+            raise ValueError("reserved_decisions must contain at most 5 entries")
         if not _is_utf8_sorted_unique(reserved_ids):
             raise ValueError(
                 "reserved_decisions must be decision_id sorted and unique"
+            )
+        reserved_kinds = tuple(
+            decision.decision_kind for decision in self.reserved_decisions
+        )
+        if len(set(reserved_kinds)) != len(reserved_kinds):
+            raise ValueError(
+                "reserved_decisions decision_kind values must be unique"
             )
         escalation_codes = tuple(
             condition.condition_code for condition in self.escalation_conditions

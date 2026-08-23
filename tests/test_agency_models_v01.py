@@ -326,6 +326,60 @@ def test_profile_rejects_unsorted_delegated_actions(agency_case: _AgencyCase) ->
         )
 
 
+def test_profile_rejects_duplicate_reserved_decision_kind(
+    agency_case: _AgencyCase,
+) -> None:
+    payload = _profile_payload(
+        agency_case,
+        delegated=("owp.repo_read",),
+        reserved=(
+            ("scope_or_criteria_change", ("owp.apply_patch",)),
+            ("scope_or_criteria_change", ("owp.run_tests",)),
+        ),
+    )
+    payload["reserved_decisions"].sort(
+        key=lambda decision: decision["decision_id"].encode("utf-8")
+    )
+    payload["profile_id"] = human_agency_profile_id(payload)
+    with pytest.raises(ValidationError, match="decision_kind.*unique"):
+        HumanAgencyProfileV01.model_validate(
+            sign_payload(
+                "human-agency-profile",
+                payload,
+                agency_case.keys["Acceptor"][0],
+            )
+        )
+
+
+def test_profile_rejects_more_than_five_reserved_decisions(
+    agency_case: _AgencyCase,
+) -> None:
+    payload = _profile_payload(
+        agency_case,
+        delegated=("owp.repo_read",),
+        reserved=(
+            ("scope_or_criteria_change", ()),
+            ("external_publication", ()),
+            ("external_communication", ()),
+            ("acceptance", ()),
+            ("payment_or_settlement", ()),
+            ("acceptance", ("owp.apply_patch",)),
+        ),
+    )
+    payload["reserved_decisions"].sort(
+        key=lambda decision: decision["decision_id"].encode("utf-8")
+    )
+    payload["profile_id"] = human_agency_profile_id(payload)
+    with pytest.raises(ValidationError, match="at most 5"):
+        HumanAgencyProfileV01.model_validate(
+            sign_payload(
+                "human-agency-profile",
+                payload,
+                agency_case.keys["Acceptor"][0],
+            )
+        )
+
+
 def test_profile_rejects_unknown_field(agency_case: _AgencyCase) -> None:
     payload = _profile_payload(agency_case, delegated=("owp.repo_read",))
     payload["extra"] = "unexpected"
