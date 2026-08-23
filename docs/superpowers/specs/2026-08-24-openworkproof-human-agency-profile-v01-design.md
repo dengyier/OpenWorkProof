@@ -375,9 +375,10 @@ recovery（B）仍不针对当前 profile 重新授权存储请求，但：受�
 action 时正常 finalize/return 且不重复调用 callback；受保护 caller 恢复 legacy-unbound 的
 CLOSED_RESULT/ABSENT 时，先发布 receipt、cleanup 并删除 journal，再抛
 `HandlerCoordinationError('AGENCY_UNBOUND_RECOVERY')`，使 truth 既不被滞留、也不被当作受
-保护结果返回；legacy caller 可恢复任一类。journal schema 迁移把紧邻前一个 unsigned-marker
-schema 作为 predecessor：空表按原样 drop/rebuild；非空且 marker 为 NULL 的行原子重建为
-unbound 并保留；非空且 marker 非 NULL 的行不可信（无签名），fail closed 且绝不伪造签名；更旧
+保护结果返回；legacy caller 可恢复任一类。journal schema 迁移把紧邻前一个可信无标记 schema
+（V3）与紧邻前一个 unsigned-marker schema（V4）作为 predecessor：空表按原样 drop/rebuild；
+非空的 V3 行原子重建为 unbound 并保留；V4 非空且 marker 为 NULL 的行原子重建为 unbound 并
+保留；V4 非空且 marker 非 NULL 的行不可信（无签名），fail closed 且绝不伪造签名；V2 及更旧
 schema 的非空行保持 fail closed。
 
 威胁边界：agency binding 只是 executor 锁内 recovery 协调的内部控制；ActionReceipt 本身并不

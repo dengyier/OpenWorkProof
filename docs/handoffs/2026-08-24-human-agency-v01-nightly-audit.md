@@ -92,9 +92,10 @@ run-tests journal 新增向后兼容的 Sidecar 签名 agency binding，防止 l
   时正常 finalize/return 且不重复调用 callback；受保护 caller 恢复 legacy-unbound 的
   CLOSED_RESULT/ABSENT 时，先发布 receipt、cleanup 并删除 journal，再抛
   `HandlerCoordinationError('AGENCY_UNBOUND_RECOVERY')`；legacy caller 可恢复任一类。
-- schema 迁移：空 predecessor 按原样 drop/rebuild；紧邻前一个 unsigned-marker schema 的非空
-  NULL-marker 行原子重建为 unbound 并保留；非空非 NULL-marker 行不可信，fail closed 且绝不
-  伪造签名；更旧 schema 的非空行保持 fail closed。
+- schema 迁移：空 predecessor 按原样 drop/rebuild；非空的 V3（紧邻前一个可信无标记 schema）
+  行原子重建为 unbound 并保留；V4（紧邻前一个 unsigned-marker schema）非空 NULL-marker 行
+  原子重建为 unbound 并保留；V4 非空非 NULL-marker 行不可信，fail closed 且绝不伪造签名；
+  V2 及更旧 schema 的非空行保持 fail closed。
 - 威胁边界：agency binding 是 executor 锁内 recovery 协调的内部控制，ActionReceipt 本身不
   携带 Agency 证明；不向外宣称受保护结果。
 

@@ -541,10 +541,11 @@ git commit -m "feat: commit human agency history atomically"
 > repo-read/rollback 存 NULL 并沿用 `openworkproof/authorization-ledger-prefix/v0.1`。受保护
 > caller 恢复 legacy-unbound 的 CLOSED_RESULT/ABSENT 时，先发布 receipt、cleanup、删除
 > journal，再抛 `HandlerCoordinationError('AGENCY_UNBOUND_RECOVERY')`；恢复 agency-bound 时不
-> 重复调用 callback。schema 对紧邻前一个 unsigned-marker schema 的非空 NULL-marker 行原子重建
-> 为 unbound 并保留，非空非 NULL-marker 行 fail closed（绝不伪造签名）。agency binding 是
-> recovery 内部控制，ActionReceipt 本身不携带 Agency 证明。Task5 Steps 1–3 仅在全部新增测试
-> 通过时保持勾选。
+> 重复调用 callback。schema 迁移：空表按原样 drop/rebuild；非空的 V3（紧邻前一个可信无标记
+> schema）行原子重建为 unbound 并保留；V4（紧邻前一个 unsigned-marker schema）非空
+> NULL-marker 行原子重建为 unbound 并保留，非空非 NULL-marker 行 fail closed（绝不伪造签名）；
+> V2 及更旧 schema 的非空行保持 fail closed。agency binding 是 recovery 内部控制，ActionReceipt
+> 本身不携带 Agency 证明。Task5 Steps 1–3 仅在全部新增测试通过时保持勾选。
 
 **Files:**
 - Create: `tests/test_agency_end_to_end_v01.py`

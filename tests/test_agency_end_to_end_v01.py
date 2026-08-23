@@ -1339,6 +1339,73 @@ def test_agency_binding_envelope_tamper_fails_closed(
         )
 
 
+def test_oversized_stored_agency_binding_json_recovery_fails_closed(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+) -> None:
+    """A stored agency-binding envelope larger than its byte budget is a
+    recovery tamper.
+
+    The oversized value stays canonical JSON, so only the size gate is in
+    play: recovery must fail closed (RECOVERY_REQUIRED) without re-running the
+    agency authorization callback and without publishing any receipt.
+    """
+    case = _run_tests_case(
+        tmp_path=tmp_path,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    _reserve_run_tests_execution_bound(
+        case,
+        agency_bound=True,
+        sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+    )
+    original = _stored_agency_binding_json(case["ledger_path"])
+    envelope = json.loads(original)
+    envelope["padding"] = "x" * 4096
+    oversized = rfc8785.dumps(envelope).decode("utf-8")
+    assert len(oversized.encode("utf-8")) > mcp_server._MAX_AGENCY_BINDING_BYTES
+    _overwrite_agency_binding_json(case["ledger_path"], oversized)
+    agency_authorize, invocations = _counting_agency_authorize(
+        case["ledger_path"], case["context"], case["request"]
+    )
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError, match="RECOVERY_REQUIRED"
+    ):
+        mcp_server.execute_run_tests(
+            case["ledger_path"],
+            evidence_root=case["evidence_root"],
+            context=case["context"],
+            request=case["request"],
+            request_arguments=case["arguments"],
+            execution_facts=case["facts"],
+            candidate_snapshot_request=_run_tests_snapshot_request(
+                case, tmp_path.resolve()
+            ),
+            sidecar_private_key=ephemeral_role_keys["Sidecar"][0],
+            execution_driver=_FakeRunTestsExecutionDriver(),
+            clock=lambda: fixed_now,
+            agency_authorize=agency_authorize,
+        )
+    assert invocations == []
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE nonce = ?",
+            (case["request"].nonce,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM handler_executions"
+        ).fetchone() == (1,)
+    finally:
+        connection.close()
+
+
 @pytest.mark.parametrize(
     "binding_json_kind",
     ("malformed", "borrowed", "edited"),
