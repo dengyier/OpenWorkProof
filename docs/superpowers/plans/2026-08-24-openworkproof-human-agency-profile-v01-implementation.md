@@ -102,7 +102,7 @@ required-live 或修改历史 candidate inventory 来换取绿灯。
 - Create: `src/openworkproof/agency.py`
 - Modify: `src/openworkproof/signing.py`
 
-- [ ] **Step 1: 记录干净基线并运行相邻测试**
+- [x] **Step 1: 记录干净基线并运行相邻测试**
 
 ```bash
 git status --short --branch
@@ -116,7 +116,7 @@ git rev-parse HEAD
 
 Expected：记录真实 passed/failed/skipped；除已确认规格与计划外没有未解释修改。
 
-- [ ] **Step 2: 写模型 RED 测试**
+- [x] **Step 2: 写模型 RED 测试**
 
 至少覆盖：
 
@@ -145,7 +145,7 @@ def test_appeal_signer_must_match_declared_role_and_subject() -> None:
 
 Expected：导入失败或对象不存在，测试为 RED。
 
-- [ ] **Step 3: 实现最小闭合模型**
+- [x] **Step 3: 实现最小闭合模型**
 
 `agency.py` 使用 `ProtocolModel` / `SignedProtocolModel`，模型字段固定为：
 
@@ -248,7 +248,7 @@ class AgencyAppealV01(SignedProtocolModel):
 `requested_change_digest` 绑定 proposed delegated/reserved closed JSON；原始理由不进入
 协议真理。
 
-- [ ] **Step 4: 增加三个独立签名域**
+- [x] **Step 4: 增加三个独立签名域**
 
 在 `signing.py` 的 v0.1 canonical/signed domain 中仅追加：
 
@@ -260,13 +260,13 @@ class AgencyAppealV01(SignedProtocolModel):
 
 不改变旧对象的 canonical bytes。补快照断言，确认既有 WorkOrder digest 不变。
 
-- [ ] **Step 5: 实现 WorkOrder 绑定验签**
+- [x] **Step 5: 实现 WorkOrder 绑定验签**
 
 规则：profile 与 transition 只接受 WorkOrder `Acceptor` key；appeal 只接受声明的
 Manager/Developer/Verifier 且 subject/key 三者一致；所有对象必须 exact
 `work_order_digest`，签名、digest、ID、时间窗均有效。
 
-- [ ] **Step 6: 运行测试与提交**
+- [x] **Step 6: 运行测试与提交**
 
 ```bash
 ./.venv/bin/python -m pytest -q tests/test_agency_models_v01.py tests/test_policy.py
@@ -285,7 +285,7 @@ git commit -m "feat: define human agency profile objects"
 - Create: `tests/test_agency_history_v01.py`
 - Modify: `src/openworkproof/agency.py`
 
-- [ ] **Step 1: 写历史 RED 矩阵**
+- [x] **Step 1: 写历史 RED 矩阵**
 
 覆盖 genesis、supersede、revoke、缺 replacement、replacement digest 不一致、时间倒流、
 cycle、一个前驱两条 transition、多个 genesis、多终点、过期 profile。关键断言：
@@ -300,7 +300,7 @@ def test_invalid_history_never_selects_latest_by_timestamp(mutation: str) -> Non
         resolve_current_human_agency_profile(*_mutated_history(mutation))
 ```
 
-- [ ] **Step 2: 实现纯函数 resolver**
+- [x] **Step 2: 实现纯函数 resolver**
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -329,7 +329,7 @@ def resolve_current_human_agency_profile(
 解析顺序必须由 signed graph 决定，不允许用最大时间戳兜底。`superseded` 必须找到 exact
 replacement id/digest；`revoked` 必须 replacement id/digest 均为 `None` 且成为唯一终点。
 
-- [ ] **Step 3: 运行测试与提交**
+- [x] **Step 3: 运行测试与提交**
 
 ```bash
 ./.venv/bin/python -m pytest -q \
@@ -349,7 +349,7 @@ git commit -m "feat: resolve human agency profile history"
 - Create: `src/openworkproof/agency_policy.py`
 - Create: `tests/test_agency_policy_v01.py`
 
-- [ ] **Step 1: 写纯策略 RED 测试**
+- [x] **Step 1: 写纯策略 RED 测试**
 
 矩阵至少包含：profile 缺失、history invalid、profile 过期、work-order binding 错误、
 reserved tool、未委托 tool、三层都允许、appeal 存在但仍拒绝、声明性保留项不误伤
@@ -367,7 +367,7 @@ def test_reserved_action_is_denied_after_base_policy_allows() -> None:
     assert decision.error_code == "AGENCY_HUMAN_DECISION_REQUIRED"
 ```
 
-- [ ] **Step 2: 实现组合器，不复制基础授权逻辑**
+- [x] **Step 2: 实现组合器，不复制基础授权逻辑**
 
 实现签名与设计 §7 保持一致：
 
@@ -413,7 +413,7 @@ return base_decision
 决定对象复用现有闭合 `PolicyDecision`，reason 使用固定字面量，不进行自由文本推理。
 缺失、invalid、expired、binding invalid 的 history 分别稳定映射到计划 §0 的四个错误码。
 
-- [ ] **Step 3: 运行测试与提交**
+- [x] **Step 3: 运行测试与提交**
 
 ```bash
 ./.venv/bin/python -m pytest -q tests/test_agency_policy_v01.py tests/test_policy.py
@@ -433,14 +433,14 @@ git commit -m "feat: enforce human agency authorization intersection"
 - Create: `tests/test_agency_ledger_v01.py`
 - Modify: `src/openworkproof/evidence.py`
 
-- [ ] **Step 1: 写事务 RED 测试**
+- [x] **Step 1: 写事务 RED 测试**
 
 覆盖：profile commit、transition commit、appeal commit、重复 nonce、重复 ID、错误 signer、
 错误 WorkOrder、before-commit 注入全表零写入、commit-ack loss exact readback、readback
 failure indeterminate、双线程同一 target 只有一个 supersession 成功、cleanup failure 不改已提交
 真相。
 
-- [ ] **Step 2: 以幂等方式增加三表**
+- [x] **Step 2: 以幂等方式增加三表**
 
 在现有 `_SCHEMA` 增加：
 
@@ -487,7 +487,7 @@ CREATE TABLE agency_appeals_v01 (
 `committed_at` 操作时间；nonce 在对象类型内唯一。`committed_at` 不进入签名对象或
 离线协议真理，只用于账本运维追踪。不得用 update/delete 表示替换或撤销。
 
-- [ ] **Step 3: 实现三类 commit 与只读 load**
+- [x] **Step 3: 实现三类 commit 与只读 load**
 
 公开函数：
 
@@ -504,12 +504,12 @@ load_agency_appeals(ledger_path, work_order_digest)
 模式。COMMIT 应答丢失后只有 exact committed truth 才抛带 committed payload 的
 `AgencyCommittedError`；无法确认则 `AgencyCommitIndeterminateError`。
 
-- [ ] **Step 4: 验证零写入与并发原子性**
+- [x] **Step 4: 验证零写入与并发原子性**
 
 before-COMMIT 故障前后对 `sqlite_master` 中全部 user table 做有序快照，不只检查新表。
 并发测试不得依赖 sleep 判胜，必须断言唯一签名链终点。
 
-- [ ] **Step 5: 运行测试与提交**
+- [x] **Step 5: 运行测试与提交**
 
 ```bash
 ./.venv/bin/python -m pytest -q \
@@ -526,6 +526,12 @@ git commit -m "feat: commit human agency history atomically"
 ---
 
 ## Task 5：新增 opt-in 受保护执行入口
+
+> **2026-08-24 安全复核前置条件：** 不得按锁外“先 profile 判定、后调用 executor”的
+> 闭包包装器直接实现。现有 repo-read/run-tests/rollback executor 在内部持有 target lock，
+> 且当前没有 `execute_apply_patch`。Task 5 必须先把 profile 判定放入既有 executor 的同一
+> 锁域，并明确 apply-patch 的真实执行入口；否则会留下判定后撤销的 TOCTOU 窗口或重复
+> 获取同一锁。该前置条件解决前，Task 5 保持未完成。
 
 **Files:**
 - Create: `tests/test_agency_end_to_end_v01.py`
@@ -605,6 +611,12 @@ git commit -m "feat: protect agent execution with human agency profiles"
 ---
 
 ## Task 6：导出最小离线验证 bundle
+
+> **2026-08-24 规格复核前置条件：** 设计 §8 要求 bundle 同时包含受 profile 约束的
+> request/decision/receipt，而本任务 Step 3 又把允许文件限定为 WorkOrder、profiles、
+> transitions、appeals 与 manifest；两者目前冲突。还需冻结验证时钟的可信来源，否则
+> active/expired 结果可被调用方选择的时间改变。两项澄清完成前，不生成声称闭合的离线
+> bundle。
 
 **Files:**
 - Create: `src/openworkproof/agency_bundle.py`
