@@ -241,7 +241,8 @@ class AgencyAppealV01(SignedProtocolModel):
 声明性条目，但 `blocked_tools` 中的每个值都必须属于当前 WorkOrder `allowed_tools`。
 `appeal_roles` 必须固定为 `("Developer", "Manager", "Verifier")`，不得由调用者扩展。
 `profile_id`、`transition_id`、`appeal_id` 及 delegated/decision 子对象 ID 必须按设计
-§5 的独立 domain，由不含自身 ID、digest、signature 的 canonical payload 唯一推导。
+§5 的独立 domain，由不含自身 ID、digest、signature 的 canonical payload 唯一推导；
+其中 `decision_id` domain 固定为 `openworkproof/reserved-decision/v0.1`。
 `requested_change_digest` 绑定 proposed delegated/reserved closed JSON；原始理由不进入
 协议真理。
 
@@ -308,6 +309,12 @@ class ResolvedAgencyProfile:
     ordered_transition_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class AgencyProfileHistory:
+    profiles: tuple[HumanAgencyProfileV01, ...]
+    transitions: tuple[AgencyProfileTransitionV01, ...]
+
+
 def resolve_current_human_agency_profile(
     work_order: WorkOrder,
     profiles: Sequence[HumanAgencyProfileV01],
@@ -348,12 +355,11 @@ reserved tool、未委托 tool、三层都允许、appeal 存在但仍拒绝、�
 
 ```python
 def test_reserved_action_is_denied_after_base_policy_allows() -> None:
-    decision = authorize_agency_protected_tool_call(
-        context=case.context,
-        request=case.apply_patch_request,
-        arguments=case.apply_patch_arguments,
-        profile=case.profile,
-        now=case.now,
+    decision = authorize_tool_call_with_agency_profile(
+        case.context,
+        case.profile_history,
+        case.apply_patch_request,
+        case.apply_patch_arguments,
     )
     assert decision.allowed is False
     assert decision.error_code == "AGENCY_HUMAN_DECISION_REQUIRED"
@@ -361,8 +367,20 @@ def test_reserved_action_is_denied_after_base_policy_allows() -> None:
 
 - [ ] **Step 2: 实现组合器，不复制基础授权逻辑**
 
-先调用现有 `authorize_tool_call`。基础策略拒绝时原样返回；基础策略允许后才应用
-profile：
+实现签名与设计 §7 保持一致：
+
+```python
+def authorize_tool_call_with_agency_profile(
+    context: AuthorizationContext,
+    profile_history: AgencyProfileHistory,
+    request: AgentRequest,
+    request_arguments: ToolRequestArguments,
+    execution_facts: ProspectiveExecutionFacts | None = None,
+) -> PolicyDecision
+```
+
+先调用现有 `authorize_tool_call`。基础策略拒绝时原样返回；基础策略允许后，调用
+Task 2 resolver 从完整 history 解析唯一 current profile，再应用 profile：
 
 ```python
 delegated_tool_names = frozenset(
@@ -374,13 +392,24 @@ reserved_tool_names = frozenset(
     for tool_name in decision.blocked_tools
 )
 if request.tool_name in reserved_tool_names:
-    return AgencyPolicyDecision.deny("AGENCY_HUMAN_DECISION_REQUIRED")
+    return PolicyDecision(
+        allowed=False,
+        decision="deny",
+        error_code="AGENCY_HUMAN_DECISION_REQUIRED",
+        reason="human agency profile reserves this decision",
+    )
 if request.tool_name not in delegated_tool_names:
-    return AgencyPolicyDecision.deny("AGENCY_ACTION_NOT_DELEGATED")
-return AgencyPolicyDecision.allow(base_decision)
+    return PolicyDecision(
+        allowed=False,
+        decision="deny",
+        error_code="AGENCY_ACTION_NOT_DELEGATED",
+        reason="human agency profile does not delegate this action",
+    )
+return base_decision
 ```
 
-决定对象必须闭合、确定性、无自由文本推理，并保留 base decision digest 供审计。
+决定对象复用现有闭合 `PolicyDecision`，reason 使用固定字面量，不进行自由文本推理。
+缺失、invalid、expired、binding invalid 的 history 分别稳定映射到计划 §0 的四个错误码。
 
 - [ ] **Step 3: 运行测试与提交**
 
@@ -520,7 +549,9 @@ assert _all_user_table_snapshot(ledger) == before
 
 - [ ] **Step 2: 先实现最小 protected dispatch**
 
-只支持首个闭环所需的 `owp.repo_read` 与 `owp.apply_patch`。入口在任何 handler reservation、
+支持设计 §7 的 `owp.repo_read`、`owp.apply_patch`、`owp.run_tests` 与
+`owp.rollback_patch`。首个深度闭环聚焦前两者，后两者至少覆盖 allow/deny 与默认兼容。
+入口在任何 handler reservation、
 evidence recovery 或业务写入之前完成：加载 authority WorkOrder → 解析 current profile →
 执行三层授权 → 拒绝或调用现有 executor。不要复制 executor 内部事务。
 
@@ -530,7 +561,12 @@ evidence recovery 或业务写入之前完成：加载 authority WorkOrder → �
 def execute_agency_protected_tool(
     ledger_path: Path,
     *,
-    tool_name: Literal["owp.repo_read", "owp.apply_patch"],
+    tool_name: Literal[
+        "owp.repo_read",
+        "owp.apply_patch",
+        "owp.run_tests",
+        "owp.rollback_patch",
+    ],
     now: datetime,
     execute_authorized: Callable[[], ActionReceiptEnvelope],
 ) -> ActionReceiptEnvelope

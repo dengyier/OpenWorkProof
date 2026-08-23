@@ -156,6 +156,9 @@ required_role: Acceptor
 - `acceptance`
 - `payment_or_settlement`
 
+`decision_id` 使用 domain `openworkproof/reserved-decision/v0.1` 对
+`decision_kind`、`blocked_tools` 与 `required_role` 的规范化 closed JSON 重算。
+
 本版只有映射到当前 WorkOrder `allowed_tools` 的 `blocked_tools` 才参与运行时强制。
 没有对应工具的决定（如外部付款）可以被 profile 声明并离线展示，但不得被宣传为
 OWP 已拦截现实支付。`blocked_tools` 可以为空；非空时必须排序、唯一并且全部属于
@@ -311,6 +314,10 @@ authorize_tool_call_with_agency_profile(
     execution_facts=None,
 ) -> PolicyDecision
 ```
+
+`profile_history` 是包含全部候选 profiles 与 transitions 的只读输入；调用方不得
+直接指定某个 profile 为“当前版本”。该入口必须调用 §6 的确定性 resolver，只有
+唯一 active profile 才能继续授权。
 
 执行顺序固定：
 
