@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -88,6 +89,27 @@ def _snapshot_all_tables(path: Path) -> dict[str, tuple[tuple[object, ...], ...]
             name: tuple(connection.execute(f'SELECT * FROM "{name}"'))
             for name in names
         }
+    finally:
+        connection.close()
+
+
+def _tamper_column(
+    ledger: Path,
+    table: str,
+    column: str,
+    value: object,
+    *,
+    where_column: str,
+    where_value: object,
+) -> None:
+    """Drop one immutable UPDATE trigger (test-only) and mutate a column."""
+    connection = evidence.connect_ledger(ledger)
+    try:
+        connection.execute(f"DROP TRIGGER IF EXISTS {table}_are_immutable_update")
+        connection.execute(
+            f"UPDATE {table} SET {column} = ? WHERE {where_column} = ?",
+            (value, where_value),
+        )
     finally:
         connection.close()
 
@@ -518,8 +540,8 @@ def _inserted_profile_row(ledger: Path, profile: HumanAgencyProfileV01) -> None:
             """
             INSERT INTO human_agency_profiles_v01 (
                 profile_id, work_order_digest, profile_digest,
-                profile_json, nonce, issued_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                profile_json, nonce, issued_at, committed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 profile.profile_id,
@@ -528,6 +550,7 @@ def _inserted_profile_row(ledger: Path, profile: HumanAgencyProfileV01) -> None:
                 evidence._canonical_json(profile.model_dump(mode="json")),
                 profile.nonce,
                 profile.model_dump(mode="json")["issued_at"],
+                "2026-01-01T00:00:00Z",
             ),
         )
         connection.execute("COMMIT")
@@ -544,7 +567,10 @@ def test_agency_tables_are_immutable_on_update_and_delete(
     second = _mk_profile(agency_case, SHA256_B)
     _inserted_profile_row(ledger_case["ledger"], second)
     transition = _mk_transition(
-        agency_case, target=profile, transition="revoked"
+        agency_case,
+        target=profile,
+        transition="superseded",
+        replacement=second,
     )
     commit_agency_profile_transition(ledger_case["ledger"], transition)
     appeal = _mk_appeal(agency_case, profile=profile)
@@ -587,3 +613,297 @@ def test_agency_tables_are_immutable_on_update_and_delete(
             )
     finally:
         connection.close()
+
+
+# --- P1-1: idempotency ordering ---
+
+
+def test_commit_exact_transition_retry_reports_committed_truth(
+    agency_case: _AgencyCase,
+    ledger_case: dict[str, Any],
+) -> None:
+    first = _mk_profile(agency_case, SHA256_A)
+    commit_human_agency_profile(ledger_case["ledger"], first)
+    transition = _mk_transition(agency_case, target=first, transition="revoked")
+    commit_agency_profile_transition(ledger_case["ledger"], transition)
+    with pytest.raises(AgencyCommittedError) as raised:
+        commit_agency_profile_transition(ledger_case["ledger"], transition)
+    assert raised.value.committed == transition
+
+
+def test_commit_exact_appeal_retry_reports_committed_truth(
+    agency_case: _AgencyCase,
+    ledger_case: dict[str, Any],
+) -> None:
+    profile = _mk_profile(agency_case, SHA256_A)
+    commit_human_agency_profile(ledger_case["ledger"], profile)
+    appeal = _mk_appeal(agency_case, profile=profile)
+    commit_agency_appeal(ledger_case["ledger"], appeal)
+    with pytest.raises(AgencyCommittedError) as raised:
+        commit_agency_appeal(ledger_case["ledger"], appeal)
+    assert raised.value.committed == appeal
+
+
+def test_commit_same_id_different_canonical_bytes_fails_closed(
+    agency_case: _AgencyCase,
+    ledger_case: dict[str, Any],
+) -> None:
+    profile = _mk_profile(agency_case, SHA256_A)
+    commit_human_agency_profile(ledger_case["ledger"], profile)
+    _tamper_column(
+        ledger_case["ledger"],
+        "human_agency_profiles_v01",
+        "profile_digest",
+        "f" * 64,
+        where_column="profile_id",
+        where_value=profile.profile_id,
+    )
+    with pytest.raises(AgencyLedgerError, match="id is already used"):
+        commit_human_agency_profile(ledger_case["ledger"], profile)
+
+
+# --- P1-2: final graph validity before COMMIT ---
+
+
+def test_commit_transition_that_creates_cycle_is_rejected_zero_write(
+    agency_case: _AgencyCase,
+    ledger_case: dict[str, Any],
+) -> None:
+    first = _mk_profile(agency_case, SHA256_A)
+    second = _mk_profile(agency_case, SHA256_B)
+    commit_human_agency_profile(ledger_case["ledger"], first)
+    commit_human_agency_profile(ledger_case["ledger"], second)
+    forward = _mk_transition(
+        agency_case,
+        target=first,
+        transition="superseded",
+        replacement=second,
+        nonce="1" * 64,
+    )
+    commit_agency_profile_transition(ledger_case["ledger"], forward)
+    back = _mk_transition(
+        agency_case,
+        target=second,
+        transition="superseded",
+        replacement=first,
+        nonce="2" * 64,
+    )
+    before = _snapshot_all_tables(ledger_case["ledger"])
+    with pytest.raises(AgencyLedgerError):
+        commit_agency_profile_transition(ledger_case["ledger"], back)
+    assert _snapshot_all_tables(ledger_case["ledger"]) == before
+
+
+def test_commit_transition_that_leaves_disconnected_profile_is_rejected_zero_write(
+    agency_case: _AgencyCase,
+    ledger_case: dict[str, Any],
+) -> None:
+    first = _mk_profile(agency_case, SHA256_A)
+    second = _mk_profile(agency_case, SHA256_B)
+    third = _mk_profile(agency_case, "c" * 64)
+    commit_human_agency_profile(ledger_case["ledger"], first)
+    commit_human_agency_profile(ledger_case["ledger"], second)
+    commit_human_agency_profile(ledger_case["ledger"], third)
+    transition = _mk_transition(
+        agency_case,
+        target=first,
+        transition="superseded",
+        replacement=second,
+        nonce="1" * 64,
+    )
+    before = _snapshot_all_tables(ledger_case["ledger"])
+    with pytest.raises(AgencyLedgerError):
+        commit_agency_profile_transition(ledger_case["ledger"], transition)
+    assert _snapshot_all_tables(ledger_case["ledger"]) == before
+
+
+# --- P1-3: row integrity ---
+
+
+def test_load_history_rejects_non_authoritative_work_order_digest(
+    agency_case: _AgencyCase,
+    ledger_case: dict[str, Any],
+) -> None:
+    profile = _mk_profile(agency_case, SHA256_A)
+    commit_human_agency_profile(ledger_case["ledger"], profile)
+    with pytest.raises(AgencyLedgerError, match="authoritative"):
+        load_agency_history(ledger_case["ledger"], "f" * 64)
+
+
+def test_load_history_rejects_tampered_profile_digest_column(
+    agency_case: _AgencyCase,
+    ledger_case: dict[str, Any],
+) -> None:
+    profile = _mk_profile(agency_case, SHA256_A)
+    commit_human_agency_profile(ledger_case["ledger"], profile)
+    _tamper_column(
+        ledger_case["ledger"],
+        "human_agency_profiles_v01",
+        "profile_digest",
+        "f" * 64,
+        where_column="profile_id",
+        where_value=profile.profile_id,
+    )
+    with pytest.raises(AgencyLedgerError):
+        load_agency_history(ledger_case["ledger"], profile.work_order_digest)
+
+
+def test_load_history_rejects_tampered_transition_target_digest_column(
+    agency_case: _AgencyCase,
+    ledger_case: dict[str, Any],
+) -> None:
+    first = _mk_profile(agency_case, SHA256_A)
+    commit_human_agency_profile(ledger_case["ledger"], first)
+    transition = _mk_transition(agency_case, target=first, transition="revoked")
+    commit_agency_profile_transition(ledger_case["ledger"], transition)
+    _tamper_column(
+        ledger_case["ledger"],
+        "agency_profile_transitions_v01",
+        "target_profile_digest",
+        "f" * 64,
+        where_column="transition_id",
+        where_value=transition.transition_id,
+    )
+    with pytest.raises(AgencyLedgerError):
+        load_agency_history(ledger_case["ledger"], first.work_order_digest)
+
+
+def test_load_appeals_rejects_tampered_appeal_profile_digest_column(
+    agency_case: _AgencyCase,
+    ledger_case: dict[str, Any],
+) -> None:
+    profile = _mk_profile(agency_case, SHA256_A)
+    commit_human_agency_profile(ledger_case["ledger"], profile)
+    appeal = _mk_appeal(agency_case, profile=profile)
+    commit_agency_appeal(ledger_case["ledger"], appeal)
+    _tamper_column(
+        ledger_case["ledger"],
+        "agency_appeals_v01",
+        "profile_digest",
+        "f" * 64,
+        where_column="appeal_id",
+        where_value=appeal.appeal_id,
+    )
+    with pytest.raises(AgencyLedgerError):
+        load_agency_appeals(ledger_case["ledger"], profile.work_order_digest)
+
+
+def test_commit_transition_reference_rejects_tampered_target_row(
+    agency_case: _AgencyCase,
+    ledger_case: dict[str, Any],
+) -> None:
+    first = _mk_profile(agency_case, SHA256_A)
+    commit_human_agency_profile(ledger_case["ledger"], first)
+    _tamper_column(
+        ledger_case["ledger"],
+        "human_agency_profiles_v01",
+        "profile_digest",
+        "f" * 64,
+        where_column="profile_id",
+        where_value=first.profile_id,
+    )
+    transition = _mk_transition(agency_case, target=first, transition="revoked")
+    before = _snapshot_all_tables(ledger_case["ledger"])
+    with pytest.raises(AgencyLedgerError):
+        commit_agency_profile_transition(ledger_case["ledger"], transition)
+    assert _snapshot_all_tables(ledger_case["ledger"]) == before
+
+
+# --- P1-4: committed_at ---
+
+
+def test_commit_populates_canonical_committed_at_column(
+    agency_case: _AgencyCase,
+    ledger_case: dict[str, Any],
+) -> None:
+    profile = _mk_profile(agency_case, SHA256_A)
+    commit_human_agency_profile(ledger_case["ledger"], profile)
+    connection = evidence.connect_ledger(ledger_case["ledger"])
+    try:
+        row = connection.execute(
+            "SELECT committed_at FROM human_agency_profiles_v01 "
+            "WHERE profile_id = ?",
+            (profile.profile_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row is not None
+    assert re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+        row[0],
+    )
+
+
+def test_load_rejects_noncanonical_committed_at(
+    agency_case: _AgencyCase,
+    ledger_case: dict[str, Any],
+) -> None:
+    profile = _mk_profile(agency_case, SHA256_A)
+    commit_human_agency_profile(ledger_case["ledger"], profile)
+    _tamper_column(
+        ledger_case["ledger"],
+        "human_agency_profiles_v01",
+        "committed_at",
+        "not-a-time",
+        where_column="profile_id",
+        where_value=profile.profile_id,
+    )
+    with pytest.raises(AgencyLedgerError, match="committed_at"):
+        load_agency_history(ledger_case["ledger"], profile.work_order_digest)
+
+
+# --- P2: public commit parse failures are ledger errors ---
+
+
+def test_commit_profile_rejects_malformed_payload_as_ledger_error(
+    ledger_case: dict[str, Any],
+) -> None:
+    with pytest.raises(AgencyLedgerError):
+        commit_human_agency_profile(ledger_case["ledger"], {"bad": "payload"})
+
+
+def test_commit_transition_rejects_malformed_payload_as_ledger_error(
+    ledger_case: dict[str, Any],
+) -> None:
+    with pytest.raises(AgencyLedgerError):
+        commit_agency_profile_transition(ledger_case["ledger"], None)
+
+
+def test_commit_appeal_rejects_malformed_payload_as_ledger_error(
+    ledger_case: dict[str, Any],
+) -> None:
+    with pytest.raises(AgencyLedgerError):
+        commit_agency_appeal(ledger_case["ledger"], None)
+
+
+# --- before-commit zero write across transition and appeal ---
+
+
+def test_before_commit_transition_fault_is_zero_write_across_all_tables(
+    agency_case: _AgencyCase,
+    ledger_case: dict[str, Any],
+) -> None:
+    first = _mk_profile(agency_case, SHA256_A)
+    commit_human_agency_profile(ledger_case["ledger"], first)
+    transition = _mk_transition(agency_case, target=first, transition="revoked")
+    before = _snapshot_all_tables(ledger_case["ledger"])
+    with pytest.raises(AgencyLedgerError):
+        commit_agency_profile_transition(
+            ledger_case["ledger"], transition, fault="before_commit"
+        )
+    assert _snapshot_all_tables(ledger_case["ledger"]) == before
+
+
+def test_before_commit_appeal_fault_is_zero_write_across_all_tables(
+    agency_case: _AgencyCase,
+    ledger_case: dict[str, Any],
+) -> None:
+    profile = _mk_profile(agency_case, SHA256_A)
+    commit_human_agency_profile(ledger_case["ledger"], profile)
+    appeal = _mk_appeal(agency_case, profile=profile)
+    before = _snapshot_all_tables(ledger_case["ledger"])
+    with pytest.raises(AgencyLedgerError):
+        commit_agency_appeal(
+            ledger_case["ledger"], appeal, fault="before_commit"
+        )
+    assert _snapshot_all_tables(ledger_case["ledger"]) == before

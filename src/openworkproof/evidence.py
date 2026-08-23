@@ -1191,7 +1191,8 @@ _SCHEMA = (
         profile_digest TEXT NOT NULL UNIQUE,
         profile_json TEXT NOT NULL,
         nonce TEXT NOT NULL UNIQUE,
-        issued_at TEXT NOT NULL
+        issued_at TEXT NOT NULL,
+        committed_at TEXT NOT NULL
     )
     """,
     """
@@ -1220,7 +1221,8 @@ _SCHEMA = (
         transition_digest TEXT NOT NULL UNIQUE,
         transition_json TEXT NOT NULL,
         nonce TEXT NOT NULL UNIQUE,
-        transitioned_at TEXT NOT NULL
+        transitioned_at TEXT NOT NULL,
+        committed_at TEXT NOT NULL
     )
     """,
     """
@@ -1248,7 +1250,8 @@ _SCHEMA = (
         appeal_digest TEXT NOT NULL UNIQUE,
         appeal_json TEXT NOT NULL,
         nonce TEXT NOT NULL UNIQUE,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        committed_at TEXT NOT NULL
     )
     """,
     """

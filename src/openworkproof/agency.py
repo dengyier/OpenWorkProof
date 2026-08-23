@@ -54,6 +54,7 @@ __all__ = [
     "human_agency_profile_id",
     "reserved_decision_id",
     "resolve_current_human_agency_profile",
+    "resolve_human_agency_profile_structure",
     "verify_agency_appeal",
     "verify_agency_profile_transition",
     "verify_human_agency_profile",
@@ -504,19 +505,22 @@ class AgencyProfileHistory:
             )
 
 
-def resolve_current_human_agency_profile(
+def resolve_human_agency_profile_structure(
     work_order: WorkOrder,
     profiles: Sequence[HumanAgencyProfileV01],
     transitions: Sequence[AgencyProfileTransitionV01],
-    *,
-    now: datetime,
 ) -> ResolvedAgencyProfile:
-    """Resolve the unique current profile from a signed append-only history.
+    """Resolve the signed append-only history structure without wall-clock expiry.
 
-    The resolution is decided by the signed graph only: superseded edges are
-    followed to a unique terminal, revoked edges close the chain, and any
-    fork, cycle, missing replacement, digest mismatch, time reversal, or
-    multiple genesis fails closed. Timestamps never select a "latest" profile.
+    This is the deterministic graph resolution shared by the public current
+    resolver and the ledger's pre-COMMIT structural validation. It follows
+    superseded edges to a unique terminal, closes revoked edges, and fails
+    closed on fork, cycle, missing replacement, digest mismatch, time reversal,
+    multiple genesis, or any disconnected/unreachable object. It deliberately
+    does not apply the terminal profile's validity window: expiry is an
+    authorization-time check applied by ``resolve_current_human_agency_profile``,
+    so structurally sound but expired histories can still be committed and
+    inspected as append-only truth.
     """
 
     if not isinstance(work_order, WorkOrder):
@@ -665,14 +669,38 @@ def resolve_current_human_agency_profile(
             ordered_transition_ids=tuple(ordered_transition_ids),
         )
 
-    if not current.valid_from <= now <= current.expires_at:
-        raise AgencyProfileHistoryError(
-            AGENCY_PROFILE_EXPIRED,
-            "agency profile is outside its validity window",
-        )
     return ResolvedAgencyProfile(
         status="active",
         current_profile=current,
         ordered_profile_ids=tuple(ordered_profile_ids),
         ordered_transition_ids=tuple(ordered_transition_ids),
     )
+
+
+def resolve_current_human_agency_profile(
+    work_order: WorkOrder,
+    profiles: Sequence[HumanAgencyProfileV01],
+    transitions: Sequence[AgencyProfileTransitionV01],
+    *,
+    now: datetime,
+) -> ResolvedAgencyProfile:
+    """Resolve the unique current profile from a signed append-only history.
+
+    The resolution is decided by the signed graph only: superseded edges are
+    followed to a unique terminal, revoked edges close the chain, and any
+    fork, cycle, missing replacement, digest mismatch, time reversal, or
+    multiple genesis fails closed. Timestamps never select a "latest" profile.
+    """
+
+    resolved = resolve_human_agency_profile_structure(
+        work_order, profiles, transitions
+    )
+    if resolved.status == "revoked":
+        return resolved
+    current = resolved.current_profile
+    if not current.valid_from <= now <= current.expires_at:
+        raise AgencyProfileHistoryError(
+            AGENCY_PROFILE_EXPIRED,
+            "agency profile is outside its validity window",
+        )
+    return resolved
