@@ -527,76 +527,100 @@ git commit -m "feat: commit human agency history atomically"
 
 ## Task 5：新增 opt-in 受保护执行入口
 
-> **2026-08-24 安全复核前置条件：** 不得按锁外“先 profile 判定、后调用 executor”的
-> 闭包包装器直接实现。现有 repo-read/run-tests/rollback executor 在内部持有 target lock，
-> 且当前没有 `execute_apply_patch`。Task 5 必须先把 profile 判定放入既有 executor 的同一
-> 锁域，并明确 apply-patch 的真实执行入口；否则会留下判定后撤销的 TOCTOU 窗口或重复
-> 获取同一锁。该前置条件解决前，Task 5 保持未完成。
+> **2026-08-24 Owner 决策：** 采用 executor 锁内 opt-in callback；不得使用锁外闭包。
+> 同时补真实 `execute_apply_patch`，完成前不声称 supersede 后 apply-patch 可安全执行。
 
 **Files:**
 - Create: `tests/test_agency_end_to_end_v01.py`
 - Modify: `src/openworkproof/mcp_server.py`
 - Modify: `src/openworkproof/agency_policy.py`
 
-- [ ] **Step 1: 写 handler 前拒绝的 RED 测试**
+- [ ] **Step 1: 拆出 profile-only 判定并写 RED 测试**
 
-使用真实初始化 ledger 与现有 repo-read/apply-patch fixture。拒绝测试必须同时断言：
+在 `agency_policy.py` 新增：
+
+```python
+def authorize_agency_profile_layer(
+    context: AuthorizationContext,
+    profile_history: AgencyProfileHistory,
+    request: AgentRequest,
+) -> PolicyDecision:
+    ...
+```
+
+该函数不重复基础 policy，只解析 current profile 并执行 reserved/delegated 判定。既有
+`authorize_tool_call_with_agency_profile` 先运行基础 policy；基础 allow 后复用该函数，保持
+基础安全错误优先。测试覆盖现有错误码矩阵和允许结果一致性。
+
+- [ ] **Step 2: 在现有三个 executor 的同一锁域接入 callback**
+
+为 `execute_repo_read`、`execute_run_tests`、`execute_rollback` 增加仅关键字可选参数：
+
+```python
+agency_authorize: Callable[[], PolicyDecision] | None = None
+```
+
+三个 executor 都必须在已持有 target lock、existing context 与基础授权通过之后，且在任何
+preflight、reservation、handler 或业务写入之前执行：
+
+```python
+if agency_authorize is not None:
+    agency_decision = agency_authorize()
+    if not agency_decision.allowed:
+        raise ToolCallDenied(agency_decision)
+```
+
+callback 必须延迟加载 ledger history；不得在 executor 加锁前捕获 profile 快照。默认
+`None` 的旧调用路径必须通过原有测试，证明默认语义不变。
+
+- [ ] **Step 3: 写锁内原子性与撤销竞态测试**
+
+使用真实初始化 ledger 与记录型 handler。对 repo-read/run-tests/rollback 至少证明：
 
 ```python
 before = _all_user_table_snapshot(ledger)
 calls = 0
-
 with pytest.raises(ToolCallDenied) as caught:
-    execute_agency_protected_tool(
-        ledger,
-        tool_name="owp.apply_patch",
-        now=case.now,
-        execute_authorized=recording_handler,
-    )
-
+    execute_repo_read(..., agency_authorize=reserved_decision)
 assert caught.value.decision.error_code == "AGENCY_HUMAN_DECISION_REQUIRED"
 assert calls == 0
 assert _all_user_table_snapshot(ledger) == before
 ```
 
-- [ ] **Step 2: 先实现最小 protected dispatch**
+并发测试用事件屏障而非 sleep：protected executor 持锁进入 callback 后，Acceptor revoke
+必须等待；executor 只可依据同一锁域内已加载的历史执行。下一次调用必须观察 revoke 并拒绝。
+
+- [ ] **Step 4: 实现真实 `execute_apply_patch` 事务入口**
+
+签名沿用现有 executor 风格：接收 ledger/evidence root、`AuthorizationContext`、签名
+`AgentRequest`、`ApplyPatchArguments`、`ProspectiveExecutionFacts`、Sidecar 私钥、candidate
+workspace handler 与 trusted clock，并提供同样的 `agency_authorize=None` opt-in seam。
+
+实现必须复用 `repo_tools.apply_patch_in_candidate_workspace`，并完成：current-context → 基础
+authorization → profile callback → receipt 容量 preflight → handler reservation/started →
+patch handler → `PatchResultEvidence` 与 patch/result EvidenceRefs → Sidecar 签名 receipt →
+`complete_receipt_publication(..., _borrowed_lock_descriptor=lock_descriptor)` → cleanup/recovery。
+不得复制测试中的手工 receipt fixture 作为生产实现；COMMIT-ACK、STARTED_UNCONFIRMED、
+handler failure 与 cleanup failure 语义要与 repo-read/run-tests/rollback 对齐。
+
+- [ ] **Step 5: 实现最小 protected dispatcher 与完整状态链**
 
 支持设计 §7 的 `owp.repo_read`、`owp.apply_patch`、`owp.run_tests` 与
-`owp.rollback_patch`。首个深度闭环聚焦前两者，后两者至少覆盖 allow/deny 与默认兼容。
-入口在任何 handler reservation、
-evidence recovery 或业务写入之前完成：加载 authority WorkOrder → 解析 current profile →
-执行三层授权 → 拒绝或调用现有 executor。不要复制 executor 内部事务。
-
-建议签名：
-
-```python
-def execute_agency_protected_tool(
-    ledger_path: Path,
-    *,
-    context: AuthorizationContext,
-    request: AgentRequest,
-    request_arguments: ToolRequestArguments,
-    execute_authorized: Callable[[], ActionReceiptEnvelope],
-    execution_facts: ProspectiveExecutionFacts | None = None,
-) -> ActionReceiptEnvelope
-```
-
-不得额外接收调用方自报的 `tool_name` 或 `now`：工具名来自签名 request，时间来自
-`context.transaction_time`。包装器先核对 ledger 权威 WorkOrder 与 context，再加载完整
-history 并授权；只允许上述四个 tool name，其他工具 fail closed。
-
-`execute_authorized` 闭包只在 profile decision allowed 后调用。首版不做通用动态反射
-dispatcher，避免把所有 MCP 参数复制一遍。
-
-- [ ] **Step 3: 完成 supersede/revoke/appeal 全闭环**
+`owp.rollback_patch`。dispatcher 不持锁、不预加载 history，只按签名
+`request.tool_name` 选择 executor，并向 executor 传入延迟 callback。不得接收独立
+`tool_name` 或 `now`；未知工具 fail closed。
 
 同一测试依次证明：repo-read allowed；apply-patch reserved；appeal 后仍 reserved；Acceptor
 supersession 后 apply-patch allowed；revoke 后所有 protected tool 返回
 `AGENCY_PROFILE_REQUIRED`。同时回归旧 `execute_repo_read`，证明未选择新入口时行为不变。
 
-- [ ] **Step 4: 运行测试与提交**
+- [ ] **Step 6: 分阶段运行测试与提交**
 
 ```bash
+./.venv/bin/python -m pytest -q tests/test_agency_policy_v01.py tests/test_policy.py
+git add src/openworkproof/agency_policy.py tests/test_agency_policy_v01.py
+git commit -m "refactor: separate human agency policy layer"
+
 ./.venv/bin/python -m pytest -q \
   tests/test_agency_end_to_end_v01.py \
   tests/test_repo_read_transaction.py \
@@ -612,21 +636,19 @@ git commit -m "feat: protect agent execution with human agency profiles"
 
 ## Task 6：导出最小离线验证 bundle
 
-> **2026-08-24 规格复核前置条件：** 设计 §8 要求 bundle 同时包含受 profile 约束的
-> request/decision/receipt，而本任务 Step 3 又把允许文件限定为 WorkOrder、profiles、
-> transitions、appeals 与 manifest；两者目前冲突。还需冻结验证时钟的可信来源，否则
-> active/expired 结果可被调用方选择的时间改变。两项澄清完成前，不生成声称闭合的离线
-> bundle。
+> **2026-08-24 Owner 决策：** v0.1 是 authorization boundary bundle，不是某次调用的
+> enforcement proof；使用 exporter 冻结的 `evaluated_at`，接受其非 TSA 边界；状态增加
+> `expired`。
 
 **Files:**
 - Create: `src/openworkproof/agency_bundle.py`
 - Create: `tests/test_agency_bundle_v01.py`
 
-- [ ] **Step 1: 写 bundle RED 测试**
+- [ ] **Step 1: 写 boundary bundle RED 测试**
 
-覆盖 active/revoked、确定性双导出、无私钥、symlink/hardlink/path traversal、额外文件、
-缺文件、WorkOrder/profile/transition/appeal 任一字节篡改、签名有效但链 fork、manifest
-摘要篡改。
+覆盖 active/revoked/expired、固定 clock 下确定性双导出、无私钥、
+symlink/hardlink/path traversal、额外文件、缺文件、WorkOrder/profile/transition/appeal 任一
+字节篡改、签名有效但链 fork、manifest 摘要篡改、manifest 状态与重新解析结果不一致。
 
 - [ ] **Step 2: 实现闭合 manifest 与结果**
 
@@ -634,15 +656,18 @@ git commit -m "feat: protect agent execution with human agency profiles"
 class AgencyBundleManifestV01(ProtocolModel):
     schema_version: Literal["openworkproof-agency-bundle/0.1"]
     work_order_digest: Digest64
-    current_status: Literal["active", "revoked"]
+    evaluated_at: CanonicalUTCTime
+    current_status: Literal["active", "revoked", "expired"]
     current_profile_id: Digest64 | None
+    boundary: Literal["authorization evidence, not legal or employment judgment"]
     entries: tuple[AgencyBundleManifestEntryV01, ...]
 
 
 class AgencyBundleVerificationResultV01(ProtocolModel):
     schema_version: Literal["openworkproof-agency-bundle-result/0.1"]
     work_order_digest: Digest64
-    current_status: Literal["active", "revoked"]
+    evaluated_at: CanonicalUTCTime
+    current_status: Literal["active", "revoked", "expired"]
     current_profile_id: Digest64 | None
     appeal_count: SafeNonNegativeInt
     boundary: Literal["authorization evidence, not legal or employment judgment"]
@@ -650,8 +675,27 @@ class AgencyBundleVerificationResultV01(ProtocolModel):
 
 - [ ] **Step 3: 实现确定性导出和纯离线验证**
 
-目录只含 manifest、WorkOrder、profiles、transitions、appeals。写入使用 staging + fsync +
-no-replace rename；验证器只信 manifest 与文件内容，不访问 ledger、网络或环境私钥。
+允许的精确布局：
+
+```text
+agency-manifest.json
+agency/work-order.json
+agency/profiles/<profile_id>.json
+agency/transitions/<transition_id>.json
+agency/appeals/<appeal_id>.json
+verify.sh
+```
+
+manifest entry 固定为 relative POSIX path、SHA-256、size；UTF-8 路径排序，manifest 本身不
+自哈希。写入使用 staging + fsync + no-replace rename。exporter 在 target lock 内用 trusted
+clock 冻结 canonical UTC second `evaluated_at`；verifier 不接受独立 `now`，只用 manifest
+时间重新解析完整历史，并核对 active/revoked/expired 与 current profile。验证器只信
+manifest 与文件内容，不访问 ledger、网络、环境私钥或系统时间；WorkOrder 内 key bindings
+即为验签公钥来源。
+
+额外/缺失文件、非普通文件、symlink、`st_nlink != 1`、路径越界、非 canonical JSON、摘要
+或 size 不符、跨 WorkOrder、错误签名、引用缺失、fork/cycle/disconnected/time reversal、
+appeal 目标不一致和重算状态不一致全部 fail closed。结果必须保留非法律/雇佣判断边界。
 
 - [ ] **Step 4: 运行测试与提交**
 

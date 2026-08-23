@@ -339,13 +339,24 @@ authorize_tool_call_with_agency_profile(
 `owp.rollback_patch`。Manager direct tools、acceptance 事务和外部副作用工具不在
 本切片中被重新实现。
 
-受保护执行包装器不接受独立的 `tool_name` 或 `now` 参数：工具名只能来自已签名的
-`AgentRequest.tool_name`，时间只能来自已构造的
-`AuthorizationContext.transaction_time`，避免调用方制造两套授权事实。包装器接收
-`context`、`request`、`request_arguments`、可选 `execution_facts` 与零参数
-`execute_authorized` 闭包；它从 ledger 加载完整 profile history，调用上述授权入口，
-只有 allow 后才执行闭包。ledger 中的权威 WorkOrder 必须与 `context.work_order`
-一致。
+受保护执行不得采用锁外“先 profile 判定、后调用 executor”的闭包包装。现有 executor
+持有 target lock，锁外判定会在 Acceptor revoke/supersede 与真实执行之间留下 TOCTOU；
+包装器先持锁再调用 executor 又会在第二个文件描述符上重复 `flock`，形成自锁死。
+
+因此 profile-only 判定必须作为 opt-in callback 进入 repo-read、run-tests、rollback 与新增
+apply-patch executor 已持有的同一 target-lock 临界区。顺序固定为：existing context 与基础
+授权通过 → 在锁内延迟加载完整 profile history → profile-only 判定 → preflight/reservation →
+handler。callback 默认 `None`，旧 executor 未选择 protected 模式时行为不变。
+
+protected dispatcher 不自行持锁或提前解析 history，只按已签名的
+`AgentRequest.tool_name` 选择 executor，并向 executor 传入延迟加载 callback。时间只来自
+已构造的 `AuthorizationContext.transaction_time`，不得额外接收调用方自报的 `tool_name`
+或 `now`。ledger 中的权威 WorkOrder 必须与 `context.work_order` 一致。
+
+`owp.apply_patch` 必须新增真实 executor，复用现有 candidate workspace patch handler，并与
+repo-read/run-tests/rollback 一样覆盖 target lock、current-context、基础授权、profile 判定、
+handler reservation、签名 receipt、证据发布、COMMIT-ACK recovery 与 cleanup。完成前不得
+声称 supersede 后 apply-patch 已可安全执行。
 
 ## 8. 账本与离线验证
 
@@ -369,9 +380,17 @@ target/replacement id，appeal 另存 profile id。全部表具备 BEFORE UPDATE
 - 并发 profile/transition 提交不产生两个 active 终点；
 - cleanup 失败不改变已提交事实。
 
-离线 bundle 必须包含：WorkOrder、公钥绑定、profile、全部 transition、相关 appeal、
-受 profile 约束的 request/decision/receipt。验证器重新计算当前 profile，不信任导出
-时预写状态。
+v0.1 离线 bundle 定位为 **agency boundary bundle**：证明 WorkOrder（其中包含公钥绑定）、
+全部 profile、transition、相关 appeal，以及某个冻结评估时刻的授权边界状态。现有 reserved
+deny 按规格零 receipt 写入，既有 ActionReceipt 也没有 `agency_profile_id`，因此 v0.1 不得
+宣称能证明某次具体调用已被该 profile 拒绝或在该 profile 下执行；执行级 enforcement
+proof 留待带 profile 绑定的新协议对象版本。
+
+manifest 必须保存 canonical UTC second `evaluated_at`，由 exporter 的可信 clock 在 target
+lock 内冻结。离线 verifier 不接受调用方另传 `now`，而是以 manifest 的 `evaluated_at`
+重新解析完整历史，并核对 `active`、`revoked` 或 `expired` 与 `current_profile_id`。该时间
+是内容寻址且可防篡改的评估事实，不是时间戳机构背书；不得把它描述为权威现实时间证明。
+验证器不信任导出时预写状态。
 
 ## 9. 首个端到端场景
 
