@@ -1184,6 +1184,87 @@ _SCHEMA = (
         SELECT RAISE(ABORT, 'v0.5 retraction receipt parent is immutable');
     END
     """,
+    """
+    CREATE TABLE human_agency_profiles_v01 (
+        profile_id TEXT PRIMARY KEY,
+        work_order_digest TEXT NOT NULL,
+        profile_digest TEXT NOT NULL UNIQUE,
+        profile_json TEXT NOT NULL,
+        nonce TEXT NOT NULL UNIQUE,
+        issued_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TRIGGER human_agency_profiles_v01_are_immutable_update
+    BEFORE UPDATE ON human_agency_profiles_v01
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.1 human agency profile is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER human_agency_profiles_v01_are_immutable_delete
+    BEFORE DELETE ON human_agency_profiles_v01
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.1 human agency profile is immutable');
+    END
+    """,
+    """
+    CREATE TABLE agency_profile_transitions_v01 (
+        transition_id TEXT PRIMARY KEY,
+        work_order_digest TEXT NOT NULL,
+        target_profile_id TEXT NOT NULL UNIQUE,
+        target_profile_digest TEXT NOT NULL,
+        replacement_profile_id TEXT,
+        replacement_profile_digest TEXT,
+        transition TEXT NOT NULL,
+        transition_digest TEXT NOT NULL UNIQUE,
+        transition_json TEXT NOT NULL,
+        nonce TEXT NOT NULL UNIQUE,
+        transitioned_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TRIGGER agency_profile_transitions_v01_are_immutable_update
+    BEFORE UPDATE ON agency_profile_transitions_v01
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.1 agency profile transition is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER agency_profile_transitions_v01_are_immutable_delete
+    BEFORE DELETE ON agency_profile_transitions_v01
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.1 agency profile transition is immutable');
+    END
+    """,
+    """
+    CREATE TABLE agency_appeals_v01 (
+        appeal_id TEXT PRIMARY KEY,
+        work_order_digest TEXT NOT NULL,
+        profile_id TEXT NOT NULL,
+        profile_digest TEXT NOT NULL,
+        requested_change_digest TEXT NOT NULL,
+        reason_code TEXT NOT NULL,
+        appeal_digest TEXT NOT NULL UNIQUE,
+        appeal_json TEXT NOT NULL,
+        nonce TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TRIGGER agency_appeals_v01_are_immutable_update
+    BEFORE UPDATE ON agency_appeals_v01
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.1 agency appeal is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER agency_appeals_v01_are_immutable_delete
+    BEFORE DELETE ON agency_appeals_v01
+    BEGIN
+        SELECT RAISE(ABORT, 'v0.1 agency appeal is immutable');
+    END
+    """,
 )
 
 
