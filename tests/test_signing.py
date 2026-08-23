@@ -174,6 +174,9 @@ def test_canonical_domains_are_exact_and_key_order_is_irrelevant() -> None:
             "scope-requirement",
             "scope-population",
             "evaluation-scope",
+            "human-agency-profile",
+            "agency-profile-transition",
+            "agency-appeal",
         }
     )
     assert ALLOWED_SIGNED_DOMAINS == ALLOWED_CANONICAL_DOMAINS - {

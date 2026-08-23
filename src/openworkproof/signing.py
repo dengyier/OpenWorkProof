@@ -49,6 +49,9 @@ ALLOWED_CANONICAL_DOMAINS = frozenset(
         "scope-requirement",
         "scope-population",
         "evaluation-scope",
+        "human-agency-profile",
+        "agency-profile-transition",
+        "agency-appeal",
     }
 )
 _UNSIGNED_ONLY_DOMAINS = frozenset({
