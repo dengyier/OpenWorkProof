@@ -270,6 +270,96 @@ def test_replacement_digest_mismatch_fails_closed(agency_case: _AgencyCase) -> N
     assert caught.value.code == AGENCY_PROFILE_HISTORY_INVALID
 
 
+# --- fail closed: signatures and full graph coverage ---
+
+
+def test_historical_profile_wrong_authority_fails_closed(
+    agency_case: _AgencyCase,
+) -> None:
+    first = _mk_profile(agency_case, SHA256_A)
+    forged = _mk_profile(agency_case, SHA256_B, signer="Manager")
+    supersede = _mk_transition(
+        agency_case, target=first, transition="superseded", replacement=forged
+    )
+    with pytest.raises(AgencyProfileHistoryError) as caught:
+        _resolve(agency_case, (forged, first), (supersede,))
+    assert caught.value.code == AGENCY_PROFILE_HISTORY_INVALID
+
+
+def test_historical_profile_foreign_signature_fails_closed(
+    agency_case: _AgencyCase,
+) -> None:
+    agency_case.keys["foreign"] = (Ed25519PrivateKey.generate(), {})
+    forged = _mk_profile(agency_case, SHA256_A, signer="foreign")
+    with pytest.raises(AgencyProfileHistoryError) as caught:
+        _resolve(agency_case, (forged,), ())
+    assert caught.value.code == AGENCY_PROFILE_HISTORY_INVALID
+
+
+def test_historical_transition_wrong_authority_fails_closed(
+    agency_case: _AgencyCase,
+) -> None:
+    first = _mk_profile(agency_case, SHA256_A)
+    second = _mk_profile(agency_case, SHA256_B)
+    forged = _mk_transition(
+        agency_case,
+        target=first,
+        transition="superseded",
+        replacement=second,
+        signer="Manager",
+    )
+    with pytest.raises(AgencyProfileHistoryError) as caught:
+        _resolve(agency_case, (second, first), (forged,))
+    assert caught.value.code == AGENCY_PROFILE_HISTORY_INVALID
+
+
+def test_disconnected_supersession_cycle_beside_genesis_fails_closed(
+    agency_case: _AgencyCase,
+) -> None:
+    genesis = _mk_profile(agency_case, SHA256_A)
+    first = _mk_profile(agency_case, SHA256_B)
+    second = _mk_profile(agency_case, SHA256_C)
+    t_first = _mk_transition(
+        agency_case, target=first, transition="superseded", replacement=second
+    )
+    t_second = _mk_transition(
+        agency_case,
+        target=second,
+        transition="superseded",
+        replacement=first,
+        nonce="e" * 64,
+    )
+    with pytest.raises(AgencyProfileHistoryError) as caught:
+        _resolve(agency_case, (genesis, first, second), (t_first, t_second))
+    assert caught.value.code == AGENCY_PROFILE_HISTORY_INVALID
+
+
+def test_revoked_chain_with_disconnected_cycle_fails_closed(
+    agency_case: _AgencyCase,
+) -> None:
+    genesis = _mk_profile(agency_case, SHA256_A)
+    revoke = _mk_transition(agency_case, target=genesis, transition="revoked")
+    first = _mk_profile(agency_case, SHA256_B)
+    second = _mk_profile(agency_case, SHA256_C)
+    t_first = _mk_transition(
+        agency_case, target=first, transition="superseded", replacement=second
+    )
+    t_second = _mk_transition(
+        agency_case,
+        target=second,
+        transition="superseded",
+        replacement=first,
+        nonce="e" * 64,
+    )
+    with pytest.raises(AgencyProfileHistoryError) as caught:
+        _resolve(
+            agency_case,
+            (genesis, first, second),
+            (revoke, t_first, t_second),
+        )
+    assert caught.value.code == AGENCY_PROFILE_HISTORY_INVALID
+
+
 # --- expired profile ---
 
 

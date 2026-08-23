@@ -539,6 +539,11 @@ def resolve_current_human_agency_profile(
                 AGENCY_PROFILE_BINDING_INVALID,
                 "agency profile is bound to a different WorkOrder",
             )
+        if not verify_human_agency_profile(profile, work_order):
+            raise AgencyProfileHistoryError(
+                AGENCY_PROFILE_HISTORY_INVALID,
+                "agency profile signature or binding is invalid",
+            )
         if profile.profile_id in profiles_by_id:
             raise AgencyProfileHistoryError(
                 AGENCY_PROFILE_HISTORY_INVALID,
@@ -553,6 +558,11 @@ def resolve_current_human_agency_profile(
             raise AgencyProfileHistoryError(
                 AGENCY_PROFILE_BINDING_INVALID,
                 "agency profile transition is bound to a different WorkOrder",
+            )
+        if not verify_agency_profile_transition(transition, work_order):
+            raise AgencyProfileHistoryError(
+                AGENCY_PROFILE_HISTORY_INVALID,
+                "agency profile transition signature or binding is invalid",
             )
         target = profiles_by_id.get(transition.target_profile_id)
         if target is None:
@@ -605,6 +615,7 @@ def resolve_current_human_agency_profile(
     ordered_transition_ids: list[str] = []
     current = genesis[0]
     visited: set[str] = set()
+    revoked_terminal = False
     while True:
         if current.profile_id in visited:
             raise AgencyProfileHistoryError(
@@ -618,13 +629,32 @@ def resolve_current_human_agency_profile(
             break
         ordered_transition_ids.append(transition.transition_id)
         if transition.transition == "revoked":
-            return ResolvedAgencyProfile(
-                status="revoked",
-                current_profile=None,
-                ordered_profile_ids=tuple(ordered_profile_ids),
-                ordered_transition_ids=tuple(ordered_transition_ids),
-            )
+            revoked_terminal = True
+            break
         current = profiles_by_id[transition.replacement_profile_id]
+
+    supplied_profile_ids = {profile.profile_id for profile in profile_tuple}
+    supplied_transition_ids = {
+        transition.transition_id for transition in transition_tuple
+    }
+    if visited != supplied_profile_ids:
+        raise AgencyProfileHistoryError(
+            AGENCY_PROFILE_HISTORY_INVALID,
+            "profile history contains a disconnected profile",
+        )
+    if set(ordered_transition_ids) != supplied_transition_ids:
+        raise AgencyProfileHistoryError(
+            AGENCY_PROFILE_HISTORY_INVALID,
+            "profile history contains an unreachable transition",
+        )
+
+    if revoked_terminal:
+        return ResolvedAgencyProfile(
+            status="revoked",
+            current_profile=None,
+            ordered_profile_ids=tuple(ordered_profile_ids),
+            ordered_transition_ids=tuple(ordered_transition_ids),
+        )
 
     if not current.valid_from <= now <= current.expires_at:
         raise AgencyProfileHistoryError(

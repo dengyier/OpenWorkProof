@@ -7,10 +7,12 @@ from typing import Any
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from conftest import SHA256_A, SHA256_B, SHA256_C
+from conftest import SHA256_A, SHA256_B, SHA256_C, SHA256_D
 from openworkproof.agency import (
     AgencyProfileHistory,
+    AgencyProfileTransitionV01,
     HumanAgencyProfileV01,
+    agency_profile_transition_id,
     delegated_action_id,
     human_agency_profile_id,
     reserved_decision_id,
@@ -110,10 +112,43 @@ def _mk_profile(
     )
 
 
+def _mk_transition(
+    case: _PolicyCase,
+    *,
+    target: HumanAgencyProfileV01,
+    transition: str = "revoked",
+    replacement: HumanAgencyProfileV01 | None = None,
+    signer: str = "Acceptor",
+) -> AgencyProfileTransitionV01:
+    payload = {
+        "schema_version": "openworkproof-agency-profile-transition/0.1",
+        "work_order_digest": case.work_order.digest,
+        "target_profile_id": target.profile_id,
+        "target_profile_digest": target.digest,
+        "transition": transition,
+        "replacement_profile_id": (
+            replacement.profile_id if replacement is not None else None
+        ),
+        "replacement_profile_digest": (
+            replacement.digest if replacement is not None else None
+        ),
+        "reason_code": (
+            "scope_changed" if transition == "superseded" else "human_withdrawal"
+        ),
+        "transitioned_at": "2026-01-01T02:00:00Z",
+        "nonce": SHA256_D,
+    }
+    payload["transition_id"] = agency_profile_transition_id(payload)
+    return AgencyProfileTransitionV01.model_validate(
+        sign_payload("agency-profile-transition", payload, case.keys[signer][0])
+    )
+
+
 def _history(
     profiles: tuple[HumanAgencyProfileV01, ...] = (),
+    transitions: tuple[AgencyProfileTransitionV01, ...] = (),
 ) -> AgencyProfileHistory:
-    return AgencyProfileHistory(profiles=profiles, transitions=())
+    return AgencyProfileHistory(profiles=profiles, transitions=transitions)
 
 
 def _authorize(
@@ -209,6 +244,26 @@ def test_invalid_history_fails_closed(policy_case: _PolicyCase) -> None:
     second = _mk_profile(policy_case, SHA256_B, delegated=("owp.repo_read",))
     decision = _authorize(
         policy_case, _history((first, second)), RepoReadArguments(path="src")
+    )
+    assert decision.allowed is False
+    assert decision.error_code == "AGENCY_PROFILE_HISTORY_INVALID"
+
+
+def test_forged_historical_profile_fails_closed(policy_case: _PolicyCase) -> None:
+    forged_first = _mk_profile(
+        policy_case, SHA256_A, delegated=("owp.repo_read",), signer="Manager"
+    )
+    second = _mk_profile(policy_case, SHA256_B, delegated=("owp.repo_read",))
+    supersede = _mk_transition(
+        policy_case,
+        target=forged_first,
+        transition="superseded",
+        replacement=second,
+    )
+    decision = _authorize(
+        policy_case,
+        _history((second, forged_first), (supersede,)),
+        RepoReadArguments(path="src"),
     )
     assert decision.allowed is False
     assert decision.error_code == "AGENCY_PROFILE_HISTORY_INVALID"
