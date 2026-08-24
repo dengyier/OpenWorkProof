@@ -310,8 +310,8 @@ upstream_adoption: not_evidenced
 ## Verified Agent Delivery
 
 `OpenWorkProof Verified Agent Delivery` is the first application slice above the protocol. It
-organizes one agent job into a delivery fact that can be contracted, executed, independently
-verified, and accepted or rejected by the customer.
+organizes one agent job into a delivery fact that can be independently verified and accepted or
+rejected by the customer.
 
 ```bash
 owp delivery-case init CASE_DIR

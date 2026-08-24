@@ -296,7 +296,7 @@ upstream_adoption: not_evidenced
 ## Verified Agent Delivery
 
 `OpenWorkProof Verified Agent Delivery` 是协议之上的首个应用切片。它把一次 Agent 工作
-组织成可签约、可执行、可独立验证、可由客户验收的交付事实。
+组织成可独立验证、可由客户验收的交付事实。
 
 ```bash
 owp delivery-case init CASE_DIR

@@ -48,14 +48,14 @@
 
 ```text
 让智能依人的目的而行动，让每一次行动经得起人的判断。
-OpenWorkProof 是 AI Agent 工作的开放验证协议。
+OpenWorkProof 是 AI Agent 工作契约与可验证执行协议。
 ```
 
 英文：
 
 ```text
 Let intelligence act toward human purposes, and let every action stand up to human judgment.
-OpenWorkProof is an open verification protocol for AI agent work.
+OpenWorkProof is an open work contract and verifiable execution protocol for AI agents.
 ```
 
 测试还应断言上述使命句位于各自 README 的前 60 行内，避免未来再次被版本历史和商业信息挤出第一屏。
@@ -66,7 +66,7 @@ OpenWorkProof is an open verification protocol for AI agent work.
 
 ```text
 人的目的
-正当的授权
+签名授权
 独立验证
 接受、拒绝、撤销和申诉
 最终判断
@@ -76,7 +76,7 @@ OpenWorkProof is an open verification protocol for AI agent work.
 
 ```text
 human purposes
-legitimate authority
+signed authority
 independent verification
 accept, reject, revoke, and appeal
 final judgment
@@ -161,11 +161,12 @@ git commit -m "test: lock readme narrative and truth boundaries"
 ```markdown
 > 让智能依人的目的而行动，让每一次行动经得起人的判断。
 
-OpenWorkProof 是 AI Agent 工作的开放验证协议。它把人的目的、授予的权限、
-Agent 的行动、留下的证据和最终验收连接成一条可独立验证的工作链。
+OpenWorkProof 是 AI Agent 工作契约与可验证执行协议。它记录谁授权了任务、
+Agent 实际执行了什么、是否超出约定范围、验证者得出了什么结论，以及验收者最终
+接受还是拒绝。
 ```
 
-随后用不超过两个自然段解释：它不替人定义什么是善，也不承诺 Agent 永远正确；它确保重要行动能说明为何发生、依据何种权限、产生何种结果，并把接受、拒绝、撤销和申诉的权利留给人。
+随后用不超过两个自然段解释：OpenWorkProof 不保证 Agent 永远正确，也不替客户作出验收决定；它确保授权有来源、执行有证据，并把接受、拒绝、撤销和申诉的权利留给人。
 
 **Step 2: 写“为什么存在”**
 
@@ -339,7 +340,7 @@ python -m pytest -q tests/test_documentation_boundaries.py
 
 Expected:
 
-- `README.md` 约 450 到 600 行；
+- `README.md` 约 350 到 450 行；
 - 测试可能仍因英文 README 未改而失败，但不得出现中文专属断言失败；
 - 不得删除现有 Acceptance 与 Human Agency 精确边界。
 
@@ -367,9 +368,9 @@ git commit -m "docs: complete chinese readme verification journey"
 ```markdown
 > Let intelligence act toward human purposes, and let every action stand up to human judgment.
 
-OpenWorkProof is an open verification protocol for AI agent work. It connects
-human purposes, delegated authority, agent actions, evidence, and final
-acceptance into a work chain that an independent party can verify.
+OpenWorkProof is an open work contract and verifiable execution protocol for AI agents. It
+records who authorized a job, what the agent did, whether it stayed within scope, what the
+verifier concluded, and whether the acceptor accepted or rejected the delivery.
 ```
 
 英文按自然开源项目语言重写，不逐句翻译中文，不使用古典哲学腔。
