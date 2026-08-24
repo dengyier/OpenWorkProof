@@ -35,6 +35,9 @@ candidate: 183 passed / 0 failed / 0 skipped
 
 ## Agent 说 `完成了`，还缺什么
 
+MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent。它们解决如何连接和通信，不能单独
+证明一次工作是否获得授权、是否按约执行，以及最终由谁验收。
+
 设想一家 AI 服务商让 Agent 修改客户的代码仓库。Agent 提交了补丁，也说测试已经通过。
 客户仍然需要回答：
 

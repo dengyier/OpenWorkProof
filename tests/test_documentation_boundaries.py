@@ -523,3 +523,11 @@ def test_readmes_do_not_turn_the_homepage_into_fundraising_or_market_copy() -> N
         text = _text(relative)
         for literal in forbidden:
             assert literal not in text, f"{relative} contains market copy: {literal}"
+
+
+def test_readmes_place_openworkproof_beyond_connection_protocols() -> None:
+    chinese = _text("README.md")
+    english = _text("README_en.md")
+
+    assert "MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent。" in chinese
+    assert "MCP connects agents to tools. A2A connects agents to agents." in english

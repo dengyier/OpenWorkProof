@@ -36,6 +36,10 @@ The local candidate and the public release are different facts.
 
 ## What is missing when an agent says `done`
 
+MCP connects agents to tools. A2A connects agents to agents. They define connection and
+communication, but do not by themselves prove that a job was authorized, executed as agreed,
+or accepted by the designated party.
+
 Imagine an AI service provider asking an agent to modify a customer's repository. The agent
 submits a patch and says the tests passed. The customer still needs answers:
 
