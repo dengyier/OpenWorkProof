@@ -188,7 +188,9 @@ def test_registry_entries_are_utf8_sorted_with_exact_sha256() -> None:
 
     for object_type, factory in AGENCY_SCHEMA_FACTORIES.items():
         path = AGENCY_OBJECT_PATHS[object_type]
-        assert files[path] == rfc8785.dumps(factory())
+        assert files[path] == rfc8785.dumps(
+            api._harden_agency_schema(factory(), object_type=object_type)
+        )
 
     registry = json.loads(files["schema-registry.json"])
     assert registry == {
@@ -218,7 +220,7 @@ def test_authoritative_agency_schema_returns_canonical_bytes() -> None:
 
     for object_type, factory in AGENCY_SCHEMA_FACTORIES.items():
         assert api.authoritative_agency_schema(object_type) == rfc8785.dumps(
-            factory()
+            api._harden_agency_schema(factory(), object_type=object_type)
         )
         assert api.authoritative_agency_schema(object_type) == (
             _runtime_directory() / AGENCY_OBJECT_PATHS[object_type]

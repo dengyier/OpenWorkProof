@@ -103,11 +103,201 @@ def _parse_canonical_json(raw: bytes, *, error_message: str) -> dict:
     return value
 
 
+# --------------------------------------------------------------------------- #
+# schema contract hardening (deterministic post-processing)
+# --------------------------------------------------------------------------- #
+# The raw Pydantic Draft 2020-12 schemas only emit ``type: string`` for every
+# digest/key/signature/time field, so a validator would accept obviously
+# malformed objects. These constraints tighten what JSON Schema can express;
+# everything else stays semantic and is documented in the ``$comment`` rather
+# than being faked as covered.
+
+_DIGEST64_PATTERN = r"^[0-9a-f]{64}$"
+_KEY_ID_PATTERN = r"^ed25519:[0-9a-f]{64}$"
+_SIGNATURE_PATTERN = r"^[A-Za-z0-9_-]{86}$"
+_UTC_SECONDS_PATTERN = (
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+)
+
+_SEMANTIC_COMMENT = (
+    "OpenWorkProof semantic validation remains mandatory after JSON Schema "
+    "validation; canonical ordering, content-derived id/digest recomputation, "
+    "cross-object/WorkOrder bindings and Ed25519 signatures are not fully "
+    "expressed here."
+)
+_APPEAL_ROLES = ("Developer", "Manager", "Verifier")
+
+_DIGEST64_FIELDS = frozenset(
+    {
+        "digest",
+        "nonce",
+        "profile_id",
+        "profile_digest",
+        "work_order_digest",
+        "action_id",
+        "decision_id",
+        "transition_id",
+        "target_profile_id",
+        "target_profile_digest",
+        "replacement_profile_id",
+        "replacement_profile_digest",
+        "appeal_id",
+        "requested_change_digest",
+    }
+)
+_KEY_ID_FIELDS = frozenset({"signer_key_id"})
+_SIGNATURE_FIELDS = frozenset({"signature"})
+_UTC_TIME_FIELDS = frozenset(
+    {
+        "valid_from",
+        "expires_at",
+        "issued_at",
+        "transitioned_at",
+        "created_at",
+    }
+)
+_IDENTIFIER_FIELDS = frozenset({"appellant_subject_id"})
+_UNIQUE_ARRAY_FIELDS = frozenset(
+    {
+        "delegated_actions",
+        "reserved_decisions",
+        "escalation_conditions",
+        "blocked_tools",
+    }
+)
+
+
+def _harden_nullable_digest64(prop: dict) -> None:
+    variants = prop.get("anyOf")
+    if not isinstance(variants, list):
+        return
+    for variant in variants:
+        if isinstance(variant, dict) and variant.get("type") == "string":
+            variant["pattern"] = _DIGEST64_PATTERN
+
+
+def _harden_appeal_roles(prop: dict) -> None:
+    title = prop.get("title")
+    prop.clear()
+    if title is not None:
+        prop["title"] = title
+    prop["type"] = "array"
+    prop["prefixItems"] = [
+        {"const": role, "type": "string"} for role in _APPEAL_ROLES
+    ]
+    prop["minItems"] = 3
+    prop["maxItems"] = 3
+
+
+def _harden_property(name: str, prop: dict) -> None:
+    if not isinstance(prop, dict):
+        return
+    if name in _DIGEST64_FIELDS:
+        if prop.get("type") == "string":
+            prop["pattern"] = _DIGEST64_PATTERN
+        elif isinstance(prop.get("anyOf"), list):
+            _harden_nullable_digest64(prop)
+        return
+    if name in _KEY_ID_FIELDS:
+        if prop.get("type") == "string":
+            prop["pattern"] = _KEY_ID_PATTERN
+        return
+    if name in _SIGNATURE_FIELDS:
+        if prop.get("type") == "string":
+            prop["pattern"] = _SIGNATURE_PATTERN
+        return
+    if name in _UTC_TIME_FIELDS:
+        if prop.get("type") == "string":
+            prop["pattern"] = _UTC_SECONDS_PATTERN
+        return
+    if name in _IDENTIFIER_FIELDS:
+        if prop.get("type") == "string":
+            prop["minLength"] = 1
+            prop["maxLength"] = 128
+        return
+    if name == "appeal_roles" and prop.get("type") == "array":
+        _harden_appeal_roles(prop)
+        return
+    if name in _UNIQUE_ARRAY_FIELDS and prop.get("type") == "array":
+        prop["uniqueItems"] = True
+    if name == "reserved_decisions" and prop.get("type") == "array":
+        prop["maxItems"] = 5
+
+
+def _harden_object(schema: dict, *, comment: str) -> None:
+    if not isinstance(schema, dict):
+        return
+    if schema.get("type") == "object":
+        schema["$comment"] = comment
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for name, prop in properties.items():
+            _harden_property(name, prop)
+    defs = schema.get("$defs")
+    if isinstance(defs, dict):
+        for def_schema in defs.values():
+            _harden_object(def_schema, comment=comment)
+
+
+def _harden_agency_schema(schema: dict, *, object_type: str) -> dict:
+    """Deterministically tighten one agency Draft 2020-12 schema in place."""
+    comment = _SEMANTIC_COMMENT
+    if object_type == "agency-profile-transition":
+        comment = (
+            _SEMANTIC_COMMENT
+            + " replacement_profile_id != target_profile_id remains "
+            + "semantic validation."
+        )
+    _harden_object(schema, comment=comment)
+
+    if object_type == "human-agency-profile":
+        schema["anyOf"] = [
+            {"properties": {"delegated_actions": {"minItems": 1}}},
+            {"properties": {"reserved_decisions": {"minItems": 1}}},
+        ]
+    elif object_type == "agency-profile-transition":
+        schema["allOf"] = [
+            {
+                "if": {
+                    "properties": {"transition": {"const": "revoked"}},
+                    "required": ["transition"],
+                },
+                "then": {
+                    "properties": {
+                        "replacement_profile_id": {"const": None},
+                        "replacement_profile_digest": {"const": None},
+                    }
+                },
+            },
+            {
+                "if": {
+                    "properties": {"transition": {"const": "superseded"}},
+                    "required": ["transition"],
+                },
+                "then": {
+                    "properties": {
+                        "replacement_profile_id": {
+                            "type": "string",
+                            "pattern": _DIGEST64_PATTERN,
+                        },
+                        "replacement_profile_digest": {
+                            "type": "string",
+                            "pattern": _DIGEST64_PATTERN,
+                        },
+                    }
+                },
+            },
+        ]
+    return schema
+
+
 def generated_agency_files() -> dict[str, bytes]:
     """Return the canonical registry and every agency schema, deterministically."""
 
     schemas = {
-        OBJECT_PATHS[name]: rfc8785.dumps(factory())
+        OBJECT_PATHS[name]: rfc8785.dumps(
+            _harden_agency_schema(factory(), object_type=name)
+        )
         for name, factory in SCHEMA_FACTORIES.items()
     }
     registry = {

@@ -208,6 +208,60 @@ focused 七文件门 `198 passed`；主/companion registry 回归 `61 passed`；
 inventory boundary（`test_current_candidate_inventory_binds_*`）仍待 Task 9 重建；本
 commit 未改 main、未 push、未重建 candidate inventory、未做 Task 8。
 
+### Task 7 独立审查 P1 修复（2026-08-24，commit `fix: constrain agency schema contracts`）
+
+agency v0.1 JSON Schema 此前太浅：纯 Pydantic `model_json_schema` 只对
+digest/key/signature/time 字段输出裸 `type: string`，`Draft202012Validator` 会接受
+明显畸形的对象。本 commit 只在 `src/openworkproof/agency_schema_registry.py` 对三个
+独立 agency schema 做确定性 post-processing 约束增强并重新生成 packaged schema 与独立
+registry，**未改** core `models.py`、既有主 schema registry v0.1、Task 8、candidate
+inventory、main 或远端：
+
+- 可表达的约束（确定性、进生成 pipeline）：Digest/ID/nonce（语义为 Digest64 的字段）
+  `pattern ^[0-9a-f]{64}$`；`signer_key_id` `pattern ^ed25519:[0-9a-f]{64}$`；
+  `signature` 未填充 base64url 64 字节签名 `pattern ^[A-Za-z0-9_-]{86}$`；canonical UTC
+  时间戳 `format date-time` + `pattern ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$`；
+  非空标识符 `minLength 1`、可确认字段 `maxLength 128`（`appellant_subject_id`）。
+- `HumanAgencyProfileV01`：`delegated_actions` 与 `reserved_decisions` 至少一边非空
+  （`anyOf` 两分支各 `minItems 1`）；`reserved_decisions` `maxItems 5`；集合型数组
+  （delegated/reserved/escalation/blocked_tools）`uniqueItems true`；`appeal_roles`
+  固定且仅为 Developer/Manager/Verifier 此顺序（`prefixItems` + `const` + `min/max 3`）；
+  保留 `additionalProperties false`。
+- `AgencyProfileTransitionV01`：`if/then` 约束 `revoked` => replacement 两字段均为
+  `null`；`superseded` => 两者均为 Digest64 字符串。`replacement != target` 仍属语义
+  验证，写入 `$comment`。
+- `AgencyAppealV01`：digest/key/signature/time/nonce 与唯一性同样收紧。
+- 每个根 schema 与 `$defs` 对象带 `$comment`：OpenWorkProof semantic validation remains
+  mandatory after JSON Schema validation; canonical ordering, content-derived
+  id/digest recomputation, cross-object/WorkOrder bindings and Ed25519 signatures are
+  not fully expressed here —— 不把无法用 JSON Schema 可靠表达的语义伪装成已覆盖。
+
+RED 测试（`tests/test_agency_schema_constraints_v01.py`，新增）直接使用
+`jsonschema.Draft202012Validator`、不调用 Pydantic，覆盖：恶意 transition（坏
+digest/signature/time/replacement）逐类结构错误、revoked 携带 replacement 拒绝、
+superseded 缺 replacement 拒绝、bad digest/key/signature/time 逐类拒绝、delegated+reserved
+都空拒绝、reserved>5 拒绝、appeal_roles 错角色/错顺序拒绝、可表达重复项（escalation 与
+blocked_tools）拒绝、合法 packaged 实例仍通过、以及一条“结构 schema 通过但
+OpenWorkProof 语义验证拒绝”的边界测试（内容派生 `profile_id` 不匹配）——用于证明不能
+宣称 Schema 与 Pydantic 完全等价。
+
+本轮 fresh 测量（控制器 fresh，未复用历史数字）：
+`tests/test_agency_schema_constraints_v01.py` `37 passed`；
+`tests/test_agency_schema_registry_v01.py` `20 passed`；agency schema 门
+（schema_registry + schema_constraints + test_schema_registry + test_package）
+`101 passed`；agency focused 八文件门（七文件 + schema_constraints）`235 passed`；
+主/companion registry 回归 `61 passed`；相邻协议回归
+（policy/mcp_server/repo_read/retraction/acceptance_bundle/schema_registry）
+`309 passed`；`python -m build` 成功（wheel 内 4 个 agency schema 资源与生成锚点
+sha256 一致）；wheel `--no-deps --target` 隔离安装后 `verify_packaged_agency_schemas`/
+`authoritative_agency_schema`/硬化约束均生效；`pip check`/`compileall`/`git diff --check`
+PASS。主 v0.1–v0.5 与 companion registry 字节完全未变；独立 registry digest 已随硬化
+schema 更新。
+
+诚实边界不变：customer_adoption/payment/upstream_adoption 仍 `not_evidenced`；全量
+inventory boundary（`test_current_candidate_inventory_binds_*`）仍待 Task 9 重建；本
+commit 未改 main、未 push、未重建 candidate inventory、未做 Task 8。
+
 ## Verified Agent Delivery 0.1 本地实现（2026-08-22）
 
 隔离分支 `codex/verified-agent-delivery` 已按计划实现首个商业产品切片
