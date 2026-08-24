@@ -965,6 +965,30 @@ git commit -m "feat: publish human agency profile schemas"
 > > 全部可读且 sha256 一致；`pip check`/`compileall`/`git diff --check` PASS。全量
 > > inventory boundary（`test_current_candidate_inventory_binds_*`）仍待 Task 9 重建，本
 > > Task 未改 main、未 push、未重建 candidate inventory、未做 Task 8。
+>
+> > **2026-08-24 独立审查 P2 修复（commit `fix: recover agency schema publish acks`）：**
+> > 修复 Task 7 两个 P2，只做最小修改，未改 schema bytes/registry digest/公开集合本身，未做
+> > Task 8/重建 inventory/main/push。P2-1：`_commit_staged_directories` 的
+> > `target.replace(backup)` 在已真实落地却抛 OSError（ACK loss）时未记录 backup，导致本次
+> > 失败后 target 缺失。现采用与 stage→target 相同的 readback 式 committed-truth 判断：仅当
+> > `target` 不存在且预期 backup 已作为目录存在时记录已移动并继续事务；歧义 fail closed 且
+> > 由既有 rollback/cleanup 收敛。补两条故障注入（monkeypatch `Path.replace` 仅对旧
+> > target→backup 真实 replace 后抛 OSError；backup rename 真失败未落地），断言收敛到完整新
+> > target 或精确恢复旧 target，且不残留 target 缺失/backup/stage/lock。P2-2：`__init__.py`
+> > 新增 side-effect-free `__dir__`（`sorted(set(globals()) | set(__all__))`），fresh import 与
+> > installed wheel 上 `dir(openworkproof)` 包含全部 `__all__`（含新增 15 项 agency 导出），
+> > 不触发 lazy import，`__all__`/`__getattr__`/`__dir__` 一致。
+> >
+> > fresh 测量（本轮控制器 fresh，未复用历史数字）：`tests/test_agency_schema_registry_v01.py`
+> > `20 passed`；计划 Step 4 门 `test_agency_schema_registry_v01.py + test_schema_registry.py +
+> > test_package.py` `64 passed`；agency focused 七文件门 `198 passed`；主/companion registry
+> > 回归 `61 passed`；并发 `test_supersession_concurrency_yields_single_winner` `1 passed`；
+> > 相邻协议回归（policy/mcp_server/repo_read/retraction/acceptance_bundle/schema_registry）
+> > `309 passed`；`python -m build` 成功；wheel `--no-deps --target` 隔离安装后
+> > `dir(openworkproof)`/`importlib.resources`/`verify_packaged_agency_schemas` 全绿；
+> > `pip check`/`compileall`/`git diff --check` PASS。全量 inventory boundary
+> > （`test_current_candidate_inventory_binds_*`）仍待 Task 9 重建，本 commit 未改 main、
+> > 未 push、未重建 candidate inventory、未做 Task 8。
 
 ---
 

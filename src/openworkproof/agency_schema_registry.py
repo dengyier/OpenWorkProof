@@ -490,7 +490,17 @@ def _commit_staged_directories(
         for target, stage in targets:
             if target.exists():
                 backup = _unused_backup_path(target)
-                target.replace(backup)
+                try:
+                    target.replace(backup)
+                except Exception:
+                    # Uncertain COMMIT acknowledgement: a filesystem may move
+                    # the old target to its backup yet still report an error.
+                    # Read the committed truth back instead of trusting the
+                    # syscall result -- only a clean "old target no longer
+                    # present and its backup now exists" outcome counts as
+                    # landed. Anything else is ambiguous and fails closed.
+                    if target.exists() or not backup.is_dir():
+                        raise
                 backups[target] = backup
             try:
                 stage.replace(target)

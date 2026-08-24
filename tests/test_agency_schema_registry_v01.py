@@ -388,6 +388,71 @@ def test_no_leftover_stage_or_backup_artifacts(tmp_path: Path) -> None:
     )
 
 
+def test_backup_rename_ack_loss_records_backup_and_completes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _api()
+    destination = tmp_path / "destination"
+    _write_old_set(destination)
+    original_replace = Path.replace
+    lost_ack = False
+
+    def replace_then_lose_ack(source: Path, target: Path) -> Path:
+        nonlocal lost_ack
+        result = original_replace(source, target)
+        if (
+            Path(target).name.startswith(".openworkproof-agency-backup-")
+            and not lost_ack
+        ):
+            lost_ack = True
+            raise OSError("simulated backup rename ACK loss")
+        return result
+
+    monkeypatch.setattr(Path, "replace", replace_then_lose_ack)
+
+    # The old-target -> backup rename actually landed but reported an error.
+    # The committed-truth readback must record the backup and finish the
+    # transaction so the new target is complete and nothing is left behind.
+    api.generate_agency_schemas(destination)
+
+    assert lost_ack is True
+    assert _snapshot(destination) == _builtin_bytes()
+    assert _agency_artifacts(tmp_path) == set()
+
+
+def test_backup_rename_failure_preserves_old_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _api()
+    destination = tmp_path / "destination"
+    before = _write_old_set(destination)
+    original_replace = Path.replace
+    failed = False
+
+    def fail_backup_rename(source: Path, target: Path) -> Path:
+        nonlocal failed
+        if (
+            Path(target).name.startswith(".openworkproof-agency-backup-")
+            and not failed
+        ):
+            failed = True
+            raise OSError("simulated backup rename failure")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", fail_backup_rename)
+
+    # A genuine backup rename failure never lands: the old target must stay
+    # exactly in place and no stage/backup artifacts may remain.
+    with pytest.raises(OSError, match="backup rename failure"):
+        api.generate_agency_schemas(destination)
+
+    assert failed is True
+    assert _snapshot(destination) == before
+    assert _agency_artifacts(tmp_path) == set()
+
+
 # --------------------------------------------------------------------------- #
 # 4. packaging and installed-wheel readability
 # --------------------------------------------------------------------------- #
@@ -451,6 +516,71 @@ resources.files("openworkproof").joinpath(
 ).read_bytes()
 assert authoritative_agency_schema("human-agency-profile").startswith(b"{")
 verify_packaged_agency_schemas()
+"""
+    subprocess.run(
+        [sys.executable, "-c", script, str(installed)],
+        cwd=cwd,
+        env={**os.environ, "PYTHONPATH": ""},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_installed_wheel_dir_exposes_all_public_names(
+    built_agency_wheel: Path,
+    tmp_path: Path,
+) -> None:
+    installed = tmp_path / "installed"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--no-deps",
+            "--target",
+            str(installed),
+            str(built_agency_wheel),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    script = """
+import pathlib
+import sys
+sys.path.insert(0, sys.argv[1])
+import openworkproof
+package = pathlib.Path(openworkproof.__file__).resolve()
+assert package.is_relative_to(pathlib.Path(sys.argv[1]).resolve())
+names = set(dir(openworkproof))
+missing = sorted(set(openworkproof.__all__) - names)
+assert not missing, f"missing from dir(openworkproof): {missing}"
+agency_exports = {
+    "HumanAgencyProfileV01",
+    "AgencyProfileTransitionV01",
+    "AgencyAppealV01",
+    "commit_human_agency_profile",
+    "commit_agency_profile_transition",
+    "commit_agency_appeal",
+    "load_agency_history",
+    "load_current_human_agency_profile",
+    "load_agency_appeals",
+    "authorize_tool_call_with_agency_profile",
+    "dispatch_protected_agent_action",
+    "export_agency_bundle",
+    "verify_agency_bundle_directory",
+    "AgencyBundleManifestV01",
+    "AgencyBundleVerificationResultV01",
+}
+assert agency_exports <= names, sorted(agency_exports - names)
+lazy_names = set(openworkproof._LAZY_EXPORTS)
+assert not (lazy_names & set(openworkproof.__dict__)), "dir() triggered __getattr__"
+lazy_modules = {module for module, _ in openworkproof._LAZY_EXPORTS.values()}
+assert not (lazy_modules & set(sys.modules)), "dir() triggered lazy import"
 """
     subprocess.run(
         [sys.executable, "-c", script, str(installed)],

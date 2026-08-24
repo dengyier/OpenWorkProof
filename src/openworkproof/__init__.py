@@ -128,6 +128,13 @@ def __getattr__(name: str):
     globals()[name] = value
     return value
 
+
+def __dir__() -> list[str]:
+    # Side-effect-free: list the lazy public names from ``__all__`` without
+    # importing any lazy module or triggering ``__getattr__``.
+    return sorted(set(globals()) | set(__all__))
+
+
 __all__ = [
     "__version__",
     "build_evaluation_scope",

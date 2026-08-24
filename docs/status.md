@@ -177,6 +177,37 @@ inventory boundary（`test_current_candidate_inventory_binds_*` 因 candidate de
 变化需 Task 9 重建）仍未闭合；本 Task 未改 main、未 push、未重建 candidate inventory、
 未做 Task 8。
 
+### Task 7 独立审查 P2 修复（2026-08-24，commit `fix: recover agency schema publish acks`）
+
+只做最小修改，未改 schema bytes/registry digest/公开集合本身，未做 Task 8/重建
+inventory/main/push：
+
+- P2-1：`agency_schema_registry._commit_staged_directories` 的
+  `target.replace(backup)` 在已真实落地却抛 OSError（ACK loss）时未记录 backup，导致
+  本次失败后 target 缺失。修复采用与 stage→target 相同的 readback 式 committed-truth
+  判断：仅当 `target` 不存在且预期 backup 已作为目录存在时记录已移动并继续事务；歧义
+  fail closed 且由既有 rollback/cleanup 收敛。新增两条故障注入：monkeypatch `Path.replace`
+  仅对旧 target→backup 真实 replace 后抛 OSError（收敛到完整新 target、零残留）；backup
+  rename 真失败未落地（旧 target 精确保持、零残留）。
+- P2-2：`openworkproof/__init__.py` 新增 side-effect-free `__dir__`
+  （`sorted(set(globals()) | set(__all__))`）。fresh import 与 installed wheel 上
+  `dir(openworkproof)` 包含全部 `__all__`（含 Task 7 新增 15 项 agency 导出），不触发
+  lazy import，`__all__`/`__getattr__`/`__dir__` 一致。
+
+本轮 fresh 测量（控制器 fresh，未复用历史数字）：
+`tests/test_agency_schema_registry_v01.py` `20 passed`；计划 Step 4 门
+（agency_schema_registry + test_schema_registry + test_package）`64 passed`；agency
+focused 七文件门 `198 passed`；主/companion registry 回归 `61 passed`；并发
+`test_supersession_concurrency_yields_single_winner` `1 passed`；相邻协议回归
+（policy/mcp_server/repo_read/retraction/acceptance_bundle/schema_registry）`309 passed`；
+`python -m build` 成功；wheel `--no-deps --target` 隔离安装后 `dir(openworkproof)`/
+`importlib.resources`/`verify_packaged_agency_schemas` 全绿；`pip check`/`compileall`/
+`git diff --check` PASS。
+
+诚实边界不变：customer_adoption/payment/upstream_adoption 仍 `not_evidenced`；全量
+inventory boundary（`test_current_candidate_inventory_binds_*`）仍待 Task 9 重建；本
+commit 未改 main、未 push、未重建 candidate inventory、未做 Task 8。
+
 ## Verified Agent Delivery 0.1 本地实现（2026-08-22）
 
 隔离分支 `codex/verified-agent-delivery` 已按计划实现首个商业产品切片
