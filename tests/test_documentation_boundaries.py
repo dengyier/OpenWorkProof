@@ -336,6 +336,41 @@ def test_human_agency_protocol_doc_offline_bundle_freshness_boundary() -> None:
     assert "freshness" in text
 
 
+def test_human_agency_protocol_doc_offline_bundle_layout_matches_implementation() -> None:
+    """The offline layout names every enforced file, including the pinned verify.sh."""
+
+    text = _text(AGENCY_PROTOCOL_DOC)
+
+    # The verifier requires these exact files and allowlists these directory
+    # patterns (agency_bundle._REQUIRED_AGENCY_FILES + _path_is_allowed).
+    for literal in (
+        "agency-manifest.json",
+        "agency/work-order.json",
+        "verify.sh",
+        "agency/profiles/",
+        "agency/transitions/",
+        "agency/appeals/",
+    ):
+        assert literal in text, f"protocol doc missing offline layout: {literal}"
+
+    # "key-free" is misleading: the signed WorkOrder carries the verification
+    # public key, so the bundle is private-key-free / self-contained, not key-free.
+    assert "key-free offline bundle" not in text
+    for literal in ("private-key-free", "self-contained"):
+        assert literal in text, f"protocol doc missing bundle term: {literal}"
+
+    # verify.sh is itself manifest-entry covered and pinned to the exact
+    # production bytes. Derive the expected content from the production constant
+    # so the doc cannot silently drift from the implementation.
+    from openworkproof.agency_bundle import AGENCY_VERIFY_SCRIPT
+
+    assert isinstance(AGENCY_VERIFY_SCRIPT, bytes) and AGENCY_VERIFY_SCRIPT
+    assert AGENCY_VERIFY_SCRIPT.decode("utf-8") in text, (
+        "protocol doc must show the exact pinned verify.sh content"
+    )
+    assert "covered by the manifest entries" in text
+
+
 def test_human_agency_protocol_doc_denies_unsupported_meanings() -> None:
     text = _text(AGENCY_PROTOCOL_DOC)
     assert (
@@ -397,3 +432,13 @@ def test_human_agency_example_output_is_byte_stable_and_secret_free() -> None:
     assert "ed25519:" not in text
     assert "PRIVATE KEY" not in text
     assert re.search(r"[0-9a-f]{64}", text) is None
+
+
+def test_human_agency_example_describes_application_side_effects_precisely() -> None:
+    """The example must not confuse interpreter bytecode caches with protocol writes."""
+
+    source = _text("examples/human_agency_profile_v01.py")
+    normalized = " ".join(source.split())
+    assert "never writes to a ledger or a filesystem" not in normalized
+    assert "no application-level filesystem or ledger writes" in normalized
+    assert "never writes a private-key file" in normalized

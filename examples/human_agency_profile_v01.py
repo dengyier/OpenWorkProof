@@ -10,8 +10,11 @@ This example builds, entirely in memory, the smallest realistic agency flow:
    (`owp.repo_read`) and one reserved tool (`owp.apply_patch`).
 
 It uses only ephemeral Ed25519 keys generated for this run. It never writes a
-private-key file, never touches the network, and never writes to a ledger or a
-filesystem. It is a protocol example, not a production deployment guide: the
+private-key file or touches the network. It performs no application-level
+filesystem or ledger writes.
+Python may create its normal bytecode cache unless that interpreter behavior is
+disabled; such cache files are not protocol side effects. This is a protocol
+example, not a production deployment guide: the
 profile expresses an authorization boundary, and is not employee scoring,
 performance monitoring, legal-liability transfer, automatic accountability,
 fund custody, or compliance certification.

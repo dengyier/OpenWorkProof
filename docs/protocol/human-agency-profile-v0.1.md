@@ -89,11 +89,20 @@ returns `AGENCY_ACTION_NOT_DELEGATED`; a revoked/absent profile returns
 
 ## Offline bundle
 
-`agency_bundle.py` exports a minimal, key-free offline bundle whose layout is
-exactly `agency-manifest.json`, `agency/work-order.json`,
-`agency/profiles/<id>.json`, `agency/transitions/<id>.json`, and
-`agency/appeals/<id>.json`. The manifest is a Sidecar-signed snapshot
-attestation of a single `evaluated_at` UTC second.
+`agency_bundle.py` exports a minimal, private-key-free, self-contained offline
+bundle whose layout is exactly `agency-manifest.json`,
+`agency/work-order.json`, `verify.sh`, `agency/profiles/<id>.json`,
+`agency/transitions/<id>.json`, and `agency/appeals/<id>.json`. The manifest is
+a Sidecar-signed snapshot attestation of a single `evaluated_at` UTC second.
+`verify.sh` is itself covered by the manifest entries (its SHA-256 and size are
+listed there), and the verifier additionally pins it to the exact
+`AGENCY_VERIFY_SCRIPT` bytes and an executable bit before trusting the snapshot:
+
+```sh
+#!/bin/sh
+set -eu
+exec python -m openworkproof.agency_bundle "${1:-.}"
+```
 
 The bundle is a historical snapshot of the authorization boundary at signing
 time. It is not a TSA proof and not a current-state proof: an older but validly

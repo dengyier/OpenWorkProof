@@ -3,6 +3,31 @@
 > 本文档是项目实现状态的权威记录。README 只保留概览，
 > 「已经完成什么」和「尚未完成什么」的完整清单以本文为准。
 
+## Human Agency Profile 0.1：离线包文档真相复审修复（2026-08-24）
+
+Task 8 独立复审发现协议文档的精确 bundle 布局遗漏实现强制的 `verify.sh`，且
+`key-free` 会掩盖 WorkOrder 内存在验签公钥；示例 docstring 还把“无应用层写入”
+绝对化为“不写 filesystem”，忽略 Python 可能生成 bytecode cache。本轮只修正文档与
+回归测试，未改协议实现、main 或 candidate inventory，未 push：
+
+- 离线包现准确写为 `private-key-free, self-contained`，精确列出
+  `agency-manifest.json`、`agency/work-order.json`、`verify.sh` 与三类历史对象目录；
+  文档中的 `verify.sh` 字节直接由测试与生产 `AGENCY_VERIFY_SCRIPT` 对照，并明确其
+  SHA-256/size 受 manifest entry 覆盖、执行位与字节由 verifier 固定。
+- 示例改为“无 application-level filesystem 或 ledger 写入”；普通解释器可能生成
+  `.pyc`，属于解释器缓存而非协议副作用。验证命令使用
+  `PYTHONDONTWRITEBYTECODE=1` 隔离该环境行为。
+- fresh：文档边界 `23 passed`；Task 8 门 `88 passed`（23 + 25 + 40）；schema 门
+  `60 passed`；样例双跑 stdout 字节一致、退出码 0。
+
+商业与外部证据边界不变：
+
+```yaml
+customer_adoption: not_evidenced
+payment: not_evidenced
+upstream_adoption: not_evidenced
+```
+
 ## Human Agency Profile 0.1：文档真相审计修复（2026-08-24，commit `fix: correct human agency documentation claims`）
 
 独立审计对 Task 8 文档切片发现 3 个 P1 + 1 个 P2。本 commit 只做最小修复，未改协议

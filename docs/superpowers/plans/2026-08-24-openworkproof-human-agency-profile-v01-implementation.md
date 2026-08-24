@@ -1111,6 +1111,20 @@ git diff --check                                      # PASS
 
 ---
 
+## Task 8 独立复审修复（离线包布局与副作用边界）
+
+- [x] **P1（RED→GREEN）**：协议文档的 `exactly` bundle 布局补入实现强制且由
+  manifest 覆盖的 `verify.sh`，并把容易误解为“不含公钥”的 `key-free` 收紧为
+  `private-key-free, self-contained`；测试直接与生产 `AGENCY_VERIFY_SCRIPT` 字节对照。
+- [x] **P2（RED→GREEN）**：示例 docstring 不再绝对声称“不写 filesystem”，改为
+  “无 application-level filesystem 或 ledger 写入”，并明确 Python bytecode cache 是
+  解释器行为、不是协议副作用。
+- [x] **复验**：`PYTHONDONTWRITEBYTECODE=1` 下文档边界 `23 passed`、Task 8 门
+  `88 passed`、schema 门 `60 passed`；样例双跑 stdout 字节一致。未改协议代码、main、
+  candidate inventory，未 push。
+
+---
+
 ## Task 9：全量门、供应链绑定与分支收口
 
 **Files:**
