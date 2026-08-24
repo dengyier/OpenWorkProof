@@ -161,12 +161,41 @@ repo-read/apply-patch `144 passed`；mcp/binding/recomposition `126 passed`；
 transitions、appeals 以及某一冻结评估时刻的边界状态；它不能被描述为一次执行的 enforcement
 proof。若要后者，需要新签名拒绝对象或带 profile 绑定的新 receipt schema，属于后续协议版本。
 
-## 需要产品 Owner 确认的四项选择
+## Owner 决策（四项选择已收口）
 
-1. v0.1 bundle 采用“授权边界证明”，还是升级协议以证明具体执行/拒绝；
-2. v0.1 是否新增真实 `execute_apply_patch`，还是将其保持为 reserved/deny；
-3. 是否接受 manifest 中冻结、可校验但非时间戳机构背书的 `evaluated_at`；
-4. `current_status` 是否增加 `expired`，或对过期历史拒绝导出。
+2026-08-24 Owner 已在实施计划 Task 6 头部给出决策，原“待确认的四项选择”全部收口：
 
-四项确认前，Tasks 5–6 保持未完成；这是协议真实性边界，不是测试或编码困难。
+1. v0.1 bundle 采用 **authorization boundary bundle**，不是某次调用的 enforcement proof；
+2. 已新增真实 `execute_apply_patch`（Task 5 Step 4 完成），不再保持 reserved/deny 占位；
+3. 接受 exporter 在 target lock 内冻结、可校验但非时间戳机构背书的 `evaluated_at`；
+4. `current_status` 增加 `expired`。
 
+四项确认前“Tasks 5–6 保持未完成”的表述已过时：Task 5 已实现并经独立 review；Task 6
+（导出最小离线 human agency boundary bundle）已实现，见实施计划 Task 6 各 Step 的完成
+证据。这是协议真实性边界，不是测试或编码困难；本记录不声明已合并、已推送或已被外部采用。
+
+## Task 6 独立审查 P1/P2 修复（Sidecar snapshot attestation）
+
+独立审查发现 P1：原 `AgencyBundleManifestV01` 未签名，攻击者可无钥删除 revoke/supersede
+后缀并重写 `evaluated_at`/`current_status`，使已撤销 bundle 被重放为 active。Owner 决策采用
+WorkOrder 内 Sidecar key binding 作为自包含 snapshot attestation：
+
+- `AgencyBundleManifestV01` 改为 `SignedProtocolModel`，`_signed_domain="manifest"` v0.1，
+  含 digest/signature_alg/signer_key_id/signature；签名覆盖 `work_order_digest`、
+  `evaluated_at`、`current_status`、`current_profile_id`、`boundary` 与全部 `entries`
+  （path/SHA-256/size），不加无效自哈希。
+- `export_agency_bundle` 必须显式接收 `sidecar_private_key: Ed25519PrivateKey`（不默认、不读
+  环境）；`compose_agency_manifest` 亦必须显式签名；导出前显式校验私钥匹配 WorkOrder Sidecar
+  binding，错误角色 fail closed。
+- 验证器加载并验证 WorkOrder identity bindings 后，只接受 Sidecar role binding 并
+  `verify_payload("manifest", ...)`；错误角色/伪签名/篡改 manifest/截断合法 supersede 链/
+  删除 revoke 后缀/重写 evaluated_at+status 均 fail closed。验证器仍不接受 `now`、不访问
+  ledger/network/环境私钥/系统时钟；verify.sh/CLI 只用于验证、不含私钥。
+- 补 RED→GREEN 回归：wrong role signer/export 拒绝、signed p1→p2 bundle 删后缀无钥重建拒绝、
+  revoked 删 revoke 回滚拒绝、evaluated_at/status coherent rewrite 拒绝、manifest 签名字节/
+  签名者篡改拒绝、extra empty directory 拒绝（保留）、verifier monkeypatch ledger/system
+  time/network/private-key access 纯净性证明。
+- 边界不变：Sidecar 签名固定的是“声称的 `evaluated_at`”，不证明真实世界时间，仍非 TSA；
+  更早但签名有效的 bundle 仍是历史快照，消费方须自行执行新鲜度策略，不能把它当作抗重放的
+  当前状态证明。
+  本记录不声明已合并、已推送或已被外部采用。

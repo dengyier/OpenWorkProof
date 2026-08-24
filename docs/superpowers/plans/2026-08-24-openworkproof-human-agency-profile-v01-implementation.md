@@ -672,8 +672,8 @@ handler failure 与 cleanup failure 语义要与 repo-read/run-tests/rollback �
 > > agency_binding_json 并证明后续 load/verification。focused：apply-patch/agency/mcp/
 > > repo-read 129 passed；policy/agency/sandbox 560 passed 4 skipped；recomposition/
 > > receipt_chain/binding 588 passed；全量 4130 passed 2 failed 8 skipped（2 failed
-> > 均为既有 `test_current_candidate_inventory_binds_*`，需 Task 9 重建）。Task5 不
-> > 标记 READY：全量 inventory boundary 仍待 Task 9 重建。
+> > 均为既有 `test_current_candidate_inventory_binds_*`，需 Task 9 重建）。后续独立
+> > review 未发现 P0/P1/P2，Task5 实现切片 READY；分支发布仍受 Task 9 inventory 重建约束。
 >
 > > **2026-08-24 Owner 威胁模型边界 + Task5 Step4 audit closure（本 commit）：**
 > > `execute_apply_patch` 的 receipt 只认证不可变 Git candidate commit 与由 patch evidence
@@ -722,8 +722,8 @@ supersession 后 apply-patch allowed；revoke 后所有 protected tool 返回
 > `AGENCY_PROFILE_REQUIRED` 且 handler/driver 零调用零写入、确定性 history-loader-在锁内 proof
 > （非阻塞 flock probe，无 sleep）。focused：agency end-to-end `40 passed`；agency-policy/policy/
 > repo-read/apply-patch `144 passed`；mcp/binding/recomposition `126 passed`；`pip check`/`compileall`/
-> `git diff --check` PASS。Task 5 仍不标记 READY：dispatcher 与完整状态链尚未经独立 review，且全量
-> inventory boundary（`test_current_candidate_inventory_binds_*`）仍需 Task 9 重建。
+> `git diff --check` PASS。独立 review 未发现 P0/P1/P2，Task 5 实现切片 READY；全量
+> inventory boundary（`test_current_candidate_inventory_binds_*`）仍需 Task 9 重建后才能发布。
 
 - [ ] **Step 6: 分阶段运行测试与提交**
 
@@ -750,21 +750,35 @@ git commit -m "feat: protect agent execution with human agency profiles"
 > **2026-08-24 Owner 决策：** v0.1 是 authorization boundary bundle，不是某次调用的
 > enforcement proof；使用 exporter 冻结的 `evaluated_at`，接受其非 TSA 边界；状态增加
 > `expired`。
+>
+> **2026-08-24 Owner 决策（独立审查 P1 修复，Sidecar snapshot attestation）：** 原 manifest
+> 未签名，攻击者可无钥删除 revoke/supersede 后缀并重写 `evaluated_at`/status。修复采用
+> WorkOrder 内 Sidecar key binding 作为自包含 snapshot attestation：
+> `AgencyBundleManifestV01` 改为 `SignedProtocolModel`，`_signed_domain="manifest"` v0.1，
+> 包含 digest/signature_alg/signer_key_id/signature；`export_agency_bundle` 必须显式接收
+> `sidecar_private_key: Ed25519PrivateKey`（不得默认/环境读取），`compose_agency_manifest`
+> 也必须显式签名；验证器加载并验证 WorkOrder identity bindings 后，只接受 Sidecar role
+> binding 并 `verify_payload("manifest", ...)`。manifest signature 覆盖 `work_order_digest`、
+> `evaluated_at`、`current_status`、`current_profile_id`、`boundary` 和全部 `entries`
+> （path/SHA-256/size），不加无效自哈希。错误角色/伪签名/篡改 manifest/截断合法 supersede
+> 链/删除 revoke 后缀/重写 evaluated_at+status 均 fail closed。Sidecar 签名固定“声称的
+> evaluated_at”，但不证明真实世界时间——仍非 TSA，仅内容寻址且不可伪造。
 
 **Files:**
 - Create: `src/openworkproof/agency_bundle.py`
 - Create: `tests/test_agency_bundle_v01.py`
 
-- [ ] **Step 1: 写 boundary bundle RED 测试**
+- [x] **Step 1: 写 boundary bundle RED 测试**
 
 覆盖 active/revoked/expired、固定 clock 下确定性双导出、无私钥、
 symlink/hardlink/path traversal、额外文件、缺文件、WorkOrder/profile/transition/appeal 任一
 字节篡改、签名有效但链 fork、manifest 摘要篡改、manifest 状态与重新解析结果不一致。
 
-- [ ] **Step 2: 实现闭合 manifest 与结果**
+- [x] **Step 2: 实现闭合 manifest 与结果**
 
 ```python
-class AgencyBundleManifestV01(ProtocolModel):
+class AgencyBundleManifestV01(SignedProtocolModel):
+    _signed_domain = "manifest"
     schema_version: Literal["openworkproof-agency-bundle/0.1"]
     work_order_digest: Digest64
     evaluated_at: CanonicalUTCTime
@@ -784,7 +798,7 @@ class AgencyBundleVerificationResultV01(ProtocolModel):
     boundary: Literal["authorization evidence, not legal or employment judgment"]
 ```
 
-- [ ] **Step 3: 实现确定性导出和纯离线验证**
+- [x] **Step 3: 实现确定性导出和纯离线验证**
 
 允许的精确布局：
 
@@ -802,13 +816,16 @@ manifest entry 固定为 relative POSIX path、SHA-256、size；UTF-8 路径排�
 clock 冻结 canonical UTC second `evaluated_at`；verifier 不接受独立 `now`，只用 manifest
 时间重新解析完整历史，并核对 active/revoked/expired 与 current profile。验证器只信
 manifest 与文件内容，不访问 ledger、网络、环境私钥或系统时间；WorkOrder 内 key bindings
-即为验签公钥来源。
+即为验签公钥来源。manifest 由 WorkOrder Sidecar key 签名（snapshot attestation），验证器
+在验证 identity bindings 后只接受 Sidecar role binding 并 `verify_payload("manifest", ...)`；
+`compose_agency_manifest` 与 `export_agency_bundle` 都必须显式接收 `sidecar_private_key`，
+verify.sh/CLI 只用于验证、不含私钥。
 
 额外/缺失文件、非普通文件、symlink、`st_nlink != 1`、路径越界、非 canonical JSON、摘要
 或 size 不符、跨 WorkOrder、错误签名、引用缺失、fork/cycle/disconnected/time reversal、
 appeal 目标不一致和重算状态不一致全部 fail closed。结果必须保留非法律/雇佣判断边界。
 
-- [ ] **Step 4: 运行测试与提交**
+- [x] **Step 4: 运行测试与提交**
 
 ```bash
 ./.venv/bin/python -m pytest -q tests/test_agency_bundle_v01.py tests/test_acceptance_bundle_v01.py
@@ -817,6 +834,49 @@ git diff --check
 git add src/openworkproof/agency_bundle.py tests/test_agency_bundle_v01.py
 git commit -m "feat: export offline human agency bundles"
 ```
+
+> **2026-08-24 已实现（commit `feat: export offline human agency bundles`）：**
+> 新增 `src/openworkproof/agency_bundle.py` 与 `tests/test_agency_bundle_v01.py`。manifest
+> 与 result 模型精确落地（`AgencyBundleManifestV01`/`AgencyBundleVerificationResultV01` +
+> `AgencyBundleManifestEntryV01`，boundary 固定为
+> `authorization evidence, not legal or employment judgment`）；允许布局精确为
+> `agency-manifest.json`、`agency/work-order.json`、`agency/profiles/<id>.json`、
+> `agency/transitions/<id>.json`、`agency/appeals/<id>.json`、`verify.sh`。导出在 target
+> lock 内用 trusted clock 冻结 canonical UTC second `evaluated_at`，用
+> `resolve_human_agency_profile_structure` + 时间窗重算 active/revoked/expired 与
+> current profile；写入走 staging + fsync + no-replace rename。验证器纯离线：只信
+> manifest 与文件字节，从 WorkOrder key bindings 验签，不接受独立 `now`、不访问
+> ledger/网络/环境私钥/系统时间；额外/缺失文件、非普通文件、symlink、`st_nlink != 1`、
+> 路径越界、非 canonical JSON、摘要/size 不符、跨 WorkOrder、错误签名、引用缺失、
+> fork/cycle/disconnected/time reversal、appeal 目标不一致、manifest status/digest 与
+> 重算不一致全部 fail closed。
+>
+> 测试矩阵覆盖 active/revoked/expired 导出、固定 clock 双导出字节一致、无私钥（逐字节
+> 扫描私钥 raw bytes + PEM 头）、symlink/hardlink/path traversal、额外/缺失文件、
+> WorkOrder/profile/transition/appeal 逐对象字节篡改、manifest entry digest 篡改、
+> manifest status/work_order_digest 与重算不一致、非 canonical JSON、错误 verify.sh、
+> 有效签名下的 multiple-genesis/fork（多出边）/cycle/disconnected-cycle/missing
+> replacement/time reversal、appeal 目标不一致、跨 WorkOrder profile、closed model。
+> RED 为 `ModuleNotFoundError`；GREEN：`tests/test_agency_bundle_v01.py` 30 passed；
+> 计划 Step 4 门 `test_agency_bundle_v01.py + test_acceptance_bundle_v01.py` 104 passed
+> （30 + 74 acceptance regression）；agency focused 回归（models/history/policy/ledger/
+> end_to_end）139 passed；`pip check`/`compileall`/`git diff --check` PASS。
+>
+> > **2026-08-24 独立审查 P1/P2 修复（未提交，工作树）：** manifest 改为 Sidecar snapshot
+> > attestation（见本 Task 头部 Owner 决策）。`AgencyBundleManifestV01` 改为
+> > `SignedProtocolModel`（`_signed_domain="manifest"` v0.1），`compose_agency_manifest` 与
+> > `export_agency_bundle` 均显式接收并校验 `sidecar_private_key`，验证器只接受 Sidecar role
+> > binding 并 `verify_payload("manifest", ...)`；删除 unused import `openworkproof.evidence`。
+> > 补 RED→GREEN 回归 9 条：wrong role signer/export 拒绝、signed p1→p2 bundle 删后缀无钥重建
+> > 拒绝、revoked 删 revoke 回滚拒绝、evaluated_at/status coherent rewrite 拒绝、manifest
+> > 签名字节/签名者篡改拒绝、verifier monkeypatch ledger/system time/network/private-key 纯净性；
+> > 保留 extra empty directory RED test 与 `_scan_tree` 精确目录集合修复。GREEN：
+> > `tests/test_agency_bundle_v01.py` `39 passed`；bundle+acceptance `113 passed`；
+> > agency focused（models/history/policy/ledger/bundle/end_to_end）`178 passed`；
+> > `pip check`/`compileall`/`git diff --check` PASS。第二轮独立 review 未发现 P0/P1/P2，
+> > Task 6 实现切片 READY。更早但签名有效的 bundle 仍是其 `evaluated_at` 时刻的历史快照，
+> > 消费方须自行执行新鲜度策略；离线验签不声称 TSA 或抗旧快照重放。未 commit、未 push；
+> > Task 7 未扩大。
 
 ---
 

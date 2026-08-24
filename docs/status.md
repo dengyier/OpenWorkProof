@@ -12,7 +12,7 @@
 reservation/started → patch handler → 独立 postcondition 校验 → `PatchResultEvidence` +
 patch/result EvidenceRefs → Sidecar 签名 receipt →
 `complete_receipt_publication(..., _borrowed_lock_descriptor=...)` → cleanup）。
-`aec4b68`（`fix: verify apply patch authority and postconditions`）修复 review blockers：
+`c201dee`（`fix: verify apply patch authority and postconditions`）修复 review blockers：
 
 - 签名精确校验 `request.tool_name == "owp.apply_patch"` 与 `arguments_digest`，
   patch 字节 digest/size 与 `ApplyPatchArguments` 精确一致，Sidecar key 匹配
@@ -99,9 +99,42 @@ patch/result EvidenceRefs → Sidecar 签名 receipt →
 
 本轮 fresh 测量（控制器 fresh，未复用历史数字）：agency end-to-end `40 passed`；
 agency-policy/policy/repo-read/apply-patch `144 passed`；mcp/binding/recomposition
-`126 passed`；`pip check` / `compileall` / `git diff --check` PASS。Task 5 仍不标记
-READY：dispatcher 与完整状态链尚未经独立 review，且全量 inventory boundary 仍需 Task 9
-重建。
+`126 passed`；`pip check` / `compileall` / `git diff --check` PASS。独立 review 未发现
+P0/P1/P2，Task 5 实现切片 READY；分支发布仍受 Task 9 全量 inventory 重建约束。
+
+## Human Agency Profile 0.1：offline boundary bundle（2026-08-24）
+
+同一隔离分支 `codex/human-agency-profile-v01` 新增 `agency_bundle.py`，导出最小、无私钥、
+可离线验证的 authorization boundary bundle。独立审查发现 P1：原 `AgencyBundleManifestV01`
+未签名，攻击者可无钥删除 revoke/supersede 后缀并重写 `evaluated_at`/`current_status`，把
+已撤销 bundle 重放为 active。Owner 决策采用 WorkOrder 内 Sidecar key binding 作为自包含
+snapshot attestation 修复：
+
+- `AgencyBundleManifestV01` 改为 `SignedProtocolModel`，`_signed_domain="manifest"` v0.1，
+  含 digest/signature_alg/signer_key_id/signature；签名覆盖 `work_order_digest`、
+  `evaluated_at`、`current_status`、`current_profile_id`、`boundary` 与全部 `entries`
+  （path/SHA-256/size），不加无效自哈希。
+- `export_agency_bundle` 必须显式接收 `sidecar_private_key: Ed25519PrivateKey`（不默认、不读
+  环境），`compose_agency_manifest` 亦必须显式签名；导出前显式校验私钥匹配 WorkOrder Sidecar
+  binding，错误角色 fail closed。验证器加载并验证 WorkOrder identity bindings 后，只接受
+  Sidecar role binding 并 `verify_payload("manifest", ...)`；验证器仍不接受 `now`、不访问
+  ledger/network/环境私钥/系统时钟；verify.sh/CLI 只用于验证、不含私钥。
+- 错误角色/伪签名/篡改 manifest/截断合法 supersede 链/删除 revoke 后缀/重写
+  evaluated_at+status 均 fail closed；保留 extra empty directory RED test 与 `_scan_tree`
+  精确目录集合修复。
+- 边界不变：Sidecar 签名固定的是“声称的 `evaluated_at`”，不证明真实世界时间，仍非 TSA；
+  一个更早但签名有效的旧 bundle 仍是可验证的历史快照，不是“当前此刻”证明。消费方必须检查
+  返回的 `evaluated_at` 是否满足自身新鲜度策略，不能把离线验签等同于抗重放时间证明。
+
+本轮 fresh 测量（控制器 fresh，未复用历史数字）：
+`tests/test_agency_bundle_v01.py` `39 passed`（30 原测试 + 9 新回归：wrong role
+signer/export 拒绝、signed p1→p2 bundle 删后缀无钥重建拒绝、revoked 删 revoke 回滚拒绝、
+evaluated_at/status coherent rewrite 拒绝、manifest 签名字节/签名者篡改拒绝、verifier
+monkeypatch ledger/system time/network/private-key 纯净性）；bundle+acceptance
+`test_agency_bundle_v01.py + test_acceptance_bundle_v01.py` `113 passed`；agency focused
+（models/history/policy/ledger/bundle/end_to_end）`178 passed`；`pip check`/`compileall`/
+`git diff --check` PASS。第二轮独立 review 未发现 P0/P1/P2，Task 6 实现切片 READY；尚未
+合并/推送，全量 inventory boundary 仍待 Task 9 重建。
 
 ## Verified Agent Delivery 0.1 本地实现（2026-08-22）
 

@@ -437,6 +437,18 @@ lock 内冻结。离线 verifier 不接受调用方另传 `now`，而是以 mani
 是内容寻址且可防篡改的评估事实，不是时间戳机构背书；不得把它描述为权威现实时间证明。
 验证器不信任导出时预写状态。
 
+**Sidecar snapshot attestation（2026-08-24 独立审查 P1 修复）：** manifest 是自包含的闭包
+快照，由 WorkOrder 内 Sidecar key binding 签名（`_signed_domain="manifest"` v0.1）。签名覆盖
+`work_order_digest`、`evaluated_at`、`current_status`、`current_profile_id`、`boundary` 与全部
+`entries`（path/SHA-256/size），因此无钥删除 revoke/supersede 后缀、重写 evaluated_at/status
+或篡改任何 entry 都 fail closed。`export_agency_bundle` 必须显式接收
+`sidecar_private_key: Ed25519PrivateKey`（不默认、不读环境），`compose_agency_manifest` 亦必须
+显式签名；验证器在验证 WorkOrder identity bindings 后只接受 Sidecar role binding 并
+`verify_payload("manifest", ...)`；verify.sh/CLI 只用于验证、不含私钥。该签名固定的是“声称的
+`evaluated_at`”，并不证明真实世界时间——仍非 TSA，边界不变。更早但签名有效的 bundle
+仍可作为历史快照重放；离线 verifier 只报告其签名时间，不声称它是当前此刻。消费方须对
+`evaluated_at` 应用自己的新鲜度策略，或使用后续的 TSA/单调 checkpoint 扩展。
+
 ## 9. 首个端到端场景
 
 固定同一 WorkOrder 与 Grant，使它们同时允许：
