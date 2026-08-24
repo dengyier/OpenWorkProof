@@ -54,7 +54,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-openworkproof = ["schemas/v0.1/*.json", "schemas/v0.2/*.json", "schemas/v0.3/*.json", "schemas/v0.4/*.json", "schemas/v0.5/*.json", "schemas/companion-v0.1/*.json"]
+openworkproof = ["schemas/v0.1/*.json", "schemas/v0.2/*.json", "schemas/v0.3/*.json", "schemas/v0.4/*.json", "schemas/v0.5/*.json", "schemas/companion-v0.1/*.json", "schemas/agency-v0.1/*.json"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"

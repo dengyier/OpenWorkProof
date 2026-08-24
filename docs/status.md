@@ -136,6 +136,47 @@ monkeypatch ledger/system time/network/private-key 纯净性）；bundle+accepta
 `git diff --check` PASS。第二轮独立 review 未发现 P0/P1/P2，Task 6 实现切片 READY；尚未
 合并/推送，全量 inventory boundary 仍待 Task 9 重建。
 
+## Human Agency Profile 0.1：独立 schema registry 冻结与公开 API（2026-08-24）
+
+同一隔离分支 `codex/human-agency-profile-v01` 新增独立
+`agency_schema_registry.py` 与 `schemas/agency-v0.1/`（三种 Acceptor 签名协议对象
+schema + registry），并扩展 `__init__.py` 最小懒加载公开 API：
+
+- 独立 registry 只冻结计划列出的三种对象：`human-agency-profile`、
+  `agency-profile-transition`、`agency-appeal`；`schema_version` 为
+  `openworkproof-agency-schema-registry/0.1`，`protocol_version=0.1`，entries 按
+  object_type UTF-8 排序且每条精确 SHA-256，无自引用。**未触碰**主 v0.1–v0.5
+  冻结 registry、`_FROZEN_V01_DIGESTS` 或主 `schema-registry.json` digest，也未把
+  agency 对象加入任何既有 `_OBJECT_PATHS_BY_VERSION`。
+- `generate_agency_schemas(destination)` 单目标安全事务（resolved-target preflight、
+  lock、staging 读回、backup/commit/rollback、COMMIT-ACK 精确读回、cleanup），
+  生成 bytes 与 packaged bytes 逐字节一致；`authoritative_agency_schema(object_type)`
+  返回 canonical bytes 且未知对象 `ValueError` fail closed；`verify_packaged_agency_schemas()`
+  经 `importlib.resources` 读 packaged `schemas/agency-v0.1` 并与生成锚点比对，漂移/缺文件/
+  非 canonical 均 `RuntimeError`。
+- `__init__.py` 最小懒加载公开：Agency 三模型、commit/load 六函数、
+  `authorize_tool_call_with_agency_profile` + `dispatch_protected_agent_action`、
+  `export_agency_bundle` + `verify_agency_bundle_directory` +
+  `AgencyBundleManifestV01` + `AgencyBundleVerificationResultV01`；未导出 evidence
+  私有锁/SQL helper。`pyproject.toml` package-data 追加 `schemas/agency-v0.1/*.json`，
+  无新增依赖。
+- 边界：`AgencyBundleManifestV01` 现为 Sidecar 签名模型，但本 Task 只冻结三种
+  agency 对象 schema，未加入 bundle schema（计划未列，不擅自扩大）。
+
+本轮 fresh 测量（控制器 fresh，未复用历史数字）：
+`tests/test_agency_schema_registry_v01.py` `17 passed`；计划 Step 4 门
+（agency_schema_registry + test_schema_registry + test_package）`60 passed`；
+agency focused 七文件门 `195 passed`；相邻协议回归（policy/mcp_server/repo_read/
+retraction/acceptance_bundle/schema_registry）`309 passed`；`python -m build` 成功
+（wheel 内含全部 4 个 agency schema 资源）；wheel `--no-deps --target` 隔离安装后
+`importlib.resources`/`authoritative_agency_schema`/`verify_packaged_agency_schemas`
+可读且 sha256 一致；`pip check`/`compileall`/`git diff --check` PASS。
+
+诚实边界不变：customer_adoption/payment/upstream_adoption 仍 `not_evidenced`；全量
+inventory boundary（`test_current_candidate_inventory_binds_*` 因 candidate definition
+变化需 Task 9 重建）仍未闭合；本 Task 未改 main、未 push、未重建 candidate inventory、
+未做 Task 8。
+
 ## Verified Agent Delivery 0.1 本地实现（2026-08-22）
 
 隔离分支 `codex/verified-agent-delivery` 已按计划实现首个商业产品切片

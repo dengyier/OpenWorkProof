@@ -59,6 +59,63 @@ _LAZY_EXPORTS = {
         "openworkproof.delivery_case",
         "verify_exported_delivery_case",
     ),
+    "HumanAgencyProfileV01": (
+        "openworkproof.agency",
+        "HumanAgencyProfileV01",
+    ),
+    "AgencyProfileTransitionV01": (
+        "openworkproof.agency",
+        "AgencyProfileTransitionV01",
+    ),
+    "AgencyAppealV01": ("openworkproof.agency", "AgencyAppealV01"),
+    "commit_human_agency_profile": (
+        "openworkproof.agency_ledger",
+        "commit_human_agency_profile",
+    ),
+    "commit_agency_profile_transition": (
+        "openworkproof.agency_ledger",
+        "commit_agency_profile_transition",
+    ),
+    "commit_agency_appeal": (
+        "openworkproof.agency_ledger",
+        "commit_agency_appeal",
+    ),
+    "load_agency_history": (
+        "openworkproof.agency_ledger",
+        "load_agency_history",
+    ),
+    "load_current_human_agency_profile": (
+        "openworkproof.agency_ledger",
+        "load_current_human_agency_profile",
+    ),
+    "load_agency_appeals": (
+        "openworkproof.agency_ledger",
+        "load_agency_appeals",
+    ),
+    "authorize_tool_call_with_agency_profile": (
+        "openworkproof.agency_policy",
+        "authorize_tool_call_with_agency_profile",
+    ),
+    "dispatch_protected_agent_action": (
+        "openworkproof.mcp_server",
+        "dispatch_protected_agent_action",
+    ),
+    "export_agency_bundle": (
+        "openworkproof.agency_bundle",
+        "export_agency_bundle",
+    ),
+    "verify_agency_bundle_directory": (
+        "openworkproof.agency_bundle",
+        "verify_agency_bundle_directory",
+    ),
+    "AgencyBundleManifestV01": (
+        "openworkproof.agency_bundle",
+        "AgencyBundleManifestV01",
+    ),
+    "AgencyBundleVerificationResultV01": (
+        "openworkproof.agency_bundle",
+        "AgencyBundleVerificationResultV01",
+    ),
 }
 
 
@@ -89,4 +146,19 @@ __all__ = [
     "inspect_delivery_case",
     "export_delivery_case",
     "verify_exported_delivery_case",
+    "HumanAgencyProfileV01",
+    "AgencyProfileTransitionV01",
+    "AgencyAppealV01",
+    "commit_human_agency_profile",
+    "commit_agency_profile_transition",
+    "commit_agency_appeal",
+    "load_agency_history",
+    "load_current_human_agency_profile",
+    "load_agency_appeals",
+    "authorize_tool_call_with_agency_profile",
+    "dispatch_protected_agent_action",
+    "export_agency_bundle",
+    "verify_agency_bundle_directory",
+    "AgencyBundleManifestV01",
+    "AgencyBundleVerificationResultV01",
 ]

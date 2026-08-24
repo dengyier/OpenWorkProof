@@ -892,12 +892,12 @@ git commit -m "feat: export offline human agency bundles"
 - Modify: `src/openworkproof/__init__.py`
 - Modify: `pyproject.toml`
 
-- [ ] **Step 1: 写 registry RED 测试**
+- [x] **Step 1: 写 registry RED 测试**
 
 断言生成内容与 packaged bytes 完全一致、registry 路径 UTF-8 排序、SHA-256 正确、未知对象
 fail closed、wheel 安装后 `importlib.resources` 可读取；同时确认主 v0.1 registry digest 不变。
 
-- [ ] **Step 2: 实现独立 registry 并生成 schema**
+- [x] **Step 2: 实现独立 registry 并生成 schema**
 
 不要把 agency 对象塞进已有 `_FROZEN_V01_DIGESTS`。提供：
 
@@ -907,12 +907,12 @@ authoritative_agency_schema(object_type: str) -> bytes
 verify_packaged_agency_schemas() -> None
 ```
 
-- [ ] **Step 3: 增加最小懒加载 API**
+- [x] **Step 3: 增加最小懒加载 API**
 
 公开模型、commit/load、protected authorization、bundle export/verify；不要导出 evidence 私有锁
 函数或内部 SQL helper。
 
-- [ ] **Step 4: 运行测试与提交**
+- [x] **Step 4: 运行测试与提交**
 
 ```bash
 ./.venv/bin/python -m pytest -q \
@@ -926,6 +926,45 @@ git add src/openworkproof/agency_schema_registry.py src/openworkproof/schemas/ag
   src/openworkproof/__init__.py pyproject.toml tests/test_agency_schema_registry_v01.py
 git commit -m "feat: publish human agency profile schemas"
 ```
+
+> **2026-08-24 已实现（本 commit，`feat: publish human agency profile schemas`）：**
+> 新增 `src/openworkproof/agency_schema_registry.py` 与
+> `src/openworkproof/schemas/agency-v0.1/`（`human-agency-profile.schema.json`、
+> `agency-profile-transition.schema.json`、`agency-appeal.schema.json`、
+> `schema-registry.json`）与 `tests/test_agency_schema_registry_v01.py`。独立 registry
+> 只冻结计划列出的三种 Acceptor 签名协议对象 schema，registry schema_version 为
+> `openworkproof-agency-schema-registry/0.1`，`protocol_version=0.1`，entries 按
+> object_type UTF-8 排序且每条精确 SHA-256，无自引用；**未触碰**
+> `schema_registry._FROZEN_V01_DIGESTS`、主 v0.1 `schema-registry.json` digest，也未把
+> agency 对象加入任何 v0.1–v0.5 `_OBJECT_PATHS_BY_VERSION`。实现
+> `generate_agency_schemas(destination)`（single-target 安全事务：resolved-target
+> preflight、lock、staging 读回校验、backup/commit/rollback、COMMIT-ACK 精确读回、cleanup）、
+> `authoritative_agency_schema(object_type) -> bytes`（未知对象 `ValueError` fail closed，
+> 返回 canonical bytes）与 `verify_packaged_agency_schemas()`（`importlib.resources`
+> 读 `schemas/agency-v0.1` 并与确定性生成锚点逐字节比对，漂移/缺文件/非 canonical 均
+> `RuntimeError`）。`__init__.py` 新增最小懒加载公开 API：Agency 三模型
+> （`HumanAgencyProfileV01`/`AgencyProfileTransitionV01`/`AgencyAppealV01`）、
+> commit/load 六函数、`authorize_tool_call_with_agency_profile` +
+> `dispatch_protected_agent_action`、`export_agency_bundle` +
+> `verify_agency_bundle_directory` + `AgencyBundleManifestV01` +
+> `AgencyBundleVerificationResultV01`；未导出 evidence 私有锁/SQL helper。`pyproject.toml`
+> package-data 追加 `schemas/agency-v0.1/*.json`，无新增依赖。
+>
+> > **边界：** `AgencyBundleManifestV01` 现为 Sidecar 签名模型，但 Task 7 只冻结计划列出的
+> > 三种 agency 对象 schema，未擅自加入 bundle schema（计划 Step 2 签名未列 bundle）。
+> > 计划 Step 4 命令引用 `tests/test_package_installation.py`，但仓库实际文件为
+> > `tests/test_package.py`（package/version/installation 契约测试），按实际文件执行。
+> >
+> > fresh 测量（本轮控制器 fresh，未复用历史数字）：`tests/test_agency_schema_registry_v01.py`
+> > `17 passed`；计划 Step 4 门 `test_agency_schema_registry_v01.py + test_schema_registry.py +
+> > test_package.py` `60 passed`；agency focused 七文件门 `195 passed`；相邻协议回归
+> > （policy/mcp_server/repo_read/retraction/acceptance_bundle/schema_registry）`309 passed`；
+> > `python -m build` 成功产出 `openworkproof-1.3.0-py3-none-any.whl` 与 sdist，wheel 内含全部
+> > 4 个 agency schema 资源；wheel `--no-deps --target` 隔离安装后
+> > `importlib.resources`/`authoritative_agency_schema`/`verify_packaged_agency_schemas`
+> > 全部可读且 sha256 一致；`pip check`/`compileall`/`git diff --check` PASS。全量
+> > inventory boundary（`test_current_candidate_inventory_binds_*`）仍待 Task 9 重建，本
+> > Task 未改 main、未 push、未重建 candidate inventory、未做 Task 8。
 
 ---
 
