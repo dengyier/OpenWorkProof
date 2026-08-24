@@ -1,7 +1,9 @@
 # Human Agency Profile v0.1 夜间联合审查记录
 
-日期：2026-08-24（Asia/Shanghai）  
-分支：`codex/human-agency-profile-v01`  
+日期：2026-08-24（Asia/Shanghai）
+
+分支：`codex/human-agency-profile-v01`
+
 边界：本记录只证明本地分支实现与本轮测试结果，不等于已合并、已推送、已发布或已被外部采用。
 
 ## 已完成
