@@ -1059,12 +1059,15 @@ def test_execute_apply_patch_precommit_publication_injection_is_zero_write(
     fixed_now,
     monkeypatch,
 ) -> None:
-    """A raise before COMMIT writes zero business/evidence state.
+    """A staging-entry failure writes zero business/evidence state.
 
     Unlike a handler failure, the real handler here succeeds (the workspace is
-    genuinely patched), but the publication coordinator raises before the
-    receipt commit, so no receipt or evidence is written and only the allowed
-    unresolved journal bookkeeping remains.
+    genuinely patched), but the publication coordinator raises at pending
+    evidence staging entry — before any receipt or evidence journal row is
+    written — so no receipt or evidence is written and only the allowed
+    unresolved journal bookkeeping remains. This is distinct from the
+    insert-then-raise pre-COMMIT rollback test below, which exercises the
+    actual INSERT and ROLLBACK path.
     """
     case = _apply_patch_case(
         tmp_path,
@@ -1128,6 +1131,112 @@ def test_execute_apply_patch_precommit_publication_injection_is_zero_write(
     assert evidence_files == []
 
 
+def test_execute_apply_patch_precommit_insert_failure_rolls_back_exactly(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    """A raise after the real insert but before COMMIT rolls back exactly.
+
+    Unlike the staging-entry injection above, the real
+    ``evidence._insert_receipt_and_publication_group`` actually INSERTs the
+    receipt, receipt_parents, grant-events, evidence_publications, state and
+    sequence rows and the pending evidence files are actually staged, then
+    ``sqlite3.OperationalError`` is raised before SQLite COMMIT. All of those
+    business rows must roll back exactly; the handler journal may remain
+    STARTED_UNCONFIRMED, the real workspace may already contain the immutable
+    patch, and the orphaned pending evidence must be removed by recovery.
+    """
+    case = _apply_patch_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    before = _business_tables(case["ledger_path"])
+    before_head = case["candidate"].head_commit
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        before_counts = {
+            name: connection.execute(
+                f"SELECT COUNT(*) FROM {name}"
+            ).fetchone()[0]
+            for name in (
+                "receipts",
+                "receipt_parents",
+                "evidence_publications",
+                "grant_events",
+                "work_order_state",
+                "sequence_counter",
+            )
+        }
+    finally:
+        connection.close()
+    real_insert = evidence._insert_receipt_and_publication_group
+
+    def insert_then_raise(*args, **kwargs):
+        real_insert(*args, **kwargs)
+        raise sqlite3.OperationalError("pre-COMMIT insert failure")
+
+    monkeypatch.setattr(
+        evidence,
+        "_insert_receipt_and_publication_group",
+        insert_then_raise,
+    )
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="pre-COMMIT insert failure",
+    ):
+        _execute_apply_patch(case, ephemeral_role_keys, fixed_now)
+
+    # The real handler already committed the immutable Git candidate commit.
+    assert (case["candidate"].worktree / "src" / "app.py").read_bytes() == (
+        b"patched\n"
+    )
+    assert (
+        _candidate_git(case["candidate"], "rev-parse", "HEAD")
+        .decode()
+        .strip()
+        != before_head
+    )
+
+    # Every business row inserted before the failure rolled back exactly.
+    assert _business_tables(case["ledger_path"]) == before
+    connection = evidence.connect_ledger(case["ledger_path"])
+    try:
+        assert connection.execute(
+            "SELECT tool_name, state FROM handler_executions"
+        ).fetchone() == ("owp.apply_patch", "STARTED_UNCONFIRMED")
+        for name in before_counts:
+            assert connection.execute(
+                f"SELECT COUNT(*) FROM {name}"
+            ).fetchone()[0] == before_counts[name]
+    finally:
+        connection.close()
+
+    # The staged pending evidence is orphaned (rowless), not silently blessed;
+    # recovery removes it idempotently.
+    pending_dir = case["evidence_root"] / ".pending"
+    pending_files = [
+        path for path in pending_dir.iterdir() if path.is_file()
+    ]
+    assert len(pending_files) == 2
+    final_files = [
+        path
+        for path in case["evidence_root"].rglob("*")
+        if path.is_file() and ".pending" not in path.parts
+    ]
+    assert final_files == []
+
+    evidence.recover_evidence_publications(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+    )
+    assert [path for path in pending_dir.iterdir() if path.is_file()] == []
+
+
 # --- evidence drift/tamper fails closed ---
 
 
@@ -1169,6 +1278,70 @@ def test_execute_apply_patch_patch_digest_mismatch_fails_closed(
             clock=lambda: fixed_now,
         )
     assert _user_table_snapshot(case["ledger_path"]) == before
+
+
+# --- post-receipt workspace drift fails closed before any new patch ---
+
+
+def test_execute_apply_patch_rejects_workspace_drift_before_next_candidate_operation(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    fixed_now,
+) -> None:
+    """The receipt certifies the immutable commit, not a forever-clean worktree.
+
+    After a successful receipt, an out-of-band write drifts the mutable
+    worktree. The next candidate operation revalidates the current candidate
+    checkpoint via ``_verify_candidate_checkpoint`` and rejects the drift
+    before applying any new patch, so the certified commit is not mutated and
+    the drift is not silently blessed.
+    """
+    case = _apply_patch_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    _execute_apply_patch(case, ephemeral_role_keys, fixed_now)
+    after_head = (
+        _candidate_git(case["candidate"], "rev-parse", "HEAD").decode().strip()
+    )
+    _, after_manifest_digest = _candidate_manifest(case["candidate"], after_head)
+
+    drift = case["candidate"].worktree / "drift.txt"
+    drift.write_bytes(b"later drift\n")
+
+    with pytest.raises(
+        repo_tools.CandidateWorkspaceError,
+        match="candidate checkpoint does not match authority",
+    ):
+        repo_tools.apply_patch_in_candidate_workspace(
+            repo_tools.PatchRequest(
+                workspace=case["candidate"],
+                patch_bytes=case["patch_bytes"],
+                expected_patch_digest=hashlib.sha256(
+                    case["patch_bytes"]
+                ).hexdigest(),
+                expected_patch_size_bytes=len(case["patch_bytes"]),
+                declared_target_paths=("src/app.py",),
+                parent_commit=after_head,
+                parent_manifest_digest=after_manifest_digest,
+                occurred_at=fixed_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                replay_profile=case["work_order"].replay_profile,
+                replay_profile_digest=case["work_order"].replay_profile_digest,
+            )
+        )
+
+    # The drift is not blessed and the certified commit is not mutated.
+    assert drift.read_bytes() == b"later drift\n"
+    assert (
+        _candidate_git(case["candidate"], "rev-parse", "HEAD").decode().strip()
+        == after_head
+    )
+    assert (case["candidate"].worktree / "src" / "app.py").read_bytes() == (
+        b"patched\n"
+    )
 
 
 # --- concurrency: exactly one result, deterministic serialization ---

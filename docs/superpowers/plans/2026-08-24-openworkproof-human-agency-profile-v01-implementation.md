@@ -674,6 +674,28 @@ handler failure 与 cleanup failure 语义要与 repo-read/run-tests/rollback �
 > > receipt_chain/binding 588 passed；全量 4130 passed 2 failed 8 skipped（2 failed
 > > 均为既有 `test_current_candidate_inventory_binds_*`，需 Task 9 重建）。Task5 不
 > > 标记 READY：全量 inventory boundary 仍待 Task 9 重建。
+>
+> > **2026-08-24 Owner 威胁模型边界 + Task5 Step4 audit closure（本 commit）：**
+> > `execute_apply_patch` 的 receipt 只认证不可变 Git candidate commit 与由 patch evidence
+> > 派生的确定性 manifest（内容寻址证据），不承诺可变 worktree 在验证后永久保持干净。
+> > handler 是受信任的同步进程内适配器，可能失败或返回伪造/错误数据；敌意 handler 派生
+> > 延迟子进程、或同用户/root 的带外进程改写/删除 workspace/Git store，都在本 coordinator
+> > 的隔离边界之外——不声称能阻止敌意 OS 进程。后续动作必须重新校验当前 candidate
+> > checkpoint 并在 drift 时 fail closed：下一条 candidate 操作在
+> > `_verify_candidate_checkpoint` 处先于任何 patch 应用拒绝。本切片不添加投机性的
+> > workspace lock 或 sandboxing。
+> >
+> > P2 测试证据补齐：新增 `test_execute_apply_patch_precommit_insert_failure_rolls_back_exactly`
+> > ——monkeypatch `evidence._insert_receipt_and_publication_group` 先调用真实 insert、再于
+> > SQLite COMMIT 前抛 `sqlite3.OperationalError`，断言 receipt/receipt_parents/
+> > evidence_publications/sequence/state/grant-event 业务行精确回滚（`_business_tables`
+> > 与逐表计数均等于 before），handler journal 保持 STARTED_UNCONFIRMED，真实 workspace
+> > 已含不可变 patch，孤儿 pending evidence 由 `recover_evidence_publications` 幂等清理；
+> > 与 staging-entry 失败（`stage_pending_evidence_group` 注入）明确区分。另新增
+> > `test_execute_apply_patch_rejects_workspace_drift_before_next_candidate_operation`
+> > ——成功 receipt 后带外写漂移 worktree，下一条 candidate 操作
+> > (`apply_patch_in_candidate_workspace`) 在 `_verify_candidate_checkpoint` 处先于任何
+> > patch 应用拒绝 drift，认证 commit 不被改写。
 
 - [ ] **Step 5: 实现最小 protected dispatcher 与完整状态链**
 

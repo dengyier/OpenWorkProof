@@ -394,6 +394,15 @@ repo-read/run-tests/rollback 一样覆盖 target lock、current-context、基础
 handler reservation、签名 receipt、证据发布、COMMIT-ACK recovery 与 cleanup。完成前不得
 声称 supersede 后 apply-patch 已可安全执行。
 
+**Owner 威胁模型边界（2026-08-24）：** `execute_apply_patch` 的 receipt 只认证不可变 Git
+candidate commit 与由 patch evidence 派生的确定性 manifest（内容寻址证据），不承诺可变
+worktree 在验证后永久保持干净。handler 是受信任的同步进程内适配器，可能失败或返回
+伪造/错误数据；敌意 handler 派生延迟子进程、或同用户/root 的带外进程改写/删除
+workspace/Git store，都在本 coordinator 的隔离边界之外——不声称能阻止敌意 OS 进程。后续
+动作必须重新校验当前 candidate checkpoint，并在 drift 时 fail closed：下一条 candidate
+操作在 `_verify_candidate_checkpoint` 处先于任何 patch 应用拒绝。本切片不添加投机性的
+workspace lock 或 sandboxing。
+
 ## 8. 账本与离线验证
 
 新增三组 append-only 表：

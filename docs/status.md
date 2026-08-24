@@ -41,20 +41,25 @@ patch/result EvidenceRefs → Sidecar 签名 receipt →
   agency binding；`ActionReceipt` 本身不携带 Human Agency 证明（binding 仅作 executor
   锁内 recovery 协调）。V5→V6 迁移测试现保留真正非 NULL 的 Sidecar 签名 run-tests
   agency_binding + canonical agency_binding_json，并证明后续 load/verification。
-- 本轮 fresh 测量（控制器 fresh，未复用历史数字）：
-  - 专项 `tests/test_apply_patch_transaction.py`：`16 passed`（含 v0.1/v0.4 非 Sidecar
-    授权拒绝、伪造 postcondition、真实 COMMIT-ACK-loss、真实 pre-COMMIT 注入、
-    V5→V6 签名 run-tests 迁移）；
+- 本轮 fresh 测量（控制器 fresh，未复用历史数字；Task5 Step4 audit closure）：
+  - 专项 `tests/test_apply_patch_transaction.py`：`18 passed`（新增 pre-COMMIT
+    insert-then-rollback 精确回滚、post-receipt workspace drift fail-closed 两测试）；
   - `test_agency_end_to_end_v01.py`：`28 passed`（superseded-allow 与 recovery 均用
     真实 repo_tools handler）；
-  - focused 四文件门（apply-patch/agency/mcp/repo-read）：`129 passed`；
-  - policy/agency/sandbox：`560 passed, 4 skipped`；
-  - recomposition/receipt_chain/binding：`588 passed`；
-  - 全量：`4130 passed, 2 failed, 8 skipped`；2 failed 均为既有
-    `test_current_candidate_inventory_binds_*`（candidate definition 已变化，历史
-    inventory 0 match，需 Task 9 重建），非本 fix 回归；8 skipped 均为已分类
-    platform/live 边界；
+  - `test_receipt_chain.py`（publication atomicity）：`413 passed`；
+  - mcp/policy/repo_tools focused（test_mcp_server/test_policy/test_sandbox）：
+    `512 passed, 4 skipped`（4 skip 均为已分类 Docker live / immutable image 边界）；
   - `pip check` / `compileall` / `git diff --check`：PASS。
+- Owner 威胁模型边界（新增，2026-08-24）：`execute_apply_patch` 的 receipt 只认证不可变
+  Git candidate commit 与由 patch evidence 派生的确定性 manifest（内容寻址证据），不承诺
+  可变 worktree 在验证后永久保持干净；handler 是受信任的同步进程内适配器，可能失败或
+  返回伪造/错误数据，敌意 handler 派生延迟子进程、或同用户/root 的带外进程改写/删除
+  workspace/Git store，都在 coordinator 隔离边界之外——不声称能阻止敌意 OS 进程；后续
+  动作必须重新校验当前 candidate checkpoint 并在 drift 时 fail closed（下一条 candidate
+  操作在 `_verify_candidate_checkpoint` 处先于任何 patch 应用拒绝）；本切片不添加投机性
+  workspace lock 或 sandboxing。该边界由新增测试
+  `test_execute_apply_patch_rejects_workspace_drift_before_next_candidate_operation`
+  证明（成功 receipt 后带外漂移 worktree，下一条 candidate 操作拒绝且不改写认证 commit）。
 - 诚实边界不变：apply-patch executor 完成前不得声称 supersede 后 apply-patch 已可
   安全执行；`owp.apply_patch` 仍以 reserved profile 在人类决策处保留，只有 Acceptor
   签署 supersede 后执行；不宣称 ActionReceipt 携带 Agency 证明；全量 inventory
