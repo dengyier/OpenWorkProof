@@ -1071,6 +1071,46 @@ git commit -m "docs: explain verifiable human agency boundaries"
 
 ---
 
+## Task 8 审计修复（commit `fix: correct human agency documentation claims`）
+
+独立审计发现 Task 8 文档切片 3 个 P1 + 1 个 P2，本 commit 只做最小修复，未改协议
+代码、main、candidate inventory，未 push、未做 Task 9：
+
+- [x] **P1-1（RED→GREEN）**：新增 `test_human_agency_example_output_is_byte_stable_and_secret_free`
+  （连续运行样例两次 stdout 字节完全相同、退出码 0、无随机 digest/id/私钥），
+  RED 后删除 `examples/human_agency_profile_v01.py` 对 `work_order_digest`/`profile_id`
+  的打印，保留临时随机 Ed25519 密钥但只打印稳定事实
+  （`profile verified  : True`、`resolved status   : active`、
+  `owp.repo_read : delegated -> allowed`、`owp.apply_patch : reserved ->
+  AGENCY_HUMAN_DECISION_REQUIRED` 与边界），输出由实际 tuple 生成并断言。
+- [x] **P1-2（RED→GREEN）**：新增 `test_human_agency_protocol_doc_genesis_is_signature_verified`，
+  RED 后把 `docs/protocol/human-agency-profile-v0.1.md` 的 "one unsigned genesis
+  profile" 改为 "one signature-verified genesis profile with no incoming transition"
+  （三种对象均签名）。
+- [x] **P1-3（RED→GREEN）**：精确化 `test_human_agency_appeal_records_but_never_restores`
+  RED 后把 README_en / protocol 的 "revoke or replace the grant" 改为
+  "only an Acceptor-signed transition can revoke the active profile or supersede it
+  with another Acceptor-signed profile"；中文 README 改为 "只有 Acceptor 签名的
+  transition 才能撤销当前 profile 或将其替换为另一个 Acceptor 签名的 profile"
+  （appeal 不改权限）。
+- [x] **P2**：`docs/status.md` 不再称"输出稳定/随机摘要输出稳定"，改为"双跑 stdout
+  字节一致、只打印稳定事实、无随机 digest/id/私钥"；补一段审计修复 fresh 证据并保留
+  `customer_adoption/payment/upstream_adoption = not_evidenced`。
+
+```bash
+./.venv/bin/python examples/human_agency_profile_v01.py   # 双跑 stdout 字节一致，退出码 0
+./.venv/bin/python -m pytest -q tests/test_documentation_boundaries.py            # 21 passed
+./.venv/bin/python -m pytest -q tests/test_documentation_boundaries.py \
+  tests/test_agency_models_v01.py tests/test_agency_end_to_end_v01.py             # 86 passed
+./.venv/bin/python -m pytest -q tests/test_agency_schema_constraints_v01.py \
+  tests/test_agency_schema_registry_v01.py tests/test_package.py                  # 60 passed
+./.venv/bin/python -m pip check                       # No broken requirements found
+./.venv/bin/python -m compileall -q src tests examples # PASS
+git diff --check                                      # PASS
+```
+
+---
+
 ## Task 9：全量门、供应链绑定与分支收口
 
 **Files:**

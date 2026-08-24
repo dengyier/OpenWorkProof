@@ -374,7 +374,7 @@ protocol object. Three facts:
 1. the profile only narrows, never expands: effective permission = WorkOrder ∩
    Grant ∩ active profile;
 2. an appeal only records a request — it never restores or expands permission;
-   only an Acceptor-signed transition/profile can revoke or replace the grant;
+   only an Acceptor-signed transition can revoke the active profile or supersede it with another Acceptor-signed profile;
 3. it is not employee scoring, performance monitoring, legal-liability transfer, automatic accountability, fund custody, or compliance certification.
 
 See [docs/protocol/human-agency-profile-v0.1.md](docs/protocol/human-agency-profile-v0.1.md)

@@ -6,6 +6,9 @@ documentation and forbid unsupported commercial or correctness claims.
 
 from __future__ import annotations
 
+import re
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -256,12 +259,26 @@ def test_human_agency_appeal_records_but_never_restores() -> None:
 
     chinese = _text("README.md")
     english = _text("README_en.md")
+    protocol = _text(AGENCY_PROTOCOL_DOC)
 
     assert "不恢复或扩大权限" in chinese
-    assert "Acceptor 签名的 transition/profile 才能撤销或替换授权" in chinese
+    assert (
+        "只有 Acceptor 签名的 transition 才能撤销当前 profile "
+        "或将其替换为另一个 Acceptor 签名的 profile"
+    ) in chinese
 
     assert "never restores or expands permission" in english
-    assert "only an Acceptor-signed transition/profile can revoke or replace" in english
+    assert (
+        "only an Acceptor-signed transition can revoke the active profile "
+        "or supersede it with another Acceptor-signed profile"
+    ) in english
+
+    # The protocol doc must make the same precise claim, not a grant-mutation one.
+    assert "revoke or replace the grant" not in protocol
+    assert (
+        "Only an Acceptor-signed transition can revoke the active profile "
+        "or supersede it with another Acceptor-signed profile"
+    ) in protocol
 
 
 def test_human_agency_protocol_doc_names_three_objects_and_roles() -> None:
@@ -274,6 +291,17 @@ def test_human_agency_protocol_doc_names_three_objects_and_roles() -> None:
         assert name in text, f"protocol doc missing object: {name}"
     for role in ("Acceptor", "Manager", "Developer", "Verifier"):
         assert role in text, f"protocol doc missing role: {role}"
+
+
+def test_human_agency_protocol_doc_genesis_is_signature_verified() -> None:
+    """The genesis profile is signature-verified, never 'unsigned'; all three objects are signed."""
+
+    text = _text(AGENCY_PROTOCOL_DOC)
+    assert "unsigned genesis" not in text
+    assert (
+        "signature-verified genesis profile with no incoming transition" in text
+    )
+    assert "All three objects are closed, immutable, signed protocol objects" in text
 
 
 def test_human_agency_protocol_doc_protected_dispatcher_four_tools() -> None:
@@ -334,3 +362,38 @@ def test_status_keeps_agency_commercial_fields_not_evidenced() -> None:
         "upstream_adoption: not_evidenced",
     ):
         assert boundary in lines, f"status.md missing: {boundary}"
+
+
+def _run_human_agency_example() -> tuple[int, bytes, bytes]:
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "examples" / "human_agency_profile_v01.py")],
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def test_human_agency_example_output_is_byte_stable_and_secret_free() -> None:
+    """Two consecutive runs print identical bytes, exit 0, and leak no random id/digest/key."""
+
+    first_rc, first_out, _ = _run_human_agency_example()
+    second_rc, second_out, _ = _run_human_agency_example()
+
+    assert first_rc == 0
+    assert second_rc == 0
+    assert first_out == second_out, (
+        "example stdout must be byte-identical across runs"
+    )
+
+    text = first_out.decode("utf-8")
+    # The stable facts the example is allowed to print.
+    assert "profile verified  : True" in text
+    assert "resolved status   : active" in text
+    assert "owp.repo_read     : delegated -> allowed" in text
+    assert "owp.apply_patch   : reserved -> AGENCY_HUMAN_DECISION_REQUIRED" in text
+    # Ephemeral keys may exist, but no random digest/id or private key may print.
+    assert "work_order_digest" not in text
+    assert "profile_id" not in text
+    assert "ed25519:" not in text
+    assert "PRIVATE KEY" not in text
+    assert re.search(r"[0-9a-f]{64}", text) is None

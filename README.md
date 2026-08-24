@@ -343,7 +343,7 @@ OpenWorkProof 自建，`upstream_adoption`、`customer_case`、
 对象。三条事实：
 
 1. profile 只收紧、不扩大：有效权限 = WorkOrder ∩ Grant ∩ active profile；
-2. appeal 只记录请求，不恢复或扩大权限；只有 Acceptor 签名的 transition/profile 才能撤销或替换授权；
+2. appeal 只记录请求，不恢复或扩大权限；只有 Acceptor 签名的 transition 才能撤销当前 profile 或将其替换为另一个 Acceptor 签名的 profile；
 3. 它不是员工评分、绩效监控、法律责任转移、自动担责、资金托管或合规认证。
 
 协议说明见 [docs/protocol/human-agency-profile-v0.1.md](docs/protocol/human-agency-profile-v0.1.md)，

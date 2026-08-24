@@ -51,7 +51,7 @@ digests, and signatures are content-derived over RFC 8785 JCS canonical bytes.
 The active profile is resolved deterministically from the signed history graph —
 never from a timestamp "latest" rule:
 
-- one unsigned genesis profile → `active`;
+- one signature-verified genesis profile with no incoming transition → `active`;
 - a `superseded` edge → follow the replacement chain to the unique terminal;
 - a `revoked` edge → terminal with no active profile;
 - fork, cycle, missing replacement, digest mismatch, time reversal, multiple
@@ -59,7 +59,7 @@ never from a timestamp "latest" rule:
 - expired profile → `AGENCY_PROFILE_EXPIRED`.
 
 An appeal only records a request — it never restores or expands permission.
-Only an Acceptor-signed transition/profile can revoke or replace the grant.
+Only an Acceptor-signed transition can revoke the active profile or supersede it with another Acceptor-signed profile.
 
 ## Authorization ordering
 

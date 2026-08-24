@@ -403,8 +403,6 @@ def main() -> int:
 
     print("Human Agency Profile v0.1 — in-process demonstration")
     print("=" * 60)
-    print(f"work_order_digest : {work_order.digest}")
-    print(f"profile_id        : {profile.profile_id}")
     print(f"profile verified  : {verified}")
     print(f"resolved status   : {resolved.status}")
     print("-" * 60)

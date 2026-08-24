@@ -3,6 +3,55 @@
 > 本文档是项目实现状态的权威记录。README 只保留概览，
 > 「已经完成什么」和「尚未完成什么」的完整清单以本文为准。
 
+## Human Agency Profile 0.1：文档真相审计修复（2026-08-24，commit `fix: correct human agency documentation claims`）
+
+独立审计对 Task 8 文档切片发现 3 个 P1 + 1 个 P2。本 commit 只做最小修复，未改协议
+代码、main、candidate inventory，未 push、未做 Task 9：
+
+- P1-1：`examples/human_agency_profile_v01.py` 此前打印 `work_order_digest` 与
+  `profile_id`，二者由本轮 ephemeral Ed25519 密钥派生，双跑 diff 必然失败，却自称
+  "输出稳定"。修复后保留临时随机密钥（签名/验证仍用真实密钥），stdout 只打印稳定
+  事实：`profile verified  : True`、`resolved status   : active`、
+  `owp.repo_read : delegated -> allowed`、`owp.apply_patch : reserved ->
+  AGENCY_HUMAN_DECISION_REQUIRED` 与两条边界；不再打印随机 digest/id/私钥。新增
+  回归测试 `test_human_agency_example_output_is_byte_stable_and_secret_free`
+  （连续运行两次、stdout 字节完全相同、退出码 0、无 64 位 hex digest/id、无
+  `ed25519:` key、无 PRIVATE KEY）。
+- P1-2：`docs/protocol/human-agency-profile-v0.1.md` 的 "one unsigned genesis
+  profile" 错误，改为 "one signature-verified genesis profile with no incoming
+  transition"（genesis 同样被 Acceptor 签名验证，无入边 transition）；三种对象均
+  签名。新增 `test_human_agency_protocol_doc_genesis_is_signature_verified` 锁定。
+- P1-3：README_en / protocol 的 "Acceptor-signed transition/profile can revoke or
+  replace the grant" 过宽且错误（不修改 CapabilityGrant），改为 "only an
+  Acceptor-signed transition can revoke the active profile or supersede it with
+  another Acceptor-signed profile"；中文 README 改为同等精确表述 "只有 Acceptor
+  签名的 transition 才能撤销当前 profile 或将其替换为另一个 Acceptor 签名的
+  profile"（appeal 不改权限）。相应边界测试
+  `test_human_agency_appeal_records_but_never_restores` 精确锁定中英文。
+- P2：本状态文档 Task 8 小节此前称样例"输出稳定"，已改为"双跑 stdout 字节一致、
+  只打印稳定事实、无随机 digest/id/私钥"，不再称随机摘要输出稳定。
+
+本轮 fresh 测量（控制器 fresh，未复用历史数字）：
+
+- 样例双跑：`./.venv/bin/python examples/human_agency_profile_v01.py` 连续两次
+  stdout 字节完全一致，退出码 0；
+- 文档边界 `tests/test_documentation_boundaries.py`：`21 passed`（含 3 条新增/精确化
+  边界测试）；
+- Task 8 门 `test_documentation_boundaries.py + test_agency_models_v01.py +
+  test_agency_end_to_end_v01.py`：`86 passed`（21 + 25 + 40）；
+- schema 门 `test_agency_schema_constraints_v01.py +
+  test_agency_schema_registry_v01.py + test_package.py`：`60 passed`；
+- `pip check` / `compileall src tests examples` / `git diff --check`：PASS。
+
+```yaml
+customer_adoption: not_evidenced
+payment: not_evidenced
+upstream_adoption: not_evidenced
+```
+
+诚实边界不变：未改 main、未 push、未重建 candidate inventory、未做 Task 9；全量
+inventory boundary（`test_current_candidate_inventory_binds_*`）仍待 Task 9 重建。
+
 ## Human Agency Profile 0.1：受保护 apply-patch executor（2026-08-24）
 
 隔离分支 `codex/human-agency-profile-v01` 新增真实 `execute_apply_patch` 事务入口，
@@ -275,7 +324,8 @@ Task 8 完成，只做文档、双语边界与使用样例，未改协议代码�
 - 新增 `examples/human_agency_profile_v01.py`：仅进程内生成 WorkOrder-bound profile、
   Acceptor Ed25519 签名、verify、判定一个 delegated（`owp.repo_read`）与一个 reserved
   （`owp.apply_patch` → `AGENCY_HUMAN_DECISION_REQUIRED`）；不写私钥文件、不联网、无
-  账本副作用、不暗示生产部署；输出稳定、无秘密。
+  账本副作用、不暗示生产部署；双跑 stdout 字节一致，只打印稳定事实、无随机
+  digest/id/私钥（P1 审计修复）。
 - `README.md`/`README_en.md` 各新增一段三条事实的实验能力入口 + protocol/example 链接，
   中英文语义对齐，未重写其它段落。
 - `tests/test_documentation_boundaries.py` 新增 9 条文档真相边界测试（RED→GREEN）。
@@ -284,8 +334,8 @@ Task 8 完成，只做文档、双语边界与使用样例，未改协议代码�
 
 - Human Agency Profile 是 WorkOrder 绑定、Acceptor 签名、机器可验证的授权/保留决策
   边界；不是员工评分、绩效监控、法律责任转移、自动担责、资金托管或合规认证。
-- appeal 只记录请求，不恢复/扩大权限；只有 Acceptor 签名 transition/profile 才能
-  撤销/替换授权。
+- appeal 只记录请求，不恢复/扩大权限；只有 Acceptor 签名的 transition 才能撤销当前
+  profile 或将其替换为另一个 Acceptor 签名的 profile。
 - JSON Schema 只做结构门；内容派生 ID、WorkOrder 绑定、Ed25519 签名、因果/时间语义
   仍需 OWP verifier。
 - offline bundle 是签名时点的历史快照，不是 TSA/current-state 证明；使用方须应用
@@ -298,7 +348,8 @@ fresh 测量（控制器 fresh，未复用历史数字）：
   test_agency_end_to_end_v01.py`：`84 passed`（19 + 25 + 40）；
 - agency schema 门 `test_agency_schema_constraints_v01.py +
   test_agency_schema_registry_v01.py + test_package.py`：`60 passed`；
-- `examples/human_agency_profile_v01.py`：退出码 0，输出稳定且无私钥/无秘密；
+- `examples/human_agency_profile_v01.py`：退出码 0，双跑 stdout 字节一致，只打印
+  稳定事实、无随机 digest/id、无私钥（P1 审计修复后复测）；
 - `pip check` / `compileall src examples` / `git diff --check`：PASS。
 
 ```yaml
