@@ -697,7 +697,7 @@ handler failure 与 cleanup failure 语义要与 repo-read/run-tests/rollback �
 > > (`apply_patch_in_candidate_workspace`) 在 `_verify_candidate_checkpoint` 处先于任何
 > > patch 应用拒绝 drift，认证 commit 不被改写。
 
-- [ ] **Step 5: 实现最小 protected dispatcher 与完整状态链**
+- [x] **Step 5: 实现最小 protected dispatcher 与完整状态链**
 
 支持设计 §7 的 `owp.repo_read`、`owp.apply_patch`、`owp.run_tests` 与
 `owp.rollback_patch`。dispatcher 不持锁、不预加载 history，只按签名
@@ -707,6 +707,23 @@ handler failure 与 cleanup failure 语义要与 repo-read/run-tests/rollback �
 同一测试依次证明：repo-read allowed；apply-patch reserved；appeal 后仍 reserved；Acceptor
 supersession 后 apply-patch allowed；revoke 后所有 protected tool 返回
 `AGENCY_PROFILE_REQUIRED`。同时回归旧 `execute_repo_read`，证明未选择新入口时行为不变。
+
+> **2026-08-24 已实现（本 commit，`feat: dispatch protected agent actions`）：**
+> `mcp_server.py` 新增 `dispatch_protected_agent_action` + 四个 typed keyword bundle
+> （`RepoReadDispatch`/`ApplyPatchDispatch`/`RunTestsDispatch`/`RollbackDispatch`）。dispatcher
+> 不持锁、不预加载 history、不做 base/agency 授权，只按签名 `request.tool_name` 路由并校验
+> bundle 形状（未知工具 / 错配 / 缺失 / 多余 bundle 均 fail closed，无 handler 副作用）；时间只
+> 来自 `AuthorizationContext.transaction_time`，dispatcher 只转发 `clock`。延迟零参
+> `agency_authorize` callback 只捕获 immutable ledger path/context/request，在 executor 已持有
+> target lock 的临界区内才调用 `load_agency_history` + `authorize_agency_profile_layer`。测试新增
+> 12 条：四工具路由、未知工具、bundle 错配/缺失/多余、v0.1 与 v0.4 路由、非 AgentRequest 拒绝、
+> apply-patch 完整状态链（repo-read allowed → apply-patch reserved 零 handler/零写入 → appeal 仍
+> denied → supersede 真实 patch allowed → revoke 后 resolved status=revoked）、revoke 后四工具全部
+> `AGENCY_PROFILE_REQUIRED` 且 handler/driver 零调用零写入、确定性 history-loader-在锁内 proof
+> （非阻塞 flock probe，无 sleep）。focused：agency end-to-end `40 passed`；agency-policy/policy/
+> repo-read/apply-patch `144 passed`；mcp/binding/recomposition `126 passed`；`pip check`/`compileall`/
+> `git diff --check` PASS。Task 5 仍不标记 READY：dispatcher 与完整状态链尚未经独立 review，且全量
+> inventory boundary（`test_current_candidate_inventory_binds_*`）仍需 Task 9 重建。
 
 - [ ] **Step 6: 分阶段运行测试与提交**
 

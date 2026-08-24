@@ -26,6 +26,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 import openworkproof.evidence as evidence
 import openworkproof.repo_tools as repo_tools
 import openworkproof.runtime_context as runtime_context
+from openworkproof.agency_ledger import load_agency_history
+from openworkproof.agency_policy import authorize_agency_profile_layer
 from openworkproof.binding_transactions import (
     load_historical_action_binding_manifest,
 )
@@ -2607,10 +2609,15 @@ def execute_rollback(
 
 
 __all__ = [
+    "ApplyPatchDispatch",
     "HandlerCoordinationError",
+    "RepoReadDispatch",
     "RollbackCommand",
+    "RollbackDispatch",
     "RollbackHandlerResult",
+    "RunTestsDispatch",
     "ToolCallDenied",
+    "dispatch_protected_agent_action",
     "execute_apply_patch",
     "execute_rollback",
     "execute_run_tests",
@@ -3708,6 +3715,184 @@ def execute_apply_patch(
         ) from release_errors[0]
     assert receipt is not None
     return receipt
+
+
+@dataclass(frozen=True, slots=True)
+class RepoReadDispatch:
+    """Keyword bundle for the protected repo-read executor."""
+
+    request_arguments: RepoReadArguments
+    candidate_runtime_root: Path
+    handler: Callable[
+        [repo_tools.CandidateReadRequest], repo_tools.CandidateReadResult
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class ApplyPatchDispatch:
+    """Keyword bundle for the protected apply-patch executor."""
+
+    request_arguments: ApplyPatchArguments
+    patch_bytes: bytes
+    candidate_workspace: CandidateWorkspace
+    handler: Callable[[repo_tools.PatchRequest], repo_tools.PatchResult]
+
+
+@dataclass(frozen=True, slots=True)
+class RunTestsDispatch:
+    """Keyword bundle for the protected run-tests executor."""
+
+    request_arguments: RunTestsArguments
+    candidate_snapshot_request: repo_tools.CandidateExecutionSnapshotRequest
+    execution_driver: repo_tools.RunTestsExecutionDriver
+
+
+@dataclass(frozen=True, slots=True)
+class RollbackDispatch:
+    """Keyword bundle for the protected rollback executor."""
+
+    handler: Callable[[RollbackCommand], RollbackHandlerResult]
+
+
+_PROTECTED_TOOL_BUNDLE_TYPES = {
+    "owp.repo_read": RepoReadDispatch,
+    "owp.apply_patch": ApplyPatchDispatch,
+    "owp.run_tests": RunTestsDispatch,
+    "owp.rollback_patch": RollbackDispatch,
+}
+
+_PROTECTED_TOOL_NAMES = frozenset(_PROTECTED_TOOL_BUNDLE_TYPES)
+
+
+def dispatch_protected_agent_action(
+    ledger_path: Path,
+    *,
+    evidence_root: Path,
+    context: AuthorizationContext,
+    request: AgentRequest,
+    execution_facts: ProspectiveExecutionFacts,
+    sidecar_private_key: Ed25519PrivateKey,
+    clock: Callable[[], datetime],
+    repo_read: RepoReadDispatch | None = None,
+    apply_patch: ApplyPatchDispatch | None = None,
+    run_tests: RunTestsDispatch | None = None,
+    rollback: RollbackDispatch | None = None,
+) -> ToolCallReceipt | RollbackReceipt:
+    """Route one signed ``AgentRequest`` to its opt-in protected executor.
+
+    This is the minimal protected dispatcher from design §7. It never acquires
+    the target lock, never preloads the Agency history, never caches a profile
+    snapshot, and never runs base or agency authorization itself. It only
+    validates enough input shape to select the correct existing executor and
+    fail closed: the signed ``request.tool_name`` must be one of the four
+    protected tools, exactly the matching keyword bundle must be supplied, and
+    no other bundle may be present. The tool name and the time are never
+    caller-supplied knobs — the tool name comes from the signed request and the
+    time comes from the already-constructed ``AuthorizationContext`` (the
+    trusted ``clock`` is only forwarded to the executor, which freezes ``now``
+    inside its own lock).
+
+    The lazy zero-arg ``agency_authorize`` callback captures only immutable
+    routing facts (the ledger path, the immutable context, and the immutable
+    signed request). It loads and re-validates the current Agency history only
+    when the executor invokes it inside its already-held target lock, and then
+    applies the profile-only authorization layer for that exact context and
+    request. Unknown tools and mismatched bundles fail closed before any
+    executor side effect.
+    """
+
+    if type(request) is not AgentRequest and type(request) is not AgentRequestV04:
+        raise HandlerCoordinationError(
+            "protected dispatch requires a signed agent request"
+        )
+    tool_name = request.tool_name
+    if tool_name not in _PROTECTED_TOOL_NAMES:
+        raise HandlerCoordinationError("PROTECTED_DISPATCH_UNKNOWN_TOOL")
+
+    bundles = (
+        ("owp.repo_read", repo_read),
+        ("owp.apply_patch", apply_patch),
+        ("owp.run_tests", run_tests),
+        ("owp.rollback_patch", rollback),
+    )
+    expected_type = _PROTECTED_TOOL_BUNDLE_TYPES[tool_name]
+    for name, bundle in bundles:
+        if name == tool_name:
+            if type(bundle) is not expected_type:
+                raise HandlerCoordinationError(
+                    "PROTECTED_DISPATCH_BUNDLE_MISMATCH"
+                )
+        elif bundle is not None:
+            raise HandlerCoordinationError("PROTECTED_DISPATCH_BUNDLE_MISMATCH")
+
+    path = Path(ledger_path)
+
+    def agency_authorize() -> PolicyDecision:
+        history = load_agency_history(path, context.work_order.digest)
+        return authorize_agency_profile_layer(context, history, request)
+
+    if tool_name == "owp.repo_read":
+        bundle = repo_read
+        assert bundle is not None
+        return execute_repo_read(
+            path,
+            evidence_root=evidence_root,
+            context=context,
+            request=request,
+            request_arguments=bundle.request_arguments,
+            execution_facts=execution_facts,
+            sidecar_private_key=sidecar_private_key,
+            candidate_runtime_root=bundle.candidate_runtime_root,
+            handler=bundle.handler,
+            clock=clock,
+            agency_authorize=agency_authorize,
+        )
+    if tool_name == "owp.apply_patch":
+        bundle = apply_patch
+        assert bundle is not None
+        return execute_apply_patch(
+            path,
+            evidence_root=evidence_root,
+            context=context,
+            request=request,
+            request_arguments=bundle.request_arguments,
+            execution_facts=execution_facts,
+            sidecar_private_key=sidecar_private_key,
+            patch_bytes=bundle.patch_bytes,
+            candidate_workspace=bundle.candidate_workspace,
+            handler=bundle.handler,
+            clock=clock,
+            agency_authorize=agency_authorize,
+        )
+    if tool_name == "owp.run_tests":
+        bundle = run_tests
+        assert bundle is not None
+        return execute_run_tests(
+            path,
+            evidence_root=evidence_root,
+            context=context,
+            request=request,
+            request_arguments=bundle.request_arguments,
+            execution_facts=execution_facts,
+            candidate_snapshot_request=bundle.candidate_snapshot_request,
+            sidecar_private_key=sidecar_private_key,
+            execution_driver=bundle.execution_driver,
+            clock=clock,
+            agency_authorize=agency_authorize,
+        )
+    bundle = rollback
+    assert bundle is not None
+    return execute_rollback(
+        path,
+        evidence_root=evidence_root,
+        context=context,
+        request=request,
+        execution_facts=execution_facts,
+        sidecar_private_key=sidecar_private_key,
+        handler=bundle.handler,
+        clock=clock,
+        agency_authorize=agency_authorize,
+    )
 
 
 def produce_deny_receipt(

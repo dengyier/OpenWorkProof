@@ -66,6 +66,43 @@ patch/result EvidenceRefs → Sidecar 签名 receipt →
   boundary（`test_current_candidate_inventory_binds_*` 因 candidate definition 变化
   需 Task 9 重建）仍未闭合，不标记 READY。
 
+## Human Agency Profile 0.1：最小 protected dispatcher（2026-08-24）
+
+同一隔离分支新增最小 protected dispatcher `mcp_server.dispatch_protected_agent_action`，
+支持设计 §7 的 `owp.repo_read`、`owp.apply_patch`、`owp.run_tests`、`owp.rollback_patch`
+四工具，并新增四个 typed keyword bundle（`RepoReadDispatch`/`ApplyPatchDispatch`/
+`RunTestsDispatch`/`RollbackDispatch`）：
+
+- dispatcher 不持锁、不预加载 Agency history、不缓存 profile 快照、不做 base/agency
+  授权，只按签名 `request.tool_name` 路由，并校验 bundle 形状（未知工具、错配、缺失、
+  多余 bundle 均 fail closed 且无 handler 副作用）；不接收独立 `tool_name` 或 `now`，
+  时间只来自已构造的 `AuthorizationContext.transaction_time`，trusted `clock` 仅转发给
+  executor。
+- 延迟零参 `agency_authorize` callback 只捕获 immutable ledger path/context/request，
+  在 executor 已持有 target lock 的临界区内才调用 `load_agency_history` +
+  `authorize_agency_profile_layer`；锁外不加载 history，避免锁外闭包的 TOCTOU。
+- 旧 `execute_repo_read` 等入口默认 `agency_authorize=None` 语义不变；dispatcher 是
+  opt-in 新入口。
+
+新增 12 条测试（`tests/test_agency_end_to_end_v01.py`，合计 40 条）：
+
+- 四工具精确路由、未知工具 fail closed、bundle 错配/缺失/多余 fail closed、v0.1 与
+  v0.4 请求路由、非 AgentRequest 拒绝；
+- apply-patch 完整状态链：repo-read delegated allowed → apply-patch reserved 返回
+  `AGENCY_HUMAN_DECISION_REQUIRED` 且 handler 零调用零写入 → Manager appeal 记录后仍
+  reserved → Acceptor supersede 到 replacement profile 后真实 patch allowed →
+  revoke 后签名历史解析为 `revoked`；
+- revoke 后四工具（repo-read/apply-patch/run-tests/rollback）全部返回
+  `AGENCY_PROFILE_REQUIRED`，handler/driver 零调用零写入（run-tests/rollback 复用既有
+  生产 fixture，不伪造授权）；
+- 确定性 history-loader 在 executor 锁内才调用（非阻塞 flock probe，无 sleep）。
+
+本轮 fresh 测量（控制器 fresh，未复用历史数字）：agency end-to-end `40 passed`；
+agency-policy/policy/repo-read/apply-patch `144 passed`；mcp/binding/recomposition
+`126 passed`；`pip check` / `compileall` / `git diff --check` PASS。Task 5 仍不标记
+READY：dispatcher 与完整状态链尚未经独立 review，且全量 inventory boundary 仍需 Task 9
+重建。
+
 ## Verified Agent Delivery 0.1 本地实现（2026-08-22）
 
 隔离分支 `codex/verified-agent-delivery` 已按计划实现首个商业产品切片

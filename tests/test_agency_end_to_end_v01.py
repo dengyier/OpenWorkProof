@@ -40,24 +40,36 @@ import openworkproof.evidence as evidence
 import openworkproof.mcp_server as mcp_server
 import openworkproof.repo_tools as repo_tools
 from openworkproof.agency import (
+    AGENCY_PROFILE_REQUIRED,
+    AgencyAppealV01,
     AgencyProfileTransitionV01,
     HumanAgencyProfileV01,
+    agency_appeal_id,
     agency_profile_transition_id,
     delegated_action_id,
     human_agency_profile_id,
     reserved_decision_id,
 )
 from openworkproof.agency_ledger import (
+    commit_agency_appeal,
     commit_agency_profile_transition,
     commit_human_agency_profile,
     load_agency_history,
+    load_current_human_agency_profile,
 )
 from openworkproof.agency_policy import (
     AGENCY_ACTION_NOT_DELEGATED,
     AGENCY_HUMAN_DECISION_REQUIRED,
     authorize_agency_profile_layer,
 )
-from openworkproof.models import WorkOrder
+from openworkproof.models import (
+    AgentRequest,
+    AgentRequestV04,
+    ApplyPatchArguments,
+    RepoReadArguments,
+    RunTestsArguments,
+    WorkOrder,
+)
 from openworkproof.signing import key_id, sign_payload
 
 from conftest import SHA256_A, SHA256_D
@@ -178,6 +190,7 @@ def _mk_transition(
     target: HumanAgencyProfileV01,
     transition: str = "revoked",
     replacement: HumanAgencyProfileV01 | None = None,
+    nonce: str = SHA256_D,
 ) -> AgencyProfileTransitionV01:
     payload = {
         "schema_version": "openworkproof-agency-profile-transition/0.1",
@@ -195,11 +208,38 @@ def _mk_transition(
             "scope_changed" if transition == "superseded" else "human_withdrawal"
         ),
         "transitioned_at": "2026-01-01T02:00:00Z",
-        "nonce": SHA256_D,
+        "nonce": nonce,
     }
     payload["transition_id"] = agency_profile_transition_id(payload)
     return AgencyProfileTransitionV01.model_validate(
         sign_payload("agency-profile-transition", payload, keys["Acceptor"][0])
+    )
+
+
+def _mk_appeal(
+    work_order: WorkOrder,
+    keys,
+    *,
+    profile: HumanAgencyProfileV01,
+    role: str = "Manager",
+    nonce: str = "e" * 64,
+) -> AgencyAppealV01:
+    binding = keys[role][1]
+    payload = {
+        "schema_version": "openworkproof-agency-appeal/0.1",
+        "work_order_digest": work_order.digest,
+        "profile_id": profile.profile_id,
+        "profile_digest": profile.digest,
+        "appellant_role": role,
+        "appellant_subject_id": binding["subject_id"],
+        "requested_change_digest": "e" * 64,
+        "reason_code": "task_blocked",
+        "created_at": "2026-01-01T01:05:00Z",
+        "nonce": nonce,
+    }
+    payload["appeal_id"] = agency_appeal_id(payload)
+    return AgencyAppealV01.model_validate(
+        sign_payload("agency-appeal", payload, keys[role][0])
     )
 
 
@@ -1821,3 +1861,810 @@ def test_apply_patch_started_unconfirmed_recovery_without_callback(
         ).fetchone() == (before_receipts,)
     finally:
         connection.close()
+
+
+# --- protected dispatcher: routing, state chain, and lazy-history proof ---
+
+
+def _signed_route_request(
+    role_keys,
+    tool_name: str,
+    *,
+    version: str = "0.1",
+) -> AgentRequest | AgentRequestV04:
+    binding = role_keys["Developer"][1]
+    payload = {
+        "claim_type": "agent-request",
+        "work_order_digest": "a" * 64,
+        "grant_id": "b" * 64,
+        "actor_id": binding["subject_id"],
+        "actor_key_id": binding["key_id"],
+        "tool_name": tool_name,
+        "arguments_digest": "c" * 64,
+        "nonce": "d" * 64,
+        "requested_at": "2026-01-01T00:00:05Z",
+        "authentication_method": "agent_signature",
+        "model_id": "model",
+        "model_version": "1",
+        "prompt_template_digest": "e" * 64,
+        "context_source_digest": "f" * 64,
+    }
+    if version == "0.4":
+        from test_binding_gateway_v04 import _resign_v04_request  # noqa: PLC0415
+
+        base = AgentRequest.model_validate(
+            sign_payload(
+                "agent-request", payload, role_keys["Developer"][0]
+            )
+        )
+        return _resign_v04_request(
+            base,
+            role_keys["Developer"][0],
+            judgment_id="1" * 64,
+            judgment_digest="2" * 64,
+            manifest_id="3" * 64,
+            manifest_digest="4" * 64,
+        )
+    return AgentRequest.model_validate(
+        sign_payload("agent-request", payload, role_keys["Developer"][0])
+    )
+
+
+def _route_bundles(tmp_path: Path) -> dict[str, object]:
+    return {
+        "repo_read": mcp_server.RepoReadDispatch(
+            request_arguments=RepoReadArguments(path="src/app.py"),
+            candidate_runtime_root=tmp_path,
+            handler=lambda command: None,
+        ),
+        "apply_patch": mcp_server.ApplyPatchDispatch(
+            request_arguments=ApplyPatchArguments(
+                target_paths=("src/app.py",),
+                patch_digest="a" * 64,
+                patch_size_bytes=1,
+            ),
+            patch_bytes=b"x",
+            candidate_workspace=object(),
+            handler=lambda command: None,
+        ),
+        "run_tests": mcp_server.RunTestsDispatch(
+            request_arguments=RunTestsArguments(
+                test_mode="developer",
+                command_digest="a" * 64,
+                source_commit="1" * 40,
+                candidate_commit="2" * 40,
+                workspace_manifest_digest="b" * 64,
+                container_image_digest="sha256:" + "c" * 64,
+                fixed_test_source_digest=None,
+            ),
+            candidate_snapshot_request=object(),
+            execution_driver=object(),
+        ),
+        "rollback": mcp_server.RollbackDispatch(
+            handler=lambda command: None
+        ),
+    }
+
+
+def _install_executor_spies(monkeypatch) -> dict[str, list[object]]:
+    calls: dict[str, list[object]] = {
+        "repo_read": [],
+        "apply_patch": [],
+        "run_tests": [],
+        "rollback": [],
+    }
+
+    def make_spy(name: str):
+        def spy(ledger_path, **kwargs):
+            calls[name].append((ledger_path, kwargs))
+            return name
+
+        return spy
+
+    monkeypatch.setattr(mcp_server, "execute_repo_read", make_spy("repo_read"))
+    monkeypatch.setattr(
+        mcp_server, "execute_apply_patch", make_spy("apply_patch")
+    )
+    monkeypatch.setattr(mcp_server, "execute_run_tests", make_spy("run_tests"))
+    monkeypatch.setattr(mcp_server, "execute_rollback", make_spy("rollback"))
+    return calls
+
+
+def test_dispatcher_routes_all_four_exact_tools(
+    tmp_path, ephemeral_role_keys, monkeypatch,
+) -> None:
+    calls = _install_executor_spies(monkeypatch)
+    bundles = _route_bundles(tmp_path)
+    tool_to_key = {
+        "owp.repo_read": "repo_read",
+        "owp.apply_patch": "apply_patch",
+        "owp.run_tests": "run_tests",
+        "owp.rollback_patch": "rollback",
+    }
+    context = object()
+    facts = object()
+    sidecar = object()
+    clock = object()
+    ledger_path = tmp_path / "ledger.sqlite3"
+    evidence_root = tmp_path / "evidence"
+
+    for tool_name, key in tool_to_key.items():
+        request = _signed_route_request(ephemeral_role_keys, tool_name)
+        result = mcp_server.dispatch_protected_agent_action(
+            ledger_path,
+            evidence_root=evidence_root,
+            context=context,
+            request=request,
+            execution_facts=facts,
+            sidecar_private_key=sidecar,
+            clock=clock,
+            **{key: bundles[key]},
+        )
+        assert result == key
+        assert calls[key] and not any(
+            other_key != key and calls[other_key]
+            for other_key in tool_to_key.values()
+        )
+        (_, kwargs) = calls[key][-1]
+        assert kwargs["request"] is request
+        assert kwargs["context"] is context
+        assert kwargs["execution_facts"] is facts
+        assert kwargs["sidecar_private_key"] is sidecar
+        assert kwargs["clock"] is clock
+        assert kwargs["evidence_root"] == evidence_root
+        agency_authorize = kwargs["agency_authorize"]
+        assert callable(agency_authorize)
+        # The callback is lazy: no history loader exists to call here, and the
+        # spy executor never invokes it.
+        assert type(agency_authorize) is not mcp_server.PolicyDecision
+        calls[key].clear()
+
+
+def test_dispatcher_unknown_tool_fails_closed(
+    tmp_path, ephemeral_role_keys, monkeypatch,
+) -> None:
+    calls = _install_executor_spies(monkeypatch)
+    bundles = _route_bundles(tmp_path)
+    # A valid signed tool that is not one of the four protected tools.
+    request = _signed_route_request(ephemeral_role_keys, "owp.compose_proof")
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError,
+        match="PROTECTED_DISPATCH_UNKNOWN_TOOL",
+    ):
+        mcp_server.dispatch_protected_agent_action(
+            tmp_path / "ledger.sqlite3",
+            evidence_root=tmp_path / "evidence",
+            context=object(),
+            request=request,
+            execution_facts=object(),
+            sidecar_private_key=object(),
+            clock=object(),
+            repo_read=bundles["repo_read"],
+        )
+    assert all(value == [] for value in calls.values())
+
+
+@pytest.mark.parametrize(
+    "tool_name, bundle_kwargs",
+    (
+        ("owp.repo_read", {}),  # missing bundle
+        ("owp.repo_read", {"apply_patch": True}),  # wrong tool bundle
+        ("owp.repo_read", {"rollback": True}),  # wrong tool bundle
+    ),
+)
+def test_dispatcher_bundle_mismatch_fails_closed(
+    tmp_path, ephemeral_role_keys, monkeypatch, tool_name, bundle_kwargs,
+) -> None:
+    calls = _install_executor_spies(monkeypatch)
+    request = _signed_route_request(ephemeral_role_keys, tool_name)
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError,
+        match="PROTECTED_DISPATCH_BUNDLE_MISMATCH",
+    ):
+        mcp_server.dispatch_protected_agent_action(
+            tmp_path / "ledger.sqlite3",
+            evidence_root=tmp_path / "evidence",
+            context=object(),
+            request=request,
+            execution_facts=object(),
+            sidecar_private_key=object(),
+            clock=object(),
+            **bundle_kwargs,
+        )
+    assert all(value == [] for value in calls.values())
+
+
+def test_dispatcher_extra_bundle_fails_closed(
+    tmp_path, ephemeral_role_keys, monkeypatch,
+) -> None:
+    calls = _install_executor_spies(monkeypatch)
+    bundles = _route_bundles(tmp_path)
+    request = _signed_route_request(ephemeral_role_keys, "owp.repo_read")
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError,
+        match="PROTECTED_DISPATCH_BUNDLE_MISMATCH",
+    ):
+        mcp_server.dispatch_protected_agent_action(
+            tmp_path / "ledger.sqlite3",
+            evidence_root=tmp_path / "evidence",
+            context=object(),
+            request=request,
+            execution_facts=object(),
+            sidecar_private_key=object(),
+            clock=object(),
+            repo_read=bundles["repo_read"],
+            rollback=bundles["rollback"],
+        )
+    assert all(value == [] for value in calls.values())
+
+
+@pytest.mark.parametrize("version", ["0.1", "0.4"])
+def test_dispatcher_routes_v01_and_v04_requests(
+    tmp_path, ephemeral_role_keys, monkeypatch, version,
+) -> None:
+    calls = _install_executor_spies(monkeypatch)
+    bundles = _route_bundles(tmp_path)
+    request = _signed_route_request(
+        ephemeral_role_keys, "owp.repo_read", version=version
+    )
+    if version == "0.4":
+        assert type(request) is AgentRequestV04
+    else:
+        assert type(request) is AgentRequest
+    result = mcp_server.dispatch_protected_agent_action(
+        tmp_path / "ledger.sqlite3",
+        evidence_root=tmp_path / "evidence",
+        context=object(),
+        request=request,
+        execution_facts=object(),
+        sidecar_private_key=object(),
+        clock=object(),
+        repo_read=bundles["repo_read"],
+    )
+    assert result == "repo_read"
+    (_, kwargs) = calls["repo_read"][-1]
+    assert kwargs["request"] is request
+    assert callable(kwargs["agency_authorize"])
+
+
+def test_dispatcher_rejects_non_agent_request(
+    tmp_path, ephemeral_role_keys, monkeypatch,
+) -> None:
+    calls = _install_executor_spies(monkeypatch)
+    bundles = _route_bundles(tmp_path)
+    with pytest.raises(
+        mcp_server.HandlerCoordinationError,
+        match="signed agent request",
+    ):
+        mcp_server.dispatch_protected_agent_action(
+            tmp_path / "ledger.sqlite3",
+            evidence_root=tmp_path / "evidence",
+            context=object(),
+            request=object(),
+            execution_facts=object(),
+            sidecar_private_key=object(),
+            clock=object(),
+            repo_read=bundles["repo_read"],
+        )
+    assert all(value == [] for value in calls.values())
+
+
+def _dispatch_repo_read(
+    case,
+    context,
+    role_keys,
+    fixed_now,
+    *,
+    handler,
+    runtime_root,
+    path="src/app.py",
+    nonce_label="repo-read:dispatch",
+):
+    request, arguments = _repo_read_request(
+        case,
+        context,
+        role_keys,
+        fixed_now,
+        path=path,
+        nonce_label=nonce_label,
+    )
+    receipt = mcp_server.dispatch_protected_agent_action(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=context,
+        request=request,
+        execution_facts=case["facts"],
+        sidecar_private_key=role_keys["Sidecar"][0],
+        clock=lambda: fixed_now,
+        repo_read=mcp_server.RepoReadDispatch(
+            request_arguments=arguments,
+            candidate_runtime_root=runtime_root,
+            handler=handler,
+        ),
+    )
+    return receipt, request
+
+
+def _dispatch_apply_patch(
+    case,
+    role_keys,
+    fixed_now,
+    *,
+    handler,
+):
+    from test_apply_patch_transaction import (  # noqa: PLC0415
+        _apply_patch_request,
+        _prospective_facts,
+    )
+
+    request, arguments = _apply_patch_request(
+        case,
+        role_keys,
+        fixed_now,
+        patch_bytes=case["patch_bytes"],
+    )
+    receipt = mcp_server.dispatch_protected_agent_action(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=case["context"],
+        request=request,
+        execution_facts=_prospective_facts(case),
+        sidecar_private_key=role_keys["Sidecar"][0],
+        clock=lambda: fixed_now,
+        apply_patch=mcp_server.ApplyPatchDispatch(
+            request_arguments=arguments,
+            patch_bytes=case["patch_bytes"],
+            candidate_workspace=case["candidate"],
+            handler=handler,
+        ),
+    )
+    return receipt, request
+
+
+def _dispatch_run_tests(case, role_keys, fixed_now, *, driver, tmp_path):
+    return mcp_server.dispatch_protected_agent_action(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=case["context"],
+        request=case["request"],
+        execution_facts=case["facts"],
+        sidecar_private_key=role_keys["Sidecar"][0],
+        clock=lambda: fixed_now,
+        run_tests=mcp_server.RunTestsDispatch(
+            request_arguments=case["arguments"],
+            candidate_snapshot_request=_run_tests_snapshot_request(
+                case, tmp_path.resolve()
+            ),
+            execution_driver=driver,
+        ),
+    )
+
+
+def _dispatch_rollback(case, role_keys, fixed_now, *, handler):
+    return mcp_server.dispatch_protected_agent_action(
+        case["ledger_path"],
+        evidence_root=case["evidence_root"],
+        context=case["context"],
+        request=case["request"],
+        execution_facts=case["facts"],
+        sidecar_private_key=role_keys["Sidecar"][0],
+        clock=lambda: fixed_now,
+        rollback=mcp_server.RollbackDispatch(handler=handler),
+    )
+
+
+def _counting_history_loader(monkeypatch) -> list[object]:
+    real_load = load_agency_history
+    calls: list[object] = []
+
+    def spy(ledger_path, work_order_digest):
+        calls.append(True)
+        return real_load(ledger_path, work_order_digest)
+
+    monkeypatch.setattr(mcp_server, "load_agency_history", spy)
+    return calls
+
+
+def test_dispatcher_apply_patch_full_state_chain(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from test_apply_patch_transaction import _fake_patch_handler  # noqa: PLC0415
+
+    history_calls = _counting_history_loader(monkeypatch)
+
+    # Phase 1: repo-read delegated -> allowed through the dispatcher.
+    repo_case, repo_context = _repo_read_success_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    reserved_profile = _mk_profile(
+        repo_case["work_order"],
+        ephemeral_role_keys,
+        SHA256_A,
+        delegated=("owp.repo_read",),
+        reserved=(("scope_or_criteria_change", ("owp.apply_patch",)),),
+    )
+    commit_human_agency_profile(repo_case["ledger_path"], reserved_profile)
+    repo_handler, repo_calls = _counting_handler(
+        repo_context.replay_checkpoint.workspace_manifest_digest
+    )
+    repo_receipt, _ = _dispatch_repo_read(
+        repo_case,
+        repo_context,
+        ephemeral_role_keys,
+        fixed_now,
+        handler=repo_handler,
+        runtime_root=tmp_path,
+    )
+    assert repo_receipt.policy_decision == "allow"
+    assert repo_receipt.execution_status == "succeeded"
+    assert len(repo_calls) == 1
+    assert len(history_calls) == 1
+
+    # Phase 2-5: the apply-patch reservation chain on a real workspace ledger.
+    case = _apply_patch_agency_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    profile = _mk_profile(
+        case["work_order"],
+        ephemeral_role_keys,
+        SHA256_A,
+        delegated=("owp.repo_read",),
+        reserved=(("scope_or_criteria_change", ("owp.apply_patch",)),),
+    )
+    commit_human_agency_profile(case["ledger_path"], profile)
+
+    # Phase 2: reserved apply-patch is denied before the handler, zero writes.
+    deny_handler, deny_calls = _fake_patch_handler(case)
+    before = _all_user_table_snapshot(case["ledger_path"])
+    history_calls.clear()
+    with pytest.raises(mcp_server.ToolCallDenied) as caught:
+        _dispatch_apply_patch(
+            case,
+            ephemeral_role_keys,
+            fixed_now,
+            handler=deny_handler,
+        )
+    assert caught.value.decision.error_code == AGENCY_HUMAN_DECISION_REQUIRED
+    assert deny_calls == []
+    assert len(history_calls) == 1
+    assert _all_user_table_snapshot(case["ledger_path"]) == before
+
+    # Phase 3: a Manager appeal is recorded but never authorizes the call.
+    appeal = _mk_appeal(
+        case["work_order"],
+        ephemeral_role_keys,
+        profile=profile,
+        role="Manager",
+    )
+    commit_agency_appeal(case["ledger_path"], appeal)
+    appeal_handler, appeal_calls = _fake_patch_handler(case)
+    before = _all_user_table_snapshot(case["ledger_path"])
+    with pytest.raises(mcp_server.ToolCallDenied) as caught:
+        _dispatch_apply_patch(
+            case,
+            ephemeral_role_keys,
+            fixed_now,
+            handler=appeal_handler,
+        )
+    assert caught.value.decision.error_code == AGENCY_HUMAN_DECISION_REQUIRED
+    assert appeal_calls == []
+    assert _all_user_table_snapshot(case["ledger_path"]) == before
+
+    # Phase 4: Acceptor supersession to a replacement profile that delegates
+    # apply-patch now allows a real patch through the production handler.
+    replacement = _mk_profile(
+        case["work_order"],
+        ephemeral_role_keys,
+        "b" * 64,
+        delegated=("owp.apply_patch",),
+    )
+    commit_human_agency_profile(case["ledger_path"], replacement)
+    commit_agency_profile_transition(
+        case["ledger_path"],
+        _mk_transition(
+            case["work_order"],
+            ephemeral_role_keys,
+            target=profile,
+            transition="superseded",
+            replacement=replacement,
+            nonce="c" * 64,
+        ),
+    )
+    before_head = case["candidate"].head_commit
+    supersede_receipt, _ = _dispatch_apply_patch(
+        case,
+        ephemeral_role_keys,
+        fixed_now,
+        handler=repo_tools.apply_patch_in_candidate_workspace,
+    )
+    assert supersede_receipt.policy_decision == "allow"
+    assert supersede_receipt.execution_status == "succeeded"
+    assert (case["candidate"].worktree / "src" / "app.py").read_bytes() == (
+        b"patched\n"
+    )
+    assert (
+        _candidate_git(case["candidate"], "rev-parse", "HEAD")
+        .decode()
+        .strip()
+        != before_head
+    )
+
+    # Phase 5: revoke the replacement -> the signed history resolves to
+    # "revoked" with no current profile. The dispatch-denied behavior for all
+    # four tools under a revoked profile is covered by
+    # test_dispatcher_revoked_profile_denies_all_four_tools.
+    commit_agency_profile_transition(
+        case["ledger_path"],
+        _mk_transition(
+            case["work_order"],
+            ephemeral_role_keys,
+            target=replacement,
+            transition="revoked",
+            nonce="d" * 64,
+        ),
+    )
+    resolved = load_current_human_agency_profile(
+        case["ledger_path"], now=fixed_now
+    )
+    assert resolved.status == "revoked"
+    assert resolved.current_profile is None
+
+
+def test_dispatcher_revoked_profile_denies_all_four_tools(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    from test_apply_patch_transaction import _fake_patch_handler  # noqa: PLC0415
+
+    # Each tool lives in its own subdirectory: repo-read, run-tests, and
+    # rollback all use the shared ``handler-loop.sqlite3`` ledger filename, so
+    # they must not share one tmp_path.
+    repo_tmp = tmp_path / "repo-read"
+    patch_tmp = tmp_path / "apply-patch"
+    tests_tmp = tmp_path / "run-tests"
+    rollback_tmp = tmp_path / "rollback"
+    for subdir in (repo_tmp, patch_tmp, tests_tmp, rollback_tmp):
+        subdir.mkdir()
+
+    # repo-read: delegated, then revoked.
+    repo_case, repo_context = _repo_read_success_case(
+        repo_tmp,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    repo_profile = _mk_profile(
+        repo_case["work_order"],
+        ephemeral_role_keys,
+        SHA256_A,
+        delegated=("owp.repo_read",),
+    )
+    commit_human_agency_profile(repo_case["ledger_path"], repo_profile)
+    commit_agency_profile_transition(
+        repo_case["ledger_path"],
+        _mk_transition(
+            repo_case["work_order"],
+            ephemeral_role_keys,
+            target=repo_profile,
+            transition="revoked",
+        ),
+    )
+    repo_handler, repo_calls = _counting_handler(
+        repo_context.replay_checkpoint.workspace_manifest_digest
+    )
+    before = _all_user_table_snapshot(repo_case["ledger_path"])
+    with pytest.raises(mcp_server.ToolCallDenied) as caught:
+        _dispatch_repo_read(
+            repo_case,
+            repo_context,
+            ephemeral_role_keys,
+            fixed_now,
+            handler=repo_handler,
+            runtime_root=repo_tmp,
+        )
+    assert caught.value.decision.error_code == AGENCY_PROFILE_REQUIRED
+    assert repo_calls == []
+    assert _all_user_table_snapshot(repo_case["ledger_path"]) == before
+
+    # apply-patch: delegated, then revoked.
+    patch_case = _apply_patch_agency_case(
+        patch_tmp,
+        signed_work_order,
+        ephemeral_role_keys,
+        fixed_now,
+    )
+    patch_profile = _mk_profile(
+        patch_case["work_order"],
+        ephemeral_role_keys,
+        SHA256_A,
+        delegated=("owp.apply_patch",),
+    )
+    commit_human_agency_profile(patch_case["ledger_path"], patch_profile)
+    commit_agency_profile_transition(
+        patch_case["ledger_path"],
+        _mk_transition(
+            patch_case["work_order"],
+            ephemeral_role_keys,
+            target=patch_profile,
+            transition="revoked",
+        ),
+    )
+    patch_handler, patch_calls = _fake_patch_handler(patch_case)
+    before = _all_user_table_snapshot(patch_case["ledger_path"])
+    with pytest.raises(mcp_server.ToolCallDenied) as caught:
+        _dispatch_apply_patch(
+            patch_case,
+            ephemeral_role_keys,
+            fixed_now,
+            handler=patch_handler,
+        )
+    assert caught.value.decision.error_code == AGENCY_PROFILE_REQUIRED
+    assert patch_calls == []
+    assert _all_user_table_snapshot(patch_case["ledger_path"]) == before
+
+    # run-tests: delegated, then revoked; driver never called.
+    tests_case = _run_tests_case(
+        tmp_path=tests_tmp,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    tests_profile = _mk_profile(
+        tests_case["work_order"],
+        ephemeral_role_keys,
+        SHA256_A,
+        delegated=("owp.run_tests",),
+    )
+    commit_human_agency_profile(tests_case["ledger_path"], tests_profile)
+    commit_agency_profile_transition(
+        tests_case["ledger_path"],
+        _mk_transition(
+            tests_case["work_order"],
+            ephemeral_role_keys,
+            target=tests_profile,
+            transition="revoked",
+        ),
+    )
+    driver = _FakeRunTestsExecutionDriver()
+    before = _all_user_table_snapshot(tests_case["ledger_path"])
+    with pytest.raises(mcp_server.ToolCallDenied) as caught:
+        _dispatch_run_tests(
+            tests_case,
+            ephemeral_role_keys,
+            fixed_now,
+            driver=driver,
+            tmp_path=tests_tmp,
+        )
+    assert caught.value.decision.error_code == AGENCY_PROFILE_REQUIRED
+    assert driver.calls == []
+    assert _all_user_table_snapshot(tests_case["ledger_path"]) == before
+
+    # rollback: delegated, then revoked; handler never called.
+    rollback_case = _rollback_case(
+        tmp_path=rollback_tmp,
+        signed_work_order=signed_work_order,
+        role_keys=ephemeral_role_keys,
+        sidecar_receipt_factory=sidecar_receipt_factory,
+        now=fixed_now,
+    )
+    rollback_profile = _mk_profile(
+        rollback_case["work_order"],
+        ephemeral_role_keys,
+        SHA256_A,
+        delegated=("owp.rollback_patch",),
+    )
+    commit_human_agency_profile(rollback_case["ledger_path"], rollback_profile)
+    commit_agency_profile_transition(
+        rollback_case["ledger_path"],
+        _mk_transition(
+            rollback_case["work_order"],
+            ephemeral_role_keys,
+            target=rollback_profile,
+            transition="revoked",
+        ),
+    )
+    rollback_calls: list[object] = []
+
+    def rollback_handler(command):
+        rollback_calls.append(command)
+        return _rollback_failed_result(rollback_case)
+
+    before = _all_user_table_snapshot(rollback_case["ledger_path"])
+    with pytest.raises(mcp_server.ToolCallDenied) as caught:
+        _dispatch_rollback(
+            rollback_case,
+            ephemeral_role_keys,
+            fixed_now,
+            handler=rollback_handler,
+        )
+    assert caught.value.decision.error_code == AGENCY_PROFILE_REQUIRED
+    assert rollback_calls == []
+    assert _all_user_table_snapshot(rollback_case["ledger_path"]) == before
+
+
+def test_dispatcher_history_loader_runs_only_inside_executor_lock(
+    tmp_path,
+    signed_work_order,
+    ephemeral_role_keys,
+    sidecar_receipt_factory,
+    fixed_now,
+    monkeypatch,
+) -> None:
+    case, context = _repo_read_success_case(
+        tmp_path,
+        signed_work_order,
+        ephemeral_role_keys,
+        sidecar_receipt_factory,
+        fixed_now,
+        monkeypatch,
+    )
+    profile = _mk_profile(
+        case["work_order"],
+        ephemeral_role_keys,
+        SHA256_A,
+        delegated=("owp.repo_read",),
+    )
+    commit_human_agency_profile(case["ledger_path"], profile)
+    handler = _read_handler(
+        context.replay_checkpoint.workspace_manifest_digest
+    )
+    real_load = load_agency_history
+    observed_lock_held: list[bool] = []
+    loader_calls: list[object] = []
+
+    def spying_load(ledger_path, work_order_digest):
+        # Deterministic proof (no sleep): if the loader is invoked before the
+        # executor holds the target lock, a non-blocking flock on a fresh
+        # descriptor succeeds; if the executor already holds it, the probe
+        # fails with BlockingIOError.
+        probe_fd = os.open(
+            evidence._target_lock_path(ledger_path),
+            os.O_RDWR | os.O_CREAT,
+            0o600,
+        )
+        try:
+            try:
+                fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                observed_lock_held.append(True)
+            else:
+                fcntl.flock(probe_fd, fcntl.LOCK_UN)
+                observed_lock_held.append(False)
+        finally:
+            os.close(probe_fd)
+        loader_calls.append(True)
+        return real_load(ledger_path, work_order_digest)
+
+    monkeypatch.setattr(mcp_server, "load_agency_history", spying_load)
+
+    receipt, _ = _dispatch_repo_read(
+        case,
+        context,
+        ephemeral_role_keys,
+        fixed_now,
+        handler=handler,
+        runtime_root=tmp_path,
+    )
+    assert receipt.policy_decision == "allow"
+    assert loader_calls == [True]
+    assert observed_lock_held == [True]

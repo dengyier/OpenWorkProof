@@ -129,6 +129,26 @@ P2 测试证据补齐与 drift 证明：
 `28 passed`；receipt_chain publication atomicity `413 passed`；mcp/policy/repo_tools
 focused `512 passed, 4 skipped`；`pip check`/`compileall`/`git diff --check` PASS。
 
+## Task 5 Step 5 审计记录（protected dispatcher + 完整状态链）
+
+2026-08-24 实现最小 protected dispatcher `mcp_server.dispatch_protected_agent_action`
+（commit `feat: dispatch protected agent actions`），只按签名 `request.tool_name` 路由四
+工具，新增 typed keyword bundle，不持锁、不预加载 history、不做 base/agency 授权；延迟
+`agency_authorize` callback 只捕获 immutable ledger path/context/request，在 executor 已
+持有 target lock 的临界区内才加载 history 并调用 `authorize_agency_profile_layer`。
+dispatcher 不接收独立 `tool_name`/`now`，未知工具/错配 bundle 均 fail closed。
+
+新增 12 条测试：四工具路由、未知工具、bundle 错配/缺失/多余、v0.1 与 v0.4、非
+AgentRequest 拒绝、apply-patch 完整状态链（repo-read allowed → apply-patch reserved →
+appeal 仍 denied → supersede 真实 patch allowed → revoke 后 resolved status=revoked）、
+revoke 后四工具全部 `AGENCY_PROFILE_REQUIRED` 零 handler/driver 零写入、确定性
+history-loader-在锁内 proof（非阻塞 flock probe，无 sleep）。
+
+本轮 fresh 门（控制器 fresh）：agency end-to-end `40 passed`；agency-policy/policy/
+repo-read/apply-patch `144 passed`；mcp/binding/recomposition `126 passed`；
+`pip check`/`compileall`/`git diff --check` PASS。Task 5 仍不标记 READY：dispatcher 与
+完整状态链尚未经独立 review；全量 inventory boundary 仍需 Task 9 重建。
+
 ## Task 6 真实性审查结论
 
 设计要求 bundle 包含受 profile 约束的 request/decision/receipt，但当前协议存在两个事实：
