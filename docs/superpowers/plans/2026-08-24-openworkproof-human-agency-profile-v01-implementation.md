@@ -725,7 +725,7 @@ supersession 后 apply-patch allowed；revoke 后所有 protected tool 返回
 > `git diff --check` PASS。独立 review 未发现 P0/P1/P2，Task 5 实现切片 READY；全量
 > inventory boundary（`test_current_candidate_inventory_binds_*`）仍需 Task 9 重建后才能发布。
 
-- [ ] **Step 6: 分阶段运行测试与提交**
+- [x] **Step 6: 分阶段运行测试与提交**
 
 ```bash
 ./.venv/bin/python -m pytest -q tests/test_agency_policy_v01.py tests/test_policy.py
@@ -1213,4 +1213,4 @@ appeal 不授权、Acceptor 绑定、fork/cycle fail closed、bundle 无私钥�
 - [x] bundle 无私钥、可离线验证、确定性、抗路径与篡改攻击。
 - [x] 中英文文档不宣称法律结论、客户采用、付款、托管或市场已成立。
 - [x] focused、adjacent、candidate、required-live 与非测试门均有 fresh 证据。
-- [ ] 工作树干净；本地提交、远端推送、合并状态分别报告。
+- [x] 工作树干净；本地提交、远端推送、合并状态分别报告。
