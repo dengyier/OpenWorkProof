@@ -442,3 +442,84 @@ def test_human_agency_example_describes_application_side_effects_precisely() -> 
     assert "never writes to a ledger or a filesystem" not in normalized
     assert "no application-level filesystem or ledger writes" in normalized
     assert "never writes a private-key file" in normalized
+
+
+# --- Human-centered README narrative ---
+
+
+def test_readmes_lead_with_human_purpose_and_judgment() -> None:
+    chinese = _text("README.md")
+    english = _text("README_en.md")
+
+    chinese_lead = "\n".join(chinese.splitlines()[:60])
+    english_lead = "\n".join(english.splitlines()[:60])
+
+    assert "让智能依人的目的而行动，让每一次行动经得起人的判断。" in chinese_lead
+    assert "OpenWorkProof 是 AI Agent 工作契约与可验证执行协议。" in chinese_lead
+    assert (
+        "Let intelligence act toward human purposes, and let every action "
+        "stand up to human judgment."
+    ) in english_lead
+    assert (
+        "OpenWorkProof is an open work contract and verifiable execution "
+        "protocol for AI agents."
+    ) in english_lead
+
+
+def test_readmes_preserve_purpose_authority_evidence_and_human_judgment() -> None:
+    chinese = _text("README.md")
+    english = _text("README_en.md")
+
+    for literal in (
+        "人的目的",
+        "签名授权",
+        "独立验证",
+        "接受、拒绝、撤销和申诉",
+        "最终判断",
+    ):
+        assert literal in chinese, f"README.md missing: {literal}"
+
+    for literal in (
+        "human purposes",
+        "signed authority",
+        "independent verification",
+        "accept, reject, revoke, and appeal",
+        "final judgment",
+    ):
+        assert literal in english, f"README_en.md missing: {literal}"
+
+
+def test_readmes_keep_current_release_and_test_boundaries_aligned() -> None:
+    chinese = _text("README.md")
+    english = _text("README_en.md")
+
+    for text in (chinese, english):
+        for literal in (
+            "1.3.0",
+            "4265 passed",
+            "0 failed",
+            "0 skipped",
+            "183 passed",
+        ):
+            assert literal in text, f"README release boundary missing: {literal}"
+
+    assert "本地候选" in chinese
+    assert "尚未发布" in chinese
+    assert "local candidate" in english
+    assert "not released" in english
+
+
+def test_readmes_do_not_turn_the_homepage_into_fundraising_or_market_copy() -> None:
+    forbidden = (
+        "Gartner",
+        "$48M",
+        "$65M",
+        "融资",
+        "funding",
+        "百亿美元市场",
+        "$10B+ market",
+    )
+    for relative in ("README.md", "README_en.md"):
+        text = _text(relative)
+        for literal in forbidden:
+            assert literal not in text, f"{relative} contains market copy: {literal}"
