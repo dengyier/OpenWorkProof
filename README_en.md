@@ -784,7 +784,7 @@ OpenWorkProof/
 - **Historical 1.2.0 release-gate snapshot:** v0.5 focused 401 passed; candidate live 176 passed; required-live 3494 passed, 0 failed, 0 skipped
 - **Local 1.3.0 candidate fresh required-live gate:** with live Docker, the
   current candidate inventory, and `OPENWORKPROOF_AGENTTEAMS_REQUIRED=1`
-  enabled, the full suite reports **3987 passed, 0 failed, 0 skipped**; the live
+  enabled, the full suite reports **4265 passed, 0 failed, 0 skipped**; the live
   three-role preflight passes inside the strict gate.
 
 **Not yet complete or not externally evidenced:** a fresh Manager → Developer →

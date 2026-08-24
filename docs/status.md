@@ -3,6 +3,45 @@
 > 本文档是项目实现状态的权威记录。README 只保留概览，
 > 「已经完成什么」和「尚未完成什么」的完整清单以本文为准。
 
+## Human Agency Profile 0.1：Task 9 供应链与全量门收口（2026-08-24）
+
+Human Agency Profile 0.1 已在隔离分支完成本地供应链与 required-live 验证；本节
+覆盖本文前面同一 profile 下“candidate inventory / Task 9 尚未完成”的阶段性表述。
+没有合并 `main`，没有推送远端：
+
+- agency focused（含 schema constraints / registry）：`235 passed`，0 failed、
+  0 skipped；相邻 policy / MCP / repo-read / retraction / acceptance / schema 回归：
+  `309 passed`，0 failed、0 skipped；
+- `prepare_context.py` 从 source revision
+  `aa38f8907208f2602357cef08fbdb24c98f85399` 的 Git blob 生成 revision 专属
+  execution / trusted-helper build contexts；两镜像均以 `linux/arm64`、
+  `--network none`、固定基础镜像与提交时间构建；
+- 新增不可变 inventory
+  `supply-chain/images/candidates/aa38f8907208f2602357cef08fbdb24c98f85399.json`，
+  不改写历史库存；对应 inventory commit 为 `7eeb2fc`；
+- candidate 两套件（artifact root + live Docker）：`183 passed`，0 failed、
+  0 skipped（620.27s）；execution image 为
+  `docker.io/openworkproof/execution-test@sha256:bd9f894d57b0bc4bcaa74b7bc60b09b9a618040e6692fe47e30f833a13dbc5ec`；
+- 首轮 required-live 基线为 `4264 passed、1 skipped`，唯一 skip 明确来自未启用
+  `OPENWORKPROOF_AGENTTEAMS_REQUIRED`；随后使用仅驻留于进程内存的 Matrix token
+  启用真实 AgentTeams 三角色 preflight，并与 live Docker、当前 inventory、严格
+  `PytestUnhandledThreadExceptionWarning` 同门复跑，最终为 **4265 passed、
+  0 failed、0 skipped**（1300.67s，退出码 0）；
+- `pip check`、`compileall src tests examples`、`git diff --check`：PASS；
+  OpenWorkProof 测试容器与卷残留均为 0。仍运行的 AgentTeams 服务容器属于现有
+  本地三 Agent 环境，不是测试残留。
+
+诚实边界：这些结果证明本地分支代码、离线工件与本机 live 环境的可复核性；不证明
+客户采用、付费、外部人工 Acceptor 验收、生产部署、远端发布或法律合规。
+
+```yaml
+customer_adoption: not_evidenced
+payment: not_evidenced
+external_human_acceptance: not_evidenced
+production_deployment: not_evidenced
+remote_merge_or_push: not_performed
+```
+
 ## Human Agency Profile 0.1：离线包文档真相复审修复（2026-08-24）
 
 Task 8 独立复审发现协议文档的精确 bundle 布局遗漏实现强制的 `verify.sh`，且

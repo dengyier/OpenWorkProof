@@ -1133,7 +1133,7 @@ git diff --check                                      # PASS
 - Modify: `docs/status.md`
 - Modify: this plan (checkboxes only after evidence exists)
 
-- [ ] **Step 1: 运行 agency focused 门**
+- [x] **Step 1: 运行 agency focused 门**
 
 ```bash
 ./.venv/bin/python -m pytest -q \
@@ -1148,7 +1148,7 @@ git diff --check                                      # PASS
 
 Expected：0 failed、0 skipped；记录真实 passed 和退出码。
 
-- [ ] **Step 2: 运行相邻协议回归**
+- [x] **Step 2: 运行相邻协议回归**
 
 ```bash
 ./.venv/bin/python -m pytest -q \
@@ -1160,18 +1160,18 @@ Expected：0 failed、0 skipped；记录真实 passed 和退出码。
   tests/test_schema_registry.py
 ```
 
-- [ ] **Step 3: 运行 candidate 两套件**
+- [x] **Step 3: 运行 candidate 两套件**
 
 先按仓库现有命令确认 candidate inventory 是否唯一绑定当前 source allowlist revision。若
 只因本分支修改了 allowlist 内文件而失配，按既有不可变流程生成新 inventory；不得改写历史
 inventory，也不得把失败称为外部噪音。
 
-- [ ] **Step 4: 运行 required-live 全量门**
+- [x] **Step 4: 运行 required-live 全量门**
 
 使用仓库当前文档中的 required-live Docker 命令，不从旧报告复制测试数。要求：退出码 0、
 0 failed、0 skipped、严格线程告警开启。记录耗时与 Docker 容器/卷残留。
 
-- [ ] **Step 5: 非测试验证**
+- [x] **Step 5: 非测试验证**
 
 ```bash
 ./.venv/bin/python -m pip check
@@ -1180,7 +1180,7 @@ git diff --check
 git status --short
 ```
 
-- [ ] **Step 6: 更新事实状态并提交**
+- [x] **Step 6: 更新事实状态并提交**
 
 只把本轮 fresh 结果写入 `docs/status.md`；计划 checkbox 只勾选有日志证据的步骤。
 
@@ -1203,14 +1203,14 @@ appeal 不授权、Acceptor 绑定、fork/cycle fail closed、bundle 无私钥�
 
 ## Final Checklist
 
-- [ ] WorkOrder v0.1、CapabilityGrant 与旧 schema digest 完全未变。
-- [ ] 旧执行 API 默认语义未变，新 profile 仅在 opt-in protected API 生效。
-- [ ] WorkOrder ∩ Grant ∩ profile 三层均允许才执行。
-- [ ] reserved tool 在 handler 前拒绝，handler 0 calls，全表零写入。
-- [ ] appeal 可验证但不授权；只有 Acceptor transition 改变 current profile。
-- [ ] supersede/revoke 链对 fork、cycle、缺失对象、多终点和时间倒流 fail closed。
-- [ ] COMMIT-ACK 丢失可 exact readback；不确定时显式 indeterminate。
-- [ ] bundle 无私钥、可离线验证、确定性、抗路径与篡改攻击。
-- [ ] 中英文文档不宣称法律结论、客户采用、付款、托管或市场已成立。
-- [ ] focused、adjacent、candidate、required-live 与非测试门均有 fresh 证据。
+- [x] WorkOrder v0.1、CapabilityGrant 与旧 schema digest 完全未变。
+- [x] 旧执行 API 默认语义未变，新 profile 仅在 opt-in protected API 生效。
+- [x] WorkOrder ∩ Grant ∩ profile 三层均允许才执行。
+- [x] reserved tool 在 handler 前拒绝，handler 0 calls，全表零写入。
+- [x] appeal 可验证但不授权；只有 Acceptor transition 改变 current profile。
+- [x] supersede/revoke 链对 fork、cycle、缺失对象、多终点和时间倒流 fail closed。
+- [x] COMMIT-ACK 丢失可 exact readback；不确定时显式 indeterminate。
+- [x] bundle 无私钥、可离线验证、确定性、抗路径与篡改攻击。
+- [x] 中英文文档不宣称法律结论、客户采用、付款、托管或市场已成立。
+- [x] focused、adjacent、candidate、required-live 与非测试门均有 fresh 证据。
 - [ ] 工作树干净；本地提交、远端推送、合并状态分别报告。

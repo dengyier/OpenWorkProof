@@ -754,7 +754,7 @@ OpenWorkProof/
 - **1.2.0 历史发布门快照**：v0.5 focused 401 passed；candidate live 176 passed；required-live 3494 passed、0 failed、0 skipped
 - **1.3.0 本地候选 fresh required-live 门**：同时启用 live Docker、当前
   candidate inventory 与 `OPENWORKPROOF_AGENTTEAMS_REQUIRED=1`，全量
-  **3987 passed、0 failed、0 skipped**；真实三角色 preflight 在严格门内通过。
+  **4265 passed、0 failed、0 skipped**；真实三角色 preflight 在严格门内通过。
 
 **尚未完成或尚无外部证据：** 新的 Manager → Developer → Verifier 真实业务执行、
 外部人工 Acceptor 终态、客户采用/付费/结算、其他 ToolCall handler 与 evidence
