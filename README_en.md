@@ -204,6 +204,27 @@ VERIFIED != ACCEPTED != PAID/SETTLED/LEGAL AUDIT/ADOPTION
 `REJECTED` is a verified terminal state. It is not an operational error and must not be
 reported as delivery success.
 
+## Verification Integrity: the verification result must also be checked
+
+"Tests passed" does not by itself make a verification trustworthy. If the selector missed
+eligible targets, or a negative control failed for a different reason than expected, the result
+must not become `VERIFIED`.
+
+Verification Integrity v0.5 freezes the eligible population and the expected failure signatures
+of negative controls:
+
+- `POPULATION_CAPTURE_FAILED` means the selected set did not cover the contracted eligible
+  population, so the result closes as `UNKNOWN`;
+- `CONTROL_FAILURE_SIGNATURE_MISMATCH` means a negative control failed for the wrong reason and
+  cannot support the claim;
+- only when population capture and control evidence hold can the protocol derive `VERIFIED`,
+  `REFUTED`, or `UNKNOWN` from the evidence.
+
+This proves that a conclusion is supported by evidence from the contracted scope. It does not
+prove that every business outcome is correct. Customer use, payment, legal effect, and upstream
+adoption remain separate external facts; without separate evidence, their status is
+`not evidenced`.
+
 ## Five-minute start
 
 ### 1. Install the public package

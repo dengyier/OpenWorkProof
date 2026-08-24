@@ -193,6 +193,20 @@ VERIFIED != ACCEPTED != PAID/SETTLED/LEGAL AUDIT/ADOPTION
 
 `REJECTED` 是可验证终态，不是系统错误，也不能写成交付成功。
 
+## 验证完整性：验证结果本身也要经得起检查
+
+“测试通过”不等于“该验证可信”。如果测试选择器漏掉了本应检查的对象，或者负向控制虽然
+失败、却不是按预期原因失败，结论仍然不应进入 `VERIFIED`。
+
+Verification Integrity v0.5 会冻结合格对象集合和负向控制的预期失败特征：
+
+- `POPULATION_CAPTURE_FAILED`：实际选择没有覆盖约定的合格对象，结论关闭为 `UNKNOWN`；
+- `CONTROL_FAILURE_SIGNATURE_MISMATCH`：负向控制的失败原因与登记特征不符，不能把这次失败当作有效证明；
+- 只有人口覆盖和控制证据都成立时，系统才会根据证据给出 `VERIFIED`、`REFUTED` 或 `UNKNOWN`。
+
+这套机制证明“结论由约定范围内的证据支持”，不证明业务结果永远正确。客户采用、付款、
+法律效力和上游采纳仍是独立外部事实；没有相应证据时，状态就是 `not evidenced`。
+
 ## 五分钟开始
 
 ### 1. 从公开包安装
