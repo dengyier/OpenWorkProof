@@ -373,9 +373,6 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues privately throug
 [GitHub Security Advisories](https://github.com/dengyier/OpenWorkProof/security/advisories/new).
 The project is licensed under [Apache-2.0](LICENSE).
 
-You can also support protocol research and maintenance through
-[GitHub Sponsors](https://github.com/sponsors/dengyier).
-
 ## Why we keep building
 
 Capability tells us what an agent can do. A work contract records why it was allowed to do it.

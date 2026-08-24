@@ -355,8 +355,6 @@ Agent 服务可以被比较、交易和结算
 [GitHub Security Advisories](https://github.com/dengyier/OpenWorkProof/security/advisories/new)
 私下报告。项目使用 [Apache-2.0](LICENSE) 许可证。
 
-你也可以通过 [GitHub Sponsors](https://github.com/sponsors/dengyier) 支持协议研究和维护。
-
 ## 为什么继续做这件事
 
 能力回答 Agent 能做什么，工作契约回答它为什么被允许这样做，证据让行动接受复核。
