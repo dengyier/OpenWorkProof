@@ -262,6 +262,55 @@ schema 更新。
 inventory boundary（`test_current_candidate_inventory_binds_*`）仍待 Task 9 重建；本
 commit 未改 main、未 push、未重建 candidate inventory、未做 Task 8。
 
+## Human Agency Profile 0.1：文档、双语边界与使用样例（2026-08-24，commit `docs: explain verifiable human agency boundaries`）
+
+Task 8 完成，只做文档、双语边界与使用样例，未改协议代码、main、candidate inventory，
+未 push：
+
+- 新增 `docs/protocol/human-agency-profile-v0.1.md`：面向工程师，含 why、三对象
+  （`HumanAgencyProfileV01`/`AgencyProfileTransitionV01`/`AgencyAppealV01`）、角色与
+  签名权威、状态/撤销/替换/appeal、授权先行（基础授权先于 agency layer 且同一 target
+  lock 内）、protected dispatcher 四工具、offline bundle、schema+semantic 验证边界、
+  threat model/fail-closed、最小 API 示例、诚实未完成/非承诺边界。
+- 新增 `examples/human_agency_profile_v01.py`：仅进程内生成 WorkOrder-bound profile、
+  Acceptor Ed25519 签名、verify、判定一个 delegated（`owp.repo_read`）与一个 reserved
+  （`owp.apply_patch` → `AGENCY_HUMAN_DECISION_REQUIRED`）；不写私钥文件、不联网、无
+  账本副作用、不暗示生产部署；输出稳定、无秘密。
+- `README.md`/`README_en.md` 各新增一段三条事实的实验能力入口 + protocol/example 链接，
+  中英文语义对齐，未重写其它段落。
+- `tests/test_documentation_boundaries.py` 新增 9 条文档真相边界测试（RED→GREEN）。
+
+明确并测试的边界：
+
+- Human Agency Profile 是 WorkOrder 绑定、Acceptor 签名、机器可验证的授权/保留决策
+  边界；不是员工评分、绩效监控、法律责任转移、自动担责、资金托管或合规认证。
+- appeal 只记录请求，不恢复/扩大权限；只有 Acceptor 签名 transition/profile 才能
+  撤销/替换授权。
+- JSON Schema 只做结构门；内容派生 ID、WorkOrder 绑定、Ed25519 签名、因果/时间语义
+  仍需 OWP verifier。
+- offline bundle 是签名时点的历史快照，不是 TSA/current-state 证明；使用方须应用
+  freshness policy。
+
+fresh 测量（控制器 fresh，未复用历史数字）：
+
+- `tests/test_documentation_boundaries.py`：`19 passed`（含 9 条新增边界测试）；
+- Task 8 门 `test_documentation_boundaries.py + test_agency_models_v01.py +
+  test_agency_end_to_end_v01.py`：`84 passed`（19 + 25 + 40）；
+- agency schema 门 `test_agency_schema_constraints_v01.py +
+  test_agency_schema_registry_v01.py + test_package.py`：`60 passed`；
+- `examples/human_agency_profile_v01.py`：退出码 0，输出稳定且无私钥/无秘密；
+- `pip check` / `compileall src examples` / `git diff --check`：PASS。
+
+```yaml
+customer_adoption: not_evidenced
+payment: not_evidenced
+upstream_adoption: not_evidenced
+```
+
+诚实边界不变：未改 main、未 push、未重建 candidate inventory、未做 Task 9；全量
+inventory boundary（`test_current_candidate_inventory_binds_*`）仍待 Task 9 重建，
+不把 inventory 预期失败混入 Task 8。
+
 ## Verified Agent Delivery 0.1 本地实现（2026-08-22）
 
 隔离分支 `codex/verified-agent-delivery` 已按计划实现首个商业产品切片

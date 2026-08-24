@@ -218,3 +218,119 @@ def test_verified_delivery_example_json_is_strictly_closed() -> None:
         assert reference.reference_digest is None
         assert reference.observed_at is None
         assert _rfc8785.dumps(reference.model_dump(mode="json")) == payload
+
+
+# --- Human Agency Profile v0.1 (Task 8) truth boundaries ---
+
+AGENCY_PROTOCOL_DOC = "docs/protocol/human-agency-profile-v0.1.md"
+
+
+def test_human_agency_readmes_are_authorization_boundaries_not_surveillance() -> None:
+    """Both READMEs state the boundary and deny surveillance/compliance meaning."""
+
+    chinese = _text("README.md")
+    english = _text("README_en.md")
+
+    # Chinese: WorkOrder-bound, Acceptor-signed, machine-verifiable.
+    for literal in ("Human Agency Profile", "WorkOrder 绑定", "Acceptor 签名", "机器可验证"):
+        assert literal in chinese, f"README.md missing: {literal}"
+    # Chinese negation of unsupported meanings.
+    assert "不是员工评分、绩效监控、法律责任转移、自动担责、资金托管或合规认证" in chinese
+
+    # English: same three facts.
+    for literal in ("Human Agency Profile", "WorkOrder-bound", "Acceptor-signed", "machine-verifiable"):
+        assert literal in english, f"README_en.md missing: {literal}"
+    assert (
+        "not employee scoring, performance monitoring, legal-liability transfer, "
+        "automatic accountability, fund custody, or compliance certification"
+    ) in english
+
+    # Both languages link the protocol doc and the runnable example.
+    for text in (chinese, english):
+        assert "docs/protocol/human-agency-profile-v0.1.md" in text
+        assert "examples/human_agency_profile_v01.py" in text
+
+
+def test_human_agency_appeal_records_but_never_restores() -> None:
+    """Appeal is a signed request, not a permission change; only Acceptor transitions."""
+
+    chinese = _text("README.md")
+    english = _text("README_en.md")
+
+    assert "不恢复或扩大权限" in chinese
+    assert "Acceptor 签名的 transition/profile 才能撤销或替换授权" in chinese
+
+    assert "never restores or expands permission" in english
+    assert "only an Acceptor-signed transition/profile can revoke or replace" in english
+
+
+def test_human_agency_protocol_doc_names_three_objects_and_roles() -> None:
+    text = _text(AGENCY_PROTOCOL_DOC)
+    for name in (
+        "HumanAgencyProfileV01",
+        "AgencyProfileTransitionV01",
+        "AgencyAppealV01",
+    ):
+        assert name in text, f"protocol doc missing object: {name}"
+    for role in ("Acceptor", "Manager", "Developer", "Verifier"):
+        assert role in text, f"protocol doc missing role: {role}"
+
+
+def test_human_agency_protocol_doc_protected_dispatcher_four_tools() -> None:
+    text = _text(AGENCY_PROTOCOL_DOC)
+    for tool in (
+        "owp.repo_read",
+        "owp.apply_patch",
+        "owp.run_tests",
+        "owp.rollback_patch",
+    ):
+        assert tool in text, f"protocol doc missing protected tool: {tool}"
+
+
+def test_human_agency_protocol_doc_schema_is_structural_gate_only() -> None:
+    text = _text(AGENCY_PROTOCOL_DOC)
+    assert "JSON Schema" in text
+    assert "structural" in text
+    # Semantic facts are NOT expressed by the schema and still need OWP verifier.
+    for literal in (
+        "content-derived",
+        "WorkOrder binding",
+        "Ed25519",
+        "causal",
+    ):
+        assert literal in text, f"protocol doc missing semantic boundary: {literal}"
+
+
+def test_human_agency_protocol_doc_offline_bundle_freshness_boundary() -> None:
+    text = _text(AGENCY_PROTOCOL_DOC)
+    assert "snapshot" in text
+    assert "TSA" in text
+    assert "freshness" in text
+
+
+def test_human_agency_protocol_doc_denies_unsupported_meanings() -> None:
+    text = _text(AGENCY_PROTOCOL_DOC)
+    assert (
+        "not employee scoring, performance monitoring, legal-liability transfer, "
+        "automatic accountability, fund custody, or compliance certification"
+    ) in text
+
+
+def test_human_agency_protocol_doc_authorization_ordering_and_threat_model() -> None:
+    text = _text(AGENCY_PROTOCOL_DOC)
+    assert "target lock" in text
+    assert "fail closed" in text or "fail-closed" in text
+    assert "threat model" in text
+    # Base authorization runs before the agency layer.
+    assert "base authorization" in text
+
+
+def test_status_keeps_agency_commercial_fields_not_evidenced() -> None:
+    status = _text("docs/status.md")
+    lines = {line.strip() for line in status.splitlines()}
+    for boundary in (
+        "customer_adoption: not_evidenced",
+        "payment: not_evidenced",
+        "upstream_adoption: not_evidenced",
+    ):
+        assert boundary in lines, f"status.md missing: {boundary}"

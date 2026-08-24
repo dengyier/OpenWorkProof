@@ -1039,22 +1039,22 @@ git commit -m "feat: publish human agency profile schemas"
 - Create: `examples/human_agency_profile_v01.py`
 - Modify: `tests/test_documentation_boundaries.py`
 
-- [ ] **Step 1: 写文档边界 RED 测试**
+- [x] **Step 1: 写文档边界 RED 测试**
 
 禁止把该能力写成法律合规、自动担责、员工评分、资金托管、客户采用或已产生收入。中英文
 必须同时说明：profile 是可验证授权边界；appeal 不恢复权限；Acceptor 才能替换/撤销。
 
-- [ ] **Step 2: 编写最小可运行样例**
+- [x] **Step 2: 编写最小可运行样例**
 
 样例只演示生成 WorkOrder-bound profile、签名、验证、判定 reserved tool；不得生成真实私钥
 文件或暗示生产部署。
 
-- [ ] **Step 3: 更新 README 与 status**
+- [x] **Step 3: 更新 README 与 status**
 
 README 只增加一段实验能力入口、三条事实和链接。`docs/status.md` 使用 fresh test count，
 并保持 `customer_adoption/payment/upstream_adoption = not_evidenced`，除非出现独立外部证据。
 
-- [ ] **Step 4: 运行测试与提交**
+- [x] **Step 4: 运行测试与提交**
 
 ```bash
 ./.venv/bin/python examples/human_agency_profile_v01.py

@@ -336,6 +336,20 @@ OpenWorkProof 自建，`upstream_adoption`、`customer_case`、
 `commercial_validation` 均为 `not_evidenced`；它不证明任何客户采用、已经
 付款、资金已释放、自动结算、普遍正确性或法规合规。
 
+### Human Agency Profile v0.1（实验能力入口）
+
+`HumanAgencyProfileV01` 是 WorkOrder 绑定、Acceptor 签名的机器可验证授权/保留
+决策边界：把「哪些工具委托给 Agent、哪些决定保留给人」冻结为可离线验签的协议
+对象。三条事实：
+
+1. profile 只收紧、不扩大：有效权限 = WorkOrder ∩ Grant ∩ active profile；
+2. appeal 只记录请求，不恢复或扩大权限；只有 Acceptor 签名的 transition/profile 才能撤销或替换授权；
+3. 它不是员工评分、绩效监控、法律责任转移、自动担责、资金托管或合规认证。
+
+协议说明见 [docs/protocol/human-agency-profile-v0.1.md](docs/protocol/human-agency-profile-v0.1.md)，
+最小可运行样例见 [examples/human_agency_profile_v01.py](examples/human_agency_profile_v01.py)。
+`customer_adoption` / `payment` / `upstream_adoption` 仍为 `not_evidenced`。
+
 ### Evidence Lifecycle v0.2 兼容入口
 
 当前 1.3.0 本地候选保留 v0.2 的 Profile 校验、正负证据提交、验证决定、Delivery

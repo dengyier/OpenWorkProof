@@ -364,6 +364,23 @@ That demo declares `upstream_adoption`, `customer_case`, and
 adoption, payment, fund release, automatic settlement, universal correctness,
 or regulatory compliance.
 
+### Human Agency Profile v0.1 (experimental entry point)
+
+`HumanAgencyProfileV01` is a WorkOrder-bound, Acceptor-signed, machine-verifiable
+authorization / reserved-decision boundary: it freezes "which tools are delegated
+to the Agent and which decisions stay with a human" into an offline-verifiable
+protocol object. Three facts:
+
+1. the profile only narrows, never expands: effective permission = WorkOrder ∩
+   Grant ∩ active profile;
+2. an appeal only records a request — it never restores or expands permission;
+   only an Acceptor-signed transition/profile can revoke or replace the grant;
+3. it is not employee scoring, performance monitoring, legal-liability transfer, automatic accountability, fund custody, or compliance certification.
+
+See [docs/protocol/human-agency-profile-v0.1.md](docs/protocol/human-agency-profile-v0.1.md)
+and the minimal runnable example [examples/human_agency_profile_v01.py](examples/human_agency_profile_v01.py).
+`customer_adoption` / `payment` / `upstream_adoption` remain `not_evidenced`.
+
 ### Evidence Lifecycle v0.2 Compatibility Entry Points
 
 The current local 1.3.0 candidate retains v0.2 profile validation, positive and
