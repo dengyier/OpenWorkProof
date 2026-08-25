@@ -11,7 +11,11 @@ import pytest
 import rfc8785
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from openworkproof.dsh_bridge import DshBridgeApplication, run_stdio_bridge
+from openworkproof.dsh_bridge import (
+    DshBridgeApplication,
+    DshCaseHandlers,
+    run_stdio_bridge,
+)
 from openworkproof.dsh_protocol import (
     DshObservationRecordV01,
     verify_dsh_observation,
@@ -94,7 +98,13 @@ def _observation(
     }
 
 
-def _open_fake_case(monkeypatch, tmp_path, *, action_handler=None):
+def _open_fake_case(
+    monkeypatch,
+    tmp_path,
+    *,
+    action_handler=None,
+    handler_factory=None,
+):
     private_key = Ed25519PrivateKey.generate()
     raw_key = private_key.private_bytes_raw()
     key_path = tmp_path / "sidecar.key"
@@ -115,6 +125,7 @@ def _open_fake_case(monkeypatch, tmp_path, *, action_handler=None):
     app = DshBridgeApplication(
         clock=lambda: NOW,
         action_handler=action_handler,
+        handler_factory=handler_factory,
     )
     app.handle_line(rfc8785.dumps(_hello()))
     response = json.loads(
@@ -130,6 +141,32 @@ def _open_fake_case(monkeypatch, tmp_path, *, action_handler=None):
     )
     assert response["payload"]["result_digest"] == "c" * 64
     return app, private_key, evidence_root
+
+
+def test_open_case_builds_case_scoped_handlers_with_shared_tokens(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    seen = []
+
+    def factory(manifest, decision_tokens):
+        seen.append((manifest.case_id, decision_tokens))
+        return DshCaseHandlers(
+            action=lambda _payload: "a" * 64,
+            verify=lambda _payload: "b" * 64,
+            acceptance_draft=lambda _payload: "c" * 64,
+            export=lambda _payload: "d" * 64,
+        )
+
+    app, _private_key, _evidence_root = _open_fake_case(
+        monkeypatch,
+        tmp_path,
+        handler_factory=factory,
+    )
+
+    assert len(seen) == 1
+    assert seen[0][0] == "c" * 64
+    assert seen[0][1] is app.decision_tokens
 
 
 def test_bridge_stdout_contains_jsonl_only() -> None:

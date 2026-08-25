@@ -15,6 +15,7 @@ from openworkproof.dsh_execution import (
     execute_dsh_tests,
 )
 from openworkproof.dsh_protocol import DshExecutionIdentityV01
+from openworkproof.dsh_protocol import dsh_action_arguments_digest
 from openworkproof.models import ApplyPatchArguments, request_arguments_digest
 from openworkproof.binding import canonical_test_profile_digest
 
@@ -64,7 +65,12 @@ def _input(
         call_id=call_id,
         root_call_id="root-1",
         tool_name="owp_apply_patch",
-        arguments_digest=request_arguments_digest("owp.apply_patch", arguments),
+        arguments_digest=dsh_action_arguments_digest(
+            {
+                "patch_utf8": patch_bytes.decode("utf-8"),
+                "target_paths": list(target_paths),
+            }
+        ),
     )
     return DshApplyPatchInputV01.model_validate(
         {
@@ -278,7 +284,9 @@ def _run_tests_payload(
         call_id="call-tests",
         root_call_id="root-tests",
         tool_name="owp_run_tests",
-        arguments_digest=request_arguments_digest("owp.run_tests", arguments),
+        arguments_digest=dsh_action_arguments_digest(
+            {"test_profile_digest": runtime.test_profile_digest}
+        ),
     )
     return DshRunTestsInputV01.model_validate(
         {

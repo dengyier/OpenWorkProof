@@ -72,6 +72,14 @@ def canonical_bytes(value: ProtocolModel | RootModel[Any] | Mapping[str, Any]) -
         raise ValueError("DSH value is not canonicalizable JCS") from error
 
 
+def dsh_action_arguments_digest(arguments: Mapping[str, Any]) -> str:
+    """Bind one Harness tool call to its exact closed argument object."""
+
+    if not isinstance(arguments, Mapping):
+        raise ValueError("DSH action arguments must be a mapping")
+    return hashlib.sha256(canonical_bytes(arguments)).hexdigest()
+
+
 class DshExecutionIdentityV01(ProtocolModel):
     session_id: Identifier
     call_id: Identifier

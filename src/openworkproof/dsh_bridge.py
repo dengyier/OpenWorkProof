@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import BinaryIO, TextIO
@@ -42,6 +43,16 @@ _RESPONSE_TYPES = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class DshCaseHandlers:
+    """Trusted handlers assembled for one already validated case."""
+
+    action: Callable[[DshActionExecutePayloadV01], str]
+    verify: Callable[[object], str]
+    acceptance_draft: Callable[[object], str]
+    export: Callable[[object], str]
+
+
 def _strict_json_object(raw: bytes) -> dict[str, object]:
     def pairs_hook(pairs):
         result: dict[str, object] = {}
@@ -68,16 +79,26 @@ class DshBridgeApplication:
         *,
         clock: Callable[[], datetime],
         action_handler: Callable[[DshActionExecutePayloadV01], str] | None = None,
+        handler_factory: Callable[
+            [DshCaseManifestV01, DecisionTokenStore], DshCaseHandlers
+        ]
+        | None = None,
     ) -> None:
         self._clock = clock
         self._action_handler = action_handler
+        self._handler_factory = handler_factory
         self._session_id: str | None = None
         self._next_sequence = 0
         self._shutdown = False
         self._responses: dict[str, tuple[bytes, bytes]] = {}
         self._cases: dict[str, DshCaseManifestV01] = {}
+        self._case_handlers: dict[str, DshCaseHandlers] = {}
         self._decision_tokens = DecisionTokenStore(clock=clock)
         self._committed_receipts: dict[tuple[str, str], str] = {}
+
+    @property
+    def decision_tokens(self) -> DecisionTokenStore:
+        return self._decision_tokens
 
     @property
     def shutdown_complete(self) -> bool:
@@ -227,6 +248,11 @@ class DshBridgeApplication:
             case_root = supplied.parent if supplied.is_file() else supplied
             manifest = load_dsh_case(case_root)
             self._cases[manifest.case_id] = manifest
+            if self._handler_factory is not None:
+                self._case_handlers[manifest.case_id] = self._handler_factory(
+                    manifest,
+                    self._decision_tokens,
+                )
             return self._response(
                 request,
                 message_type="case_status",
@@ -312,7 +338,11 @@ class DshBridgeApplication:
                 result_digest=record.record_id,
             )
         if message_type == "action_execute":
-            if self._action_handler is None:
+            handlers = self._case_handlers.get(request.payload.case_id)
+            action_handler = (
+                handlers.action if handlers is not None else self._action_handler
+            )
+            if action_handler is None:
                 return self._response(
                     request,
                     message_type="action_result",
@@ -321,7 +351,7 @@ class DshBridgeApplication:
                     error_kind="operational_failure",
                 )
             try:
-                result_digest = self._action_handler(request.payload)
+                result_digest = action_handler(request.payload)
             except DshExecutionDenied as error:
                 return self._response(
                     request,
@@ -339,6 +369,36 @@ class DshBridgeApplication:
             return self._response(
                 request,
                 message_type="action_result",
+                status="ok",
+                result_digest=result_digest,
+            )
+        if message_type in {"verify_request", "acceptance_draft", "export_request"}:
+            handlers = self._case_handlers.get(request.payload.case_id)
+            if handlers is None:
+                return self._response(
+                    request,
+                    message_type=_RESPONSE_TYPES[message_type],
+                    status="unknown",
+                    reason_code="HANDLER_NOT_CONFIGURED",
+                )
+            handler = {
+                "verify_request": handlers.verify,
+                "acceptance_draft": handlers.acceptance_draft,
+                "export_request": handlers.export,
+            }[message_type]
+            try:
+                result_digest = handler(request.payload)
+            except Exception:
+                return self._response(
+                    request,
+                    message_type=_RESPONSE_TYPES[message_type],
+                    status="error",
+                    reason_code="HANDLER_FAILED",
+                    error_kind="operational_failure",
+                )
+            return self._response(
+                request,
+                message_type=_RESPONSE_TYPES[message_type],
                 status="ok",
                 result_digest=result_digest,
             )
@@ -383,4 +443,4 @@ def run_stdio_bridge(
     return 0
 
 
-__all__ = ["DshBridgeApplication", "run_stdio_bridge"]
+__all__ = ["DshBridgeApplication", "DshCaseHandlers", "run_stdio_bridge"]

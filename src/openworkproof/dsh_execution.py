@@ -16,7 +16,10 @@ from pydantic import model_validator
 import openworkproof.repo_tools as repo_tools
 import openworkproof.evidence as evidence
 from openworkproof.dsh_case import DecisionTokenStore
-from openworkproof.dsh_protocol import DshExecutionIdentityV01
+from openworkproof.dsh_protocol import (
+    DshExecutionIdentityV01,
+    dsh_action_arguments_digest,
+)
 from openworkproof.binding import canonical_test_profile_digest
 from openworkproof.mcp_server import (
     ToolCallDenied,
@@ -214,8 +217,11 @@ def execute_dsh_patch(
         patch_digest=hashlib.sha256(patch_bytes).hexdigest(),
         patch_size_bytes=len(patch_bytes),
     )
-    if payload.execution.arguments_digest != request_arguments_digest(
-        "owp.apply_patch", arguments
+    if payload.execution.arguments_digest != dsh_action_arguments_digest(
+        {
+            "patch_utf8": payload.patch_utf8,
+            "target_paths": list(payload.target_paths),
+        }
     ):
         raise DshExecutionDenied("ACTION_ARGUMENTS_MISMATCH")
     try:
@@ -297,8 +303,8 @@ def execute_dsh_tests(
         container_image_digest=profile.container_image_digest,
         fixed_test_source_digest=profile.fixed_test_source_digest,
     )
-    if payload.execution.arguments_digest != request_arguments_digest(
-        "owp.run_tests", arguments
+    if payload.execution.arguments_digest != dsh_action_arguments_digest(
+        {"test_profile_digest": payload.test_profile_digest}
     ):
         raise DshExecutionDenied("ACTION_ARGUMENTS_MISMATCH")
     if not case.decision_tokens.consume(
