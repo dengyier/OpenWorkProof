@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from pydantic import Field, RootModel, model_validator
 
 from openworkproof.models import (
+    CanonicalRoot,
     CanonicalUTCTime,
     Digest64,
     Identifier,
@@ -213,17 +214,29 @@ class DshActionExecutePayloadV01(ProtocolModel):
     execution: DshExecutionIdentityV01
     decision_token: Digest64
     patch_text: str | None
+    target_paths: tuple[CanonicalRoot, ...] | None
     test_profile_digest: Digest64 | None
 
     @model_validator(mode="after")
     def _validate_action(self) -> DshActionExecutePayloadV01:
         if self.execution.tool_name == "owp_apply_patch":
-            if self.patch_text is None or self.test_profile_digest is not None:
+            if (
+                self.patch_text is None
+                or self.target_paths is None
+                or not self.target_paths
+                or self.test_profile_digest is not None
+            ):
                 raise ValueError("owp_apply_patch requires only patch_text")
+            if list(self.target_paths) != sorted(set(self.target_paths)):
+                raise ValueError("target_paths must be sorted and unique")
             if len(self.patch_text.encode("utf-8")) > 65_536:
                 raise ValueError("patch_text exceeds 65536 UTF-8 bytes")
         elif self.execution.tool_name == "owp_run_tests":
-            if self.patch_text is not None or self.test_profile_digest is None:
+            if (
+                self.patch_text is not None
+                or self.target_paths is not None
+                or self.test_profile_digest is None
+            ):
                 raise ValueError("owp_run_tests requires only test_profile_digest")
         else:
             raise ValueError("action_execute accepts only OWP-owned tools")
@@ -321,6 +334,21 @@ class DshResultPayloadV01(ProtocolModel):
     status: Literal["ready", "ok", "denied", "unknown", "error"]
     result_digest: Digest64 | None
     reason_code: Identifier | None
+    error_kind: Literal["protocol_denial", "operational_failure"] | None = None
+    decision_token: Digest64 | None = None
+    expires_at: CanonicalUTCTime | None = None
+
+    @model_validator(mode="after")
+    def _validate_result(self) -> DshResultPayloadV01:
+        if (self.decision_token is None) != (self.expires_at is None):
+            raise ValueError("decision token and expiry must be paired")
+        if self.decision_token is not None and self.status != "ok":
+            raise ValueError("decision token requires ok status")
+        if self.status in {"denied", "unknown", "error"} and self.reason_code is None:
+            raise ValueError("non-success status requires a reason code")
+        if self.status in {"ready", "ok"} and self.error_kind is not None:
+            raise ValueError("success status cannot contain an error kind")
+        return self
 
 
 class DshReadyResponseV01(_BridgeMessageV01):

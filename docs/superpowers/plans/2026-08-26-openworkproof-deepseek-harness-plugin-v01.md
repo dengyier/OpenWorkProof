@@ -624,7 +624,7 @@ git commit -m "feat: independently verify Harness code changes"
 - Create: `tests/test_dsh_bridge_v01.py`
 - Modify: `src/openworkproof/cli.py`
 
-- [ ] **Step 1: Write RED framing and recovery tests**
+- [x] **Step 1: Write RED framing and recovery tests**
 
 ```python
 def test_bridge_stdout_contains_jsonl_only(tmp_path: Path) -> None:
@@ -649,7 +649,7 @@ def test_protocol_denial_is_not_operational_failure(bridge_case) -> None:
     assert response.error_code == "OWP_AUTHORIZATION_DENIED"
 ```
 
-- [ ] **Step 2: Implement deterministic dispatch**
+- [x] **Step 2: Implement deterministic dispatch**
 
 `run_stdio_bridge(stdin, stdout, stderr, clock)` reads one bounded UTF-8 JSON
 object per line, validates the discriminated request, dispatches exactly one
@@ -659,7 +659,7 @@ wrong session, unsupported version, and messages after shutdown.
 
 Diagnostics use `stderr`; imported modules may not print to stdout.
 
-- [ ] **Step 3: Add CLI commands**
+- [x] **Step 3: Add CLI commands**
 
 Add parsers and dispatch for:
 
@@ -675,14 +675,14 @@ owp dsh-case export CASE_DIR --output-directory DIR
 `prepare_acceptance_decision_binding()` and writes canonical bytes without a
 private key or signature. No CLI command accepts an Acceptor private key.
 
-- [ ] **Step 4: Run CLI, bridge, ACK-loss, and package tests**
+- [x] **Step 4: Run CLI, bridge, ACK-loss, and package tests**
 
 ```bash
 ./.venv/bin/python -m pytest -q \
   tests/test_dsh_bridge_v01.py \
-  tests/test_cli.py \
+  tests/test_cli_transport.py \
   tests/test_package.py \
-  tests/test_acceptance_bundle.py
+  tests/test_acceptance_bundle_v01.py
 ./.venv/bin/python -m pip check
 ./.venv/bin/python -m compileall -q src tests
 git diff --check
@@ -690,7 +690,7 @@ git diff --check
 
 Expected: all PASS and stdout framing remains clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/openworkproof/dsh_bridge.py src/openworkproof/cli.py \

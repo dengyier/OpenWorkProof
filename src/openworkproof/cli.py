@@ -29,6 +29,7 @@ exact JSON shape.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
@@ -438,6 +439,93 @@ def cli_delivery_case_export(
     )
 
 
+def cli_dsh_case_inspect(case_directory: str | Path) -> dict[str, object]:
+    from openworkproof.dsh_case import load_dsh_case
+
+    manifest = load_dsh_case(Path(case_directory))
+    return {
+        **manifest.model_dump(mode="json"),
+        "boundary": (
+            "case inspection is not execution, independent verification, "
+            "human acceptance, payment, or customer adoption"
+        ),
+    }
+
+
+def cli_dsh_case_verify(case_directory: str | Path) -> dict[str, object]:
+    from openworkproof.dsh_case import load_dsh_case
+
+    manifest = load_dsh_case(Path(case_directory))
+    connection = evidence.connect_ledger(Path(manifest.ledger_path))
+    try:
+        work_order, receipts, _, _ = (
+            evidence._replay_receipt_publication_ledger(connection)
+        )
+    finally:
+        connection.close()
+    if work_order.digest != manifest.work_order_digest:
+        raise CliError("DSH case WorkOrder binding is invalid")
+    return {
+        "schema_version": "openworkproof-dsh-case-verification/0.1",
+        "case_id": manifest.case_id,
+        "status": "VERIFIED",
+        "receipt_count": len(receipts),
+        "boundary": "case integrity verified; execution and acceptance are separate",
+    }
+
+
+def cli_dsh_acceptance_draft(
+    case_directory: str | Path,
+    output: str | Path,
+) -> dict[str, object]:
+    import os
+
+    from openworkproof.acceptance import prepare_acceptance_decision_binding
+    from openworkproof.dsh_case import load_dsh_case
+
+    manifest = load_dsh_case(Path(case_directory))
+    destination = Path(output)
+    if destination.exists() or destination.is_symlink():
+        raise CliError("acceptance draft output already exists")
+    draft = prepare_acceptance_decision_binding(
+        Path(manifest.ledger_path),
+        clock=lambda: datetime.now(timezone.utc).replace(microsecond=0),
+    )
+    descriptor = os.open(
+        destination,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    try:
+        os.write(descriptor, draft.canonical_payload)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return {
+        "schema_version": "openworkproof-dsh-acceptance-draft-result/0.1",
+        "case_id": manifest.case_id,
+        "binding_id": draft.binding_id,
+        "output": str(destination),
+        "signed": False,
+        "boundary": "draft only; no Acceptor private key or acceptance claim",
+    }
+
+
+def cli_dsh_case_export(
+    case_directory: str | Path,
+    output_directory: str | Path,
+) -> dict[str, object]:
+    from openworkproof.dsh_case import load_dsh_case
+
+    manifest = load_dsh_case(Path(case_directory))
+    result = cli_delivery_build(
+        manifest.ledger_path,
+        output_directory,
+        "public",
+    )
+    return {"case_id": manifest.case_id, **result}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="owp")
     parser.add_argument(
@@ -660,6 +748,27 @@ def build_parser() -> argparse.ArgumentParser:
     export = delivery_case_sub.add_parser("export")
     export.add_argument("case_directory")
     export.add_argument("--output-directory", required=True)
+
+    dsh_bridge = sub.add_parser(
+        "dsh-bridge", help="run the DeepSeek Harness JSONL bridge"
+    )
+    dsh_bridge.add_argument("--stdio", action="store_true", required=True)
+
+    dsh_case = sub.add_parser(
+        "dsh-case", help="inspect or export one frozen DSH case"
+    )
+    dsh_case_sub = dsh_case.add_subparsers(
+        dest="dsh_case_action", required=True
+    )
+    for action in ("inspect", "verify"):
+        command = dsh_case_sub.add_parser(action)
+        command.add_argument("case_directory")
+    acceptance_draft = dsh_case_sub.add_parser("acceptance-draft")
+    acceptance_draft.add_argument("case_directory")
+    acceptance_draft.add_argument("--output", required=True)
+    dsh_export = dsh_case_sub.add_parser("export")
+    dsh_export.add_argument("case_directory")
+    dsh_export.add_argument("--output-directory", required=True)
     return parser
 
 
@@ -668,6 +777,15 @@ def app(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "dsh-bridge":
+            from openworkproof.dsh_bridge import run_stdio_bridge
+
+            return run_stdio_bridge(
+                sys.stdin,
+                sys.stdout,
+                sys.stderr,
+                clock=lambda: datetime.now(timezone.utc).replace(microsecond=0),
+            )
         if args.command == "status":
             result: dict[str, object] = cli_status(args.ledger)
         elif args.command == "run-tests":
@@ -770,6 +888,19 @@ def app(argv: Sequence[str] | None = None) -> int:
                 result = cli_delivery_case_verify(args.case_directory)
             else:
                 result = cli_delivery_case_export(
+                    args.case_directory, args.output_directory
+                )
+        elif args.command == "dsh-case":
+            if args.dsh_case_action == "inspect":
+                result = cli_dsh_case_inspect(args.case_directory)
+            elif args.dsh_case_action == "verify":
+                result = cli_dsh_case_verify(args.case_directory)
+            elif args.dsh_case_action == "acceptance-draft":
+                result = cli_dsh_acceptance_draft(
+                    args.case_directory, args.output
+                )
+            else:
+                result = cli_dsh_case_export(
                     args.case_directory, args.output_directory
                 )
         else:
