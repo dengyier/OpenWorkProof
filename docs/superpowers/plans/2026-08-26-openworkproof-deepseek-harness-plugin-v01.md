@@ -126,7 +126,7 @@ Every task follows RED → minimal GREEN → adjacent regression → `pip check`
 - Create: `tsconfig.json`
 - Create: `vitest.config.ts`
 
-- [ ] **Step 1: Create the local repository and exact dependency baseline**
+- [x] **Step 1: Create the local repository and exact dependency baseline**
 
 ```bash
 mkdir /Users/molin/Project/openworkproof-dsh-plugin
@@ -145,7 +145,7 @@ Expected: a local repository exists; no remote exists; the lockfile resolves
 the exact release-candidate versions or the task stops with a recorded package
 availability conflict.
 
-- [ ] **Step 2: Write the RED compatibility test**
+- [x] **Step 2: Write the RED compatibility test**
 
 ```ts
 import { describe, expect, it } from 'vitest'
@@ -169,7 +169,7 @@ Run: `pnpm vitest run test/compatibility.test.ts`
 
 Expected: FAIL because `src/index.ts` does not export the probe.
 
-- [ ] **Step 3: Add the minimal bundle manifest and probe**
+- [x] **Step 3: Add the minimal bundle manifest and probe**
 
 `package.json` must contain:
 
@@ -204,7 +204,7 @@ Expected: FAIL because `src/index.ts` does not export the probe.
 `src/index.ts` initially exports the exact probe and an empty `apply()` so that
 the profile can load without changing behavior.
 
-- [ ] **Step 4: Verify bundle composition against exact DSH**
+- [x] **Step 4: Verify bundle composition against exact DSH**
 
 ```bash
 pnpm test
@@ -219,7 +219,7 @@ Expected: test and typecheck PASS; dump contains an
 `@openworkproof/dsh-plugin` layer. If guard, event, or command APIs do not match
 the exact package, stop Enforce development and record the incompatibility.
 
-- [ ] **Step 5: Commit the compatibility spike**
+- [x] **Step 5: Commit the compatibility spike**
 
 ```bash
 git add package.json pnpm-lock.yaml tsconfig.json vitest.config.ts \
