@@ -780,7 +780,7 @@ git commit -m "feat: connect plugin to OWP bridge"
 - Modify: `src/index.ts`
 - Create: `profiles/owp-verified.patch.yml`
 
-- [ ] **Step 1: Write guard and bypass RED tests**
+- [x] **Step 1: Write guard and bypass RED tests**
 
 ```ts
 it.each(['write', 'edit', 'bash'])('denies native mutator %s in enforce', async name => {
@@ -801,7 +801,7 @@ it('cannot be bypassed by an earlier pre-execute allow', async () => {
 })
 ```
 
-- [ ] **Step 2: Implement async authorization plus symbol-token guard**
+- [x] **Step 2: Implement async authorization plus symbol-token guard**
 
 ```ts
 const NATIVE_MUTATORS = new Set(['write', 'edit', 'bash'])
@@ -828,7 +828,7 @@ ctx.tools.guard(exec => {
 The bridge still validates and consumes its own wire decision token inside the
 tool body; the symbol set only prevents Harness-pipeline bypass.
 
-- [ ] **Step 3: Register two closed tools**
+- [x] **Step 3: Register two closed tools**
 
 `owp_apply_patch` accepts only `patch_utf8` and sorted `target_paths`.
 `owp_run_tests` accepts only `test_profile_digest`. Their bodies call
@@ -838,7 +838,7 @@ tool body; the symbol set only prevents Harness-pipeline bypass.
 `profiles/owp-verified.patch.yml` restates the complete plugin config with
 `mode: enforce`; it never modifies DSH core rows to weaken native sandboxing.
 
-- [ ] **Step 4: Run plugin policy and tool tests**
+- [x] **Step 4: Run plugin policy and tool tests**
 
 ```bash
 pnpm test -- test/policy.test.ts test/tools.test.ts
@@ -848,7 +848,7 @@ pnpm build
 
 Expected: PASS, including earlier-listener bypass and replay cases.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/policy.ts src/tools.ts src/index.ts profiles/owp-verified.patch.yml \
