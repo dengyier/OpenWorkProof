@@ -14,15 +14,21 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import model_validator
 
 import openworkproof.repo_tools as repo_tools
+import openworkproof.evidence as evidence
 from openworkproof.dsh_case import DecisionTokenStore
 from openworkproof.dsh_protocol import DshExecutionIdentityV01
-from openworkproof.mcp_server import ToolCallDenied, execute_apply_patch
+from openworkproof.binding import canonical_test_profile_digest
+from openworkproof.mcp_server import (
+    ToolCallDenied,
+    execute_apply_patch,
+)
 from openworkproof.models import (
     AgentRequest,
     ApplyPatchArguments,
     CanonicalRoot,
     Digest64,
     ProtocolModel,
+    RunTestsArguments,
     ToolCallReceipt,
     request_arguments_digest,
 )
@@ -54,6 +60,14 @@ class DshApplyPatchInputV01(ProtocolModel):
         return self
 
 
+class DshRunTestsInputV01(ProtocolModel):
+    schema_version: Literal["openworkproof-dsh-run-tests/0.1"]
+    case_id: Digest64
+    execution: DshExecutionIdentityV01
+    decision_token: Digest64
+    test_profile_digest: Digest64
+
+
 @dataclass(frozen=True, slots=True)
 class DshExecutionCaseV01:
     """Trusted runtime objects assembled after a frozen case is opened."""
@@ -62,13 +76,23 @@ class DshExecutionCaseV01:
     ledger_path: Path
     evidence_root: Path
     context: AuthorizationContext
-    candidate_workspace: repo_tools.CandidateWorkspace
+    candidate_workspace: repo_tools.CandidateWorkspace | None
     sidecar_private_key: Ed25519PrivateKey
     developer_private_key: Ed25519PrivateKey
     decision_tokens: DecisionTokenStore
     patch_handler: Callable[
         [repo_tools.PatchRequest], repo_tools.PatchResult
     ] = repo_tools.apply_patch_in_candidate_workspace
+    test_profile_digest: str | None = None
+    run_tests_executor: Callable[
+        [
+            RunTestsArguments,
+            ProspectiveExecutionFacts,
+            DshExecutionIdentityV01,
+            datetime,
+        ],
+        ToolCallReceipt,
+    ] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,13 +114,13 @@ def _trusted_now(clock: Callable[[], datetime]) -> datetime:
     return now.astimezone(timezone.utc)
 
 
-def _developer_grant(case: DshExecutionCaseV01):
+def _developer_grant(case: DshExecutionCaseV01, tool_name: str):
     developer_key_id = key_id(case.developer_private_key.public_key())
     grants = tuple(
         grant
         for grant in case.context.ledger_prefix.effective_grants
         if grant.subject_key_id == developer_key_id
-        and "owp.apply_patch" in grant.allowed_tools
+        and tool_name in grant.allowed_tools
     )
     if len(grants) != 1:
         raise DshExecutionDenied("OWP_AUTHORIZATION_DENIED")
@@ -109,7 +133,7 @@ def _agent_request(
     arguments: ApplyPatchArguments,
     now: datetime,
 ) -> AgentRequest:
-    grant = _developer_grant(case)
+    grant = _developer_grant(case, "owp.apply_patch")
     execution_bytes = payload.execution.model_dump(mode="json")
     prompt_digest = _digest_payload(
         "openworkproof/dsh-prompt-profile/v0.1",
@@ -211,6 +235,8 @@ def execute_dsh_patch(
         raise DshExecutionDenied("DECISION_TOKEN_INVALID")
 
     now = _trusted_now(clock)
+    if case.candidate_workspace is None:
+        raise RuntimeError("PATCH_WORKSPACE_UNAVAILABLE")
     request = _agent_request(case, payload, arguments, now)
     try:
         receipt = execute_apply_patch(
@@ -234,10 +260,103 @@ def execute_dsh_patch(
     )
 
 
+def execute_dsh_tests(
+    case: DshExecutionCaseV01,
+    payload: DshRunTestsInputV01,
+    *,
+    clock: Callable[[], datetime],
+) -> ToolCallReceipt:
+    """Delegate the frozen Verifier profile to an out-of-process executor."""
+
+    if payload.case_id != case.case_id:
+        raise DshExecutionDenied("CASE_ID_MISMATCH")
+    if payload.execution.tool_name != "owp_run_tests":
+        raise DshExecutionDenied("ACTION_TYPE_MISMATCH")
+    if (
+        case.test_profile_digest is None
+        or payload.test_profile_digest != case.test_profile_digest
+    ):
+        raise DshExecutionDenied("TEST_PROFILE_MISMATCH")
+    profiles = tuple(
+        profile
+        for profile in case.context.work_order.test_profiles
+        if profile.test_mode == "verifier"
+        and canonical_test_profile_digest(profile)
+        == payload.test_profile_digest
+    )
+    if len(profiles) != 1:
+        raise DshExecutionDenied("TEST_PROFILE_MISMATCH")
+    profile = profiles[0]
+    checkpoint = case.context.replay_checkpoint
+    arguments = RunTestsArguments(
+        test_mode="verifier",
+        command_digest=profile.command_digest,
+        source_commit=case.context.work_order.source_commit,
+        candidate_commit=checkpoint.head_commit,
+        workspace_manifest_digest=checkpoint.workspace_manifest_digest,
+        container_image_digest=profile.container_image_digest,
+        fixed_test_source_digest=profile.fixed_test_source_digest,
+    )
+    if payload.execution.arguments_digest != request_arguments_digest(
+        "owp.run_tests", arguments
+    ):
+        raise DshExecutionDenied("ACTION_ARGUMENTS_MISMATCH")
+    if not case.decision_tokens.consume(
+        payload.decision_token, payload.execution
+    ):
+        raise DshExecutionDenied("DECISION_TOKEN_INVALID")
+    if case.run_tests_executor is None:
+        raise RuntimeError("TEST_EXECUTOR_UNAVAILABLE")
+    now = _trusted_now(clock)
+    facts = _execution_facts(case, payload.execution)
+    try:
+        receipt = case.run_tests_executor(
+            arguments,
+            facts,
+            payload.execution,
+            now,
+        )
+    except ToolCallDenied as error:
+        raise DshExecutionDenied("OWP_AUTHORIZATION_DENIED") from error
+    if (
+        not isinstance(receipt, ToolCallReceipt)
+        or receipt.tool_name != "owp.run_tests"
+        or receipt.work_order_digest != case.context.work_order.digest
+        or receipt.request_arguments != arguments
+        or receipt.arguments_digest
+        != request_arguments_digest("owp.run_tests", arguments)
+        or receipt.correlation_factors is None
+        or receipt.correlation_factors.execution_context_id
+        != facts.execution_context_id
+        or receipt.correlation_factors.container_instance_id_digest
+        != facts.container_instance_id_digest
+        or receipt.correlation_factors.controller_id != facts.controller_id
+    ):
+        raise RuntimeError("VERIFIER_RECEIPT_BINDING_INVALID")
+    try:
+        connection = evidence.connect_ledger(case.ledger_path)
+        try:
+            _, receipts, _, _ = evidence._replay_receipt_publication_ledger(
+                connection
+            )
+        finally:
+            connection.close()
+    except Exception as error:
+        raise RuntimeError("VERIFIER_RECEIPT_READBACK_UNAVAILABLE") from error
+    committed = tuple(
+        item for item in receipts if item.digest == receipt.digest
+    )
+    if len(committed) != 1 or committed[0] != receipt:
+        raise RuntimeError("VERIFIER_RECEIPT_NOT_COMMITTED")
+    return receipt
+
+
 __all__ = [
     "DshApplyPatchInputV01",
     "DshExecutionCaseV01",
     "DshExecutionDenied",
     "DshPatchExecutionResult",
+    "DshRunTestsInputV01",
     "execute_dsh_patch",
+    "execute_dsh_tests",
 ]

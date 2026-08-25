@@ -529,7 +529,7 @@ git commit -m "feat: execute Harness patches through OWP"
 
 ---
 
-### Task 5: Add frozen test execution and independent Git verification
+### Task 5: Add external frozen test execution and independent Git verification
 
 **Files:**
 - Modify: `src/openworkproof/dsh_execution.py`
@@ -537,7 +537,7 @@ git commit -m "feat: execute Harness patches through OWP"
 - Modify: `tests/test_dsh_execution_v01.py`
 - Create: `tests/test_dsh_verifier_v01.py`
 
-- [ ] **Step 1: Write test and verifier RED cases**
+- [x] **Step 1: Write test and verifier RED cases**
 
 ```python
 def test_agent_cannot_supply_an_arbitrary_command(case) -> None:
@@ -559,15 +559,18 @@ def test_valid_signature_wrong_criterion_is_refuted(case) -> None:
     assert "CRITERION_BINDING_MISMATCH" in result.reason_codes
 ```
 
-- [ ] **Step 2: Implement `execute_dsh_tests()`**
+- [x] **Step 2: Implement `execute_dsh_tests()`**
 
 The tool input contains only `case_id`, execution identity, decision token, and
 the frozen `test_profile_digest`. The bridge loads the command and fixed test
-source from Manager-signed case inputs and invokes existing `execute_run_tests()`.
-The Agent never supplies argv, image digest, workspace manifest, or verifier
-source bytes.
+source from Manager-signed case inputs and delegates to a separate Verifier
+worker. That worker owns the distinct Verifier credential and invokes existing
+`execute_run_tests()`; the bridge validates the exact returned receipt and
+committed correlation factors. The Harness and bridge never receive the
+Verifier private key. The Agent never supplies argv, image digest, workspace
+manifest, or verifier source bytes.
 
-- [ ] **Step 3: Implement independent verifier output**
+- [x] **Step 3: Implement independent verifier output**
 
 ```python
 class DshVerificationResultV01(ProtocolModel):
@@ -589,20 +592,22 @@ and denied roots, hashes declared files, reruns the frozen verifier profile,
 replays authorization/receipt causality, and emits `UNKNOWN` when repository
 identity or durable evidence cannot be read atomically.
 
-- [ ] **Step 4: Run verification and test-driver regressions**
+- [x] **Step 4: Run verification and test-driver regressions**
 
 ```bash
 ./.venv/bin/python -m pytest -q \
   tests/test_dsh_execution_v01.py \
   tests/test_dsh_verifier_v01.py \
-  tests/test_run_tests.py \
-  tests/test_verification.py
+  tests/test_run_tests_runner.py \
+  tests/test_verification_report_v01.py \
+  tests/test_verification_transactions_v02.py \
+  tests/test_verification_transactions_v03.py
 git diff --check
 ```
 
 Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/openworkproof/dsh_execution.py src/openworkproof/dsh_verifier.py \

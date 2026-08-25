@@ -215,11 +215,16 @@ DeepSeek Harness profile
 
 External human tools
   +-- Manager signs WorkOrder and CapabilityGrant
-  +-- Verifier reruns frozen checks
+  +-- Verifier worker reruns frozen checks and commits its own receipt
   `-- Acceptor signs accept or reject outside Harness
 ```
 
-The TypeScript bundle owns host integration. The Python bridge owns protocol truth. External human keys do not cross into the Harness process.
+The TypeScript bundle owns host integration. The Python bridge owns protocol
+truth. External human keys do not cross into the Harness process. In
+particular, the bridge does not hold a Verifier private key: `owp_run_tests`
+delegates to a separate Verifier worker, then validates and reads back the
+worker's already committed OWP receipt. It never downgrades the existing
+Verifier-only `execute_run_tests()` boundary to Developer authority.
 
 ### 9.1 Internal adapter boundary
 
@@ -314,7 +319,8 @@ Missing authorization never upgrades an ObservationRecord into an ActionReceipt 
 
 ### 13.1 Verification
 
-The Verifier receives no claim from the Agent as authoritative. It independently:
+The Verifier runs outside the Harness and bridge credential boundary. It
+receives no claim from the Agent as authoritative. It independently:
 
 1. reads the final Git revision and working-tree state;
 2. checks changed paths against the frozen scope;
