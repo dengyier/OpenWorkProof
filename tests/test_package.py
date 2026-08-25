@@ -16,7 +16,7 @@ def test_package_version_is_protocol_version() -> None:
 
 
 def test_release_metadata_is_synchronized() -> None:
-    expected_version = "1.3.0"
+    expected_version = "1.4.0"
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
     server = json.loads((ROOT / "server.json").read_text())
     legacy_mcp = json.loads((ROOT / "mcp.json").read_text())

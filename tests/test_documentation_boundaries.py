@@ -517,7 +517,7 @@ def test_readmes_keep_current_release_and_test_boundaries_aligned() -> None:
 
     for text in (chinese, english):
         for literal in (
-            "1.3.0",
+            "1.4.0",
             "4265 passed",
             "0 failed",
             "0 skipped",

@@ -7,7 +7,7 @@
 
 隔离分支与独立插件仓库已完成本地开发者预览：
 
-- 锁定 `DeepSeek Harness 0.1.1-rc.2`、插件 `0.1.0`、OpenWorkProof `1.3.0`；
+- 锁定 `DeepSeek Harness 0.1.1-rc.2`、插件 `0.1.0`、OpenWorkProof `1.4.0`；
 - 打包后的插件已安装进全新临时 DSH profile，并由 `--dump-config` 确认 bundle 生效；
 - Enforce 的单调最终 guard 阻断原生 `write`、`edit`、`bash`，OWP patch/test 工具只发送
   闭合参数；

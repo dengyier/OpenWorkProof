@@ -25,7 +25,7 @@ verification separate from acceptance, and preserves the human ability to accept
 [Protocol](docs/protocol/human-agency-profile-v0.1.md) · [中文](README.md)
 
 ```text
-Local candidate: 1.3.0, not released
+Local candidate: 1.4.0, not released
 required-live: 4265 passed / 0 failed / 0 skipped
 candidate: 183 passed / 0 failed / 0 skipped
 License: Apache-2.0
@@ -239,7 +239,7 @@ owp --help
 
 ### 2. Run the local candidate
 
-The repository's `1.3.0` version is a local candidate and is not released. Install it from
+The repository's `1.4.0` version is a local candidate and is not released. Install it from
 source for development:
 
 ```bash

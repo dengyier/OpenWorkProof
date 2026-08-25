@@ -178,7 +178,7 @@ class DshBridgeApplication:
                     else expires_at.strftime("%Y-%m-%dT%H:%M:%SZ")
                 ),
                 "bridge_version": "0.1.0" if include_versions else None,
-                "openworkproof_version": "1.3.0" if include_versions else None,
+                "openworkproof_version": "1.4.0" if include_versions else None,
                 "host_version": "0.1.1-rc.2" if include_versions else None,
             }
         )

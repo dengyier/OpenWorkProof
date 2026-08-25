@@ -374,7 +374,7 @@ class DshResultPayloadV01(ProtocolModel):
     decision_token: Digest64 | None = None
     expires_at: CanonicalUTCTime | None = None
     bridge_version: Literal["0.1.0"] | None = None
-    openworkproof_version: Literal["1.3.0"] | None = None
+    openworkproof_version: Literal["1.4.0"] | None = None
     host_version: Literal["0.1.1-rc.2"] | None = None
 
     @model_validator(mode="after")

@@ -24,7 +24,7 @@ OpenWorkProof 不保证 Agent 的结果一定正确，也不替客户作出验�
 [English](README_en.md)
 
 ```text
-本地候选版本: 1.3.0, 尚未发布
+本地候选版本: 1.4.0, 尚未发布
 required-live: 4265 passed / 0 failed / 0 skipped
 candidate: 183 passed / 0 failed / 0 skipped
 许可证: Apache-2.0
@@ -221,7 +221,7 @@ owp --help
 
 ### 2. 运行本地候选
 
-本仓库 `main` 中的 `1.3.0` 是尚未发布的本地候选。开发者可以从源码安装：
+本仓库中的 `1.4.0` 是尚未发布的本地候选。开发者可以从源码安装：
 
 ```bash
 git clone https://github.com/dengyier/OpenWorkProof.git

@@ -2,7 +2,7 @@
 
 > 为 DeepSeek Harness 的代码变更增加事前授权、执行证据、独立复核与人工验收。
 
-本文对应本地候选 `OpenWorkProof 1.3.0`、插件 `0.1.0` 与
+本文对应本地候选 `OpenWorkProof 1.4.0`、插件 `0.1.0` 与
 `DeepSeek Harness 0.1.1-rc.2`。三者目前组成开发者预览，不是已发布的兼容承诺。
 
 ## 一句话边界
@@ -42,7 +42,7 @@ WorkOrder / CapabilityGrant
 | 组件 | 本地候选 | 当前证据 |
 |---|---:|---|
 | DeepSeek Harness | `0.1.1-rc.2` | 精确版本 profile 安装、配置组合与 guard 预检 |
-| OpenWorkProof Core | `1.3.0` | 本地源码候选，真实协议夹具闭环 |
+| OpenWorkProof Core | `1.4.0` | 本地源码候选，真实协议夹具闭环 |
 | DSH plugin | `0.1.0` | 本地 tarball，尚未发布 npm |
 | Node.js | `v23.11.0` | 本地预检环境，不是最低兼容范围 |
 | Python | `3.12.13` | 本地预检环境；Core 仍以项目元数据为准 |
