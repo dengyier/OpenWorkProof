@@ -13,12 +13,19 @@
   闭合参数；
 - 一次性 Git 夹具完成授权 patch、冻结测试、独立 Git 回读、外部 Acceptor 签名、
   Acceptance 绑定、交付导出、离线复核与篡改拒绝；
-- DSH/patch/rollback 聚焦回归 `388 passed / 4 environment-gated skipped`；插件
-  `30 passed`，typecheck/build/live-preflight 均通过。
+- DSH/patch/rollback 聚焦回归 `388 passed / 4 environment-gated skipped`；发布候选聚焦门
+  `38 passed`；插件 `30 passed`，typecheck/build/live-preflight 均通过；
+- 全新环境已安装 `openworkproof-1.4.0-py3-none-any.whl` 并启动
+  `owp dsh-bridge --help`；最终插件包 SHA-256 为
+  `8c48b3cba4333b024b284dca0704e82ae6f9471edc1cb278d95990d02c7ff49b`；
+- 排除两个供应链测试文件后的整仓回归为 `4119 passed / 7 environment-gated skipped`；
+- 当前 Docker daemon 不可连接。本轮源码 revision 已生成专属 build context，但没有生成
+  新 candidate inventory；标准全量因此会在当前 inventory 绑定测试上预期失败，
+  required-live 尚未执行。本候选不得标记 READY 或发布。
 
 当前仍是本地候选：未创建插件远端、未发布 npm、未合并或推送 core、未在第二台环境
 外部复现。通用案例初始化器和独立 Verifier 服务编排仍需由集成方准备；本地夹具不能写成
-任意仓库零配置交付。
+任意仓库零配置交付。两轮内部自审不能替代计划要求的两份独立只读审查。
 
 ```yaml
 customer_adoption: not_evidenced

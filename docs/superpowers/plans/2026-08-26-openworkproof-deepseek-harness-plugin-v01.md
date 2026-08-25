@@ -993,7 +993,7 @@ git commit -m "feat: add bilingual OWP Harness commands"
 - Create: `scripts/create_dsh_fixture.py`
 - Create in plugin repo: `scripts/live-preflight.mjs`
 
-- [ ] **Step 1: Write the Python end-to-end RED test**
+- [x] **Step 1: Write the Python end-to-end RED test**
 
 The test must perform this exact sequence:
 
@@ -1017,14 +1017,14 @@ def test_verified_code_change_closed_loop(tmp_path: Path) -> None:
         verify_exported_delivery_case(export)
 ```
 
-- [ ] **Step 2: Create the deterministic fixture builder**
+- [x] **Step 2: Create the deterministic fixture builder**
 
 The fixture creates a small Git repository, signed WorkOrder/Grant/binding,
 separate Developer/Sidecar/Verifier keys, Manager and Acceptor keys outside the
 case directory, a fixed test profile, candidate workspace, ledger and evidence
 root. All timestamps are injected and all expected digests are deterministic.
 
-- [ ] **Step 3: Add a real DSH live preflight**
+- [x] **Step 3: Add a real DSH live preflight**
 
 `scripts/live-preflight.mjs` installs the packed plugin into a temporary
 profile, starts exact DSH with the fixture workspace, confirms the bundle in
@@ -1032,7 +1032,7 @@ profile, starts exact DSH with the fixture workspace, confirms the bundle in
 checks that native `write` is denied. It records exact DSH, plugin, OWP, Node,
 Python and artifact versions.
 
-- [ ] **Step 4: Run focused end-to-end gates**
+- [x] **Step 4: Run focused end-to-end gates**
 
 Core:
 
@@ -1053,7 +1053,7 @@ Expected: deny, authorized patch, frozen tests, verification, external
 acceptance, export, clean replay, and tamper failure all pass for the exact
 artifacts.
 
-- [ ] **Step 5: Commit both repositories**
+- [x] **Step 5: Commit both repositories**
 
 Core:
 
@@ -1080,7 +1080,7 @@ git commit -m "test: add live DeepSeek Harness preflight"
 - Plugin create: `README.md`, `README_zh.md`, `SECURITY.md`
 - Core modify: `tests/test_documentation_boundaries.py`
 
-- [ ] **Step 1: Write documentation RED assertions**
+- [x] **Step 1: Write documentation RED assertions**
 
 Add literal checks for:
 
@@ -1097,7 +1097,7 @@ for literal in (
     assert literal in combined_docs
 ```
 
-- [ ] **Step 2: Write the bilingual user journey**
+- [x] **Step 2: Write the bilingual user journey**
 
 Documentation must contain exact install, Audit/Enforce distinction, five-minute
 fixture, external acceptance, offline verification, uninstall, evidence
@@ -1107,7 +1107,7 @@ limitations, and compatibility table.
 Do not describe local live preflight as adoption, production use, customer
 delivery, or DeepSeek endorsement.
 
-- [ ] **Step 3: Add package security disclosures**
+- [x] **Step 3: Add package security disclosures**
 
 `SECURITY.md` states that the plugin is trusted local code, spawns `owp`, can
 observe declared tool metadata, cannot prove unobserved side effects, and keeps
@@ -1115,7 +1115,7 @@ human authority keys outside its process. It gives a private vulnerability
 contact already authorized for the project or points to GitHub private security
 advisories; it must not invent an inbox.
 
-- [ ] **Step 4: Verify documentation and package rendering**
+- [x] **Step 4: Verify documentation and package rendering**
 
 ```bash
 ./.venv/bin/python -m pytest -q tests/test_documentation_boundaries.py
@@ -1133,7 +1133,7 @@ Expected: docs tests PASS; tarball contains built JS, patch files, bilingual
 README, license and security policy, but no source maps with local paths,
 fixtures, secrets, or private keys.
 
-- [ ] **Step 5: Commit both documentation changes**
+- [x] **Step 5: Commit both documentation changes**
 
 Core:
 
@@ -1161,7 +1161,7 @@ git commit -m "docs: publish Harness plugin boundaries"
 - Plugin create: `dist/openworkproof-dsh-plugin-0.1.0.tgz` outside Git or in release staging only
 - Plugin create: `dist/SHA256SUMS` outside Git or in release staging only
 
-- [ ] **Step 1: Run focused protocol and plugin gates**
+- [x] **Step 1: Run focused protocol and plugin gates**
 
 ```bash
 ./.venv/bin/python -m pytest -q \
@@ -1197,7 +1197,12 @@ inventory, follow the repository's existing inventory-generation procedure;
 never overwrite a historical candidate and never weaken the allowlist to make
 tests green.
 
-- [ ] **Step 3: Build and verify exact distributable artifacts**
+2026-08-26 boundary: the non-supply-chain regression completed with
+`4119 passed / 7 environment-gated skipped`, but Docker daemon recovery failed.
+The current-revision candidate inventory and required-live gate therefore remain
+open; Step 2 is intentionally unchecked.
+
+- [x] **Step 3: Build and verify exact distributable artifacts**
 
 Core:
 
@@ -1227,6 +1232,9 @@ checks code/security, key custody, fail-closed behavior, package contents, and
 artifact/revision binding. Every P0/P1 finding must be fixed and both focused
 and regression gates rerun before READY.
 
+2026-08-26 boundary: two internal review passes were recorded in the handoff,
+but they are not independent reviews. Step 4 remains intentionally unchecked.
+
 - [ ] **Step 5: Commit release-candidate metadata only after exact gates pass**
 
 ```bash
@@ -1245,13 +1253,13 @@ Omit files that did not change. Do not tag, push, publish, or announce.
 - Modify: this plan, checking only steps supported by direct evidence
 - Create: `docs/handoffs/2026-08-26-deepseek-harness-plugin-v01.md`
 
-- [ ] **Step 1: Record exact repository states**
+- [x] **Step 1: Record exact repository states**
 
 For both repositories record branch, full HEAD, worktree status, remote state,
 artifact SHA-256, focused/full test counts, DSH/OWP/Node/Python versions, and
 review outcomes.
 
-- [ ] **Step 2: Record evidence levels separately**
+- [x] **Step 2: Record evidence levels separately**
 
 The handoff must distinguish:
 
@@ -1270,13 +1278,13 @@ used
 adopted
 ```
 
-- [ ] **Step 3: State unresolved boundaries**
+- [x] **Step 3: State unresolved boundaries**
 
 Always report current evidence for customer adoption, payment, production use,
 organizational verifier independence, DeepSeek endorsement, npm publication,
 PyPI publication, and public marketplace/directory listing.
 
-- [ ] **Step 4: Offer explicit finishing choices**
+- [x] **Step 4: Offer explicit finishing choices**
 
 Present separately:
 
@@ -1288,7 +1296,7 @@ Present separately:
 
 No choice implies another.
 
-- [ ] **Step 5: Commit the handoff**
+- [x] **Step 5: Commit the handoff**
 
 ```bash
 git add docs/handoffs/2026-08-26-deepseek-harness-plugin-v01.md \
@@ -1298,18 +1306,18 @@ git commit -m "docs: hand off DeepSeek Harness plugin candidate"
 
 ## Final verification checklist
 
-- [ ] Exact DSH version and official APIs rechecked at implementation time.
-- [ ] Native `write`, `edit`, and unrestricted `bash` denied in Enforce.
-- [ ] OWP-owned patch/test tools are the only consequential success path.
-- [ ] Another pre-execution listener cannot bypass the monotonic guard.
-- [ ] Audit never creates an ActionReceipt without prior authorization.
-- [ ] Live results and durable session events correlate exactly.
-- [ ] Independent Git readback and frozen test rerun can return REFUTED/UNKNOWN.
-- [ ] Manager and Acceptor private keys never enter Harness or exports.
-- [ ] Agent has no acceptance-signing surface.
-- [ ] Clean export verifies offline; tampering fails.
-- [ ] Plugin tarball installs into a clean exact-version profile.
-- [ ] Core wheel and plugin tarball belong to the reviewed revisions.
+- [x] Exact DSH version and official APIs rechecked at implementation time.
+- [x] Native `write`, `edit`, and unrestricted `bash` denied in Enforce.
+- [x] OWP-owned patch/test tools are the only consequential success path.
+- [x] Another pre-execution listener cannot bypass the monotonic guard.
+- [x] Audit never creates an ActionReceipt without prior authorization.
+- [x] Live results and durable session events correlate exactly.
+- [x] Independent Git readback and frozen test rerun can return REFUTED/UNKNOWN.
+- [x] Manager and Acceptor private keys never enter Harness or exports.
+- [x] Agent has no acceptance-signing surface.
+- [x] Clean export verifies offline; tampering fails.
+- [x] Plugin tarball installs into a clean exact-version profile.
+- [x] Core wheel and plugin tarball belong to the reviewed revisions.
 - [ ] Focused, adversarial, regression, candidate, and required-live gates pass.
-- [ ] Documentation claims match direct evidence.
+- [x] Documentation claims match direct evidence.
 - [ ] Merge, push, registry publication, community announcement, real use, and adoption remain separately verified states.
