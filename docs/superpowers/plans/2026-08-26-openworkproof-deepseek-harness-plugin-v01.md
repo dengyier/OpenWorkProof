@@ -938,7 +938,7 @@ git commit -m "feat: correlate Harness evidence durably"
 - Create: `test/commands.test.ts`
 - Modify: `src/index.ts`
 
-- [ ] **Step 1: Write RED command tests**
+- [x] **Step 1: Write RED command tests**
 
 ```ts
 it('shows verified as awaiting human acceptance', async () => {
@@ -953,20 +953,20 @@ it('exports an acceptance draft but exposes no signing command', async () => {
 })
 ```
 
-- [ ] **Step 2: Register the three commands**
+- [x] **Step 2: Register the three commands**
 
 Use `ctx.commands.register()` for `owp-status`, `owp-evidence`, and
 `owp-export`. Language follows plugin config `zh-CN` or `en`; stable protocol
 state identifiers remain English. Export calls the bridge and returns only the
 created local path, digest, and verification instruction.
 
-- [ ] **Step 3: Assert the negative authority surface**
+- [x] **Step 3: Assert the negative authority surface**
 
 There is no `owp-accept`, `owp-sign`, private-key input, generic shell command,
 or Agent-callable acceptance tool. Documentation sends the human to the
 external `owp dsh-case acceptance-draft` flow.
 
-- [ ] **Step 4: Run command and full plugin tests**
+- [x] **Step 4: Run command and full plugin tests**
 
 ```bash
 pnpm test
@@ -976,7 +976,7 @@ pnpm build
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/commands.ts src/index.ts test/commands.test.ts
