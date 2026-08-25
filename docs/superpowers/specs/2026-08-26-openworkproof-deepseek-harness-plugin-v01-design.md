@@ -1,27 +1,32 @@
 # OpenWorkProof for DeepSeek Harness V0.1 Design
 
 **Date:** 2026-08-26
-**Status:** Approved design; implementation not started
+**Status:** Approved revised design; implementation not started
 **Product:** OpenWorkProof for DeepSeek Harness / OpenWorkProof｜DeepSeek Harness 可验证执行插件
 
-## 1. Purpose
+## 1. First-principles purpose
 
-DeepSeek Harness can execute useful Agent work, but an Agent saying “done” is not proof that the work was authorized, executed within scope, independently verified, or accepted by the responsible human.
+The product is not a dashboard, a generic host abstraction, or a claim that an Agent is trustworthy.
 
-V0.1 adds an installable DeepSeek Harness bundle that converts one Harness session into evidence-bound OpenWorkProof facts:
+Its V0.1 job is narrower:
+
+> Let another party determine whether one consequential code change was authorized before execution, stayed within scope, produced independently rechecked evidence, and was accepted or rejected by the authorized human.
+
+The first complete loop is:
 
 ```text
-task request
-  -> authorization boundary
-  -> observed tool execution
-  -> signed receipts and evidence
-  -> independent verification
-  -> explicit human acceptance or rejection
+human-signed WorkOrder and CapabilityGrant
+  -> exact DeepSeek Harness tool authorization
+  -> observed tool execution through the Harness pipeline
+  -> durable event and artifact binding
+  -> independent repository readback and test rerun
+  -> external human acceptance or rejection
+  -> offline-verifiable delivery export
 ```
 
-The plugin does not make the Harness more intelligent. It makes consequential work easier to authorize, inspect, verify, and accept.
+The plugin does not prove hidden model reasoning, unobserved processes, or every side effect inside a tool. It proves only the facts inside its declared observation and enforcement boundary. Independent readback is required before a semantic verification claim.
 
-OpenWorkProof remains host-independent. Codex, ChatGPT, Claude Code, and DeepSeek Harness are different execution surfaces around one protocol core. This design freezes the common Host Adapter Protocol while delivering only the DeepSeek Harness adapter in V0.1.
+OpenWorkProof remains host-independent. V0.1 ships only a DeepSeek Harness adapter. Codex, ChatGPT, and Claude Code are future integration targets, not current support claims.
 
 ## 2. Evidence and upstream status
 
@@ -30,7 +35,10 @@ The design relies on these current DeepSeek Harness extension points:
 - the official repository describes DeepSeek Harness as “Everything is a Plugin” and marks it as Developer Preview with compatibility-breaking changes expected;
 - profile bundles are out-of-tree packages declaring `dsh.bundle.patch`;
 - `dsh plugin --profile <name> add <spec>` installs npm, GitHub, tarball, or local bundle dependencies;
-- `tools/pre-execute`, `tools/post-execute`, `tools/result`, and `session/event` expose the authorization, observation, and durable-session seams required by this design;
+- `tools/pre-execute` supports asynchronous allow, deny, and ask decisions;
+- `tools.guard()` is a synchronous monotonic final denial layer after the extensible pre-execution waterfall;
+- `tools/result` exposes the frozen live result;
+- `session/event` exposes append-only durable session events such as `tool/call` and `tool/result`;
 - the official community path is a public plugin repository with the `dsh-plugin` GitHub topic and a post in DeepSeek Harness Discussions.
 
 Primary sources:
@@ -38,6 +46,7 @@ Primary sources:
 - <https://github.com/deepseek-ai/deepseek-harness>
 - <https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/develop/basic/publish.md>
 - <https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/tools.md>
+- <https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/session.md>
 - <https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/develop/framework/events.md>
 - <https://github.com/deepseek-ai/deepseek-harness/blob/master/CONTRIBUTING.md>
 
@@ -46,89 +55,130 @@ Observed on 2026-08-26:
 - the installed local `dsh` is `0.1.0-rc.6`;
 - npm metadata reports `@deepseek-ai/dsh` latest as `0.1.1-rc.2`;
 - no official centralized plugin marketplace is evidenced;
-- several independent community directories and marketplace plugins exist, but listing is not official endorsement or security certification.
+- directory inclusion is discoverability, not endorsement, adoption, or security certification.
 
 Implementation must recheck upstream version, APIs, and distribution rules before release.
 
-## 3. Goals
+## 3. V0.1 user and job
+
+### 3.1 Primary user
+
+A developer or small team using DeepSeek Harness to modify a Git repository and run tests, where another human must be able to review and accept the change.
+
+### 3.2 Current failure
+
+The Agent can report that it changed files and passed tests, but the recipient cannot cheaply establish:
+
+- whether the change was authorized before execution;
+- whether the Agent touched only allowed files and tools;
+- whether the reported result matches the durable Harness record;
+- whether the repository and tests independently confirm the claim;
+- who accepted or rejected delivery.
+
+### 3.3 Smallest observable improvement
+
+For one repository and one WorkOrder, the plugin must block an unauthorized write, permit one authorized change, export a complete evidence bundle, fail verification after tampering, and keep human acceptance separate.
+
+### 3.4 Stop condition
+
+If DeepSeek Harness cannot provide a stable pre-execution denial path, durable tool identity, and result correlation for the supported version, V0.1 stops at an observation-only compatibility report. It must not ship Enforce mode with an unproved fail-closed claim.
+
+## 4. Goals
 
 V0.1 must:
 
 1. install as a native DeepSeek Harness profile bundle;
-2. provide bilingual Chinese and English product surfaces;
-3. default to a non-blocking `audit` mode;
-4. provide an explicit `enforce` mode through an `owp-verified` profile;
-5. use the existing Python OpenWorkProof implementation as the sole protocol authority;
-6. bind Harness tool execution and artifacts to OWP evidence without fabricating missing facts;
-7. keep verification distinct from acceptance;
-8. export a delivery case that another environment can verify offline;
-9. package prebuilt plugin artifacts suitable for npm installation;
-10. provide enough compatibility, privacy, and threat evidence for responsible community distribution;
-11. define a host-neutral adapter contract that later Codex, ChatGPT, and Claude Code adapters can implement without changing core protocol truth.
+2. complete one `Verified Code Change` loop for one Git repository;
+3. provide bilingual Chinese and English status and documentation surfaces;
+4. default to non-blocking `audit` mode that emits observation facts only;
+5. provide explicit `enforce` mode through an `owp-verified` profile;
+6. combine asynchronous authorization with a monotonic final guard;
+7. use the existing Python OpenWorkProof implementation as the sole protocol authority;
+8. keep Manager and Acceptor private keys outside Harness and the Agent;
+9. bind live tool results to durable Harness events and declared artifacts;
+10. perform independent repository readback and test rerun before VerificationDecision;
+11. keep verification distinct from acceptance;
+12. export a delivery case that another environment can verify offline;
+13. package prebuilt plugin artifacts suitable for npm installation;
+14. provide compatibility, privacy, threat, and supply-chain evidence proportional to a public developer preview.
 
-## 4. Non-goals
+## 5. Non-goals
 
 V0.1 does not:
 
 - modify DeepSeek Harness core;
 - reimplement OpenWorkProof signing or verification in TypeScript;
+- support arbitrary business workflows or every Harness tool;
+- support parallel tool execution, multiple Agents, or cross-session workflow composition;
+- build a custom web dashboard or full Acceptance UI;
+- freeze or publish a universal Host Adapter Protocol based on one implementation;
+- implement Codex, ChatGPT, or Claude Code adapters;
 - build an OpenWorkProof SaaS, Agent OS, plugin marketplace, wallet, payment, custody, or settlement service;
 - inspect or claim access to hidden model reasoning;
-- treat a natural-language prompt as a signed authorization automatically;
+- treat a natural-language prompt as signed authorization automatically;
 - accept work on behalf of a human;
-- implement Codex, ChatGPT, or Claude Code adapters in the same release;
-- advertise those future adapters as supported before their own implementation and verification gates pass;
-- claim legal audit, absolute security, customer adoption, payment, or production use.
+- claim legal audit, absolute security, customer adoption, payment, production use, or DeepSeek endorsement.
 
-## 5. Product positioning
+## 6. Product positioning
 
-### 5.1 Market name
+### 6.1 Market name
 
 **English:** OpenWorkProof for DeepSeek Harness
+
 **Chinese:** OpenWorkProof｜DeepSeek Harness 可验证执行插件
 
-### 5.2 One-line descriptions
+### 6.2 One-line descriptions
 
 **Chinese**
 
-> 为 DeepSeek Harness 的 Agent 工作增加可验证授权、执行回执、独立验证与人工验收。
+> 为 DeepSeek Harness 的代码变更增加事前授权、执行证据、独立复核与人工验收。
 
 **English**
 
-> Add verifiable authorization, execution receipts, independent verification, and human acceptance to DeepSeek Harness agents.
+> Add prior authorization, execution evidence, independent rechecking, and human acceptance to DeepSeek Harness code changes.
 
-### 5.3 User promise
+### 6.3 Claim boundary
 
-An Agent saying “done” is not proof of delivery. The plugin helps a user determine:
+The plugin helps a user determine:
 
-- who requested and authorized the work;
-- what authority and tool scope were granted;
-- what the Harness actually executed;
-- what evidence and artifacts support the result;
-- whether an independent verifier approved the evidence;
-- whether an authorized human accepted or rejected delivery.
+- who requested and authorized the declared change;
+- what repository, paths, tools, and tests were in scope;
+- which calls passed through the observed Harness tool pipeline;
+- whether live results match durable session events;
+- whether independent repository readback and test rerun support the claim;
+- whether the WorkOrder-bound Acceptor accepted or rejected delivery.
 
-## 6. Distribution architecture
+It does not prove unobserved execution, hidden tool-internal behavior, remote-system state without readback, or semantic correctness beyond the frozen verification criteria.
 
-The authoritative OpenWorkProof protocol remains in the existing Python project. A separate plugin repository is the recommended distribution surface:
+## 7. Trust model and authority
+
+| Role | Authority | V0.1 key boundary |
+|---|---|---|
+| Manager | defines WorkOrder, scope, tools, tests, and acceptance criteria | private key remains outside Harness |
+| Developer Agent | performs the authorized change | receives no Manager or Acceptor private key |
+| Adapter/Sidecar | witnesses Harness facts and commits gateway-bound receipts | holds only a dedicated limited witness key |
+| Verifier | reads final repository state and reruns frozen checks | separate process or environment and distinct key |
+| Acceptor | accepts or rejects the verified delivery | private key remains outside Harness and plugin |
+
+Required disclosures:
+
+- role separation does not imply organizational independence;
+- if one person controls multiple keys, the export must state that independence is not evidenced;
+- compromise of the Harness or adapter may falsify observed host facts unless independent readback detects the mismatch;
+- a signature proves integrity and key possession under verified rules, not that a judgment criterion was correct;
+- the Acceptor decision is never generated or signed by the Agent.
+
+## 8. Distribution architecture
+
+The authoritative protocol remains in the existing Python project. The DeepSeek Harness bundle is distributed separately:
 
 ```text
-github.com/dengyier/OpenWorkProof          authoritative protocol and Python package
-github.com/dengyier/openworkproof-dsh-plugin  DeepSeek Harness bundle and market surface
+github.com/dengyier/OpenWorkProof
+  protocol models, policy, signing, replay, delivery export, DSH bridge
+
+github.com/dengyier/openworkproof-dsh-plugin
+  DeepSeek Harness bundle, adapter, install docs, compatibility evidence
 ```
-
-The plugin repository may be developed from a temporary integration workspace, but its published artifact must not duplicate protocol rules.
-
-Future host adapters remain separate distribution packages around the same core:
-
-```text
-Codex Adapter -----------\
-ChatGPT Adapter ----------+--> OWP Host Adapter Protocol --> OpenWorkProof Core
-Claude Code Adapter ------+
-DeepSeek Harness Plugin --/
-```
-
-Only the DeepSeek Harness path is a V0.1 deliverable. The other paths establish architectural intent, not present support.
 
 Recommended package name:
 
@@ -136,221 +186,211 @@ Recommended package name:
 @openworkproof/dsh-plugin
 ```
 
-If the npm scope is unavailable, use a single unscoped fallback selected before implementation. Do not publish multiple synonymous packages.
+If the npm scope is unavailable, choose one unscoped fallback before implementation. Do not publish synonymous packages.
 
-## 7. Runtime architecture
+The plugin must not duplicate canonical protocol rules. Cross-repository compatibility is pinned by exact version ranges and tested artifact pairs.
+
+## 9. Minimal runtime architecture
 
 ```text
-DeepSeek Harness Web or Headless Profile
+DeepSeek Harness profile
   |
-  +-- OpenWorkProof DSH Bundle (TypeScript)
-  |     +-- Session Contract Plugin
-  |     +-- Tool Policy Gate
-  |     +-- Evidence Collector
-  |     +-- Acceptance UI Provider
+  +-- OWP DSH Bundle (TypeScript)
+  |     +-- Contract Loader
+  |     +-- Async Authorization Hook
+  |     +-- Monotonic Policy Guard
+  |     +-- Live/Durable Evidence Correlator
+  |     +-- Status and Export Commands
   |     `-- Bridge Client
   |
-  `-- OpenWorkProof Bridge (Python child process over stdio)
+  `-- OWP Bridge (Python child process over stdio)
         +-- canonical models and validation
-        +-- signing and key binding
-        +-- policy decisions
-        +-- receipt construction
-        +-- verification and replay
-        `-- delivery-case export
+        +-- policy decisions and exact execution tokens
+        +-- observation and receipt construction
+        +-- independent verification orchestration
+        +-- acceptance draft preparation
+        `-- delivery-case export and replay
+
+External human tools
+  +-- Manager signs WorkOrder and CapabilityGrant
+  +-- Verifier reruns frozen checks
+  `-- Acceptor signs accept or reject outside Harness
 ```
 
-The TypeScript bundle owns Harness integration. The Python bridge owns protocol truth.
+The TypeScript bundle owns host integration. The Python bridge owns protocol truth. External human keys do not cross into the Harness process.
 
-### 7.1 Host Adapter Protocol
+### 9.1 Internal adapter boundary
 
-The host-neutral contract sits above existing OWP models and below vendor-specific event APIs. It must not alter frozen WorkOrder, CapabilityGrant, PolicyDecision, ActionReceipt, VerificationDecision, or AcceptanceDecision semantics.
-
-Every adapter declares its observable and enforceable capabilities before opening a case:
-
-```json
-{
-  "schema_version": "openworkproof-host-capabilities/0.1",
-  "host": "deepseek-harness",
-  "host_version": "<observed-version>",
-  "adapter_version": "<observed-version>",
-  "capabilities": {
-    "observe_tool_calls": true,
-    "block_before_execute": true,
-    "observe_results": true,
-    "collect_artifacts": true,
-    "show_acceptance_ui": true
-  }
-}
-```
-
-The common event vocabulary is:
+V0.1 may define a private typed interface for the facts needed by the bridge:
 
 ```text
-session_started
-task_requested
+session_opened
 authorization_requested
-tool_started
-tool_finished
+tool_result_observed
+durable_tool_event_observed
 artifact_observed
-verification_requested
-acceptance_recorded
-session_ended
+session_closed
 ```
 
-Vendor-native payloads may be retained as non-authoritative extension data. They must not silently change canonical OWP signing inputs.
+This interface is an implementation seam, not a public standard. Vendor-native data may be retained as non-authoritative extension data but cannot silently change canonical signing inputs.
 
-Capability negotiation controls the strongest claim an adapter may make:
+A public cross-host protocol may be designed only after a second adapter exposes real commonalities and differences.
 
-- `block_before_execute=true` is required for `enforce`;
-- observation without pre-execution control permits `audit` only;
-- missing event continuity produces `UNKNOWN` or an evidence gap;
-- no acceptor identity binding means no formal AcceptanceDecision;
-- a bypassed adapter cannot claim a complete execution chain.
+## 10. Verified Code Change contract
 
-The first implementation may place the adapter protocol in the existing Python repository as a small model, validation, and bridge surface. Host-specific TypeScript remains in the plugin repository.
+Each V0.1 case freezes before execution:
 
-## 8. Components
+- one repository root and current revision;
+- allowed path prefixes;
+- denied path prefixes;
+- allowed Harness tool names;
+- maximum tool-call count and deadline;
+- exact verification commands;
+- expected exit-code policy;
+- required evidence artifacts;
+- Acceptor key binding;
+- stop and rejection conditions.
 
-### 8.1 Session Contract Plugin
+The first sample case uses a disposable Git fixture. It authorizes one bounded text or source change and one test command. It rejects writes outside the allowed path and rejects any export whose final repository state differs from the independently read state.
 
-Responsibilities:
+## 11. Enforcement pipeline
 
-- create a stable binding between a Harness session and an OWP case;
-- capture the task request separately from authorization;
-- expose the current contract, evidence state, and acceptance state to the UI;
-- never infer a CapabilityGrant from an ordinary user prompt.
+### 11.1 Pre-execution authorization
 
-### 8.2 Tool Policy Gate
+For every consequential tool call:
 
-Responsibilities:
+1. the async `tools/pre-execute` listener sends the immutable execution identity, tool name, canonical arguments digest, repository target, session, and WorkOrder context to the bridge;
+2. the bridge returns allow, deny, or human-confirmation-required plus a one-use decision token bound to that exact execution;
+3. the adapter stores only the short-lived decision token in memory;
+4. the listener never rewrites tool arguments.
 
-- participate in `tools/pre-execute`;
-- normalize tool name, arguments digest, target, session, and task context;
-- in `audit`, observe without changing the Harness result;
-- in `enforce`, request an OWP policy decision before consequential execution;
-- map allow, deny, and human-confirmation outcomes without silently falling back.
+### 11.2 Monotonic final guard
 
-### 8.3 Evidence Collector
+The synchronous `tools.guard()` checks that the exact execution has a current allow token. Missing, mismatched, expired, replayed, or already-consumed tokens produce a denial reason.
 
-Responsibilities:
+This guard is mandatory because another pre-execution listener may short-circuit the waterfall. No later listener can turn a guard denial into permission.
 
-- observe canonical tool results and durable session events;
-- bind tool calls, results, artifacts, versions, timestamps, and event identifiers;
-- store hashes and minimal required metadata by default;
-- mark missing or discontinuous evidence explicitly;
-- never convert incomplete observation into a successful receipt.
+### 11.3 Result and durable-event correlation
 
-### 8.4 Bridge Client and Python Bridge
+The adapter observes the frozen live `tools/result` and separately observes append-only `session/event` records. It correlates by Harness execution identity, call ID, session ID, and sequence.
 
-The plugin starts one local bridge process:
+- live result without matching durable events: `UNKNOWN / DURABLE_EVENT_MISSING`;
+- durable result without a witnessed authorized execution: `UNKNOWN / AUTHORIZATION_BINDING_MISSING`;
+- duplicated, reordered, or conflicting identities: fail closed in Enforce mode;
+- out-of-band work: outside evidence scope.
+
+## 12. ObservationRecord and ActionReceipt
+
+Audit and Enforce artifacts are not interchangeable.
+
+### 12.1 ObservationRecord
+
+Audit mode emits a non-authoritative adapter envelope stating what the plugin observed. It may contain hashes, versions, event identifiers, and explicit evidence gaps.
+
+An ObservationRecord does not assert that the action was authorized, policy-approved, semantically correct, verified, or accepted.
+
+### 12.2 ActionReceipt
+
+An ActionReceipt may be constructed only when all required WorkOrder, CapabilityGrant, PolicyDecision, exact execution identity, result, durable event, and artifact bindings are present and valid.
+
+Missing authorization never upgrades an ObservationRecord into an ActionReceipt after execution.
+
+## 13. Independent verification and acceptance
+
+### 13.1 Verification
+
+The Verifier receives no claim from the Agent as authoritative. It independently:
+
+1. reads the final Git revision and working-tree state;
+2. checks changed paths against the frozen scope;
+3. hashes declared artifacts from disk;
+4. reruns the exact WorkOrder-bound verification commands;
+5. compares exit codes and outputs against the frozen criterion;
+6. checks the complete causal and signature chain;
+7. returns verified, rejected, or unknown with machine-readable reasons.
+
+Integrity verification and semantic verification remain separate fields. A correct signature cannot compensate for a wrong criterion.
+
+### 13.2 Acceptance
+
+The plugin may display `VERIFIED — AWAITING HUMAN ACCEPTANCE` and prepare an acceptance draft. It cannot sign it.
+
+The external Acceptor reviews the scope, diff, verification result, evidence gaps, and known limitations, then signs accept or reject outside Harness. The final export binds that decision to the exact WorkOrder and verification result.
+
+## 14. Modes and user surface
+
+### 14.1 Audit mode
+
+Audit is the default installation behavior:
+
+- it does not block the existing Harness workflow;
+- it emits ObservationRecords only;
+- it shows `EXECUTION OBSERVED / AUTHORIZATION NOT EVIDENCED` when no prior authorization exists;
+- missing bridge or event continuity remains an explicit evidence gap;
+- it never displays `AUTHORIZED`, `VERIFIED`, or `ACCEPTED` without the corresponding protocol facts.
+
+### 14.2 Enforce mode
+
+The `owp-verified` profile enables Enforce mode:
+
+- every consequential call requires an exact current allow token;
+- expired, revoked, replayed, wrong-target, and over-scope authority is denied;
+- bridge failure, missing decision state, or evidence discontinuity fails closed;
+- verification must complete before an acceptance draft exists;
+- acceptance remains external and human-controlled.
+
+### 14.3 V0.1 surfaces
+
+V0.1 provides lightweight bilingual status and export commands rather than a custom dashboard:
+
+```text
+/owp-status   current task, authorization, execution, verification, acceptance
+/owp-evidence evidence coverage and gaps
+/owp-export   prepare an offline-verifiable delivery export
+```
+
+If slash-command integration is not stable in the supported Harness version, the same functions ship as documented local CLI commands. This substitution does not weaken protocol semantics.
+
+## 15. Bridge protocol
+
+The plugin starts one local process:
 
 ```bash
 owp dsh-bridge --stdio
 ```
 
-The bridge uses JSON Lines. Every message includes:
+Transport rules:
 
-- `schema_version`;
-- `request_id`;
-- `session_id`;
-- `message_type`;
-- `timestamp`;
-- `payload`.
+- stdout is JSON Lines protocol only;
+- stderr is diagnostics only;
+- every request has `schema_version`, `request_id`, `session_id`, `message_type`, `sequence`, `timestamp`, and `payload`;
+- startup negotiates exact OWP, bridge, adapter, and Harness versions;
+- requests are idempotent by `request_id` where replay is safe;
+- decision tokens are one-use and bound to an exact execution identity;
+- timeouts and process exits have stable operational error codes;
+- no private key is passed in command-line arguments;
+- committed truth is recovered by readback after lost acknowledgements.
 
-Minimum message types:
+Minimum messages:
 
 ```text
 hello / ready
-session_open / session_status
+case_open / case_status
 authorization_check / authorization_result
-tool_started / tool_finished
-artifact_observed
+observation_commit / observation_result
+action_commit / action_result
 verify_request / verify_result
-acceptance_request / acceptance_result
+acceptance_draft / acceptance_draft_result
 export_request / export_result
 shutdown
 error
 ```
 
-The implementation plan must freeze exact schemas, canonical bytes, exit behavior, and replay semantics before production code.
+Exact schemas, canonical bytes, recovery semantics, and exit codes must be frozen in the implementation plan before code.
 
-### 8.5 Acceptance UI Provider
+## 16. Installation and first run
 
-The UI follows the active Harness language while retaining stable English protocol identifiers.
-
-It must display:
-
-```text
-Task / 任务
-Authorization / 授权
-Execution / 执行
-Verification / 验证
-Acceptance / 验收
-Evidence / 证据
-```
-
-The user can:
-
-- review the active scope and evidence;
-- explicitly authorize when permitted by the current protocol context;
-- accept delivery;
-- reject delivery with a reason;
-- request more evidence;
-- export the case.
-
-The UI must never label `VERIFIED` as `ACCEPTED`.
-
-## 9. Modes
-
-### 9.1 Audit mode
-
-Audit mode is the default public-install behavior.
-
-- It does not block the existing Harness workflow.
-- It records observable task, tool, result, and artifact facts.
-- It may verify integrity and evidence completeness.
-- Without a valid prior authorization, it displays:
-
-```text
-EXECUTION OBSERVED
-AUTHORIZATION NOT EVIDENCED
-```
-
-- Missing bridge or events create an explicit evidence gap.
-- Audit mode must not imply that observed work was authorized or accepted.
-
-### 9.2 Enforce mode
-
-The `owp-verified` profile enables enforce mode by default.
-
-- Consequential tool calls require a current, scope-matching authorization.
-- Expired, revoked, replayed, wrong-target, or over-scope authority is denied.
-- The gate may request explicit human confirmation when the protocol permits it.
-- A bridge failure or evidence discontinuity fails closed.
-- Verification must complete before the result can be presented for acceptance.
-- Human acceptance remains a separate signed or otherwise protocol-bound decision.
-
-## 10. Protocol mapping
-
-| DeepSeek Harness fact | OpenWorkProof meaning | Boundary |
-|---|---|---|
-| user prompt or task | task request / WorkOrder input | not automatically authorization |
-| session identity | case/session correlation | not human identity by itself |
-| `tools/pre-execute` | PolicyDecision input | enforce may allow, deny, or request confirmation |
-| canonical tool call | ActionReceipt action input | arguments require canonical digest binding |
-| tool result | ActionReceipt result input | successful transport is not semantic success |
-| `session/event` sequence | causal evidence | gaps must remain visible |
-| artifact path/content | EvidenceRef | bind digest, size, and declared scope; avoid secret capture |
-| verifier result | VerificationDecision | verification is not acceptance |
-| user acceptance action | AcceptanceDecision | requires authorized acceptor context |
-
-Existing OpenWorkProof schemas remain authoritative. The plugin may introduce adapter-envelope schemas, but must not fork or weaken frozen core semantics.
-
-The DeepSeek Harness mapping is the first conformance implementation of the Host Adapter Protocol. Later adapters require their own capability mapping, threat model, compatibility matrix, tests, and release evidence.
-
-## 11. Installation and first-run flow
-
-V0.1 accepts a two-step installation to reach the market quickly:
+V0.1 accepts a two-step developer-preview installation:
 
 ```bash
 pipx install openworkproof
@@ -358,41 +398,48 @@ dsh plugin --profile web add @openworkproof/dsh-plugin
 dsh web
 ```
 
-The first-run preflight checks:
+Preflight checks:
 
-- compatible `dsh` version and profile;
-- compatible `openworkproof` version;
+- supported exact `dsh` compatibility range;
+- compatible `openworkproof` bridge version;
 - bridge executable availability;
 - writable private case directory;
-- no unexpected secret capture configuration;
-- plugin bundle loaded in the effective profile.
+- repository root and Git state;
+- plugin bundle present in the effective profile;
+- no Manager or Acceptor private key in plugin configuration;
+- Audit or Enforce mode displayed explicitly.
 
-The onboarding offers:
+The five-minute sample must:
 
-1. Audit Mode / 审计模式;
-2. Verified Profile / 强制验证配置;
-3. a five-minute real sample task;
-4. evidence timeline review;
-5. delivery-case export and offline verification.
+1. create a disposable Git fixture;
+2. show an unauthorized out-of-scope write being denied in Enforce mode;
+3. authorize and complete one in-scope change;
+4. independently rerun one frozen test;
+5. export the case;
+6. show offline verification passing;
+7. modify one exported artifact and show verification failing.
 
-## 12. Failure semantics
+## 17. Failure semantics
 
 | Failure | Audit mode | Enforce mode |
 |---|---|---|
-| OWP Core absent | configuration error; no verified claim | enforce unavailable |
-| incompatible Harness version | observation disabled or explicitly degraded | enforce unavailable |
-| bridge startup failure | no verified claim | fail closed |
-| bridge disconnect | continue only with visible evidence gap | block later consequential calls |
-| event loss or sequence gap | `UNKNOWN / EVIDENCE GAP` | fail closed |
-| policy timeout | record unavailable decision | deny or require authorized human decision |
-| verifier unavailable | executed, not verified | cannot proceed to accepted state |
+| OWP Core absent | configuration error; no verified claim | unavailable |
+| incompatible Harness version | observation disabled or explicitly degraded | unavailable |
+| bridge startup or version negotiation failure | no verified claim | fail closed |
+| bridge disconnect | explicit evidence gap | block consequential calls |
+| pre-execution hook bypassed | outside evidence scope | guard denies |
+| allow token missing or mismatched | observation only | guard denies |
+| live result lacks durable event | `UNKNOWN` | fail closed |
+| event loss, duplicate, or reordering | `UNKNOWN` | fail closed |
+| repository readback differs | `UNKNOWN` or rejected | rejected |
+| verifier unavailable | observed/executed, not verified | no acceptance draft |
 | user has not accepted | verified, awaiting acceptance | verified, awaiting acceptance |
-| export fails | preserve committed truth; report export failure | preserve committed truth; report export failure |
-| plugin bypassed | outside evidence scope | no complete-chain claim |
+| export fails | preserve committed truth | preserve committed truth |
+| plugin bypassed or out-of-band work | outside evidence scope | no complete-chain claim |
 
-Operational failures and protocol denials must have distinct stable codes. No exception path may fabricate a successful receipt.
+Operational failures and protocol denials use distinct stable codes. No exception path fabricates a successful receipt.
 
-## 13. Privacy and security
+## 18. Privacy, keys, and security
 
 Default evidence excludes:
 
@@ -400,155 +447,132 @@ Default evidence excludes:
 - complete environment-variable sets;
 - hidden model reasoning;
 - source-code bodies not selected as evidence;
-- raw tool output beyond the minimum declared evidence need.
+- raw tool output beyond the frozen evidence need.
 
 Default evidence includes:
 
 - plugin, Harness, OWP, profile, and schema versions;
-- session and event identifiers;
+- session, execution, call, and event identifiers;
 - tool name and canonical argument/result digests;
-- declared artifact digests, sizes, and media types;
+- declared artifact digests, sizes, media types, and repository-relative paths;
 - timestamps and causal links;
-- policy, verification, and acceptance identifiers.
+- policy, verification, and acceptance identifiers;
+- independence disclosure and evidence gaps.
 
-The plugin must document:
+The plugin documents filesystem locations, spawned processes, network behavior, collected fields, redaction, required permissions, key locations, uninstall, and evidence retention.
 
-- filesystem locations;
-- spawned processes;
-- network behavior;
-- collected fields;
-- redaction behavior;
-- permissions required;
-- uninstall and evidence-retention behavior.
-
-## 14. Package and supply-chain requirements
+## 19. Package and supply-chain requirements
 
 The npm package must:
 
 - declare `dsh.bundle.patch`;
 - include prebuilt JavaScript and `cordis.patch.yml`;
 - avoid install-time build scripts where practical;
-- pin and publish a tested DeepSeek Harness compatibility range;
+- pin a tested Harness compatibility range;
 - contain license and third-party notices;
 - pass packed-tarball install and load tests;
-- publish a checksum and immutable release tag;
+- publish checksums and immutable release tags;
 - disclose that plugin execution is trusted local code;
 - avoid downloading unpinned executables at runtime.
 
-Initial manifest shape:
+Exact peer dependency ranges come from compatibility tests, not examples.
 
-```json
-{
-  "name": "@openworkproof/dsh-plugin",
-  "version": "0.1.0",
-  "type": "module",
-  "main": "lib/index.js",
-  "files": ["lib", "cordis.patch.yml"],
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    }
-  }
-}
-```
+## 20. Verification matrix
 
-Exact peer dependency ranges must come from the implementation compatibility tests, not from this example.
+### 20.1 Authorization and enforcement
 
-## 15. Verification matrix
-
-Release requires evidence for at least:
-
-### Audit behavior
-
-- ordinary Harness execution remains unblocked;
-- observed tool calls produce a deterministic evidence timeline;
-- absent authorization is displayed as absent;
-- missing events produce `UNKNOWN`, not success.
-
-### Enforce behavior
-
-- unauthorized file write is denied;
-- unauthorized shell or external action is denied;
+- an ordinary prompt does not create authorization;
+- out-of-scope write is denied by the monotonic guard;
 - expired, revoked, replayed, wrong-target, and over-scope grants are denied;
-- authorized execution proceeds exactly once;
-- bridge crash and policy timeout fail closed;
-- a human-confirmation path cannot be replayed for another action.
+- another pre-execution listener cannot bypass the final guard;
+- an authorized execution proceeds exactly once;
+- bridge crash and policy timeout fail closed.
 
-### Evidence integrity
+### 20.2 Observation and receipt boundary
 
-- changed tool arguments fail verification;
-- changed tool results fail verification;
-- changed artifact bytes fail verification;
-- missing, duplicated, or reordered events fail or return `UNKNOWN` as specified;
+- Audit emits ObservationRecord and never ActionReceipt without prior authorization;
+- live and durable event identities must match;
+- missing, duplicate, reordered, and substituted events return `UNKNOWN` or fail closed;
+- unobserved and out-of-band work remains outside scope.
+
+### 20.3 Semantic verification
+
+- changed paths outside scope are rejected;
+- changed tool arguments, results, or artifact bytes fail verification;
 - substituted keys and mismatched case/session bindings fail;
-- export can be replayed offline in a clean environment.
+- a valid signature bound to the wrong test criterion is rejected;
+- independent test rerun failure rejects the delivery;
+- export replays offline in a clean environment;
+- all fail-closed paths leave no fabricated receipt or acceptance.
 
-### Product and distribution
+### 20.4 Human authority
 
-- Chinese and English surfaces render correctly;
+- Manager and Acceptor private keys are absent from Harness configuration and process arguments;
+- the Agent cannot invoke acceptance signing;
+- verified without human decision remains `AWAITING HUMAN ACCEPTANCE`;
+- accept and reject signatures bind to the exact WorkOrder and verification result.
+
+### 20.5 Product and distribution
+
+- Chinese and English status text renders correctly;
 - npm tarball installs into a clean profile;
 - bundle appears in `dsh --profile <profile> --dump-config`;
-- supported Harness versions load and run the sample;
+- supported versions run the exact sample;
 - unsupported versions fail with an actionable message;
-- uninstall removes the bundle without deleting user evidence silently.
+- uninstall does not silently delete evidence.
 
-## 16. Market release plan
+## 21. Staged release plan
 
-### 16.1 Official ecosystem discovery
+### Gate A: local technical alpha
 
-1. publish the public GitHub plugin repository;
-2. add `dsh-plugin`, `deepseek-harness`, `openworkproof`, `verifiable-execution`, and `ai-agent-security` topics;
-3. publish the prebuilt npm package;
-4. post a bilingual “Show Your Plugin” entry in DeepSeek Harness Discussions;
-5. provide an exact install command, compatibility matrix, demo, threat model, and evidence boundary.
+- exact supported Harness version;
+- focused and adversarial tests pass;
+- five-minute fixture loop passes;
+- no public package or adoption claim.
 
-### 16.2 Community directories
+### Gate B: externally reproducible preview
 
-After the official discovery path is live:
+- prebuilt tarball and bilingual README;
+- another clean environment reproduces install, denial, authorized execution, verification, tamper failure, and export;
+- exact artifact checksums and compatibility evidence recorded.
 
-- verify whether topic-based community indexes ingest the repository;
-- submit structured metadata to relevant independent registries;
-- state that inclusion is discovery metadata, not official endorsement or security certification;
-- correct stale compatibility records when upstream changes.
+### Gate C: ecosystem distribution
 
-### 16.3 Launch assets
+- public plugin repository;
+- prebuilt npm package;
+- `dsh-plugin` GitHub topic;
+- bilingual DeepSeek Harness Discussions post;
+- optional independent directories clearly labeled as discovery metadata only.
 
-- bilingual README;
-- 60–90 second installation and first-case video;
-- Audit versus Enforce comparison GIF;
-- sample WorkOrder and exported evidence bundle;
-- one tamper demonstration showing offline verification failure;
-- privacy and permissions page;
-- compatibility badge tied to a dated test result;
-- public issue template for compatibility and security reports.
+Directory ingestion is not a technical release gate. Publication, installation, external reproduction, real use, and adoption remain separate states.
 
-## 17. Success criteria
+## 22. Success criteria
 
 V0.1 is technically releasable only when:
 
-1. a new user can complete the documented two-step installation;
-2. the five-minute sample produces an understandable bilingual timeline;
-3. Audit records a real task without blocking it;
-4. Enforce blocks at least one unauthorized consequential action;
-5. an authorized action produces a valid receipt;
-6. a tampered export fails offline verification;
-7. verification and human acceptance remain visibly distinct;
-8. the npm package installs and loads from a clean profile;
-9. compatibility evidence belongs to the exact published artifacts.
+1. a new user completes the documented two-step installation;
+2. the exact five-minute fixture demonstrates deny, allow, verify, export, and tamper failure;
+3. Audit records a real Harness call without claiming authorization;
+4. Enforce blocks an unauthorized out-of-scope write through the final guard;
+5. one authorized code change produces a valid ActionReceipt;
+6. an independent repository readback and test rerun produce VerificationDecision;
+7. the Agent cannot sign human acceptance;
+8. a clean environment verifies the accepted or rejected export offline;
+9. the npm artifact and tested compatibility evidence belong to the exact published revision.
 
-Market distribution is complete only when the public repository, npm package, official Discussions post, and at least one independently reachable directory entry are verified. These states must be reported separately.
+Customer adoption, willingness to pay, production use, organizationally independent verification, and DeepSeek endorsement remain `not_evidenced` until direct evidence exists.
 
-Customer adoption, willingness to pay, production use, and DeepSeek endorsement remain `not_evidenced` until direct evidence exists.
-
-## 18. Later versions
+## 23. Later versions
 
 Potential follow-up work, explicitly outside V0.1:
 
-- single-command installer or bundled OWP sidecar;
-- Codex, ChatGPT, and Claude Code adapters sharing the same Host Adapter Protocol;
+- single-command installer or bundled sidecar;
+- a second host adapter, followed by evidence-based extraction of a public Host Adapter Protocol;
+- Codex, ChatGPT, and Claude Code integrations;
+- parallel execution and multi-Agent cases;
 - organization policy profiles and team key management;
 - richer evidence visualization;
 - remote verifier federation;
-- externally governed plugin registry security metadata.
+- externally governed plugin security metadata.
 
 Later work requires new evidence and a separately approved design.
