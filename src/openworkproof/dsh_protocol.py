@@ -80,11 +80,8 @@ class DshExecutionIdentityV01(ProtocolModel):
     arguments_digest: Digest64
 
 
-class DshObservationRecordV01(SignedProtocolModel):
-    _signed_domain = "dsh-observation-record"
-
+class DshObservationDraftV01(ProtocolModel):
     schema_version: Literal["openworkproof-dsh-observation/0.1"]
-    record_id: Digest64
     host: Literal["deepseek-harness"]
     host_version: Literal["0.1.1-rc.2"]
     adapter_version: Literal["0.1.0"]
@@ -99,7 +96,7 @@ class DshObservationRecordV01(SignedProtocolModel):
     nonce: Digest64
 
     @model_validator(mode="after")
-    def _validate_observation(self) -> DshObservationRecordV01:
+    def _validate_observation(self) -> DshObservationDraftV01:
         if not _utf8_sorted_unique(self.evidence_gap_codes):
             raise ValueError("evidence gap codes must be UTF-8 sorted and unique")
         paired = (self.durable_call_sequence is None) == (
@@ -122,6 +119,36 @@ class DshObservationRecordV01(SignedProtocolModel):
             and "AUTHORIZATION_NOT_EVIDENCED" not in self.evidence_gap_codes
         ):
             raise ValueError("not_evidenced requires its evidence gap code")
+        return self
+
+
+class DshObservationRecordV01(SignedProtocolModel):
+    _signed_domain = "dsh-observation-record"
+
+    schema_version: Literal["openworkproof-dsh-observation/0.1"]
+    record_id: Digest64
+    host: Literal["deepseek-harness"]
+    host_version: Literal["0.1.1-rc.2"]
+    adapter_version: Literal["0.1.0"]
+    execution: DshExecutionIdentityV01
+    authorization_status: Literal["not_evidenced", "authorized", "denied"]
+    live_result_digest: Digest64 | None
+    durable_call_sequence: SafeNonNegativeInt | None
+    durable_result_sequence: SafeNonNegativeInt | None
+    receipt_digest: Digest64 | None
+    evidence_gap_codes: tuple[DshEvidenceGapCode, ...]
+    observed_at: CanonicalUTCTime
+    nonce: Digest64
+
+    @model_validator(mode="after")
+    def _validate_observation(self) -> DshObservationRecordV01:
+        DshObservationDraftV01.model_validate(
+            {
+                key: value
+                for key, value in self.model_dump(mode="json").items()
+                if key not in _SIGNING_FIELDS
+            }
+        )
         if self.record_id != dsh_observation_record_id(
             self.model_dump(mode="json")
         ):
@@ -206,7 +233,8 @@ class DshAuthorizationCheckPayloadV01(ProtocolModel):
 
 
 class DshObservationCommitPayloadV01(ProtocolModel):
-    observation: DshObservationRecordV01
+    case_id: Digest64
+    observation: DshObservationDraftV01
 
 
 class DshActionExecutePayloadV01(ProtocolModel):

@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import BinaryIO, TextIO
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from openworkproof.dsh_case import (
     DecisionTokenStore,
@@ -20,6 +24,7 @@ from openworkproof.dsh_protocol import (
     DshBridgeResponseV01,
     DshResultPayloadV01,
     canonical_bytes,
+    sign_dsh_observation,
 )
 
 
@@ -72,6 +77,7 @@ class DshBridgeApplication:
         self._responses: dict[str, tuple[bytes, bytes]] = {}
         self._cases: dict[str, DshCaseManifestV01] = {}
         self._decision_tokens = DecisionTokenStore(clock=clock)
+        self._committed_receipts: dict[tuple[str, str], str] = {}
 
     @property
     def shutdown_complete(self) -> bool:
@@ -82,6 +88,48 @@ class DshBridgeApplication:
         if now.tzinfo is None or now.utcoffset() is None or now.microsecond:
             raise ValueError("bridge clock must return an exact aware second")
         return now.astimezone(timezone.utc)
+
+    @staticmethod
+    def _execution_digest(execution) -> str:
+        return hashlib.sha256(canonical_bytes(execution)).hexdigest()
+
+    @staticmethod
+    def _load_sidecar_private_key(manifest) -> Ed25519PrivateKey:
+        try:
+            raw = Path(manifest.sidecar_key_path).read_bytes()
+        except OSError as error:
+            raise ValueError("sidecar key is unavailable") from error
+        if len(raw) != 32:
+            raise ValueError("sidecar key must contain exactly 32 bytes")
+        return Ed25519PrivateKey.from_private_bytes(raw)
+
+    @staticmethod
+    def _store_observation(manifest, record) -> None:
+        root = Path(manifest.evidence_root)
+        directory = root / "dsh-observations"
+        if directory.is_symlink():
+            raise ValueError("observation directory must not be a symlink")
+        directory.mkdir(mode=0o700, exist_ok=True)
+        path = directory / f"{record.record_id}.json"
+        raw = canonical_bytes(record) + b"\n"
+        try:
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            if path.is_symlink() or path.read_bytes() != raw:
+                raise ValueError("observation record conflicts with immutable truth")
+            return
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
 
     @staticmethod
     def _response(
@@ -215,6 +263,54 @@ class DshBridgeApplication:
                 decision_token=token.token,
                 expires_at=expires_at,
             )
+        if message_type == "observation_commit":
+            manifest = self._cases.get(request.payload.case_id)
+            if manifest is None:
+                return self._response(
+                    request,
+                    message_type="observation_result",
+                    status="denied",
+                    reason_code="CASE_NOT_OPEN",
+                    error_kind="protocol_denial",
+                )
+            observation = request.payload.observation
+            receipt_digest = observation.receipt_digest
+            committed = self._committed_receipts.get(
+                (
+                    request.payload.case_id,
+                    self._execution_digest(observation.execution),
+                )
+            )
+            if observation.authorization_status == "authorized" and (
+                receipt_digest is None or committed != receipt_digest
+            ):
+                return self._response(
+                    request,
+                    message_type="observation_result",
+                    status="denied",
+                    reason_code="RECEIPT_BINDING_MISSING",
+                    error_kind="protocol_denial",
+                )
+            try:
+                record = sign_dsh_observation(
+                    observation.model_dump(mode="json"),
+                    self._load_sidecar_private_key(manifest),
+                )
+                self._store_observation(manifest, record)
+            except (OSError, ValueError):
+                return self._response(
+                    request,
+                    message_type="observation_result",
+                    status="error",
+                    reason_code="OBSERVATION_COMMIT_FAILED",
+                    error_kind="operational_failure",
+                )
+            return self._response(
+                request,
+                message_type="observation_result",
+                status="ok",
+                result_digest=record.record_id,
+            )
         if message_type == "action_execute":
             if self._action_handler is None:
                 return self._response(
@@ -234,6 +330,12 @@ class DshBridgeApplication:
                     reason_code=str(error),
                     error_kind="protocol_denial",
                 )
+            self._committed_receipts[
+                (
+                    request.payload.case_id,
+                    self._execution_digest(request.payload.execution),
+                )
+            ] = result_digest
             return self._response(
                 request,
                 message_type="action_result",

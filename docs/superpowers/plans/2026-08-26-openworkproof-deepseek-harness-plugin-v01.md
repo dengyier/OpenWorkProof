@@ -861,11 +861,14 @@ git commit -m "feat: enforce OWP-owned Harness tools"
 ### Task 9: Correlate live results with committed session events
 
 **Files:**
+- Core modify: `src/openworkproof/dsh_protocol.py`
+- Core modify: `src/openworkproof/dsh_bridge.py`
+- Core modify: `tests/test_dsh_bridge_v01.py`
 - Create: `src/evidence.ts`
 - Create: `test/evidence.test.ts`
 - Modify: `src/index.ts`
 
-- [ ] **Step 1: Write RED correlation tests**
+- [x] **Step 1: Write RED correlation tests**
 
 ```ts
 it('commits only after live result and durable call/result agree', async () => {
@@ -883,7 +886,7 @@ it.each(['missing', 'duplicate', 'reordered', 'substituted'])('%s event is UNKNO
 })
 ```
 
-- [ ] **Step 2: Implement bounded correlation state**
+- [x] **Step 2: Implement bounded correlation state**
 
 `EvidenceCorrelator` keeps one session and one in-flight call, hashes the frozen
 live result, accepts only contiguous durable sequence, pairs `tool/call` and
@@ -891,7 +894,12 @@ live result, accepts only contiguous durable sequence, pairs `tool/call` and
 It emits an explicit gap and clears state on duplicate, reorder, wrong session,
 unknown call, nested call, or parallel in-flight call.
 
-- [ ] **Step 3: Attach exact DSH events**
+The adapter sends only a closed observation draft. The Python bridge binds any
+claimed receipt to the exact action result previously committed in that bridge
+session, signs the record with the case-owned Sidecar key, and stores the
+canonical record immutably. No signing key enters the TypeScript process.
+
+- [x] **Step 3: Attach exact DSH events**
 
 Register:
 
@@ -904,7 +912,7 @@ Audit commits `DshObservationRecordV01`. Enforce may expose a receipt digest
 only when the bridge already committed the OWP transaction and the durable
 event pair agrees.
 
-- [ ] **Step 4: Run correlation and existing compatibility tests**
+- [x] **Step 4: Run correlation and existing compatibility tests**
 
 ```bash
 pnpm test -- test/evidence.test.ts test/compatibility.test.ts
@@ -914,7 +922,7 @@ pnpm build
 
 Expected: PASS; no test upgrades missing evidence to success.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/evidence.ts src/index.ts test/evidence.test.ts

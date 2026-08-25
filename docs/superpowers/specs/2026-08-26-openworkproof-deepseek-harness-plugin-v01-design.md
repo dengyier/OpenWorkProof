@@ -307,6 +307,11 @@ Audit and Enforce artifacts are not interchangeable.
 
 Audit mode emits a non-authoritative adapter envelope stating what the plugin observed. It may contain hashes, versions, event identifiers, and explicit evidence gaps.
 
+The TypeScript adapter submits only a closed observation draft. The Python
+bridge loads the case-owned Sidecar key, signs the final `ObservationRecord`,
+and stores it immutably under the case evidence root. The Harness process never
+receives the Sidecar private key.
+
 An ObservationRecord does not assert that the action was authorized, policy-approved, semantically correct, verified, or accepted.
 
 ### 12.2 ActionReceipt
