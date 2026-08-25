@@ -393,7 +393,7 @@ hello / ready
 case_open / case_status
 authorization_check / authorization_result
 observation_commit / observation_result
-action_commit / action_result
+action_execute / action_result
 verify_request / verify_result
 acceptance_draft / acceptance_draft_result
 export_request / export_result

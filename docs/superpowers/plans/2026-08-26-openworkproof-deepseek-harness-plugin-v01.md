@@ -236,7 +236,7 @@ git commit -m "chore: prove DeepSeek Harness plugin seams"
 - Create: `tests/test_dsh_protocol_v01.py`
 - Modify: `src/openworkproof/signing.py`
 
-- [ ] **Step 1: Write strict-model RED tests**
+- [x] **Step 1: Write strict-model RED tests**
 
 ```python
 def test_audit_observation_never_claims_authorization() -> None:
@@ -266,7 +266,7 @@ Run: `./.venv/bin/python -m pytest -q tests/test_dsh_protocol_v01.py`
 
 Expected: RED import failure.
 
-- [ ] **Step 2: Implement the closed companion models**
+- [x] **Step 2: Implement the closed companion models**
 
 `dsh_protocol.py` defines immutable `extra="forbid"` objects:
 
@@ -313,12 +313,12 @@ closed request types are `hello`, `case_open`, `authorization_check`,
 `observation_commit`, `action_execute`, `verify_request`, `acceptance_draft`,
 `export_request`, and `shutdown`.
 
-- [ ] **Step 3: Add only the companion signing domain**
+- [x] **Step 3: Add only the companion signing domain**
 
 In `signing.py`, add `dsh-observation-record` to the v0.1 signed-domain set.
 Do not change any existing domain or canonical bytes.
 
-- [ ] **Step 4: Run focused and signing regressions**
+- [x] **Step 4: Run focused and signing regressions**
 
 ```bash
 ./.venv/bin/python -m pytest -q \
@@ -331,7 +331,7 @@ git diff --check
 
 Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/openworkproof/dsh_protocol.py src/openworkproof/signing.py \

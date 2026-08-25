@@ -53,6 +53,7 @@ ALLOWED_CANONICAL_DOMAINS = frozenset(
         "agency-profile-transition",
         "agency-appeal",
         "handler-agency-binding",
+        "dsh-observation-record",
     }
 )
 _UNSIGNED_ONLY_DOMAINS = frozenset({

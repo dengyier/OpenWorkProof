@@ -178,6 +178,7 @@ def test_canonical_domains_are_exact_and_key_order_is_irrelevant() -> None:
             "agency-profile-transition",
             "agency-appeal",
             "handler-agency-binding",
+            "dsh-observation-record",
         }
     )
     assert ALLOWED_SIGNED_DOMAINS == ALLOWED_CANONICAL_DOMAINS - {
