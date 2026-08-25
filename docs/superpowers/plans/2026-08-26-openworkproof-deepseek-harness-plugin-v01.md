@@ -450,7 +450,7 @@ git commit -m "feat: freeze DeepSeek Harness case boundaries"
 - Create: `src/openworkproof/dsh_execution.py`
 - Create: `tests/test_dsh_execution_v01.py`
 
-- [ ] **Step 1: Write patch RED tests**
+- [x] **Step 1: Write patch RED tests**
 
 ```python
 def test_unauthorized_patch_never_calls_handler_or_writes_ledger(case) -> None:
@@ -468,7 +468,7 @@ def test_authorized_patch_uses_existing_transaction(case) -> None:
     assert result.receipt.digest == _replay_receipt(case)
 ```
 
-- [ ] **Step 2: Define the closed tool input**
+- [x] **Step 2: Define the closed tool input**
 
 ```python
 class DshApplyPatchInputV01(ProtocolModel):
@@ -485,7 +485,7 @@ paths to equal sorted declared paths, consumes the exact decision token, builds
 the canonical `ApplyPatchArguments`/AgentRequest, and invokes existing
 `execute_apply_patch()` with `apply_patch_in_candidate_workspace` as handler.
 
-- [ ] **Step 3: Implement without a post-hoc receipt path**
+- [x] **Step 3: Implement without a post-hoc receipt path**
 
 The only success path is:
 
@@ -508,7 +508,7 @@ return execute_apply_patch(
 Do not add a function that signs a receipt for a mutation already performed by
 native DSH `write` or `edit`.
 
-- [ ] **Step 4: Run patch, policy, atomicity, and recovery tests**
+- [x] **Step 4: Run patch, policy, atomicity, and recovery tests**
 
 ```bash
 ./.venv/bin/python -m pytest -q \
@@ -520,7 +520,7 @@ git diff --check
 
 Expected: all PASS; denial snapshots have zero writes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/openworkproof/dsh_execution.py tests/test_dsh_execution_v01.py
