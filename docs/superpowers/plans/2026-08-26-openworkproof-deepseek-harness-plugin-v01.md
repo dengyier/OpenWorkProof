@@ -708,7 +708,7 @@ git commit -m "feat: add DeepSeek Harness stdio bridge"
 - Create: `test/bridge-client.test.ts`
 - Create: `test/fixtures/fake-bridge.mjs`
 
-- [ ] **Step 1: Write RED bridge-client tests**
+- [x] **Step 1: Write RED bridge-client tests**
 
 ```ts
 it('negotiates exact versions before any case request', async () => {
@@ -716,7 +716,7 @@ it('negotiates exact versions before any case request', async () => {
   const client = await BridgeClient.start(config(bridge.command))
   expect(client.ready).toEqual({
     bridgeVersion: '0.1.0',
-    openworkproofVersion: '1.4.0',
+    openworkproofVersion: '1.3.0',
     hostVersion: '0.1.1-rc.2',
   })
 })
@@ -727,7 +727,7 @@ it('fails closed on timeout and malformed stdout', async () => {
 })
 ```
 
-- [ ] **Step 2: Implement strict configuration**
+- [x] **Step 2: Implement strict configuration**
 
 ```ts
 export interface OwpPluginConfig {
@@ -743,14 +743,14 @@ Defaults are `audit`, `owp`, `['dsh-bridge', '--stdio']`, no implicit case
 directory, and 5000 ms. Enforce without an explicit case directory fails at
 startup.
 
-- [ ] **Step 3: Implement process ownership and JSONL requests**
+- [x] **Step 3: Implement process ownership and JSONL requests**
 
 `BridgeClient` owns one child process, reserves stdout for JSONL, forwards
 stderr to DSH diagnostics with secret redaction, allocates monotonic sequence
 and SHA-256 request IDs, rejects unknown response IDs, limits a line to 1 MiB,
 uses exact timeout/abort behavior, and sends `shutdown` before termination.
 
-- [ ] **Step 4: Verify unit behavior**
+- [x] **Step 4: Verify unit behavior**
 
 ```bash
 pnpm test -- test/bridge-client.test.ts
@@ -760,7 +760,7 @@ pnpm build
 
 Expected: PASS; orphan child count is zero after every test.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/config.ts src/bridge-client.ts test/bridge-client.test.ts \

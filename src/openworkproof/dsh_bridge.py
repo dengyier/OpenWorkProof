@@ -94,6 +94,7 @@ class DshBridgeApplication:
         error_kind: str | None = None,
         decision_token: str | None = None,
         expires_at: datetime | None = None,
+        include_versions: bool = False,
     ) -> bytes:
         payload = DshResultPayloadV01.model_validate(
             {
@@ -107,6 +108,9 @@ class DshBridgeApplication:
                     if expires_at is None
                     else expires_at.strftime("%Y-%m-%dT%H:%M:%SZ")
                 ),
+                "bridge_version": "0.1.0" if include_versions else None,
+                "openworkproof_version": "1.3.0" if include_versions else None,
+                "host_version": "0.1.1-rc.2" if include_versions else None,
             }
         )
         response = DshBridgeResponseV01.model_validate(
@@ -156,6 +160,7 @@ class DshBridgeApplication:
                     parsed,
                     message_type="ready",
                     status="ready",
+                    include_versions=True,
                 )
         elif parsed.session_id != self._session_id:
             response = self._error(parsed, "SESSION_MISMATCH")

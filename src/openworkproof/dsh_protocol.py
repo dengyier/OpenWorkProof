@@ -337,6 +337,9 @@ class DshResultPayloadV01(ProtocolModel):
     error_kind: Literal["protocol_denial", "operational_failure"] | None = None
     decision_token: Digest64 | None = None
     expires_at: CanonicalUTCTime | None = None
+    bridge_version: Literal["0.1.0"] | None = None
+    openworkproof_version: Literal["1.3.0"] | None = None
+    host_version: Literal["0.1.1-rc.2"] | None = None
 
     @model_validator(mode="after")
     def _validate_result(self) -> DshResultPayloadV01:
@@ -348,6 +351,15 @@ class DshResultPayloadV01(ProtocolModel):
             raise ValueError("non-success status requires a reason code")
         if self.status in {"ready", "ok"} and self.error_kind is not None:
             raise ValueError("success status cannot contain an error kind")
+        versions = (
+            self.bridge_version,
+            self.openworkproof_version,
+            self.host_version,
+        )
+        if self.status == "ready" and any(value is None for value in versions):
+            raise ValueError("ready status requires exact negotiated versions")
+        if self.status != "ready" and any(value is not None for value in versions):
+            raise ValueError("only ready status may contain negotiated versions")
         return self
 
 
