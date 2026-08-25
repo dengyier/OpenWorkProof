@@ -64,11 +64,21 @@ class DshVerificationCaseV01:
     ledger_path: Path | None
     evidence_root: Path | None
     verification_runner: Callable[[Path], int] | None
+    git_dir: Path | None = None
 
 
-def _git(root: Path, *args: str) -> bytes:
+def _git(root: Path, *args: str, git_dir: Path | None = None) -> bytes:
+    prefix = (
+        ["git", "-C", str(root)]
+        if git_dir is None
+        else [
+            "git",
+            f"--git-dir={git_dir}",
+            f"--work-tree={root}",
+        ]
+    )
     return subprocess.run(
-        ["git", "-C", str(root), *args],
+        [*prefix, *args],
         check=True,
         capture_output=True,
     ).stdout
@@ -133,10 +143,21 @@ def verify_dsh_code_change(
             now=now,
         )
     try:
-        candidate = _git(case.repository_root, "rev-parse", "HEAD").decode(
+        candidate = _git(
+            case.repository_root,
+            "rev-parse",
+            "HEAD",
+            git_dir=case.git_dir,
+        ).decode(
             "ascii"
         ).strip()
-        _git(case.repository_root, "cat-file", "-e", case.source_revision)
+        _git(
+            case.repository_root,
+            "cat-file",
+            "-e",
+            case.source_revision,
+            git_dir=case.git_dir,
+        )
         raw_paths = _git(
             case.repository_root,
             "diff",
@@ -144,12 +165,14 @@ def verify_dsh_code_change(
             "-z",
             case.source_revision,
             "--",
+            git_dir=case.git_dir,
         ) + _git(
             case.repository_root,
             "ls-files",
             "--others",
             "--exclude-standard",
             "-z",
+            git_dir=case.git_dir,
         )
         changed = tuple(
             sorted(

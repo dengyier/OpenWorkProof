@@ -3779,6 +3779,73 @@ def _read_candidate_control(workspace: CandidateWorkspace) -> dict[str, Any]:
     return _parse_candidate_control(raw, workspace)
 
 
+def _replace_candidate_control(
+    workspace: CandidateWorkspace,
+    *,
+    head_commit: str,
+    manifest_digest: str,
+) -> CandidateWorkspace:
+    """Atomically advance the candidate control record to one verified HEAD."""
+
+    rebound = CandidateWorkspace(
+        runtime_root=workspace.runtime_root,
+        candidate_root=workspace.candidate_root,
+        worktree=workspace.worktree,
+        git_dir=workspace.git_dir,
+        workspace_id=workspace.workspace_id,
+        source_artifact_sha256=workspace.source_artifact_sha256,
+        head_commit=head_commit,
+        workspace_manifest_digest=manifest_digest,
+    )
+    payload = rfc8785.dumps(
+        {
+            "schema_version": "openworkproof-candidate-control/0.1",
+            "workspace_id": rebound.workspace_id,
+            "source_artifact_sha256": rebound.source_artifact_sha256,
+            "head_commit": rebound.head_commit,
+            "workspace_manifest_digest": rebound.workspace_manifest_digest,
+            "worktree_inode": os.stat(
+                rebound.worktree, follow_symlinks=False
+            ).st_ino,
+            "git_inode": os.stat(rebound.git_dir, follow_symlinks=False).st_ino,
+        }
+    )
+    temporary = rebound.candidate_root / "control.json.next"
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("candidate control write did not progress")
+            view = view[written:]
+        os.fsync(descriptor)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    finally:
+        os.close(descriptor)
+    try:
+        os.replace(temporary, rebound.candidate_root / "control.json")
+        directory = os.open(
+            rebound.candidate_root,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        _validate_candidate_layout(rebound)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return rebound
+
+
 def _parse_candidate_control(
     raw: bytes,
     workspace: CandidateWorkspace,
@@ -4060,7 +4127,13 @@ def apply_patch_in_candidate_workspace(request: PatchRequest) -> PatchResult:
 
     if type(request) is not PatchRequest:
         raise CandidateWorkspaceError("candidate patch request is invalid")
-    workspace = request.workspace
+    workspace = _candidate_from_request_binding(
+        runtime_root=request.workspace.runtime_root,
+        workspace_id=request.workspace.workspace_id,
+        source_artifact_sha256=request.workspace.source_artifact_sha256,
+        expected_head_commit=request.parent_commit,
+        expected_workspace_manifest_digest=request.parent_manifest_digest,
+    )
     _validate_candidate_layout(workspace)
     if (
         not isinstance(request.replay_profile, ReplayProfile)
@@ -4153,6 +4226,11 @@ def apply_patch_in_candidate_workspace(request: PatchRequest) -> PatchResult:
             head_commit=actual_commit,
             manifest_digest=expected_manifest_digest,
         )
+        _replace_candidate_control(
+            workspace,
+            head_commit=actual_commit,
+            manifest_digest=expected_manifest_digest,
+        )
     except Exception as patch_error:
         try:
             _run_git(
@@ -4166,6 +4244,11 @@ def apply_patch_in_candidate_workspace(request: PatchRequest) -> PatchResult:
                 arguments=("clean", "-ffdx"),
             )
             _verify_candidate_checkpoint(
+                workspace,
+                head_commit=request.parent_commit,
+                manifest_digest=request.parent_manifest_digest,
+            )
+            _replace_candidate_control(
                 workspace,
                 head_commit=request.parent_commit,
                 manifest_digest=request.parent_manifest_digest,
@@ -4210,7 +4293,13 @@ def validate_patch_result_against_candidate(
         raise CandidateWorkspaceError("candidate patch request is invalid")
     if type(result) is not PatchResult:
         raise CandidateWorkspaceError("candidate patch result is invalid")
-    workspace = request.workspace
+    workspace = _candidate_from_request_binding(
+        runtime_root=request.workspace.runtime_root,
+        workspace_id=request.workspace.workspace_id,
+        source_artifact_sha256=request.workspace.source_artifact_sha256,
+        expected_head_commit=result.candidate_commit,
+        expected_workspace_manifest_digest=result.workspace_manifest_digest,
+    )
     _validate_candidate_layout(workspace)
     if (
         not isinstance(request.replay_profile, ReplayProfile)
@@ -4304,7 +4393,13 @@ def rollback_candidate_workspace(request: RollbackRequest) -> RollbackResult:
         != request.failure_target_patch_receipt_digest
     ):
         raise CandidateWorkspaceError("rollback target binding is invalid")
-    workspace = request.workspace
+    workspace = _candidate_from_request_binding(
+        runtime_root=request.workspace.runtime_root,
+        workspace_id=request.workspace.workspace_id,
+        source_artifact_sha256=request.workspace.source_artifact_sha256,
+        expected_head_commit=request.before_commit,
+        expected_workspace_manifest_digest=request.before_manifest_digest,
+    )
     _validate_candidate_layout(workspace)
     _verify_candidate_checkpoint(
         workspace,
@@ -4340,6 +4435,11 @@ def rollback_candidate_workspace(request: RollbackRequest) -> RollbackResult:
             head_commit=request.parent_commit,
             manifest_digest=request.parent_manifest_digest,
         )
+        _replace_candidate_control(
+            workspace,
+            head_commit=request.parent_commit,
+            manifest_digest=request.parent_manifest_digest,
+        )
     except CandidateWorkspaceError:
         try:
             _run_git(
@@ -4353,6 +4453,11 @@ def rollback_candidate_workspace(request: RollbackRequest) -> RollbackResult:
                 arguments=("clean", "-ffdx"),
             )
             _verify_candidate_checkpoint(
+                workspace,
+                head_commit=request.before_commit,
+                manifest_digest=request.before_manifest_digest,
+            )
+            _replace_candidate_control(
                 workspace,
                 head_commit=request.before_commit,
                 manifest_digest=request.before_manifest_digest,
