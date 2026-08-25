@@ -92,15 +92,16 @@ V0.1 must:
 3. provide bilingual Chinese and English status and documentation surfaces;
 4. default to non-blocking `audit` mode that emits observation facts only;
 5. provide explicit `enforce` mode through an `owp-verified` profile;
-6. combine asynchronous authorization with a monotonic final guard;
-7. use the existing Python OpenWorkProof implementation as the sole protocol authority;
-8. keep Manager and Acceptor private keys outside Harness and the Agent;
-9. bind live tool results to durable Harness events and declared artifacts;
-10. perform independent repository readback and test rerun before VerificationDecision;
-11. keep verification distinct from acceptance;
-12. export a delivery case that another environment can verify offline;
-13. package prebuilt plugin artifacts suitable for npm installation;
-14. provide compatibility, privacy, threat, and supply-chain evidence proportional to a public developer preview.
+6. expose OWP-owned patch and test tools instead of post-hoc wrapping native mutations;
+7. combine asynchronous authorization with a monotonic final guard;
+8. use the existing Python OpenWorkProof implementation as the sole protocol authority;
+9. keep Manager and Acceptor private keys outside Harness and the Agent;
+10. bind live tool results to durable Harness events and declared artifacts;
+11. perform independent repository readback and test rerun before VerificationDecision;
+12. keep verification distinct from acceptance;
+13. export a delivery case that another environment can verify offline;
+14. package prebuilt plugin artifacts suitable for npm installation;
+15. provide compatibility, privacy, threat, and supply-chain evidence proportional to a public developer preview.
 
 ## 5. Non-goals
 
@@ -197,6 +198,7 @@ DeepSeek Harness profile
   |
   +-- OWP DSH Bundle (TypeScript)
   |     +-- Contract Loader
+  |     +-- OWP Tool Registrar
   |     +-- Async Authorization Hook
   |     +-- Monotonic Policy Guard
   |     +-- Live/Durable Evidence Correlator
@@ -243,7 +245,7 @@ Each V0.1 case freezes before execution:
 - one repository root and current revision;
 - allowed path prefixes;
 - denied path prefixes;
-- allowed Harness tool names;
+- allowed OWP tool names;
 - maximum tool-call count and deadline;
 - exact verification commands;
 - expected exit-code policy;
@@ -251,11 +253,24 @@ Each V0.1 case freezes before execution:
 - Acceptor key binding;
 - stop and rejection conditions.
 
-The first sample case uses a disposable Git fixture. It authorizes one bounded text or source change and one test command. It rejects writes outside the allowed path and rejects any export whose final repository state differs from the independently read state.
+The first sample case uses a disposable Git fixture. It authorizes one bounded text or source change through `owp_apply_patch` and one frozen test through `owp_run_tests`. It rejects writes outside the allowed path and rejects any export whose final repository state differs from the independently read state.
 
 ## 11. Enforcement pipeline
 
-### 11.1 Pre-execution authorization
+### 11.1 OWP-owned execution tools
+
+The plugin registers two V0.1 tools:
+
+```text
+owp_apply_patch
+owp_run_tests
+```
+
+Their tool bodies call the Python bridge, which invokes the existing OpenWorkProof authorization, execution, evidence-publication, and receipt transactions. Enforce mode does not run a native DSH write and then manufacture an OWP receipt afterward.
+
+The `owp-verified` profile denies native consequential tools including `write`, `edit`, and unrestricted `bash`. Read-only tools remain available only within the frozen repository boundary. Audit mode may observe native tools but produces ObservationRecords rather than ActionReceipts.
+
+### 11.2 Pre-execution authorization
 
 For every consequential tool call:
 
@@ -264,13 +279,13 @@ For every consequential tool call:
 3. the adapter stores only the short-lived decision token in memory;
 4. the listener never rewrites tool arguments.
 
-### 11.2 Monotonic final guard
+### 11.3 Monotonic final guard
 
-The synchronous `tools.guard()` checks that the exact execution has a current allow token. Missing, mismatched, expired, replayed, or already-consumed tokens produce a denial reason.
+The synchronous `tools.guard()` denies native consequential tools in Enforce mode and checks that each OWP-owned execution has a current allow token. Missing, mismatched, expired, replayed, or already-consumed tokens produce a denial reason.
 
 This guard is mandatory because another pre-execution listener may short-circuit the waterfall. No later listener can turn a guard denial into permission.
 
-### 11.3 Result and durable-event correlation
+### 11.4 Result and durable-event correlation
 
 The adapter observes the frozen live `tools/result` and separately observes append-only `session/event` records. It correlates by Harness execution identity, call ID, session ID, and sequence.
 
@@ -482,6 +497,7 @@ Exact peer dependency ranges come from compatibility tests, not examples.
 ### 20.1 Authorization and enforcement
 
 - an ordinary prompt does not create authorization;
+- native `write`, `edit`, and unrestricted `bash` cannot bypass OWP-owned tools in Enforce mode;
 - out-of-scope write is denied by the monotonic guard;
 - expired, revoked, replayed, wrong-target, and over-scope grants are denied;
 - another pre-execution listener cannot bypass the final guard;
