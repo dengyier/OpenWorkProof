@@ -19,6 +19,7 @@ OpenWorkProof 不保证 Agent 的结果一定正确，也不替客户作出验�
 
 [安装](#五分钟开始) · [工作原理](#工作原理) ·
 [Human Agency](#human-agency能力越强人的决定权越不能消失) ·
+[DeepSeek Harness](docs/integrations/deepseek-harness.md) ·
 [协议文档](docs/protocol/human-agency-profile-v0.1.md) ·
 [English](README_en.md)
 
@@ -272,6 +273,7 @@ owp acceptance-bundle-verify DIRECTORY
 | CLI | 本地验证、CI 和自动化脚本 | `owp --help` |
 | MCP | 需要把 OWP 暴露为 Agent 工具的团队 | [MCP_SERVER.md](MCP_SERVER.md) |
 | AgentTeams | Manager、Developer、Verifier 多角色协作 | [agentteams/README.md](agentteams/README.md) |
+| DeepSeek Harness | 需要事前授权、独立复核与外部验收的代码变更 | [集成说明](docs/integrations/deepseek-harness.md) |
 | Python API | 需要嵌入已有平台或服务 | [src/openworkproof](src/openworkproof/) |
 
 GitHub Action 的 four-question 对应中文四问报告：
@@ -283,6 +285,11 @@ GitHub Action 的 four-question 对应中文四问报告：
 
 报告结论是 `VERIFIED`、`REFUTED` 或 `UNKNOWN`，并说明是否只达到
 `READY_FOR_ACCEPTANCE`。它不会把协议结论写成客户已经接受或已经付款。
+
+DeepSeek Harness 适配器当前是本地开发者预览，锁定
+`DeepSeek Harness 0.1.1-rc.2`。Audit 只记录观察事实；Enforce 在工具执行前授权，并
+阻断原生 `write`、`edit` 和不受限 `bash`。本地预检通过不等于 npm 发布、外部复现、
+客户采用或 DeepSeek 官方背书。
 
 ## 当前可以复核的证据
 

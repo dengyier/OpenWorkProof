@@ -26,6 +26,28 @@ def _text(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
+def test_deepseek_harness_docs_state_exact_security_and_claim_boundaries() -> None:
+    combined = "\n".join(
+        _text(relative)
+        for relative in (
+            "README.md",
+            "README_en.md",
+            "docs/status.md",
+            "docs/integrations/deepseek-harness.md",
+        )
+    )
+    for literal in (
+        "DeepSeek Harness 0.1.1-rc.2",
+        "Audit emits ObservationRecord",
+        "Enforce denies native write/edit/bash",
+        "VERIFIED != ACCEPTED",
+        "Manager and Acceptor private keys remain outside Harness",
+        "customer_adoption: not_evidenced",
+        "deepseek_endorsement: not_evidenced",
+    ):
+        assert literal in combined, f"DeepSeek Harness docs missing: {literal}"
+
+
 def test_docs_assert_truth_boundaries() -> None:
     for relative in DOCS:
         text = _text(relative)

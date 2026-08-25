@@ -3,6 +3,31 @@
 > 本文档是项目实现状态的权威记录。README 只保留概览，
 > 「已经完成什么」和「尚未完成什么」的完整清单以本文为准。
 
+## DeepSeek Harness 插件 V0.1 本地候选（2026-08-26）
+
+隔离分支与独立插件仓库已完成本地开发者预览：
+
+- 锁定 `DeepSeek Harness 0.1.1-rc.2`、插件 `0.1.0`、OpenWorkProof `1.3.0`；
+- 打包后的插件已安装进全新临时 DSH profile，并由 `--dump-config` 确认 bundle 生效；
+- Enforce 的单调最终 guard 阻断原生 `write`、`edit`、`bash`，OWP patch/test 工具只发送
+  闭合参数；
+- 一次性 Git 夹具完成授权 patch、冻结测试、独立 Git 回读、外部 Acceptor 签名、
+  Acceptance 绑定、交付导出、离线复核与篡改拒绝；
+- DSH/patch/rollback 聚焦回归 `388 passed / 4 environment-gated skipped`；插件
+  `30 passed`，typecheck/build/live-preflight 均通过。
+
+当前仍是本地候选：未创建插件远端、未发布 npm、未合并或推送 core、未在第二台环境
+外部复现。通用案例初始化器和独立 Verifier 服务编排仍需由集成方准备；本地夹具不能写成
+任意仓库零配置交付。
+
+```yaml
+customer_adoption: not_evidenced
+deepseek_endorsement: not_evidenced
+npm_publication: not_evidenced
+external_reproduction: not_evidenced
+production_use: not_evidenced
+```
+
 ## Human Agency Profile 0.1：Task 9 供应链与全量门收口（2026-08-24）
 
 Human Agency Profile 0.1 已在隔离分支完成本地供应链与 required-live 验证；本节

@@ -21,6 +21,7 @@ verification separate from acceptance, and preserves the human ability to accept
 
 [Install](#five-minute-start) · [How it works](#how-it-works) ·
 [Human Agency](#human-agency-more-capability-must-not-mean-less-human-choice) ·
+[DeepSeek Harness](docs/integrations/deepseek-harness.md) ·
 [Protocol](docs/protocol/human-agency-profile-v0.1.md) · [中文](README.md)
 
 ```text
@@ -292,6 +293,7 @@ See [docs/offline-verification.md](docs/offline-verification.md) for the complet
 | CLI | Local verification, CI, and automation | `owp --help` |
 | MCP | Teams exposing OpenWorkProof as agent tools | [MCP_SERVER.md](MCP_SERVER.md) |
 | AgentTeams | Manager, Developer, and Verifier collaboration | [agentteams/README.md](agentteams/README.md) |
+| DeepSeek Harness | Code changes needing prior authority, independent rechecking, and external acceptance | [integration guide](docs/integrations/deepseek-harness.md) |
 | Python API | Platforms embedding the protocol | [src/openworkproof](src/openworkproof/) |
 
 The GitHub Action produces a four-question report:
@@ -304,6 +306,11 @@ The GitHub Action produces a four-question report:
 The result is `VERIFIED`, `REFUTED`, or `UNKNOWN`, and states whether the work has only reached
 `READY_FOR_ACCEPTANCE`. It does not report protocol verification as customer acceptance or
 payment.
+
+The DeepSeek Harness adapter is currently a local developer preview pinned to
+`DeepSeek Harness 0.1.1-rc.2`. Audit records observations only. Enforce authorizes before
+execution and blocks native `write`, `edit`, and unrestricted `bash`. A passing local preflight
+is not npm publication, external reproduction, customer adoption, or DeepSeek endorsement.
 
 ## Evidence you can verify
 
