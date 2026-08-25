@@ -347,7 +347,7 @@ git commit -m "feat: define DeepSeek Harness bridge protocol"
 - Create: `src/openworkproof/dsh_case.py`
 - Create: `tests/test_dsh_case_v01.py`
 
-- [ ] **Step 1: Write RED tests for case and key isolation**
+- [x] **Step 1: Write RED tests for case and key isolation**
 
 ```python
 def test_case_rejects_manager_or_acceptor_private_keys(tmp_path: Path) -> None:
@@ -371,7 +371,7 @@ def test_decision_token_is_exact_one_use() -> None:
     assert not store.consume(token, _execution())
 ```
 
-- [ ] **Step 2: Implement `DshCaseManifestV01`**
+- [x] **Step 2: Implement `DshCaseManifestV01`**
 
 The manifest contains exact absolute runtime paths but signs only stable public
 identities and relative scope:
@@ -399,7 +399,7 @@ non-regular key files, key modes broader than `0600`, wrong current revision,
 Manager/Acceptor private-key filenames or JSON keys, and unknown files in the
 case control directory.
 
-- [ ] **Step 3: Implement exact one-use decision tokens**
+- [x] **Step 3: Implement exact one-use decision tokens**
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -421,19 +421,21 @@ The implementation stores SHA-256 of the random 32-byte token, binds the
 canonical execution digest, deletes on first consume, and rejects expired,
 mismatched, missing, or replayed tokens without exception-driven allow.
 
-- [ ] **Step 4: Verify path, permission, replay and expiry matrices**
+- [x] **Step 4: Verify path, permission, replay and expiry matrices**
 
 Run:
 
 ```bash
 ./.venv/bin/python -m pytest -q tests/test_dsh_case_v01.py
-./.venv/bin/python -m pytest -q tests/test_policy.py tests/test_runtime_context.py
+./.venv/bin/python -m pytest -q tests/test_policy.py
+./.venv/bin/python -m pytest -q tests/test_mcp_server.py \
+  -k "authorization_prefix_digest or stale_context"
 git diff --check
 ```
 
 Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/openworkproof/dsh_case.py tests/test_dsh_case_v01.py
