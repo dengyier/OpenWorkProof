@@ -288,8 +288,10 @@ GitHub Action 的 four-question 对应中文四问报告：
 
 DeepSeek Harness 适配器当前是本地开发者预览，锁定
 `DeepSeek Harness 0.1.1-rc.2`。Audit 只记录观察事实；Enforce 在工具执行前授权，并
-阻断原生 `write`、`edit` 和不受限 `bash`。本地预检通过不等于 npm 发布、外部复现、
-客户采用或 DeepSeek 官方背书。
+阻断原生 `write`、`edit` 和不受限 `bash`。`/owp-verify` 只消费因果关联后的精确补丁
+回执；真实 CLI 进程已完成账本回读、独立验证、无私钥验收草稿与离线导出，并在进程重启
+后恢复同一已提交 receipt。上述本地预检不等于 npm 发布、外部复现、客户采用或
+DeepSeek 官方背书。
 
 ## 当前可以复核的证据
 

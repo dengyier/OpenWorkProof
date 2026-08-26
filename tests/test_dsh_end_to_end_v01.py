@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -14,19 +12,19 @@ import pytest
 import rfc8785
 
 from openworkproof.delivery_case import DeliveryCaseError, verify_exported_delivery_case
-from openworkproof import repo_tools
 from openworkproof.dsh_bridge import (
     DshBridgeApplication,
     _durable_action_receipt_digest,
 )
-from openworkproof.dsh_case import dsh_case_id
-from openworkproof.dsh_protocol import DshActionExecutePayloadV01
-from scripts.create_dsh_fixture import create_dsh_fixture
-
-
-def _write_private_key(path: Path, key) -> None:
-    path.write_bytes(key.private_bytes_raw())
-    os.chmod(path, 0o600)
+from openworkproof.dsh_protocol import (
+    DshActionExecutePayloadV01,
+    canonical_bytes,
+    sign_dsh_observation,
+)
+from scripts.create_dsh_fixture import (
+    create_dsh_fixture,
+    prepare_dsh_process_case,
+)
 
 
 def _run_restarted_bridge(
@@ -37,7 +35,8 @@ def _run_restarted_bridge(
     patch_text: str,
     now,
     session_id: str,
-) -> dict[str, object]:
+    export_destination: Path | None = None,
+) -> dict[str, dict[str, object]]:
     process = subprocess.Popen(
         [sys.executable, "-m", "openworkproof.cli", "dsh-bridge", "--stdio"],
         cwd=Path(__file__).parents[1],
@@ -62,7 +61,7 @@ def _run_restarted_bridge(
         }
         return json.dumps(body, separators=(",", ":")) + "\n"
 
-    requests = (
+    requests = [
         message(
             0,
             "hello",
@@ -90,16 +89,56 @@ def _run_restarted_bridge(
                 "test_profile_digest": None,
             },
         ),
-    )
+    ]
     try:
+        responses: list[dict[str, object]] = []
         for request in requests:
             process.stdin.write(request)
-        process.stdin.flush()
-        response_lines = [process.stdout.readline() for _ in requests]
-        if any(not line for line in response_lines):
-            raise AssertionError(process.stderr.read())
-        responses = [json.loads(line) for line in response_lines]
-        return responses[-1]
+            process.stdin.flush()
+            line = process.stdout.readline()
+            if not line:
+                raise AssertionError(process.stderr.read())
+            responses.append(json.loads(line))
+        result = {"action": responses[-1]}
+        if export_destination is not None:
+            verify_request = message(
+                3,
+                "verify_request",
+                {
+                    "case_id": case_id,
+                    "action_receipt_digest": responses[-1]["payload"][
+                        "result_digest"
+                    ],
+                },
+            )
+            process.stdin.write(verify_request)
+            process.stdin.flush()
+            verify_response = json.loads(process.stdout.readline())
+            result["verify"] = verify_response
+            verification_digest = verify_response["payload"]["result_digest"]
+            acceptance_request = message(
+                4,
+                "acceptance_draft",
+                {
+                    "case_id": case_id,
+                    "verification_digest": verification_digest,
+                },
+            )
+            process.stdin.write(acceptance_request)
+            process.stdin.flush()
+            result["acceptance"] = json.loads(process.stdout.readline())
+            export_request = message(
+                5,
+                "export_request",
+                {
+                    "case_id": case_id,
+                    "destination": str(export_destination),
+                },
+            )
+            process.stdin.write(export_request)
+            process.stdin.flush()
+            result["export"] = json.loads(process.stdout.readline())
+        return result
     finally:
         process.kill()
         process.wait(timeout=5)
@@ -246,72 +285,36 @@ def test_verified_code_change_closed_loop(
     assert action_response["payload"]["result_digest"] == recovered
     assert replayed_calls == []
 
-    shutil.rmtree(tmp_path / "delivery-case")
-    shutil.rmtree(tmp_path / "exported")
-    source_runtime = tmp_path / "source-runtime"
-    source_runtime.mkdir(mode=0o700)
-    source_workspace = repo_tools.initialize_candidate_workspace(
-        repo_tools.WorkspaceInitRequest(
-            runtime_root=source_runtime,
-            workspace_id="6" * 64,
-            source=case["source"],
-        )
+    process_case_id = prepare_dsh_process_case(
+        tmp_path,
+        case,
+        ephemeral_role_keys,
     )
-    (source_workspace.worktree / ".git").write_text(
-        f"gitdir: {source_workspace.git_dir}\n",
-        encoding="utf-8",
+    observation = sign_dsh_observation(
+        {
+            "schema_version": "openworkproof-dsh-observation/0.1",
+            "host": "deepseek-harness",
+            "host_version": "0.1.1-rc.2",
+            "adapter_version": "0.1.0",
+            "execution": case["patch_execution"].model_dump(mode="json"),
+            "authorization_status": "authorized",
+            "live_result_digest": recovered,
+            "durable_call_sequence": 1,
+            "durable_result_sequence": 2,
+            "receipt_digest": recovered,
+            "evidence_gap_codes": [],
+            "observed_at": fixed_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "nonce": "e" * 64,
+        },
+        ephemeral_role_keys["Sidecar"][0],
     )
-    subprocess.run(
-        [
-            "git",
-            f"--git-dir={source_workspace.git_dir}",
-            "config",
-            "core.bare",
-            "false",
-        ],
-        check=True,
+    observation_root = case["evidence_root"] / "dsh-observations"
+    observation_root.mkdir(mode=0o700)
+    (observation_root / f"{observation.record_id}.json").write_bytes(
+        canonical_bytes(observation) + b"\n"
     )
-    subprocess.run(
-        [
-            "git",
-            f"--git-dir={source_workspace.git_dir}",
-            "config",
-            "core.worktree",
-            str(source_workspace.worktree),
-        ],
-        check=True,
-    )
-    key_root = tmp_path / "keys"
-    key_root.mkdir(mode=0o700)
-    sidecar_key = key_root / "sidecar.key"
-    developer_key = key_root / "developer.key"
-    _write_private_key(sidecar_key, ephemeral_role_keys["Sidecar"][0])
-    _write_private_key(developer_key, ephemeral_role_keys["Developer"][0])
-    stable_manifest = {
-        "schema_version": "openworkproof-dsh-case/0.1",
-        "work_order_digest": case["work_order_digest"],
-        "source_revision": case["work_order"].source_commit,
-        "allowed_path_roots": ["src"],
-        "denied_path_roots": ["secrets"],
-        "allowed_tools": ["owp_apply_patch"],
-        "test_profile_digest": case["profile_digest"],
-        "mode": "audit",
-    }
-    process_case_id = dsh_case_id(stable_manifest)
-    case_manifest = {
-        **stable_manifest,
-        "case_id": process_case_id,
-        "repository_root": str(source_workspace.worktree),
-        "ledger_path": str(case["ledger_path"]),
-        "evidence_root": str(case["evidence_root"]),
-        "candidate_runtime_root": str(case["candidate"].runtime_root),
-        "candidate_workspace_id": case["candidate"].workspace_id,
-        "verifier_socket_path": None,
-        "sidecar_key_path": str(sidecar_key),
-        "developer_key_path": str(developer_key),
-    }
-    (tmp_path / "case.json").write_bytes(rfc8785.dumps(case_manifest) + b"\n")
 
+    process_export = tmp_path.parent / f"{tmp_path.name}-process-export"
     first_process = _run_restarted_bridge(
         tmp_path,
         case_id=process_case_id,
@@ -319,6 +322,7 @@ def test_verified_code_change_closed_loop(
         patch_text=case["patch_bytes"].decode("utf-8"),
         now=fixed_now,
         session_id="process-restart-1",
+        export_destination=process_export,
     )
     second_process = _run_restarted_bridge(
         tmp_path,
@@ -328,9 +332,12 @@ def test_verified_code_change_closed_loop(
         now=fixed_now,
         session_id="process-restart-2",
     )
-    assert first_process["payload"]["result_digest"] == recovered
-    assert second_process == {
-        **first_process,
+    assert first_process["action"]["payload"]["result_digest"] == recovered
+    assert first_process["verify"]["payload"]["status"] == "ok"
+    assert first_process["acceptance"]["payload"]["status"] == "ok"
+    assert first_process["export"]["payload"]["status"] == "ok"
+    assert second_process["action"] == {
+        **first_process["action"],
         "request_id": "3" * 64,
         "session_id": "process-restart-2",
     }

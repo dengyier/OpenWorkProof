@@ -111,14 +111,14 @@ outside all frozen/control paths. Cases that allow `owp_run_tests` now also
 bind an in-case `verifier_socket_path`; the socket client and production
 handler assembly remain to be implemented.
 
-- [ ] **Step 1: Write RED ordinary-CLI tests**
+- [x] **Step 1: Write RED ordinary-CLI tests**
 
 Start the real CLI bridge, open a generated case, authorize one patch, execute
 it, request verification, request an acceptance draft, and export. Assert none
 of the responses returns `EXECUTION_CASE_UNAVAILABLE` or
 `HANDLER_NOT_CONFIGURED`.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 ./.venv/bin/python -m pytest -q \
@@ -127,20 +127,20 @@ of the responses returns `EXECUTION_CASE_UNAVAILABLE` or
 
 Expected: the real CLI bridge has no handler factory.
 
-- [ ] **Step 3: Implement one production factory**
+- [x] **Step 3: Implement one production factory**
 
 `build_dsh_case_handlers(manifest, token_store)` constructs the four existing
 `DshCaseHandlers` callables from validated manifest data. It calls existing
 OpenWorkProof execution, verification, acceptance-binding, and export
 functions; it does not duplicate protocol logic or load Manager/Acceptor keys.
 
-- [ ] **Step 4: Wire the factory only into the ordinary CLI**
+- [x] **Step 4: Wire the factory only into the ordinary CLI**
 
 `run_stdio_bridge()` defaults to `DshBridgeApplication(clock=clock,
 handler_factory=build_dsh_case_handlers)`. Unit tests may continue injecting
 special handlers explicitly.
 
-- [ ] **Step 5: Run GREEN and commit**
+- [x] **Step 5: Run GREEN and commit**
 
 ```bash
 ./.venv/bin/python -m pytest -q \
@@ -246,13 +246,13 @@ git commit -m "fix: make Harness audit evidence explicit"
 - Modify: `/Users/molin/Project/openworkproof-dsh-plugin/src/commands.ts`
 - Modify: `/Users/molin/Project/openworkproof-dsh-plugin/test/commands.test.ts`
 
-- [ ] **Step 1: Write RED tests**
+- [x] **Step 1: Write RED tests**
 
 Assert that `verifier-private-key.hex` and nested verifier-private-key fields
 are rejected, and that the exact command printed by `/owp-export` succeeds on
 the produced package and fails after one-byte tampering.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 ./.venv/bin/python -m pytest -q \
@@ -261,13 +261,13 @@ cd /Users/molin/Project/openworkproof-dsh-plugin
 pnpm vitest run test/commands.test.ts
 ```
 
-- [ ] **Step 3: Apply the minimal custody and command corrections**
+- [x] **Step 3: Apply the minimal custody and command corrections**
 
 Extend forbidden external authority key names to Manager, Verifier, and
 Acceptor. Make the DSH export handler and printed verifier refer to one actual
 format; do not merely rename the command text.
 
-- [ ] **Step 4: Run GREEN and commit each repository**
+- [x] **Step 4: Run GREEN and commit each repository**
 
 Run the focused tests, `pip check`, plugin typecheck, and `git diff --check`,
 then make one single-purpose commit in each repository.
@@ -286,46 +286,46 @@ round trip remains gated on the production handler from Task 2.
 - Modify: `/Users/molin/Project/openworkproof-dsh-plugin/src/bridge-client.ts`
 - Modify: `/Users/molin/Project/openworkproof-dsh-plugin/test/bridge-client.test.ts`
 
-- [ ] **Step 1: Write RED process-restart tests**
+- [x] **Step 1: Write RED process-restart tests**
 
 Inject ACK loss after a real commit, terminate the bridge, start a new bridge,
 query by case plus execution/request identity, and assert the committed digest
 is recovered without a second handler call. Assert unavailable truth becomes
 UNKNOWN and is never retried automatically.
 
-- [ ] **Step 2: Verify RED in both repositories**
+- [x] **Step 2: Verify RED in both repositories**
 
 Current in-memory response caches must fail the cross-process test.
 
-- [ ] **Step 3: Persist and query committed truth minimally**
+- [x] **Step 3: Persist and query committed truth minimally**
 
 Use the case ledger/evidence store as the durable authority. Add a closed query
 message only if existing receipt lookup cannot answer the exact execution
 binding. The TypeScript client may reconnect and query; it must not replay a
 consequential `action_execute` after an indeterminate timeout.
 
-- [ ] **Step 4: Run GREEN and commit**
+- [x] **Step 4: Run GREEN and commit**
 
 Run bridge, execution, client, and package regressions before the two
 single-purpose commits.
 
-Progress: the core bridge now performs an exact ledger readback by execution
-context and action arguments before invoking a consequential handler; a fresh
-bridge instance recovered a real committed patch receipt without replay, and
-indeterminate readback returned UNKNOWN. The TypeScript client test proves one
-write on timeout and no automatic retry. A separate OS-process kill/respawn
-test is still required before this task is complete.
+Completed: the core bridge performs exact ledger readback by execution context
+and action arguments before invoking a consequential handler. A separate
+Python process is terminated and restarted, recovers the committed patch
+receipt without replay, and returns UNKNOWN for indeterminate truth. The
+TypeScript client proves one write on timeout and no automatic retry.
 
 ## Task 7: Replace the mock-heavy preflight with a real packed chain
 
 **Files:**
 - Modify: `/Users/molin/Project/openworkproof-dsh-plugin/scripts/live-preflight.mjs`
-- Create: `/Users/molin/Project/openworkproof-dsh-plugin/scripts/create-live-case.mjs`
-- Modify: `/Users/molin/Project/openworkproof-dsh-plugin/package.json`
+- Create: `/Users/molin/Project/openworkproof-dsh-plugin/scripts/preflight-driver/`
+- Create: `/Users/molin/Project/openworkproof-dsh-plugin/test/live-preflight-source.test.ts`
 - Modify: `scripts/create_dsh_fixture.py`
 - Modify: `tests/test_dsh_end_to_end_v01.py`
+- Create: `tests/test_dsh_live_case_v01.py`
 
-- [ ] **Step 1: Write a RED real-chain assertion**
+- [x] **Step 1: Write a RED real-chain assertion**
 
 The preflight must reject any artifact whose packed code contains a wrong OWP
 version and must fail unless logs prove: profile load, actual DSH call, actual
@@ -333,24 +333,24 @@ core bridge PID, case open, native-mutator denial, authorized OWP action,
 observation commit, bound verification, clean export verification, and tamper
 rejection.
 
-- [ ] **Step 2: Remove mock proof substitutes**
+- [x] **Step 2: Remove mock proof substitutes**
 
 Do not directly instantiate `OwpPolicy`, do not supply a fake bridge, and do not
 count a separately run Python pytest fixture as the host integration result.
 
-- [ ] **Step 3: Execute the packed chain**
+- [x] **Step 3: Execute the packed chain**
 
 Install the tarball into a clean `DSH_HOME`, create one disposable signed case,
 launch the pinned host with the real plugin configuration and real CLI bridge,
 run the bounded workflow, and verify the emitted export in a second process.
 
-- [ ] **Step 4: Emit a composed manifest**
+- [x] **Step 4: Emit a composed manifest**
 
 Write canonical JSON binding core/plugin commits, versions, artifact digests,
 runtime versions, exact command, result, and boundary statement. Verify the
 manifest in an automated test.
 
-- [ ] **Step 5: Commit after the real chain passes**
+- [x] **Step 5: Commit after the real chain passes**
 
 Make separate core and plugin commits. Do not update release metadata before
 this gate.

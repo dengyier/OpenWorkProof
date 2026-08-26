@@ -309,8 +309,11 @@ payment.
 
 The DeepSeek Harness adapter is currently a local developer preview pinned to
 `DeepSeek Harness 0.1.1-rc.2`. Audit records observations only. Enforce authorizes before
-execution and blocks native `write`, `edit`, and unrestricted `bash`. A passing local preflight
-is not npm publication, external reproduction, customer adoption, or DeepSeek endorsement.
+execution and blocks native `write`, `edit`, and unrestricted `bash`. `/owp-verify` consumes only
+the exact causally correlated patch receipt. Real CLI processes now read committed truth back,
+verify independently, prepare a keyless acceptance draft, export for offline replay, and recover
+the same committed receipt after process restart. These local checks are not npm publication,
+external reproduction, customer adoption, or DeepSeek endorsement.
 
 ## Evidence you can verify
 

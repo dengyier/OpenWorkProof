@@ -66,7 +66,7 @@ dsh --profile owp-preview --dump-config
 ```
 
 默认 bundle 是 Audit。Enforce 必须显式叠加 profile，并指向一个已经冻结、权限为私有、
-且不含 Manager/Acceptor 私钥的 case 目录：
+且不含 Manager、Verifier、Acceptor 私钥的 case 目录：
 
 ```bash
 export OWP_CASE_DIRECTORY=/absolute/path/to/private-case
@@ -94,7 +94,18 @@ node scripts/live-preflight.mjs \
 闭合 action payload、真实 OWP delivery fixture、offline tamper rejected。该脚本在临时
 DSH_HOME 安装 tarball，结束后删除临时 profile；不会发布包或联系外部服务。
 
-## 外部验收与离线复核
+## 验证、外部验收与离线复核
+
+case 打开后，先用 `/owp-evidence` 查看证据是否已形成因果关联，再由
+`/owp-verify` 把精确的补丁 ActionReceipt 交给 Core 独立回读。只有 bridge 返回
+`VERIFIED`，插件才显示“等待人工验收”；`UNKNOWN` 或 `REFUTED` 不会被升级。
+
+```text
+/owp-status
+/owp-evidence
+/owp-verify
+/owp-export
+```
 
 `VERIFIED` 后，Agent 只能请求无签名草稿。Acceptor 在 Harness 外审阅并签名，再提交
 Acceptance binding。插件不生成、保存或调用 Acceptor 私钥。
@@ -102,12 +113,14 @@ Acceptance binding。插件不生成、保存或调用 Acceptor 私钥。
 ```bash
 owp dsh-case acceptance-draft CASE_DIR --output acceptance-draft.json
 # 外部 Acceptor 独立签名并按集成流程提交
-owp dsh-case export CASE_DIR --output-directory DELIVERY_DIR
-owp delivery-case verify DELIVERY_DIR
+owp dsh-case export CASE_DIR --output-directory PUBLIC_DELIVERY_DIR
+# 插件 /owp-export 生成的完整离线证据包：
+owp audit-replay CUSTOMER_PRIVATE_DELIVERY_DIR
 ```
 
-`/owp-export` 输出的离线命令同样使用 `owp delivery-case verify`。导出后修改任何受
-manifest 约束的文件，复核必须失败。
+`owp dsh-case export` 的 public 包和插件 `/owp-export` 的 customer-private 包是两种
+明确不同的导出。后者保留完整离线回放所需材料，并使用 `owp audit-replay`。导出后修改
+任何受 manifest 约束的文件，复核必须失败。
 
 ## 文件、进程与网络行为
 

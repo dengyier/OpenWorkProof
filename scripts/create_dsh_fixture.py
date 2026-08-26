@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
+import subprocess
 from datetime import timedelta
 from pathlib import Path
 
@@ -512,3 +514,76 @@ def create_dsh_fixture(
         "exported_path": exported_path,
         "delivery_error": DeliveryCaseError,
     }
+
+
+def prepare_dsh_process_case(root: Path, case, role_keys) -> str:
+    """Turn a closed developer fixture into one loadable private DSH case."""
+
+    from openworkproof import repo_tools
+    from openworkproof.dsh_case import dsh_case_id
+
+    for disposable in (root / "delivery-case", root / "exported"):
+        if disposable.exists():
+            shutil.rmtree(disposable)
+    source_runtime = root / "source-runtime"
+    source_runtime.mkdir(mode=0o700)
+    source_workspace = repo_tools.initialize_candidate_workspace(
+        repo_tools.WorkspaceInitRequest(
+            runtime_root=source_runtime,
+            workspace_id="6" * 64,
+            source=case["source"],
+        )
+    )
+    (source_workspace.worktree / ".git").write_text(
+        f"gitdir: {source_workspace.git_dir}\n",
+        encoding="utf-8",
+    )
+    for key, value in (
+        ("core.bare", "false"),
+        ("core.worktree", str(source_workspace.worktree)),
+    ):
+        subprocess.run(
+            [
+                "git",
+                f"--git-dir={source_workspace.git_dir}",
+                "config",
+                key,
+                value,
+            ],
+            check=True,
+        )
+    key_root = root / "keys"
+    key_root.mkdir(mode=0o700)
+    sidecar_key = key_root / "sidecar.key"
+    developer_key = key_root / "developer.key"
+    for path, private_key in (
+        (sidecar_key, role_keys["Sidecar"][0]),
+        (developer_key, role_keys["Developer"][0]),
+    ):
+        path.write_bytes(private_key.private_bytes_raw())
+        os.chmod(path, 0o600)
+    stable_manifest = {
+        "schema_version": "openworkproof-dsh-case/0.1",
+        "work_order_digest": case["work_order_digest"],
+        "source_revision": case["work_order"].source_commit,
+        "allowed_path_roots": ["src"],
+        "denied_path_roots": ["secrets"],
+        "allowed_tools": ["owp_apply_patch"],
+        "test_profile_digest": case["profile_digest"],
+        "mode": "audit",
+    }
+    case_id = dsh_case_id(stable_manifest)
+    manifest = {
+        **stable_manifest,
+        "case_id": case_id,
+        "repository_root": str(source_workspace.worktree),
+        "ledger_path": str(case["ledger_path"]),
+        "evidence_root": str(case["evidence_root"]),
+        "candidate_runtime_root": str(case["candidate"].runtime_root),
+        "candidate_workspace_id": case["candidate"].workspace_id,
+        "verifier_socket_path": None,
+        "sidecar_key_path": str(sidecar_key),
+        "developer_key_path": str(developer_key),
+    }
+    (root / "case.json").write_bytes(rfc8785.dumps(manifest) + b"\n")
+    return case_id
