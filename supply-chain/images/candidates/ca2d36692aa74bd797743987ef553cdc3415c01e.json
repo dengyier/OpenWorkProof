@@ -1,0 +1,132 @@
+{
+ "base_image": {
+  "platform": "linux/arm64",
+  "python_version": "3.12.13",
+  "reference": "docker.io/library/python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de"
+ },
+ "build_inputs": {
+  "execution": {
+   "dockerfile_sha256": "ed415c1e0f6dd54e94aca73a860af3259fab44fafc542e507a2508dfda07d0eb",
+   "fixed_test_source_sha256": "79b8f001ae89c394901d5ba618e79821dd6d78dd6194de3023a28fcac6f130a6",
+   "requirements_lock_sha256": "f60a9bd1cc239a5c2eab11e92665d1af10f457ee06381398350d9ddf0b8d4c70",
+   "runner_sha256": "a9eb1afc84ced1b573473d64d0e2fb9d7f05dfb9ead057b978720721bbb828d4",
+   "wheel_sha256sums_sha256": "d34350069473b90a356fc24f41362bd457c87112ac82ad5f3468ebc97b5df5b2"
+  },
+  "global": {
+   "full_wheelhouse_sha256sums_sha256": "e8d3ccaaa1cf735113e7bd533637cef028d710725981fbe20968179c70ea3a72",
+   "project_requirements_lock_sha256": "be6f8e10d7a82b978913eb2b6a73ee11efc5a9af623e5a783163e3cb78179f8c"
+  },
+  "trusted_helper": {
+   "deb_sha256sums_sha256": "79095383da9e8413666d9d8e78c04b57197adcd616358fdea87e5d0a98c8460e",
+   "debian_packages_lock_sha256": "d19818e666e1e62644a264d5ef28a8779e04b549e402351f9b1c1cbd90a470b1",
+   "dockerfile_sha256": "e30ddb6023c1f19ca05c3e62b213e42a07743f7560d8aa3f36e805e61d4f6b75",
+   "helper_src_sha256sums_sha256": "6791c2468b02612112cf2d961edc0d5431ba8c53fc103c8500ba94bc91b55ebc",
+   "requirements_lock_sha256": "a6fc946cbfb709962f85a38d5c3c5d605dc0885a363bf25045a9e5c4dd783435",
+   "source_allowlist_sha256": "4933cb72b5f2b476c8d46a91eced70b511aca3601ebbcfffc7c5d7de68c995f7",
+   "wheel_sha256sums_sha256": "1e75f54377e6fe7e303b60c6ad3c07bbaa886986a938b2b4f00ff5cf76e45dcf"
+  }
+ },
+ "claims": {
+  "acceptor_access": false,
+  "acceptor_acquisition_path": null,
+  "clean_cache_reacquisition": false,
+  "delivery_signoff_pass": false,
+  "final_trusted_helper": false,
+  "registry_pushed": false
+ },
+ "external_layout": {
+  "local_root": "/Users/molin/Project/openWorkProof-delivery",
+  "path_rule": "join-local-root-with-relative-path-no-parent-traversal",
+  "relative_paths": {
+   "archives": "oci/ca2d36692aa74bd797743987ef553cdc3415c01e",
+   "execution_build_context": "build-contexts/ca2d36692aa74bd797743987ef553cdc3415c01e/execution",
+   "git_deb_closure": "debs/linux-arm64-trixie-git",
+   "trusted_helper_build_context": "build-contexts/ca2d36692aa74bd797743987ef553cdc3415c01e/trusted-helper",
+   "wheelhouse": "wheelhouse/linux-arm64-cp312-full"
+  }
+ },
+ "images": {
+  "execution": {
+   "archives": {
+    "docker": {
+     "filename": "openworkproof-execution-test-candidate.docker-archive.tar",
+     "format": "docker-archive",
+     "sha256": "7a7997221e711c3867b14946386b2502051c50416dc96a544f28e4193f26efb1"
+    },
+    "oci": {
+     "filename": "openworkproof-execution-test-candidate.oci-archive.tar",
+     "format": "oci-image-layout-archive",
+     "sha256": "0dcb58b0f3e64b4675e88d82e12611e566c42e71c9f2b275ece7b633b6c1df7d"
+    }
+   },
+   "candidate_name": "openworkproof/execution-test:ca2d36692aa74bd797743987ef553cdc3415c01e",
+   "cmd": [
+    "execute"
+   ],
+   "entrypoint": [
+    "/opt/venv/bin/python",
+    "-I",
+    "/opt/openworkproof/run_tests_runner.py"
+   ],
+   "labels": {
+    "org.opencontainers.image.description": "Offline Python 3.12 pytest runtime for the fixed Rich 15 source test",
+    "org.opencontainers.image.revision": "ca2d36692aa74bd797743987ef553cdc3415c01e",
+    "org.opencontainers.image.source": "https://github.com/dengyier/OpenWorkProof",
+    "org.opencontainers.image.title": "OpenWorkProof Rich execution/test candidate",
+    "org.openworkproof.base.digest": "sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de",
+    "org.openworkproof.image.role": "execution-test"
+   },
+   "local_image_id": "sha256:d6874b95c448f8589c04b4ed9ce01b453f8cc1a7b0c764a553df181d759371b0",
+   "local_repo_digests": [
+    "openworkproof/execution-test@sha256:d6874b95c448f8589c04b4ed9ce01b453f8cc1a7b0c764a553df181d759371b0"
+   ],
+   "oci_manifest_digest": "sha256:6063838314b81bf7483f537e465d2dc3be19a8791fd9876d7cce9bb1ccb4e8b7",
+   "platform": "linux/arm64",
+   "user": "65532:65532"
+  },
+  "trusted_helper": {
+   "archives": {
+    "docker": {
+     "filename": "openworkproof-trusted-helper-candidate.docker-archive.tar",
+     "format": "docker-archive",
+     "sha256": "06ba3fdf6f379624a5aac61ab174c97924a48611ae83c9e5f19fbbc4be22a10b"
+    },
+    "oci": {
+     "filename": "openworkproof-trusted-helper-candidate.oci-archive.tar",
+     "format": "oci-image-layout-archive",
+     "sha256": "394ac99605df96e087cb1e490c00771bfa7953ade7f36b0158f5f0f760ad43ab"
+    }
+   },
+   "candidate_name": "openworkproof/trusted-helper-candidate:ca2d36692aa74bd797743987ef553cdc3415c01e",
+   "cmd": null,
+   "entrypoint": [
+    "/opt/venv/bin/python",
+    "-I",
+    "-m",
+    "openworkproof.trusted_helper"
+   ],
+   "labels": {
+    "org.opencontainers.image.description": "Offline candidate containing Git and the frozen OpenWorkProof helper subset",
+    "org.opencontainers.image.revision": "ca2d36692aa74bd797743987ef553cdc3415c01e",
+    "org.opencontainers.image.source": "https://github.com/dengyier/OpenWorkProof",
+    "org.opencontainers.image.title": "OpenWorkProof trusted-helper candidate",
+    "org.openworkproof.base.digest": "sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de",
+    "org.openworkproof.image.role": "trusted-helper-candidate"
+   },
+   "local_image_id": "sha256:50a5650f07df0be857a6c32bea38a474c7c30d125dd343aab5e4116bc4d7408c",
+   "local_repo_digests": [
+    "openworkproof/trusted-helper-candidate@sha256:50a5650f07df0be857a6c32bea38a474c7c30d125dd343aab5e4116bc4d7408c"
+   ],
+   "oci_manifest_digest": "sha256:70aea2f922193309d1ce481f07d919e7b2c6769df23528fffecf4ee7520233d5",
+   "platform": "linux/arm64",
+   "user": "65532:65532"
+  }
+ },
+ "license": {
+  "oci_label_present": false,
+  "spdx": "NOASSERTION",
+  "status": "PENDING"
+ },
+ "schema_version": "openworkproof-image-candidate-inventory/0.2",
+ "source_revision": "ca2d36692aa74bd797743987ef553cdc3415c01e"
+}
