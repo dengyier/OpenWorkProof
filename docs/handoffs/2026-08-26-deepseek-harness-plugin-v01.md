@@ -30,6 +30,9 @@ DeepSeek 官方认可、已在外部环境复现或已有用户采用。
 - tarball：`openworkproof-dsh-plugin-0.1.0.tgz`
 - tarball SHA-256：`8ba3b70e16d785a416db919d07127f37c2c5a936847a0ee8dfe278ebffc35a65`
 - 最终预检环境：Node `v23.11.0`、Python `3.12.13`、OpenWorkProof `1.4.0`
+- 持久化本地产物目录：
+  `/Users/molin/Project/openWorkProof-delivery/release-candidates/97a65e5/`（含三份产物与
+  `SHA256SUMS`，未发布）
 
 ## 实现事实
 
