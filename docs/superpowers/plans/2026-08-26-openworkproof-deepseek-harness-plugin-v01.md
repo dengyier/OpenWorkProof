@@ -1205,6 +1205,13 @@ required-live gate passed `4309 / 0 / 1`. The sole skip is the existing
 `live AgentTeams not required` marker because this shell did not provide
 `OPENWORKPROOF_AGENTTEAMS_REQUIRED`; no test rule was weakened.
 
+2026-08-27 remediation result: implementation revision
+`55939ad0b8c48ad5cf22a0c5b351be014526973d` received a new immutable inventory
+in commit `97a65e5`. Candidate live passed `185 / 0 / 0` in 734.32s; full
+required-live passed `4328 / 0 / 1` in 1412.76s with the same single explicit
+AgentTeams environment skip and strict unhandled-thread warning policy. The
+historical `ca2d366…` inventory was not modified.
+
 - [x] **Step 3: Build and verify exact distributable artifacts**
 
 Core:
@@ -1227,6 +1234,16 @@ node scripts/live-preflight.mjs dist/openworkproof-dsh-plugin-0.1.0.tgz
 Expected: clean-environment install and live preflight PASS for the exact wheel
 and tarball. Version `1.4.0` is a release-candidate metadata decision only;
 publishing remains unauthorized.
+
+2026-08-27 exact artifacts: core wheel
+`d792e7159e9212c2cc92f6c2624ca6f2c7843ac61987616e007ccd4a5d5f8c2b`,
+sdist `277e57c0d84a91c9fcc26df5d8e7eabd4926ec5969f4d4d30b7cecf807a59047`,
+and plugin tarball
+`8ba3b70e16d785a416db919d07127f37c2c5a936847a0ee8dfe278ebffc35a65`.
+An online dependency-resolved clean venv installed the wheel and ran
+`owp dsh-bridge --help`; the repository's current arm64 offline wheelhouse does
+not contain `cryptography`, so complete offline installation from that
+wheelhouse remains unproven.
 
 - [ ] **Step 4: Obtain two independent read-only reviews**
 

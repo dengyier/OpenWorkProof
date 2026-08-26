@@ -25,8 +25,8 @@ OpenWorkProof 不保证 Agent 的结果一定正确，也不替客户作出验�
 
 ```text
 本地候选版本: 1.4.0, 尚未发布
-required-live: 4265 passed / 0 failed / 0 skipped
-candidate: 183 passed / 0 failed / 0 skipped
+required-live: 4328 passed / 0 failed / 1 environment-gated skipped
+candidate: 185 passed / 0 failed / 0 skipped
 许可证: Apache-2.0
 ```
 
@@ -299,11 +299,15 @@ DeepSeek 官方背书。
 
 | 验证门 | 当前结果 |
 |---|---|
-| required-live | `4265 passed / 0 failed / 0 skipped` |
-| candidate | `183 passed / 0 failed / 0 skipped` |
+| required-live | `4328 passed / 0 failed / 1 environment-gated skipped` |
+| candidate | `185 passed / 0 failed / 0 skipped` |
 | AgentTeams | Manager、Developer、Verifier 三角色 live preflight 已通过 |
 | 离线验证 | Surface、Acceptance 与 Human Agency bundle 可独立回放 |
 | 供应链 | candidate inventory、OCI/Docker 工件和哈希绑定已过门 |
+
+本次 required-live 唯一 skip 是未设置 `OPENWORKPROOF_AGENTTEAMS_REQUIRED` 时的
+`live AgentTeams not required`；此前三角色 live preflight 证据仍单独列示，不能把两次
+不同环境的结果合并成“本次零 skip”。
 
 Rich #4196、Dify #33013 和 AgentScope #2239 是自有演示与复现实验，用于验证不同项目
 类型下的协议路径。它们不是客户案例，也不代表上游项目已经采用 OpenWorkProof。

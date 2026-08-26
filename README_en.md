@@ -26,8 +26,8 @@ verification separate from acceptance, and preserves the human ability to accept
 
 ```text
 Local candidate: 1.4.0, not released
-required-live: 4265 passed / 0 failed / 0 skipped
-candidate: 183 passed / 0 failed / 0 skipped
+required-live: 4328 passed / 0 failed / 1 environment-gated skipped
+candidate: 185 passed / 0 failed / 0 skipped
 License: Apache-2.0
 ```
 
@@ -321,11 +321,16 @@ The following facts describe the local candidate. They do not prove customer ado
 
 | Gate | Current result |
 |---|---|
-| required-live | `4265 passed / 0 failed / 0 skipped` |
-| candidate | `183 passed / 0 failed / 0 skipped` |
+| required-live | `4328 passed / 0 failed / 1 environment-gated skipped` |
+| candidate | `185 passed / 0 failed / 0 skipped` |
 | AgentTeams | Manager, Developer, and Verifier live preflight passed |
 | Offline verification | Surface, Acceptance, and Human Agency bundles replay independently |
 | Supply chain | Candidate inventory, OCI/Docker artifacts, and hashes passed their binding gate |
+
+The only skip in this required-live run was `live AgentTeams not required` because
+`OPENWORKPROOF_AGENTTEAMS_REQUIRED` was not set. The earlier three-role live preflight remains
+separate evidence; results from two different environments are not combined into a false
+"zero skip in this run" claim.
 
 Rich #4196, Dify #33013, and AgentScope #2239 are project-owned demos and reproductions used to
 exercise the protocol across different project types. They are not customer case studies and

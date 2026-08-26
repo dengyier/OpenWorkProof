@@ -518,10 +518,10 @@ def test_readmes_keep_current_release_and_test_boundaries_aligned() -> None:
     for text in (chinese, english):
         for literal in (
             "1.4.0",
-            "4265 passed",
+            "4328 passed",
             "0 failed",
-            "0 skipped",
-            "183 passed",
+            "1 environment-gated skipped",
+            "185 passed",
         ):
             assert literal in text, f"README release boundary missing: {literal}"
 

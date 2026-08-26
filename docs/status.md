@@ -3,7 +3,7 @@
 > 本文档是项目实现状态的权威记录。README 只保留概览，
 > 「已经完成什么」和「尚未完成什么」的完整清单以本文为准。
 
-## DeepSeek Harness 插件 V0.1 本地候选（2026-08-26）
+## DeepSeek Harness 插件 V0.1 本地候选（2026-08-27）
 
 隔离分支与独立插件仓库已完成本地开发者预览：
 
@@ -13,23 +13,24 @@
   闭合参数；
 - 一次性 Git 夹具完成授权 patch、冻结测试、独立 Git 回读、外部 Acceptor 签名、
   Acceptance 绑定、交付导出、离线复核与篡改拒绝；
-- DSH/patch/rollback 聚焦回归 `388 passed / 4 environment-gated skipped`；发布候选聚焦门
-  `38 passed`；插件 `30 passed`，typecheck/build/live-preflight 均通过；
+- 当前 Core DSH 专项 `55 passed`；插件 `46 passed`，typecheck、build 与真实打包宿主
+  live-preflight 均通过；
 - 全新环境已安装 `openworkproof-1.4.0-py3-none-any.whl` 并启动
   `owp dsh-bridge --help`；最终插件包 SHA-256 为
-  `8c48b3cba4333b024b284dca0704e82ae6f9471edc1cb278d95990d02c7ff49b`；
-- 排除两个供应链测试文件后的整仓回归为 `4119 passed / 7 environment-gated skipped`；
-- Docker Desktop 29.5.2 恢复后，已从源码定义 revision
-  `ca2d36692aa74bd797743987ef553cdc3415c01e` 构建 revision-bound contexts、OCI archives
+  `8ba3b70e16d785a416db919d07127f37c2c5a936847a0ee8dfe278ebffc35a65`；
+- Docker Desktop 29.5.2 下，已从源码定义 revision
+  `55939ad0b8c48ad5cf22a0c5b351be014526973d` 构建 revision-bound contexts、OCI archives
   与 Docker v2 archives，并新增不可变 inventory
-  `supply-chain/images/candidates/ca2d36692aa74bd797743987ef553cdc3415c01e.json`
-  （inventory commit `a9e67cc`，不改写历史库存）；
-- candidate 两套件（artifact root + 强制 live Docker）：`184 passed / 0 failed /
-  0 skipped`（919.21s，退出码 0）；required-live 全量：`4309 passed / 0 failed /
-  1 skipped`（1643.91s，退出码 0），唯一 skip 为未设置
+  `supply-chain/images/candidates/55939ad0b8c48ad5cf22a0c5b351be014526973d.json`
+  （inventory commit `97a65e5`，不改写历史库存）；
+- candidate 两套件（artifact root + 强制 live Docker）：`185 passed / 0 failed /
+  0 skipped`（734.32s，退出码 0）；required-live 全量：`4328 passed / 0 failed /
+  1 skipped`（1412.76s，退出码 0），唯一 skip 为未设置
   `OPENWORKPROOF_AGENTTEAMS_REQUIRED` 时的 `live AgentTeams not required`；
-- `pip check`、`compileall src tests`、`git diff --check` 均通过，OpenWorkProof label
-  测试容器与卷残留均为 0。
+- `97a65e5` revision 的 wheel/sdist 与 `8d550e1` 插件 tarball 已重新构建；在线依赖
+  解析的全新 venv 可安装
+  wheel 并运行 `owp dsh-bridge --help`。项目现有 arm64 离线 wheelhouse 缺少
+  `cryptography`，因此不能宣称该 wheelhouse 已支持完整离线安装。
 
 当前仍是本地候选：供应链与 required-live 本地门已闭合，但未创建插件远端、未发布 npm、
 未合并或推送 core、未在第二台环境外部复现。通用案例初始化器和独立 Verifier 服务编排
