@@ -88,6 +88,38 @@ class DshExecutionIdentityV01(ProtocolModel):
     arguments_digest: Digest64
 
 
+def dsh_execution_identity_digest(
+    execution: DshExecutionIdentityV01,
+) -> str:
+    """Bind a verification result to one exact Harness execution identity."""
+
+    return hashlib.sha256(
+        rfc8785.dumps(
+            {
+                "domain": "openworkproof/dsh-execution-identity/v0.1",
+                "payload": execution.model_dump(mode="json"),
+            }
+        )
+    ).hexdigest()
+
+
+def dsh_execution_context_id(execution: DshExecutionIdentityV01) -> str:
+    """Derive the correlation id committed in an OWP ActionReceipt."""
+
+    return hashlib.sha256(
+        rfc8785.dumps(
+            {
+                "domain": "openworkproof/dsh-execution-context/v0.1",
+                "payload": {
+                    "session_id": execution.session_id,
+                    "call_id": execution.call_id,
+                    "root_call_id": execution.root_call_id,
+                },
+            }
+        )
+    ).hexdigest()
+
+
 class DshObservationDraftV01(ProtocolModel):
     schema_version: Literal["openworkproof-dsh-observation/0.1"]
     host: Literal["deepseek-harness"]

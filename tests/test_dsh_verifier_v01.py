@@ -89,3 +89,52 @@ def test_unavailable_independent_runner_is_unknown(tmp_path: Path) -> None:
 
     assert result.status == "UNKNOWN"
     assert result.reason_codes == ("VERIFIER_UNAVAILABLE",)
+
+
+def test_artifact_bindings_distinguish_swapped_file_contents(
+    tmp_path: Path,
+) -> None:
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _git(seed, "init", "-b", "main")
+    _git(seed, "config", "user.email", "test@example.com")
+    _git(seed, "config", "user.name", "OWP Test")
+    (seed / "src").mkdir()
+    (seed / "src" / "a.txt").write_text("base-a\n", encoding="utf-8")
+    (seed / "src" / "b.txt").write_text("base-b\n", encoding="utf-8")
+    _git(seed, "add", "src/a.txt", "src/b.txt")
+    _git(seed, "commit", "-m", "base")
+    source = _git(seed, "rev-parse", "HEAD")
+
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    subprocess.run(["git", "clone", "-q", str(seed), str(left)], check=True)
+    subprocess.run(["git", "clone", "-q", str(seed), str(right)], check=True)
+    (left / "src" / "a.txt").write_text("alpha\n", encoding="utf-8")
+    (left / "src" / "b.txt").write_text("beta\n", encoding="utf-8")
+    (right / "src" / "a.txt").write_text("beta\n", encoding="utf-8")
+    (right / "src" / "b.txt").write_text("alpha\n", encoding="utf-8")
+
+    def verification_case(repository_root: Path) -> DshVerificationCaseV01:
+        return DshVerificationCaseV01(
+            case_id="a" * 64,
+            repository_root=repository_root,
+            source_revision=source,
+            allowed_path_roots=("src",),
+            denied_path_roots=("secrets",),
+            test_profile_digest="b" * 64,
+            ledger_path=None,
+            evidence_root=None,
+            verification_runner=lambda _repo: 0,
+        )
+
+    left_result = verify_dsh_code_change(
+        verification_case(left), clock=lambda: NOW
+    )
+    right_result = verify_dsh_code_change(
+        verification_case(right), clock=lambda: NOW
+    )
+
+    assert left_result.model_dump(mode="json") != right_result.model_dump(
+        mode="json"
+    )

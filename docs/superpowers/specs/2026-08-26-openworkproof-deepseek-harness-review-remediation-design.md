@@ -144,6 +144,11 @@ Swapping the contents of two paths must change the verification object and
 cannot collide. Missing or ambiguous receipt binding returns UNKNOWN, not
 VERIFIED.
 
+For v0.1, `candidate_tree_digest` is the RFC 8785 SHA-256 of the frozen source
+revision plus the complete UTF-8 sorted changed-artifact bindings. Deleted,
+symlinked, or otherwise unreadable changed paths fail closed; the field is not
+the unchanged Git `HEAD` commit id and must not be described as one.
+
 ## 7. Honest Audit activation
 
 Both Audit and Enforce require an explicit case directory before the plugin is

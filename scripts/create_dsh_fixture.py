@@ -89,6 +89,8 @@ def create_dsh_fixture(
     verification_profile_v03,
     role_keys,
     now,
+    include_action_receipt_binding: bool = True,
+    action_receipt_digest_override: str | None = None,
 ):
     """Close one real ledger from DSH patch through external acceptance."""
 
@@ -456,6 +458,15 @@ def create_dsh_fixture(
                 0
                 if (repository / "src" / "app.py").read_bytes() == b"patched\n"
                 else 1
+            ),
+            execution=(
+                patch_execution if include_action_receipt_binding else None
+            ),
+            action_receipt_digest=(
+                action_receipt_digest_override
+                or patch.receipt.digest
+                if include_action_receipt_binding
+                else None
             ),
             git_dir=base["candidate"].git_dir,
         ),

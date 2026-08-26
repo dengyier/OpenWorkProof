@@ -151,13 +151,13 @@ git commit -m "feat: assemble production Harness case handlers"
 - Modify: `tests/test_dsh_verifier_v01.py`
 - Modify: `tests/test_dsh_end_to_end_v01.py`
 
-- [ ] **Step 1: Write RED collision and missing-binding tests**
+- [x] **Step 1: Write RED collision and missing-binding tests**
 
 Create two worktrees whose changed paths are identical but whose file contents
 are swapped. Assert their canonical verification bytes differ. Remove or alter
 the action receipt binding and assert UNKNOWN with a stable reason code.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 ./.venv/bin/python -m pytest -q tests/test_dsh_verifier_v01.py
@@ -166,19 +166,19 @@ the action receipt binding and assert UNKNOWN with a stable reason code.
 Expected: current separately sorted path and digest lists collide or verify
 without the exact receipt.
 
-- [ ] **Step 3: Replace parallel collections with artifact bindings**
+- [x] **Step 3: Replace parallel collections with artifact bindings**
 
 Add a strict immutable `{path, sha256}` object, candidate tree digest,
 execution digest, and ActionReceipt digest to the verification result. Build
 them in UTF-8 path order and include them in canonical bytes.
 
-- [ ] **Step 4: Require exact committed receipt truth**
+- [x] **Step 4: Require exact committed receipt truth**
 
 The verifier reads the receipt associated with the requested case and execution
 identity, validates causal replay, and returns UNKNOWN when zero or multiple
 bindings exist. A successful ledger replay without this binding is insufficient.
 
-- [ ] **Step 5: Run GREEN and commit**
+- [x] **Step 5: Run GREEN and commit**
 
 ```bash
 ./.venv/bin/python -m pytest -q \

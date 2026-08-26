@@ -19,6 +19,7 @@ from openworkproof.dsh_case import DecisionTokenStore
 from openworkproof.dsh_protocol import (
     DshExecutionIdentityV01,
     dsh_action_arguments_digest,
+    dsh_execution_context_id,
 )
 from openworkproof.binding import canonical_test_profile_digest
 from openworkproof.mcp_server import (
@@ -183,14 +184,7 @@ def _execution_facts(
     execution: DshExecutionIdentityV01,
 ) -> ProspectiveExecutionFacts:
     return ProspectiveExecutionFacts(
-        execution_context_id=_digest_payload(
-            "openworkproof/dsh-execution-context/v0.1",
-            {
-                "session_id": execution.session_id,
-                "call_id": execution.call_id,
-                "root_call_id": execution.root_call_id,
-            },
-        ),
+        execution_context_id=dsh_execution_context_id(execution),
         container_instance_id_digest=_digest_payload(
             "openworkproof/dsh-host-instance/v0.1",
             {"session_id": execution.session_id},
