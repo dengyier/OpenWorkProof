@@ -354,6 +354,55 @@ def test_indeterminate_committed_truth_never_replays_action(
     assert calls == []
 
 
+def test_verifier_transport_failure_returns_unknown_and_keeps_stdio_alive(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    def unavailable(_payload):
+        raise RuntimeError("VERIFIER_TRANSPORT_UNAVAILABLE")
+
+    app, _private_key, _evidence_root = _open_fake_case(
+        monkeypatch,
+        tmp_path,
+        action_handler=unavailable,
+    )
+    action = _request(
+        "action_execute",
+        2,
+        {
+            "case_id": "c" * 64,
+            "execution": _observation()["execution"],
+            "decision_token": "d" * 64,
+            "patch_text": None,
+            "target_paths": None,
+            "test_profile_digest": "e" * 64,
+        },
+    )
+    shutdown = _request("shutdown", 3, {"reason": "client_shutdown"})
+    source = "".join(
+        json.dumps(item, separators=(",", ":")) + "\n"
+        for item in (action, shutdown)
+    )
+    stdout = io.StringIO()
+
+    result = run_stdio_bridge(
+        io.StringIO(source),
+        stdout,
+        io.StringIO(),
+        clock=lambda: NOW,
+        application=app,
+    )
+
+    assert result == 0
+    responses = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert responses[0]["payload"]["status"] == "unknown"
+    assert (
+        responses[0]["payload"]["reason_code"]
+        == "VERIFIER_TRANSPORT_UNAVAILABLE"
+    )
+    assert responses[1]["message_type"] == "shutdown"
+
+
 def test_observation_commit_is_signed_by_bridge_and_stored_immutably(
     monkeypatch,
     tmp_path,

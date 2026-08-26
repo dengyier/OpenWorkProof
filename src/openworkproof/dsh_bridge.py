@@ -34,6 +34,13 @@ from openworkproof.models import ApplyPatchArguments, RunTestsArguments, ToolCal
 
 
 _MAX_LINE_BYTES = 1_048_576
+_UNKNOWN_OPERATIONAL_REASON_CODES = frozenset(
+    {
+        "VERIFIER_REQUEST_INVALID",
+        "VERIFIER_RESPONSE_INVALID",
+        "VERIFIER_TRANSPORT_UNAVAILABLE",
+    }
+)
 _RESPONSE_TYPES = {
     "hello": "ready",
     "case_open": "case_status",
@@ -473,6 +480,16 @@ class DshBridgeApplication:
                     reason_code=str(error),
                     error_kind="protocol_denial",
                 )
+            except RuntimeError as error:
+                reason_code = str(error)
+                if reason_code in _UNKNOWN_OPERATIONAL_REASON_CODES:
+                    return self._response(
+                        request,
+                        message_type="action_result",
+                        status="unknown",
+                        reason_code=reason_code,
+                    )
+                raise
             self._committed_receipts[
                 (
                     request.payload.case_id,
@@ -501,6 +518,22 @@ class DshBridgeApplication:
             }[message_type]
             try:
                 result_digest = handler(request.payload)
+            except RuntimeError as error:
+                reason_code = str(error)
+                if reason_code in _UNKNOWN_OPERATIONAL_REASON_CODES:
+                    return self._response(
+                        request,
+                        message_type=_RESPONSE_TYPES[message_type],
+                        status="unknown",
+                        reason_code=reason_code,
+                    )
+                return self._response(
+                    request,
+                    message_type=_RESPONSE_TYPES[message_type],
+                    status="error",
+                    reason_code="HANDLER_FAILED",
+                    error_kind="operational_failure",
+                )
             except Exception:
                 return self._response(
                     request,
