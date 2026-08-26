@@ -244,11 +244,6 @@ def load_dsh_case(case_directory: Path | str) -> DshCaseManifestV01:
         manifest.candidate_runtime_root,
         manifest.sidecar_key_path,
         manifest.developer_key_path,
-        *(
-            ()
-            if manifest.verifier_socket_path is None
-            else (manifest.verifier_socket_path,)
-        ),
     )
     relative_paths = tuple(
         _relative_runtime_path(case_root, value) for value in runtime_values
@@ -275,11 +270,6 @@ def load_dsh_case(case_directory: Path | str) -> DshCaseManifestV01:
         evidence,
         Path(manifest.sidecar_key_path),
         Path(manifest.developer_key_path),
-        *(
-            ()
-            if manifest.verifier_socket_path is None
-            else (Path(manifest.verifier_socket_path),)
-        ),
     )
     if any(_paths_overlap(candidate_runtime, path) for path in protected_paths):
         raise DshCaseError(

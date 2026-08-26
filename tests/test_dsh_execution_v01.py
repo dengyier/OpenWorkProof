@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import socket
+import tempfile
+import threading
+from dataclasses import replace
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
@@ -16,8 +22,13 @@ from openworkproof.dsh_execution import (
 )
 from openworkproof.dsh_protocol import DshExecutionIdentityV01
 from openworkproof.dsh_protocol import dsh_action_arguments_digest
-from openworkproof.models import ApplyPatchArguments, request_arguments_digest
+from openworkproof.models import (
+    ApplyPatchArguments,
+    RunTestsArguments,
+    request_arguments_digest,
+)
 from openworkproof.binding import canonical_test_profile_digest
+from openworkproof.policy import ProspectiveExecutionFacts
 
 from test_apply_patch_transaction import (
     _apply_patch_case,
@@ -347,3 +358,96 @@ def test_authorized_tests_use_frozen_profile_and_existing_transaction(
         "start_and_wait",
         "cleanup",
     ]
+
+
+def test_authorized_tests_cross_external_verifier_socket(
+    dsh_tests_case,
+    tmp_path,
+) -> None:
+    import json
+
+    import rfc8785
+
+    from openworkproof.dsh_handlers import make_external_verifier_executor
+
+    runtime, driver, fixed_now, profile = dsh_tests_case
+    external = runtime.run_tests_executor
+    assert external is not None
+    socket_root = Path(tempfile.mkdtemp(prefix="owp-dsh-", dir="/tmp"))
+    socket_path = socket_root / "verifier.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    os.chmod(socket_path, 0o600)
+    listener.listen(1)
+    failures: list[BaseException] = []
+
+    def serve() -> None:
+        try:
+            connection, _ = listener.accept()
+            with connection:
+                raw = b""
+                while not raw.endswith(b"\n"):
+                    raw += connection.recv(65_536)
+                request = json.loads(raw)
+                receipt = external(
+                    RunTestsArguments.model_validate(request["arguments"]),
+                    ProspectiveExecutionFacts(**request["facts"]),
+                    DshExecutionIdentityV01.model_validate(
+                        request["execution"]
+                    ),
+                    fixed_now,
+                )
+                connection.sendall(
+                    rfc8785.dumps(
+                        {
+                            "schema_version": (
+                                "openworkproof-dsh-verifier-response/0.1"
+                            ),
+                            "case_id": runtime.case_id,
+                            "execution_identity_digest": request[
+                                "execution_identity_digest"
+                            ],
+                            "receipt": receipt.model_dump(mode="json"),
+                        }
+                    )
+                    + b"\n"
+                )
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            listener.close()
+
+    server = threading.Thread(target=serve)
+    server.start()
+    socket_executor = make_external_verifier_executor(
+        socket_path=socket_path,
+        case_id=runtime.case_id,
+    )
+    transported = replace(runtime, run_tests_executor=socket_executor)
+    provisional = _run_tests_payload(
+        transported,
+        profile,
+        token="0" * 64,
+    )
+    decision = transported.decision_tokens.issue(
+        provisional.execution,
+        expires_at=fixed_now + timedelta(seconds=30),
+    )
+
+    receipt = execute_dsh_tests(
+        transported,
+        provisional.model_copy(update={"decision_token": decision.token}),
+        clock=lambda: fixed_now,
+    )
+    server.join(timeout=5)
+
+    assert not server.is_alive()
+    assert failures == []
+    assert receipt.tool_name == "owp.run_tests"
+    assert [call[0] for call in driver.calls] == [
+        "prepare",
+        "start_and_wait",
+        "cleanup",
+    ]
+    socket_path.unlink()
+    socket_root.rmdir()

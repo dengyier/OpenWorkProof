@@ -135,9 +135,12 @@ can be reconstructed after process restart. A lambda built from test fixtures
 or a direct host-process test runner is not an acceptable substitute.
 
 The minimal v0.1 transport is a case-bound local Unix socket. A case that
-allows `owp_run_tests` must declare an absolute `verifier_socket_path` inside
-the case root. The separate Verifier process owns its private key outside the
-case and returns an already committed `ToolCallReceipt`; the bridge validates
+allows `owp_run_tests` must declare an absolute `verifier_socket_path`. The
+address may live outside the case because macOS imposes a short Unix-socket
+path limit; connection time therefore requires a non-symlink socket owned by
+the current user with exact mode `0600`. The separate Verifier process owns
+its private key outside the case and returns an already committed
+`ToolCallReceipt`; the bridge validates
 the typed receipt and reads the exact digest back from the authoritative
 ledger. The socket is a transport address, not authority. Handler startup
 must reject an absent, non-socket, symlinked, non-owned, or overly permissive

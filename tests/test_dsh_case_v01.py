@@ -223,14 +223,26 @@ def test_case_requires_verifier_transport_for_test_tool(tmp_path: Path) -> None:
         load_dsh_case(case)
 
 
-def test_case_rejects_verifier_transport_outside_case(tmp_path: Path) -> None:
+def test_case_allows_external_verifier_transport_address(tmp_path: Path) -> None:
     case = _write_case(tmp_path)
     manifest_path = case / "case.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["verifier_socket_path"] = str(tmp_path / "outside.sock")
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(DshCaseError, match="escapes"):
+    loaded = load_dsh_case(case)
+
+    assert loaded.verifier_socket_path == str(tmp_path / "outside.sock")
+
+
+def test_case_rejects_relative_verifier_transport_address(tmp_path: Path) -> None:
+    case = _write_case(tmp_path)
+    manifest_path = case / "case.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["verifier_socket_path"] = "verifier.sock"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(DshCaseError, match="transport path must be absolute"):
         load_dsh_case(case)
 
 
