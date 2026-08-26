@@ -11,7 +11,8 @@ DeepSeek 官方认可、已在外部环境复现或已有用户采用。
 
 - 路径：`/Users/molin/Project/openWorkProof/.worktrees/deepseek-harness-plugin-v01`
 - 分支：`codex/deepseek-harness-plugin-v01`
-- HEAD：`ca2d36692aa74bd797743987ef553cdc3415c01e`
+- 实现 revision：`ca2d36692aa74bd797743987ef553cdc3415c01e`
+- candidate inventory commit：`a9e67cc`
 - 远端：`origin = git@github.com:dengyier/OpenWorkProof.git`
 - 本地候选版本：`1.4.0`，未发布
 - wheel：`openworkproof-1.4.0-py3-none-any.whl`
@@ -35,8 +36,8 @@ DeepSeek 官方认可、已在外部环境复现或已有用户采用。
 - `designed`：完成，V0.1 只覆盖单仓库、串行 patch/test、Audit/Enforce 两模式。
 - `implemented`：完成，包含 Cordis 插件、JSONL bridge、事前授权、单调最终 guard、
   闭合 patch/test 工具、观察记录、独立 Git 回读、验收草稿和交付导出协议面。
-- `tested`：部分完成，聚焦、插件、打包和本地 live preflight 通过；本 revision 的
-  candidate/required-live 未闭环。
+- `tested`：本地聚焦、插件、打包、live preflight、candidate 与 required-live 均通过；
+  两份独立只读审查与第二台环境复现未完成。
 - `committed`：两个本地仓库均已提交实现；本交接与计划收口提交除外。
 - `packaged`：完成本地 wheel、sdist、插件 tarball；没有发布。
 - `merged`：未执行。
@@ -55,6 +56,15 @@ DeepSeek 官方认可、已在外部环境复现或已有用户采用。
   回归：`4119 passed / 7 environment-gated skipped`（635.20s）。7 项分别来自未要求真实
   AgentTeams、非 Linux Landlock 和未提供 live Docker 镜像。
 - 插件：`30 passed`；typecheck、build 通过。
+- 新不可变 candidate inventory：
+  `supply-chain/images/candidates/ca2d36692aa74bd797743987ef553cdc3415c01e.json`
+  （commit `a9e67cc`）；四个 archive、`SHA256SUMS`、revision 命名库存副本与 sidecar
+  均在 `/Users/molin/Project/openWorkProof-delivery/oci/ca2d36692aa74bd797743987ef553cdc3415c01e/`。
+- candidate 两套件（artifact root + `OPENWORKPROOF_REQUIRE_LIVE_DOCKER=1`）：
+  `184 passed / 0 failed / 0 skipped`（919.21s，退出码 0）。
+- required-live 全量（candidate artifact root + 全限定 execution RepoDigest + 严格线程告警）：
+  `4309 passed / 0 failed / 1 skipped`（1643.91s，退出码 0）；唯一 skip 为未设置
+  `OPENWORKPROOF_AGENTTEAMS_REQUIRED` 时的 `live AgentTeams not required`。
 - 打包预检：PASS；确认精确 profile 装载、Enforce 阻断原生 `write/edit/bash`、授权令牌
   单次消费、闭合 action payload、真实 OWP 交付夹具、离线篡改拒绝。
 - 全新 venv 安装 wheel 后，`owp dsh-bridge --help` 与版本 `1.4.0` 通过。
@@ -64,15 +74,11 @@ DeepSeek 官方认可、已在外部环境复现或已有用户采用。
 
 ## 尚未闭环的发布门
 
-1. Docker daemon 当前不可连接。已为 core revision
-   `ca2d36692aa74bd797743987ef553cdc3415c01e` 生成 revision-bound build contexts，但 OCI/
-   Docker archives 和新不可变 candidate inventory 未生成。
-2. 标准全量在旧 inventory 绑定检查上出现预期失败；required-live 尚未执行。不得沿用
-   `4265/183` 历史计数冒充本候选结果。
-3. 计划要求的两份独立只读审查尚未取得。当前只有两轮内部自审。
-4. `owp dsh-bridge --stdio` 默认没有面向任意仓库的生产 handler assembler；通用 case
+1. 计划要求的两份独立只读审查尚未取得。当前只有两轮内部自审。
+2. `owp dsh-bridge --stdio` 默认没有面向任意仓库的生产 handler assembler；通用 case
    初始化、独立 Verifier 服务和外部 Acceptor 工作流仍由集成方提供。因此当前是开发者
    预览与确定性参考闭环，不是零配置生产产品。
+3. 第二台机器外部复现、插件远端、npm/PyPI 发布、插件市场上架和真实用户采用均未取证。
 
 ## 内部审查结论
 
@@ -107,7 +113,6 @@ external_reproduction: not_evidenced
 ## 后续选择（互不蕴含）
 
 1. 保持两个仓库本地，先完成独立双审；
-2. Docker 恢复后生成新不可变 inventory，并跑 candidate 与 required-live；
-3. 补通用 case/runtime assembler，再做第二台机器外部复现；
-4. 仅在上述发布门闭环后，分别决定是否本地合并 core、创建/推送插件远端；
-5. npm、PyPI、插件市场发布与社区公告必须另行授权。
+2. 补通用 case/runtime assembler，再做第二台机器外部复现；
+3. 独立决定是否本地合并 core、创建/推送插件远端；
+4. npm、PyPI、插件市场发布与社区公告必须另行授权。

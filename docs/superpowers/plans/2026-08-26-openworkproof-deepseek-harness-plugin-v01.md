@@ -1183,7 +1183,7 @@ pnpm build
 
 Expected: zero failures and zero unclassified skips.
 
-- [ ] **Step 2: Run core regressions before version changes**
+- [x] **Step 2: Run core regressions before version changes**
 
 ```bash
 ./.venv/bin/python -m pytest -q
@@ -1197,10 +1197,13 @@ inventory, follow the repository's existing inventory-generation procedure;
 never overwrite a historical candidate and never weaken the allowlist to make
 tests green.
 
-2026-08-26 boundary: the non-supply-chain regression completed with
-`4119 passed / 7 environment-gated skipped`, but Docker daemon recovery failed.
-The current-revision candidate inventory and required-live gate therefore remain
-open; Step 2 is intentionally unchecked.
+2026-08-26 result: the non-supply-chain regression completed with
+`4119 passed / 7 environment-gated skipped`. After Docker Desktop recovered,
+revision `ca2d36692aa74bd797743987ef553cdc3415c01e` received a new immutable
+inventory (`a9e67cc`); candidate live passed `184 / 0 / 0`, and the full
+required-live gate passed `4309 / 0 / 1`. The sole skip is the existing
+`live AgentTeams not required` marker because this shell did not provide
+`OPENWORKPROOF_AGENTTEAMS_REQUIRED`; no test rule was weakened.
 
 - [x] **Step 3: Build and verify exact distributable artifacts**
 
@@ -1244,6 +1247,13 @@ git commit -m "build: prepare DeepSeek Harness bridge release candidate"
 ```
 
 Omit files that did not change. Do not tag, push, publish, or announce.
+
+2026-08-26 boundary: release-candidate metadata had already been committed before
+the final candidate/required-live evidence existed, and the immutable inventory
+was committed after candidate but before the full required-live gate. Therefore
+the temporal claim "metadata committed only after exact gates pass" is not
+retroactively marked complete. No tag, push, publication, or announcement was
+performed.
 
 ---
 
@@ -1318,6 +1328,6 @@ git commit -m "docs: hand off DeepSeek Harness plugin candidate"
 - [x] Clean export verifies offline; tampering fails.
 - [x] Plugin tarball installs into a clean exact-version profile.
 - [x] Core wheel and plugin tarball belong to the reviewed revisions.
-- [ ] Focused, adversarial, regression, candidate, and required-live gates pass.
+- [x] Focused, adversarial, regression, candidate, and required-live gates pass.
 - [x] Documentation claims match direct evidence.
 - [ ] Merge, push, registry publication, community announcement, real use, and adoption remain separately verified states.

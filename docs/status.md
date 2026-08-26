@@ -19,13 +19,22 @@
   `owp dsh-bridge --help`；最终插件包 SHA-256 为
   `8c48b3cba4333b024b284dca0704e82ae6f9471edc1cb278d95990d02c7ff49b`；
 - 排除两个供应链测试文件后的整仓回归为 `4119 passed / 7 environment-gated skipped`；
-- 当前 Docker daemon 不可连接。本轮源码 revision 已生成专属 build context，但没有生成
-  新 candidate inventory；标准全量因此会在当前 inventory 绑定测试上预期失败，
-  required-live 尚未执行。本候选不得标记 READY 或发布。
+- Docker Desktop 29.5.2 恢复后，已从源码定义 revision
+  `ca2d36692aa74bd797743987ef553cdc3415c01e` 构建 revision-bound contexts、OCI archives
+  与 Docker v2 archives，并新增不可变 inventory
+  `supply-chain/images/candidates/ca2d36692aa74bd797743987ef553cdc3415c01e.json`
+  （inventory commit `a9e67cc`，不改写历史库存）；
+- candidate 两套件（artifact root + 强制 live Docker）：`184 passed / 0 failed /
+  0 skipped`（919.21s，退出码 0）；required-live 全量：`4309 passed / 0 failed /
+  1 skipped`（1643.91s，退出码 0），唯一 skip 为未设置
+  `OPENWORKPROOF_AGENTTEAMS_REQUIRED` 时的 `live AgentTeams not required`；
+- `pip check`、`compileall src tests`、`git diff --check` 均通过，OpenWorkProof label
+  测试容器与卷残留均为 0。
 
-当前仍是本地候选：未创建插件远端、未发布 npm、未合并或推送 core、未在第二台环境
-外部复现。通用案例初始化器和独立 Verifier 服务编排仍需由集成方准备；本地夹具不能写成
-任意仓库零配置交付。两轮内部自审不能替代计划要求的两份独立只读审查。
+当前仍是本地候选：供应链与 required-live 本地门已闭合，但未创建插件远端、未发布 npm、
+未合并或推送 core、未在第二台环境外部复现。通用案例初始化器和独立 Verifier 服务编排
+仍需由集成方准备；本地夹具不能写成任意仓库零配置交付。两轮内部自审不能替代计划要求的
+两份独立只读审查，因此尚不能标记为独立复审 READY 或对外发布。
 
 ```yaml
 customer_adoption: not_evidenced
