@@ -42,7 +42,7 @@ _CASE_STABLE_FIELDS = frozenset(
         "mode",
     }
 )
-_HUMAN_ROLES = ("manager", "acceptor")
+_HUMAN_ROLES = ("manager", "verifier", "acceptor")
 
 
 class DshCaseError(ValueError):

@@ -98,6 +98,14 @@ def test_case_rejects_manager_or_acceptor_private_keys(tmp_path: Path) -> None:
         load_dsh_case(case)
 
 
+def test_case_rejects_verifier_private_key_file(tmp_path: Path) -> None:
+    case = _write_case(tmp_path)
+    (case / "evidence" / "verifier-private-key.hex").write_text("00" * 32)
+
+    with pytest.raises(DshCaseError, match="human private key"):
+        load_dsh_case(case)
+
+
 def test_case_requires_exact_repository_revision(tmp_path: Path) -> None:
     case = _write_case(tmp_path)
     _git(case / "repo", "commit", "--allow-empty", "-m", "drift")
