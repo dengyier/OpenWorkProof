@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import BinaryIO, TextIO
+from typing import BinaryIO, Literal, TextIO
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -59,9 +59,18 @@ class DshCaseHandlers:
     """Trusted handlers assembled for one already validated case."""
 
     action: Callable[[DshActionExecutePayloadV01], str]
-    verify: Callable[[object], str]
+    verify: Callable[[object], str | DshHandlerResult]
     acceptance_draft: Callable[[object], str]
     export: Callable[[object], str]
+
+
+@dataclass(frozen=True, slots=True)
+class DshHandlerResult:
+    """One non-success handler truth that must not be upgraded to ``ok``."""
+
+    status: Literal["denied", "unknown"]
+    result_digest: str
+    reason_code: str
 
 
 def _durable_action_receipt_digest(
@@ -517,7 +526,7 @@ class DshBridgeApplication:
                 "export_request": handlers.export,
             }[message_type]
             try:
-                result_digest = handler(request.payload)
+                result = handler(request.payload)
             except RuntimeError as error:
                 reason_code = str(error)
                 if reason_code in _UNKNOWN_OPERATIONAL_REASON_CODES:
@@ -542,11 +551,19 @@ class DshBridgeApplication:
                     reason_code="HANDLER_FAILED",
                     error_kind="operational_failure",
                 )
+            if isinstance(result, DshHandlerResult):
+                return self._response(
+                    request,
+                    message_type=_RESPONSE_TYPES[message_type],
+                    status=result.status,
+                    result_digest=result.result_digest,
+                    reason_code=result.reason_code,
+                )
             return self._response(
                 request,
                 message_type=_RESPONSE_TYPES[message_type],
                 status="ok",
-                result_digest=result_digest,
+                result_digest=result,
             )
         if message_type == "shutdown":
             self._shutdown = True
@@ -604,6 +621,7 @@ def run_stdio_bridge(
 __all__ = [
     "DshBridgeApplication",
     "DshCaseHandlers",
+    "DshHandlerResult",
     "_durable_action_receipt_digest",
     "run_stdio_bridge",
 ]

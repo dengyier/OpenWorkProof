@@ -610,10 +610,19 @@ def build_dsh_case_handlers(
             ),
             clock=lambda: now,
         )
-        return _store_result(
+        digest = _store_result(
             Path(manifest.evidence_root),
             "dsh-verifications",
             result,
+        )
+        if result.status == "VERIFIED":
+            return digest
+        from openworkproof.dsh_bridge import DshHandlerResult
+
+        return DshHandlerResult(
+            status="denied" if result.status == "REFUTED" else "unknown",
+            result_digest=digest,
+            reason_code=result.reason_codes[0],
         )
 
     def acceptance_draft(payload: object) -> str:

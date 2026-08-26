@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from openworkproof.dsh_bridge import (
     DshBridgeApplication,
     DshCaseHandlers,
+    DshHandlerResult,
     run_stdio_bridge,
 )
 from openworkproof.dsh_protocol import (
@@ -172,6 +173,48 @@ def test_open_case_builds_case_scoped_handlers_with_shared_tokens(
     assert len(seen) == 1
     assert seen[0][0] == "c" * 64
     assert seen[0][1] is app.decision_tokens
+
+
+def test_verify_result_preserves_unknown_instead_of_upgrading_file_to_ok(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    def factory(_manifest, _decision_tokens):
+        return DshCaseHandlers(
+            action=lambda _payload: "a" * 64,
+            verify=lambda _payload: DshHandlerResult(
+                status="unknown",
+                result_digest="b" * 64,
+                reason_code="ARTIFACT_READ_UNAVAILABLE",
+            ),
+            acceptance_draft=lambda _payload: "c" * 64,
+            export=lambda _payload: "d" * 64,
+        )
+
+    app, _private_key, _evidence_root = _open_fake_case(
+        monkeypatch,
+        tmp_path,
+        handler_factory=factory,
+    )
+
+    response = json.loads(
+        app.handle_line(
+            rfc8785.dumps(
+                _request(
+                    "verify_request",
+                    2,
+                    {
+                        "case_id": "c" * 64,
+                        "action_receipt_digest": "a" * 64,
+                    },
+                )
+            )
+        )
+    )
+
+    assert response["payload"]["status"] == "unknown"
+    assert response["payload"]["result_digest"] == "b" * 64
+    assert response["payload"]["reason_code"] == "ARTIFACT_READ_UNAVAILABLE"
 
 
 def test_bridge_stdout_contains_jsonl_only() -> None:
