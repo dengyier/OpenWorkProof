@@ -101,6 +101,11 @@ This temporary artifact is verification evidence, not a published release.
 - Modify: `tests/test_dsh_bridge_v01.py`
 - Create: `tests/test_dsh_handlers_v01.py`
 
+**Discovered prerequisite:** the reviewed case schema freezes a source
+checkout but does not bind a controlled candidate runtime or an external
+Verifier transport. Add and test those bindings through case initialization
+before Step 1; do not use `scripts/create_dsh_fixture.py` as production code.
+
 - [ ] **Step 1: Write RED ordinary-CLI tests**
 
 Start the real CLI bridge, open a generated case, authorize one patch, execute
@@ -198,25 +203,25 @@ git commit -m "fix: bind Harness verification to exact execution truth"
 - Modify: `/Users/molin/Project/openworkproof-dsh-plugin/test/evidence.test.ts`
 - Create: `/Users/molin/Project/openworkproof-dsh-plugin/test/plugin-activation.test.ts`
 
-- [ ] **Step 1: Write RED configuration and shutdown tests**
+- [x] **Step 1: Write RED configuration and shutdown tests**
 
 Assert that an enabled Audit or Enforce plugin without `caseDirectory` fails
 with `OWP_CASE_DIRECTORY_REQUIRED`, the shipped unconfigured patch is explicitly
 disabled, and shutdown commits each incomplete correlation as UNKNOWN.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 pnpm vitest run test/plugin-activation.test.ts test/evidence.test.ts
 ```
 
-- [ ] **Step 3: Implement honest activation and drain**
+- [x] **Step 3: Implement honest activation and drain**
 
 Require a case for active modes, retain an installable disabled base profile,
 and make `EvidenceCorrelator.drain()` finalize incomplete entries before bridge
 shutdown. Do not synthesize ActionReceipt truth in Audit.
 
-- [ ] **Step 4: Run GREEN and commit**
+- [x] **Step 4: Run GREEN and commit**
 
 ```bash
 pnpm test
@@ -262,6 +267,11 @@ format; do not merely rename the command text.
 Run the focused tests, `pip check`, plugin typecheck, and `git diff --check`,
 then make one single-purpose commit in each repository.
 
+Progress: Manager/Verifier/Acceptor private-key exclusions are enforced, and
+the plugin now prints `owp audit-replay`, the verifier for the delivery package
+emitted by the current DSH export path. The final generated-package command
+round trip remains gated on the production handler from Task 2.
+
 ## Task 6: Add restart-safe consequential ACK recovery
 
 **Files:**
@@ -293,6 +303,13 @@ consequential `action_execute` after an indeterminate timeout.
 
 Run bridge, execution, client, and package regressions before the two
 single-purpose commits.
+
+Progress: the core bridge now performs an exact ledger readback by execution
+context and action arguments before invoking a consequential handler; a fresh
+bridge instance recovered a real committed patch receipt without replay, and
+indeterminate readback returned UNKNOWN. The TypeScript client test proves one
+write on timeout and no automatic retry. A separate OS-process kill/respawn
+test is still required before this task is complete.
 
 ## Task 7: Replace the mock-heavy preflight with a real packed chain
 

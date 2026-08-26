@@ -104,6 +104,7 @@ def _open_fake_case(
     *,
     action_handler=None,
     handler_factory=None,
+    committed_truth_lookup=None,
 ):
     private_key = Ed25519PrivateKey.generate()
     raw_key = private_key.private_bytes_raw()
@@ -126,6 +127,10 @@ def _open_fake_case(
         clock=lambda: NOW,
         action_handler=action_handler,
         handler_factory=handler_factory,
+        committed_truth_lookup=(
+            committed_truth_lookup
+            or (lambda _manifest, _payload: None)
+        ),
     )
     app.handle_line(rfc8785.dumps(_hello()))
     response = json.loads(
@@ -212,15 +217,18 @@ def test_duplicate_request_id_with_different_bytes_is_protocol_error() -> None:
     assert response["payload"]["reason_code"] == "REQUEST_ID_CONFLICT"
 
 
-def test_lost_ack_replays_cached_committed_truth() -> None:
+def test_lost_ack_replays_cached_committed_truth(monkeypatch, tmp_path) -> None:
     calls: list[str] = []
 
     def action(_payload):
         calls.append("committed")
         return "a" * 64
 
-    app = DshBridgeApplication(clock=lambda: NOW, action_handler=action)
-    app.handle_line(rfc8785.dumps(_hello()))
+    app, _private_key, _evidence_root = _open_fake_case(
+        monkeypatch,
+        tmp_path,
+        action_handler=action,
+    )
     execution = {
         "session_id": "session-1",
         "call_id": "call-1",
@@ -230,7 +238,7 @@ def test_lost_ack_replays_cached_committed_truth() -> None:
     }
     request = _request(
         "action_execute",
-        1,
+        2,
         {
             "case_id": "c" * 64,
             "execution": execution,
@@ -248,6 +256,49 @@ def test_lost_ack_replays_cached_committed_truth() -> None:
     assert json.loads(first)["payload"]["result_digest"] == "a" * 64
     assert second == first
     assert calls == ["committed"]
+
+
+def test_indeterminate_committed_truth_never_replays_action(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    calls: list[str] = []
+
+    def action(_payload):
+        calls.append("replayed")
+        return "a" * 64
+
+    def unavailable(_manifest, _payload):
+        raise OSError("ledger unavailable")
+
+    app, _private_key, _evidence_root = _open_fake_case(
+        monkeypatch,
+        tmp_path,
+        action_handler=action,
+        committed_truth_lookup=unavailable,
+    )
+    response = json.loads(
+        app.handle_line(
+            rfc8785.dumps(
+                _request(
+                    "action_execute",
+                    2,
+                    {
+                        "case_id": "c" * 64,
+                        "execution": _observation()["execution"],
+                        "decision_token": "d" * 64,
+                        "patch_text": None,
+                        "target_paths": None,
+                        "test_profile_digest": "e" * 64,
+                    },
+                )
+            )
+        )
+    )
+
+    assert response["payload"]["status"] == "unknown"
+    assert response["payload"]["reason_code"] == "COMMITTED_TRUTH_UNAVAILABLE"
+    assert calls == []
 
 
 def test_observation_commit_is_signed_by_bridge_and_stored_immutably(

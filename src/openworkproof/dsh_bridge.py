@@ -13,6 +13,8 @@ from typing import BinaryIO, TextIO
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import openworkproof.evidence as evidence
+from openworkproof.binding import canonical_test_profile_digest
 from openworkproof.dsh_case import (
     DecisionTokenStore,
     DshCaseManifestV01,
@@ -25,8 +27,10 @@ from openworkproof.dsh_protocol import (
     DshBridgeResponseV01,
     DshResultPayloadV01,
     canonical_bytes,
+    dsh_execution_context_id,
     sign_dsh_observation,
 )
+from openworkproof.models import ApplyPatchArguments, RunTestsArguments, ToolCallReceipt
 
 
 _MAX_LINE_BYTES = 1_048_576
@@ -51,6 +55,78 @@ class DshCaseHandlers:
     verify: Callable[[object], str]
     acceptance_draft: Callable[[object], str]
     export: Callable[[object], str]
+
+
+def _durable_action_receipt_digest(
+    manifest: DshCaseManifestV01,
+    payload: DshActionExecutePayloadV01,
+) -> str | None:
+    """Read exact committed action truth before any consequential retry."""
+
+    connection = evidence.connect_ledger(Path(manifest.ledger_path))
+    try:
+        work_order, receipts, _, _ = (
+            evidence._replay_receipt_publication_ledger(connection)
+        )
+    finally:
+        connection.close()
+    if work_order.digest != manifest.work_order_digest:
+        raise ValueError("case WorkOrder binding is invalid")
+    execution_context_id = dsh_execution_context_id(payload.execution)
+    candidates = tuple(
+        receipt
+        for receipt in receipts
+        if isinstance(receipt, ToolCallReceipt)
+        and receipt.policy_decision == "allow"
+        and receipt.execution_status == "succeeded"
+        and receipt.correlation_factors is not None
+        and receipt.correlation_factors.execution_context_id
+        == execution_context_id
+    )
+    if payload.execution.tool_name == "owp_apply_patch":
+        patch = payload.patch_text
+        targets = payload.target_paths
+        if patch is None or targets is None:
+            raise ValueError("patch action payload is incomplete")
+        expected = ApplyPatchArguments(
+            target_paths=targets,
+            patch_digest=hashlib.sha256(patch.encode("utf-8")).hexdigest(),
+            patch_size_bytes=len(patch.encode("utf-8")),
+        )
+        candidates = tuple(
+            receipt
+            for receipt in candidates
+            if receipt.tool_name == "owp.apply_patch"
+            and receipt.request_arguments == expected
+        )
+    else:
+        profile_digest = payload.test_profile_digest
+        profiles = tuple(
+            profile
+            for profile in work_order.test_profiles
+            if profile.test_mode == "verifier"
+            and canonical_test_profile_digest(profile) == profile_digest
+        )
+        if len(profiles) != 1:
+            raise ValueError("test profile binding is invalid")
+        profile = profiles[0]
+        candidates = tuple(
+            receipt
+            for receipt in candidates
+            if receipt.tool_name == "owp.run_tests"
+            and isinstance(receipt.request_arguments, RunTestsArguments)
+            and receipt.request_arguments.command_digest
+            == profile.command_digest
+            and receipt.request_arguments.source_commit
+            == work_order.source_commit
+            and receipt.request_arguments.container_image_digest
+            == profile.container_image_digest
+            and receipt.request_arguments.fixed_test_source_digest
+            == profile.fixed_test_source_digest
+        )
+    if len(candidates) > 1:
+        raise ValueError("committed action binding is ambiguous")
+    return None if not candidates else candidates[0].digest
 
 
 def _strict_json_object(raw: bytes) -> dict[str, object]:
@@ -83,10 +159,14 @@ class DshBridgeApplication:
             [DshCaseManifestV01, DecisionTokenStore], DshCaseHandlers
         ]
         | None = None,
+        committed_truth_lookup: Callable[
+            [DshCaseManifestV01, DshActionExecutePayloadV01], str | None
+        ] = _durable_action_receipt_digest,
     ) -> None:
         self._clock = clock
         self._action_handler = action_handler
         self._handler_factory = handler_factory
+        self._committed_truth_lookup = committed_truth_lookup
         self._session_id: str | None = None
         self._next_sequence = 0
         self._shutdown = False
@@ -338,6 +418,39 @@ class DshBridgeApplication:
                 result_digest=record.record_id,
             )
         if message_type == "action_execute":
+            manifest = self._cases.get(request.payload.case_id)
+            if manifest is None:
+                return self._response(
+                    request,
+                    message_type="action_result",
+                    status="denied",
+                    reason_code="CASE_NOT_OPEN",
+                    error_kind="protocol_denial",
+                )
+            try:
+                committed_digest = self._committed_truth_lookup(
+                    manifest, request.payload
+                )
+            except Exception:
+                return self._response(
+                    request,
+                    message_type="action_result",
+                    status="unknown",
+                    reason_code="COMMITTED_TRUTH_UNAVAILABLE",
+                )
+            if committed_digest is not None:
+                self._committed_receipts[
+                    (
+                        request.payload.case_id,
+                        self._execution_digest(request.payload.execution),
+                    )
+                ] = committed_digest
+                return self._response(
+                    request,
+                    message_type="action_result",
+                    status="ok",
+                    result_digest=committed_digest,
+                )
             handlers = self._case_handlers.get(request.payload.case_id)
             action_handler = (
                 handlers.action if handlers is not None else self._action_handler
@@ -443,4 +556,9 @@ def run_stdio_bridge(
     return 0
 
 
-__all__ = ["DshBridgeApplication", "DshCaseHandlers", "run_stdio_bridge"]
+__all__ = [
+    "DshBridgeApplication",
+    "DshCaseHandlers",
+    "_durable_action_receipt_digest",
+    "run_stdio_bridge",
+]

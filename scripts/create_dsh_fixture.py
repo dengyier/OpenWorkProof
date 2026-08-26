@@ -494,6 +494,11 @@ def create_dsh_fixture(
 
     return {
         "patch": patch,
+        "patch_bytes": patch_bytes,
+        "patch_execution": patch_execution,
+        "case_id": runtime.case_id,
+        "ledger_path": base["ledger_path"],
+        "work_order_digest": base["work_order"].digest,
         "test_receipt": test_receipt,
         "verification": verification,
         "acceptance_draft_payload": acceptance_draft_payload,

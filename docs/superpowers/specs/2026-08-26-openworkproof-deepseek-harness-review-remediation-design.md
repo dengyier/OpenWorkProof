@@ -126,6 +126,14 @@ The factory may reuse existing deterministic fixture helpers only after their
 test-only key and clock assumptions are removed. No fallback handler may turn
 an unavailable case into success.
 
+The current `openworkproof-dsh-case/0.1` object is insufficient for this
+factory: it identifies a clean source checkout, but not the controlled
+candidate runtime needed by `execute_dsh_patch`, and it contains no closed
+transport contract for an external Verifier. Before the factory is wired, the
+case initialization contract must add those two bindings and prove that they
+can be reconstructed after process restart. A lambda built from test fixtures
+or a direct host-process test runner is not an acceptable substitute.
+
 ## 6. Verification binding
 
 A VERIFIED result must bind all of the following:
