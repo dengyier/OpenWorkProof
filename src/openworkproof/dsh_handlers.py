@@ -9,15 +9,41 @@ import stat
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import rfc8785
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import openworkproof.evidence as evidence
+import openworkproof.repo_tools as repo_tools
+from openworkproof.binding import canonical_test_profile_digest
+from openworkproof.dsh_case import DecisionTokenStore, DshCaseManifestV01
+from openworkproof.dsh_execution import (
+    DshApplyPatchInputV01,
+    DshExecutionCaseV01,
+    DshRunTestsInputV01,
+    execute_dsh_patch,
+    execute_dsh_tests,
+)
 from openworkproof.dsh_protocol import (
+    DshActionExecutePayloadV01,
     DshExecutionIdentityV01,
     dsh_execution_identity_digest,
 )
-from openworkproof.models import RunTestsArguments, ToolCallReceipt
-from openworkproof.policy import ProspectiveExecutionFacts
+from openworkproof.models import (
+    RunTestsArguments,
+    TestResultEvidence,
+    ToolCallReceipt,
+)
+from openworkproof.policy import (
+    AuthorizationLedgerPrefix,
+    CommittedEvidence,
+    ProspectiveExecutionFacts,
+    derive_authorization_context,
+)
+
+if TYPE_CHECKING:
+    from openworkproof.dsh_bridge import DshCaseHandlers
 
 
 _MAX_VERIFIER_MESSAGE_BYTES = 1_048_576
@@ -161,4 +187,182 @@ def make_external_verifier_executor(
     return execute
 
 
-__all__ = ["make_external_verifier_executor"]
+def _load_private_key(path: str) -> Ed25519PrivateKey:
+    raw = Path(path).read_bytes()
+    if len(raw) != 32:
+        raise RuntimeError("CASE_KEY_INVALID")
+    return Ed25519PrivateKey.from_private_bytes(raw)
+
+
+def _case_runtime(
+    manifest: DshCaseManifestV01,
+    decision_tokens: DecisionTokenStore,
+    *,
+    now: datetime,
+) -> DshExecutionCaseV01:
+    ledger_path = Path(manifest.ledger_path)
+    evidence_root = Path(manifest.evidence_root)
+    connection = evidence.connect_ledger(ledger_path)
+    try:
+        work_order, receipts, grants, groups = (
+            evidence._replay_receipt_publication_ledger(connection)
+        )
+        attempts = evidence._validated_grant_attempts(
+            connection, work_order, receipts
+        )
+    finally:
+        connection.close()
+    if (
+        work_order.digest != manifest.work_order_digest
+        or work_order.source_commit != manifest.source_revision
+    ):
+        raise RuntimeError("CASE_LEDGER_BINDING_INVALID")
+    committed: list[CommittedEvidence] = []
+    verified: list[TestResultEvidence] = []
+    verifier_paths = {
+        f"{work_order.evidence_policy.evidence_root}/{artifact.path}"
+        for artifact in work_order.evidence_policy.artifacts
+        if artifact.purpose
+        in {"verifier_result", "verifier_independent_result"}
+    }
+    for group in groups:
+        for publication in group.publications:
+            if publication.state != "COMMITTED":
+                continue
+            payload = (evidence_root / publication.final_path).read_bytes()
+            item = CommittedEvidence(
+                reference=publication.reference,
+                payload=payload,
+            )
+            committed.append(item)
+            if publication.reference.path in verifier_paths:
+                verified.append(TestResultEvidence.model_validate_json(payload))
+    workspace = repo_tools.load_candidate_workspace(
+        Path(manifest.candidate_runtime_root),
+        manifest.candidate_workspace_id,
+    )
+    if workspace.source_artifact_sha256 != work_order.source_artifact.sha256:
+        raise RuntimeError("CASE_WORKSPACE_BINDING_INVALID")
+    descriptor = os.open(
+        workspace.worktree,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        workspace_manifest = repo_tools.scan_workspace_manifest(
+            descriptor, workspace.head_commit
+        )
+    finally:
+        os.close(descriptor)
+    workspace_manifest_digest = repo_tools.workspace_manifest_digest(
+        workspace_manifest
+    )
+    if workspace_manifest_digest != workspace.workspace_manifest_digest:
+        raise RuntimeError("CASE_WORKSPACE_BINDING_INVALID")
+    checkpoint = repo_tools.ReplayCheckpoint(
+        files=(),
+        head_commit=workspace.head_commit,
+        workspace_manifest=workspace_manifest,
+        workspace_manifest_digest=workspace_manifest_digest,
+        verified_test_results=tuple(verified),
+    )
+    context = derive_authorization_context(
+        work_order,
+        AuthorizationLedgerPrefix(
+            effective_grants=tuple(
+                sorted(grants.values(), key=lambda item: item.grant_id)
+            ),
+            grant_attempts=tuple(
+                sorted(attempts.values(), key=lambda item: item.digest)
+            ),
+            receipts=receipts,
+        ),
+        tuple(
+            sorted(committed, key=lambda item: item.reference.path.encode())
+        ),
+        checkpoint,
+        now,
+    )
+    verifier_socket = manifest.verifier_socket_path
+    return DshExecutionCaseV01(
+        case_id=manifest.case_id,
+        ledger_path=ledger_path,
+        evidence_root=evidence_root,
+        context=context,
+        candidate_workspace=workspace,
+        sidecar_private_key=_load_private_key(manifest.sidecar_key_path),
+        developer_private_key=_load_private_key(manifest.developer_key_path),
+        decision_tokens=decision_tokens,
+        test_profile_digest=manifest.test_profile_digest,
+        run_tests_executor=(
+            None
+            if verifier_socket is None
+            else make_external_verifier_executor(
+                socket_path=Path(verifier_socket),
+                case_id=manifest.case_id,
+            )
+        ),
+    )
+
+
+def build_dsh_case_handlers(
+    manifest: DshCaseManifestV01,
+    decision_tokens: DecisionTokenStore,
+    *,
+    clock: Callable[[], datetime],
+) -> DshCaseHandlers:
+    """Assemble one case-scoped handler set from durable protocol truth."""
+
+    from openworkproof.dsh_bridge import DshCaseHandlers
+
+    def action(payload: DshActionExecutePayloadV01) -> str:
+        now = clock().astimezone(timezone.utc)
+        runtime = _case_runtime(
+            manifest,
+            decision_tokens,
+            now=now,
+        )
+        if payload.execution.tool_name == "owp_apply_patch":
+            result = execute_dsh_patch(
+                runtime,
+                DshApplyPatchInputV01.model_validate(
+                    {
+                        "schema_version": (
+                            "openworkproof-dsh-apply-patch/0.1"
+                        ),
+                        "case_id": payload.case_id,
+                        "execution": payload.execution.model_dump(mode="json"),
+                        "decision_token": payload.decision_token,
+                        "patch_utf8": payload.patch_text,
+                        "target_paths": list(payload.target_paths or ()),
+                    }
+                ),
+                clock=lambda: now,
+            )
+            return result.receipt.digest
+        receipt = execute_dsh_tests(
+            runtime,
+            DshRunTestsInputV01.model_validate(
+                {
+                    "schema_version": "openworkproof-dsh-run-tests/0.1",
+                    "case_id": payload.case_id,
+                    "execution": payload.execution.model_dump(mode="json"),
+                    "decision_token": payload.decision_token,
+                    "test_profile_digest": payload.test_profile_digest,
+                }
+            ),
+            clock=lambda: now,
+        )
+        return receipt.digest
+
+    def unavailable(_payload: object) -> str:
+        raise RuntimeError("HANDLER_NOT_IMPLEMENTED")
+
+    return DshCaseHandlers(
+        action=action,
+        verify=unavailable,
+        acceptance_draft=unavailable,
+        export=unavailable,
+    )
+
+
+__all__ = ["build_dsh_case_handlers", "make_external_verifier_executor"]

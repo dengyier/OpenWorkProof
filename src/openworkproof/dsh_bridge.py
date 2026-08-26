@@ -541,7 +541,19 @@ def run_stdio_bridge(
 ) -> int:
     """Run one bounded JSONL session; stdout is protocol bytes only."""
 
-    app = application or DshBridgeApplication(clock=clock)
+    if application is None:
+        from openworkproof.dsh_handlers import build_dsh_case_handlers
+
+        app = DshBridgeApplication(
+            clock=clock,
+            handler_factory=lambda manifest, tokens: build_dsh_case_handlers(
+                manifest,
+                tokens,
+                clock=clock,
+            ),
+        )
+    else:
+        app = application
     for line in stdin:
         raw = line.encode("utf-8") if isinstance(line, str) else bytes(line)
         try:

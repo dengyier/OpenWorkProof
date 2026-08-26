@@ -73,6 +73,7 @@ def _write_case(tmp_path: Path) -> Path:
         "ledger_path": str(case / "ledger.sqlite3"),
         "evidence_root": str(evidence),
         "candidate_runtime_root": str(runtime),
+        "candidate_workspace_id": "c" * 64,
         "verifier_socket_path": str(case / "verifier.sock"),
         "sidecar_key_path": str(keys / "sidecar.key"),
         "developer_key_path": str(keys / "developer.key"),
@@ -187,6 +188,7 @@ def test_valid_case_loads_exact_runtime_paths(tmp_path: Path) -> None:
     assert loaded.candidate_runtime_root == str(
         (case / "candidate-runtime").resolve()
     )
+    assert loaded.candidate_workspace_id == "c" * 64
     assert loaded.verifier_socket_path == str(case / "verifier.sock")
     assert loaded.allowed_tools == ("owp_apply_patch", "owp_run_tests")
 

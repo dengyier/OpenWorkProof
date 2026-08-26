@@ -194,6 +194,59 @@ def test_bridge_stdout_contains_jsonl_only() -> None:
     assert all(line == line.strip() for line in stdout.getvalue().splitlines())
 
 
+def test_stdio_default_wires_production_case_handlers(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    manifest = SimpleNamespace(
+        case_id="c" * 64,
+        allowed_tools=("owp_apply_patch",),
+    )
+    monkeypatch.setattr(
+        "openworkproof.dsh_bridge.load_dsh_case",
+        lambda _path: manifest,
+    )
+    calls: list[object] = []
+
+    def factory(opened, tokens, *, clock):
+        calls.append((opened, tokens, clock()))
+        return DshCaseHandlers(
+            action=lambda _payload: "a" * 64,
+            verify=lambda _payload: "b" * 64,
+            acceptance_draft=lambda _payload: "c" * 64,
+            export=lambda _payload: "d" * 64,
+        )
+
+    monkeypatch.setattr(
+        "openworkproof.dsh_handlers.build_dsh_case_handlers",
+        factory,
+    )
+    messages = (
+        _hello(),
+        _request(
+            "case_open",
+            1,
+            {"case_manifest_path": str(tmp_path)},
+        ),
+        _request("shutdown", 2, {"reason": "client_shutdown"}),
+    )
+    source = "".join(
+        json.dumps(item, separators=(",", ":")) + "\n" for item in messages
+    )
+
+    result = run_stdio_bridge(
+        io.StringIO(source),
+        io.StringIO(),
+        io.StringIO(),
+        clock=lambda: NOW,
+    )
+
+    assert result == 0
+    assert len(calls) == 1
+    assert calls[0][0] is manifest
+    assert calls[0][2] == NOW
+
+
 def test_duplicate_request_bytes_return_the_exact_cached_response() -> None:
     app = DshBridgeApplication(clock=lambda: NOW)
     raw = rfc8785.dumps(_hello())

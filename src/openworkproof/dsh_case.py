@@ -81,6 +81,7 @@ class DshCaseManifestV01(ProtocolModel):
     ledger_path: str
     evidence_root: str
     candidate_runtime_root: str
+    candidate_workspace_id: Digest64
     verifier_socket_path: str | None = None
     sidecar_key_path: str
     developer_key_path: str
