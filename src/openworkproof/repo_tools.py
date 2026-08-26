@@ -3779,6 +3779,93 @@ def _read_candidate_control(workspace: CandidateWorkspace) -> dict[str, Any]:
     return _parse_candidate_control(raw, workspace)
 
 
+def load_candidate_workspace(
+    runtime_root: Path,
+    workspace_id: str,
+) -> CandidateWorkspace:
+    """Recover one existing workspace from its immutable control record."""
+
+    if (
+        type(runtime_root) is not type(Path())
+        or not runtime_root.is_absolute()
+        or runtime_root != Path(os.path.abspath(runtime_root))
+        or type(workspace_id) is not str
+        or _DIGEST_PATTERN.fullmatch(workspace_id) is None
+    ):
+        raise CandidateWorkspaceError("candidate recovery binding is invalid")
+    candidate_root = runtime_root / workspace_id
+    control_path = candidate_root / "control.json"
+    try:
+        root_descriptor = _open_candidate_runtime_root(runtime_root)
+        os.close(root_descriptor)
+        candidate_metadata = os.stat(candidate_root, follow_symlinks=False)
+        control_metadata = os.stat(control_path, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(candidate_metadata.st_mode)
+            or stat.S_IMODE(candidate_metadata.st_mode) != 0o700
+            or candidate_metadata.st_uid != os.geteuid()
+            or not stat.S_ISREG(control_metadata.st_mode)
+            or stat.S_IMODE(control_metadata.st_mode) != 0o600
+            or control_metadata.st_nlink != 1
+            or not 1 <= control_metadata.st_size <= 4_096
+        ):
+            raise CandidateWorkspaceError(
+                "candidate recovery control is invalid"
+            )
+        descriptor = os.open(control_path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            opened = os.fstat(descriptor)
+            if not os.path.samestat(control_metadata, opened):
+                raise CandidateWorkspaceError(
+                    "candidate recovery control changed"
+                )
+            raw = _read_workspace_file(descriptor, opened.st_size)
+        finally:
+            os.close(descriptor)
+        value = json.loads(raw)
+        if (
+            type(value) is not dict
+            or rfc8785.dumps(value) != raw
+            or set(value)
+            != {
+                "schema_version",
+                "workspace_id",
+                "source_artifact_sha256",
+                "head_commit",
+                "workspace_manifest_digest",
+                "worktree_inode",
+                "git_inode",
+            }
+            or value["schema_version"]
+            != "openworkproof-candidate-control/0.1"
+            or value["workspace_id"] != workspace_id
+            or _DIGEST_PATTERN.fullmatch(value["source_artifact_sha256"])
+            is None
+            or _OID_PATTERN.fullmatch(value["head_commit"]) is None
+            or _DIGEST_PATTERN.fullmatch(value["workspace_manifest_digest"])
+            is None
+        ):
+            raise CandidateWorkspaceError(
+                "candidate recovery control binding is invalid"
+            )
+        workspace = CandidateWorkspace(
+            runtime_root=runtime_root,
+            candidate_root=candidate_root,
+            worktree=candidate_root / "worktree",
+            git_dir=candidate_root / "git",
+            workspace_id=workspace_id,
+            source_artifact_sha256=value["source_artifact_sha256"],
+            head_commit=value["head_commit"],
+            workspace_manifest_digest=value["workspace_manifest_digest"],
+        )
+        _validate_candidate_layout(workspace)
+        return workspace
+    except CandidateWorkspaceError:
+        raise
+    except Exception as error:
+        raise CandidateWorkspaceError("RECOVERY_REQUIRED") from error
+
+
 def _replace_candidate_control(
     workspace: CandidateWorkspace,
     *,

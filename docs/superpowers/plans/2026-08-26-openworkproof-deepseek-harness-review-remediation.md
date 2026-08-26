@@ -106,6 +106,11 @@ checkout but does not bind a controlled candidate runtime or an external
 Verifier transport. Add and test those bindings through case initialization
 before Step 1; do not use `scripts/create_dsh_fixture.py` as production code.
 
+Progress: `candidate_runtime_root` is now a private owned `0700` directory
+outside all frozen/control paths. Cases that allow `owp_run_tests` now also
+bind an in-case `verifier_socket_path`; the socket client and production
+handler assembly remain to be implemented.
+
 - [ ] **Step 1: Write RED ordinary-CLI tests**
 
 Start the real CLI bridge, open a generated case, authorize one patch, execute

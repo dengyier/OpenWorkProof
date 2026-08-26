@@ -850,6 +850,28 @@ def test_rebuild_candidate_workspace_replaces_a_mismatched_checkpoint(
     assert not (runtime_root / f"{workspace_id}.rebuild").exists()
 
 
+def test_load_candidate_workspace_recovers_exact_control_identity(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    source = _source_snapshot()
+    created = repo_tools.initialize_candidate_workspace(
+        repo_tools.WorkspaceInitRequest(
+            runtime_root=runtime_root,
+            workspace_id="e" * 64,
+            source=source,
+        )
+    )
+
+    recovered = repo_tools.load_candidate_workspace(
+        runtime_root,
+        created.workspace_id,
+    )
+
+    assert recovered == created
+
+
 def test_rebuild_candidate_workspace_replays_committed_patch_checkpoint(
     tmp_path: Path,
     work_order_dict: dict,

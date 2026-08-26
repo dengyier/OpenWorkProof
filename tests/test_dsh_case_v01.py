@@ -73,6 +73,7 @@ def _write_case(tmp_path: Path) -> Path:
         "ledger_path": str(case / "ledger.sqlite3"),
         "evidence_root": str(evidence),
         "candidate_runtime_root": str(runtime),
+        "verifier_socket_path": str(case / "verifier.sock"),
         "sidecar_key_path": str(keys / "sidecar.key"),
         "developer_key_path": str(keys / "developer.key"),
     }
@@ -186,6 +187,7 @@ def test_valid_case_loads_exact_runtime_paths(tmp_path: Path) -> None:
     assert loaded.candidate_runtime_root == str(
         (case / "candidate-runtime").resolve()
     )
+    assert loaded.verifier_socket_path == str(case / "verifier.sock")
     assert loaded.allowed_tools == ("owp_apply_patch", "owp_run_tests")
 
 
@@ -207,6 +209,28 @@ def test_case_requires_candidate_runtime_outside_frozen_source(
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(DshCaseError, match="candidate runtime root.*repository"):
+        load_dsh_case(case)
+
+
+def test_case_requires_verifier_transport_for_test_tool(tmp_path: Path) -> None:
+    case = _write_case(tmp_path)
+    manifest_path = case / "case.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["verifier_socket_path"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(DshCaseError, match="Verifier transport"):
+        load_dsh_case(case)
+
+
+def test_case_rejects_verifier_transport_outside_case(tmp_path: Path) -> None:
+    case = _write_case(tmp_path)
+    manifest_path = case / "case.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["verifier_socket_path"] = str(tmp_path / "outside.sock")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(DshCaseError, match="escapes"):
         load_dsh_case(case)
 
 

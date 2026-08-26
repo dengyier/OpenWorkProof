@@ -81,6 +81,7 @@ class DshCaseManifestV01(ProtocolModel):
     ledger_path: str
     evidence_root: str
     candidate_runtime_root: str
+    verifier_socket_path: str | None = None
     sidecar_key_path: str
     developer_key_path: str
     mode: Literal["audit", "enforce"]
@@ -103,6 +104,13 @@ class DshCaseManifestV01(ProtocolModel):
         )
         if any(not Path(value).is_absolute() for value in runtime_paths):
             raise ValueError("runtime paths must be absolute")
+        if "owp_run_tests" in self.allowed_tools:
+            if self.verifier_socket_path is None:
+                raise ValueError(
+                    "external Verifier transport is required for owp_run_tests"
+                )
+            if not Path(self.verifier_socket_path).is_absolute():
+                raise ValueError("Verifier transport path must be absolute")
         stable = {
             "schema_version": self.schema_version,
             "work_order_digest": self.work_order_digest,
@@ -236,6 +244,11 @@ def load_dsh_case(case_directory: Path | str) -> DshCaseManifestV01:
         manifest.candidate_runtime_root,
         manifest.sidecar_key_path,
         manifest.developer_key_path,
+        *(
+            ()
+            if manifest.verifier_socket_path is None
+            else (manifest.verifier_socket_path,)
+        ),
     )
     relative_paths = tuple(
         _relative_runtime_path(case_root, value) for value in runtime_values
@@ -262,6 +275,11 @@ def load_dsh_case(case_directory: Path | str) -> DshCaseManifestV01:
         evidence,
         Path(manifest.sidecar_key_path),
         Path(manifest.developer_key_path),
+        *(
+            ()
+            if manifest.verifier_socket_path is None
+            else (Path(manifest.verifier_socket_path),)
+        ),
     )
     if any(_paths_overlap(candidate_runtime, path) for path in protected_paths):
         raise DshCaseError(
