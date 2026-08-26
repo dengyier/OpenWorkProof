@@ -501,6 +501,7 @@ def create_dsh_fixture(
         "evidence_root": base["evidence_root"],
         "work_order_digest": base["work_order"].digest,
         "work_order": base["work_order"],
+        "source": base["source"],
         "candidate": base["candidate"],
         "profile_digest": profile_digest,
         "binding_now": binding_now,
