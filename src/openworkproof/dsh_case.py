@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
 import stat
 import subprocess
@@ -79,6 +80,7 @@ class DshCaseManifestV01(ProtocolModel):
     test_profile_digest: Digest64
     ledger_path: str
     evidence_root: str
+    candidate_runtime_root: str
     sidecar_key_path: str
     developer_key_path: str
     mode: Literal["audit", "enforce"]
@@ -95,6 +97,7 @@ class DshCaseManifestV01(ProtocolModel):
             self.repository_root,
             self.ledger_path,
             self.evidence_root,
+            self.candidate_runtime_root,
             self.sidecar_key_path,
             self.developer_key_path,
         )
@@ -163,6 +166,27 @@ def _require_private_key_file(path: Path) -> None:
         raise DshCaseError("key file mode must be exactly 0600")
 
 
+def _require_private_candidate_runtime(path: Path) -> None:
+    try:
+        info = path.stat()
+    except OSError as error:
+        raise DshCaseError("candidate runtime root is unavailable") from error
+    if not stat.S_ISDIR(info.st_mode):
+        raise DshCaseError("candidate runtime root must be a directory")
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        raise DshCaseError("candidate runtime root mode must be exactly 0700")
+    if info.st_uid != os.geteuid():
+        raise DshCaseError("candidate runtime root must be owned by this user")
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return (
+        left == right
+        or left.is_relative_to(right)
+        or right.is_relative_to(left)
+    )
+
+
 def _git_output(repository: Path, *args: str) -> str:
     try:
         result = subprocess.run(
@@ -209,6 +233,7 @@ def load_dsh_case(case_directory: Path | str) -> DshCaseManifestV01:
         manifest.repository_root,
         manifest.ledger_path,
         manifest.evidence_root,
+        manifest.candidate_runtime_root,
         manifest.sidecar_key_path,
         manifest.developer_key_path,
     )
@@ -221,12 +246,28 @@ def load_dsh_case(case_directory: Path | str) -> DshCaseManifestV01:
     repository = Path(manifest.repository_root)
     ledger = Path(manifest.ledger_path)
     evidence = Path(manifest.evidence_root)
+    candidate_runtime = Path(manifest.candidate_runtime_root)
     if not repository.is_dir():
         raise DshCaseError("repository_root must be a directory")
     if not ledger.is_file():
         raise DshCaseError("ledger_path must be a regular file")
     if not evidence.is_dir():
         raise DshCaseError("evidence_root must be a directory")
+    if _paths_overlap(candidate_runtime, repository):
+        raise DshCaseError(
+            "candidate runtime root must be outside repository_root"
+        )
+    protected_paths = (
+        ledger,
+        evidence,
+        Path(manifest.sidecar_key_path),
+        Path(manifest.developer_key_path),
+    )
+    if any(_paths_overlap(candidate_runtime, path) for path in protected_paths):
+        raise DshCaseError(
+            "candidate runtime root overlaps protected case paths"
+        )
+    _require_private_candidate_runtime(candidate_runtime)
     _require_private_key_file(Path(manifest.sidecar_key_path))
     _require_private_key_file(Path(manifest.developer_key_path))
     if Path(manifest.sidecar_key_path).samefile(manifest.developer_key_path):

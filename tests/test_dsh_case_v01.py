@@ -37,9 +37,11 @@ def _write_case(tmp_path: Path) -> Path:
     repo = case / "repo"
     keys = case / "keys"
     evidence = case / "evidence"
+    runtime = case / "candidate-runtime"
     repo.mkdir(parents=True)
     keys.mkdir()
     evidence.mkdir()
+    runtime.mkdir(mode=0o700)
     (case / "ledger.sqlite3").write_bytes(b"")
     (keys / "sidecar.key").write_bytes(b"s" * 32)
     (keys / "developer.key").write_bytes(b"d" * 32)
@@ -70,6 +72,7 @@ def _write_case(tmp_path: Path) -> Path:
         "repository_root": str(repo),
         "ledger_path": str(case / "ledger.sqlite3"),
         "evidence_root": str(evidence),
+        "candidate_runtime_root": str(runtime),
         "sidecar_key_path": str(keys / "sidecar.key"),
         "developer_key_path": str(keys / "developer.key"),
     }
@@ -180,7 +183,31 @@ def test_valid_case_loads_exact_runtime_paths(tmp_path: Path) -> None:
     loaded = load_dsh_case(case)
 
     assert loaded.repository_root == str((case / "repo").resolve())
+    assert loaded.candidate_runtime_root == str(
+        (case / "candidate-runtime").resolve()
+    )
     assert loaded.allowed_tools == ("owp_apply_patch", "owp_run_tests")
+
+
+def test_case_requires_private_candidate_runtime_root(tmp_path: Path) -> None:
+    case = _write_case(tmp_path)
+    os.chmod(case / "candidate-runtime", 0o755)
+
+    with pytest.raises(DshCaseError, match="candidate runtime root"):
+        load_dsh_case(case)
+
+
+def test_case_requires_candidate_runtime_outside_frozen_source(
+    tmp_path: Path,
+) -> None:
+    case = _write_case(tmp_path)
+    manifest_path = case / "case.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["candidate_runtime_root"] = manifest["repository_root"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(DshCaseError, match="candidate runtime root.*repository"):
+        load_dsh_case(case)
 
 
 def test_decision_token_is_exact_one_use() -> None:
