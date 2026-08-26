@@ -22,6 +22,9 @@ not prove the advertised packaged integration. The candidate is therefore
    surfaces and must not be described as active observation;
 6. the current live preflight loads the tarball but tests imported classes,
    mocks, and a separate Python fixture rather than one real packaged chain.
+7. a clean profile can compose the packed YAML but cannot import the plugin
+   when the package emits runtime imports of Harness API packages that the
+   profile intentionally does not install as third-party dependencies.
 
 Passing focused, candidate, and required-live tests remains useful regression
 evidence, but it does not override these direct integration failures.
@@ -97,6 +100,14 @@ functional loss over a mutating bypass. Audit does not deny them.
 
 The compatibility test must inspect the pinned host package set and fail when a
 new known consequential model-facing tool is introduced without classification.
+
+### 4.3 Clean-profile runtime loading
+
+Harness API packages remain exact dev-time type dependencies. The emitted
+plugin JavaScript must not import a second runtime copy of the host services.
+OWP tool definitions therefore use the public `ToolDefinition` shape and closed
+JSON Schemas directly. A clean-profile pack/install/import test is mandatory;
+`--dump-config` alone is not a runtime-load test.
 
 ## 5. Production bridge assembly
 

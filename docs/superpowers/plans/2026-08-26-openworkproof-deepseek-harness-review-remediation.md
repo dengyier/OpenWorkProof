@@ -26,18 +26,22 @@ Docker candidate/required-live gates.
 - Modify: `/Users/molin/Project/openworkproof-dsh-plugin/src/compatibility.ts`
 - Modify: `/Users/molin/Project/openworkproof-dsh-plugin/src/bridge-client.ts`
 - Modify: `/Users/molin/Project/openworkproof-dsh-plugin/src/policy.ts`
+- Modify: `/Users/molin/Project/openworkproof-dsh-plugin/src/tools.ts`
 - Modify: `/Users/molin/Project/openworkproof-dsh-plugin/test/bridge-client.test.ts`
 - Modify: `/Users/molin/Project/openworkproof-dsh-plugin/test/fixtures/fake-bridge.mjs`
 - Modify: `/Users/molin/Project/openworkproof-dsh-plugin/test/policy.test.ts`
+- Modify: `/Users/molin/Project/openworkproof-dsh-plugin/test/compatibility.test.ts`
 - Create: `/Users/molin/Project/openworkproof-dsh-plugin/test/real-bridge.test.ts`
+- Create: `/Users/molin/Project/openworkproof-dsh-plugin/test/packaged-runtime.test.ts`
 
-- [ ] **Step 1: Write RED tests**
+- [x] **Step 1: Write RED tests**
 
 Add assertions that the negotiated OpenWorkProof version is `1.4.0`, a real
 `owp dsh-bridge --stdio` child accepts the tuple, and Enforce denies exactly
 `write`, `edit`, `bash`, `pwsh`, and `str_replace_editor`.
+Also pack into a clean profile and import the installed entry point.
 
-- [ ] **Step 2: Run RED tests**
+- [x] **Step 2: Run RED tests**
 
 ```bash
 cd /Users/molin/Project/openworkproof-dsh-plugin
@@ -45,8 +49,9 @@ pnpm vitest run test/bridge-client.test.ts test/real-bridge.test.ts test/policy.
 ```
 
 Expected: failures show `1.3.0` and both missing native mutators.
+The clean package additionally fails on unresolved host runtime modules.
 
-- [ ] **Step 3: Add one compatibility tuple and closed mutator set**
+- [x] **Step 3: Add one compatibility tuple and closed mutator set**
 
 Export the tuple from `compatibility.ts`, import it in client/tests/preflight,
 and set:
@@ -61,7 +66,10 @@ export const NATIVE_MUTATORS = new Set([
 ])
 ```
 
-- [ ] **Step 4: Run GREEN and full plugin regression**
+Emit closed `ToolDefinition` objects directly so the packed plugin uses the
+host services injected by DSH and does not import a second runtime package set.
+
+- [x] **Step 4: Run GREEN and full plugin regression**
 
 ```bash
 pnpm test
@@ -72,12 +80,17 @@ git diff --check
 
 Expected: all pass with a real core handshake.
 
-- [ ] **Step 5: Commit the plugin P0 repair**
+- [x] **Step 5: Commit the plugin P0 repair**
 
 ```bash
 git add src test
 git commit -m "fix: close Harness compatibility bypasses"
 ```
+
+Completed in plugin commit `7fba1b9`; clean packed artifact SHA-256 observed
+during the gate was
+`4de25e6daa0fa8bb92e36f4a89fad4b8848a9b9c5f852ff0da49e0b4ccb5d972`.
+This temporary artifact is verification evidence, not a published release.
 
 ## Task 2: Assemble production case handlers for the ordinary CLI bridge
 
