@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -16,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import openworkproof.evidence as evidence
 import openworkproof.repo_tools as repo_tools
+from openworkproof.acceptance import prepare_acceptance_decision_binding
 from openworkproof.binding import canonical_test_profile_digest
 from openworkproof.dsh_case import DecisionTokenStore, DshCaseManifestV01
 from openworkproof.dsh_execution import (
@@ -26,9 +28,20 @@ from openworkproof.dsh_execution import (
     execute_dsh_tests,
 )
 from openworkproof.dsh_protocol import (
+    DshAcceptanceDraftPayloadV01,
     DshActionExecutePayloadV01,
     DshExecutionIdentityV01,
+    DshExportRequestPayloadV01,
+    DshObservationRecordV01,
+    DshVerifyRequestPayloadV01,
+    canonical_bytes,
     dsh_execution_identity_digest,
+    verify_dsh_observation,
+)
+from openworkproof.dsh_verifier import (
+    DshVerificationCaseV01,
+    DshVerificationResultV01,
+    verify_dsh_code_change,
 )
 from openworkproof.models import (
     RunTestsArguments,
@@ -41,6 +54,7 @@ from openworkproof.policy import (
     ProspectiveExecutionFacts,
     derive_authorization_context,
 )
+from openworkproof.services import OpenWorkProofServices
 
 if TYPE_CHECKING:
     from openworkproof.dsh_bridge import DshCaseHandlers
@@ -48,6 +62,17 @@ if TYPE_CHECKING:
 
 _MAX_VERIFIER_MESSAGE_BYTES = 1_048_576
 _VERIFIER_TIMEOUT_SECONDS = 5.0
+
+
+def _evidence_payload_path(
+    evidence_root: Path,
+    logical_root: str,
+    final_path: str,
+) -> Path:
+    prefix = f"{logical_root}/"
+    if not final_path.startswith(prefix):
+        raise RuntimeError("CASE_EVIDENCE_BINDING_INVALID")
+    return evidence_root / final_path.removeprefix(prefix)
 
 
 def _strict_canonical_object(raw: bytes) -> dict[str, object]:
@@ -225,17 +250,29 @@ def _case_runtime(
         if artifact.purpose
         in {"verifier_result", "verifier_independent_result"}
     }
-    for group in groups:
+    references = {
+        reference.path: reference
+        for receipt in receipts
+        for reference in receipt.evidence_refs
+    }
+    for group, state in groups:
+        if state != "COMMITTED":
+            continue
         for publication in group.publications:
-            if publication.state != "COMMITTED":
-                continue
-            payload = (evidence_root / publication.final_path).read_bytes()
+            payload = _evidence_payload_path(
+                evidence_root,
+                work_order.evidence_policy.evidence_root,
+                publication.final_path,
+            ).read_bytes()
+            reference = references.get(publication.final_path)
+            if reference is None:
+                raise RuntimeError("CASE_EVIDENCE_BINDING_INVALID")
             item = CommittedEvidence(
-                reference=publication.reference,
+                reference=reference,
                 payload=payload,
             )
             committed.append(item)
-            if publication.reference.path in verifier_paths:
+            if reference.path in verifier_paths:
                 verified.append(TestResultEvidence.model_validate_json(payload))
     workspace = repo_tools.load_candidate_workspace(
         Path(manifest.candidate_runtime_root),
@@ -304,6 +341,184 @@ def _case_runtime(
     )
 
 
+def _verified_patch_execution(
+    manifest: DshCaseManifestV01,
+    receipt_digest: str,
+    sidecar_key: Ed25519PrivateKey,
+) -> DshExecutionIdentityV01:
+    directory = Path(manifest.evidence_root) / "dsh-observations"
+    candidates: list[DshExecutionIdentityV01] = []
+    if directory.is_dir() and not directory.is_symlink():
+        for path in sorted(directory.iterdir(), key=lambda item: item.name):
+            if path.is_symlink() or not path.is_file() or path.suffix != ".json":
+                continue
+            try:
+                record = DshObservationRecordV01.model_validate_json(
+                    path.read_bytes()
+                )
+            except (OSError, ValueError):
+                continue
+            if (
+                record.authorization_status == "authorized"
+                and record.receipt_digest == receipt_digest
+                and not record.evidence_gap_codes
+                and record.execution.tool_name == "owp_apply_patch"
+                and verify_dsh_observation(
+                    record, sidecar_key.public_key()
+                )
+            ):
+                candidates.append(record.execution)
+    if len(candidates) != 1:
+        raise RuntimeError("PATCH_OBSERVATION_BINDING_UNAVAILABLE")
+    return candidates[0]
+
+
+def _committed_verifier_exit_code(
+    manifest: DshCaseManifestV01,
+    *,
+    candidate_commit: str,
+    workspace_manifest_digest: str,
+) -> int:
+    ledger_path = Path(manifest.ledger_path)
+    evidence_root = Path(manifest.evidence_root)
+    connection = evidence.connect_ledger(ledger_path)
+    try:
+        work_order, receipts, _, groups = (
+            evidence._replay_receipt_publication_ledger(connection)
+        )
+    finally:
+        connection.close()
+    profile = tuple(
+        item
+        for item in work_order.test_profiles
+        if item.test_mode == "verifier"
+        and canonical_test_profile_digest(item) == manifest.test_profile_digest
+    )
+    if len(profile) != 1:
+        raise RuntimeError("VERIFIER_PROFILE_BINDING_INVALID")
+    selected = profile[0]
+    committed_payloads = {
+        publication.final_path: _evidence_payload_path(
+            evidence_root,
+            work_order.evidence_policy.evidence_root,
+            publication.final_path,
+        ).read_bytes()
+        for group, state in groups
+        for publication in group.publications
+        if state == "COMMITTED"
+    }
+    results: list[TestResultEvidence] = []
+    artifact_purposes = {
+        f"{work_order.evidence_policy.evidence_root}/{artifact.path}": (
+            artifact.purpose
+        )
+        for artifact in work_order.evidence_policy.artifacts
+    }
+    for receipt in receipts:
+        if (
+            not isinstance(receipt, ToolCallReceipt)
+            or receipt.tool_name != "owp.run_tests"
+            or receipt.policy_decision != "allow"
+            or receipt.execution_status != "succeeded"
+            or not isinstance(receipt.request_arguments, RunTestsArguments)
+            or receipt.request_arguments.test_mode != "verifier"
+            or receipt.request_arguments.command_digest
+            != selected.command_digest
+            or receipt.request_arguments.container_image_digest
+            != selected.container_image_digest
+            or receipt.request_arguments.fixed_test_source_digest
+            != selected.fixed_test_source_digest
+            or receipt.request_arguments.candidate_commit != candidate_commit
+            or receipt.request_arguments.workspace_manifest_digest
+            != workspace_manifest_digest
+        ):
+            continue
+        references = tuple(
+            reference
+            for reference in receipt.evidence_refs
+            if artifact_purposes.get(reference.path)
+            in {"verifier_result", "verifier_independent_result"}
+        )
+        if len(references) != 1:
+            continue
+        payload = committed_payloads.get(references[0].path)
+        if payload is None:
+            continue
+        result = TestResultEvidence.model_validate_json(payload)
+        if (
+            result.test_mode == "verifier"
+            and result.command_digest == selected.command_digest
+            and result.candidate_commit == candidate_commit
+            and result.workspace_manifest_digest == workspace_manifest_digest
+            and result.container_image_digest == selected.container_image_digest
+            and result.fixed_test_source_digest
+            == selected.fixed_test_source_digest
+        ):
+            results.append(result)
+    if len(results) != 1:
+        raise RuntimeError("VERIFIER_RESULT_BINDING_UNAVAILABLE")
+    return results[0].actual_exit_code
+
+
+def _store_result(root: Path, kind: str, payload: object) -> str:
+    raw = canonical_bytes(payload)
+    digest = hashlib.sha256(raw).hexdigest()
+    directory = root / kind
+    directory.mkdir(mode=0o700, exist_ok=True)
+    destination = directory / f"{digest}.json"
+    encoded = raw + b"\n"
+    if destination.exists():
+        if destination.is_symlink() or destination.read_bytes() != encoded:
+            raise RuntimeError("IMMUTABLE_RESULT_CONFLICT")
+        return digest
+    descriptor = os.open(
+        destination,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        os.write(descriptor, encoded)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return digest
+
+
+def _load_verification_result(
+    manifest: DshCaseManifestV01,
+    digest: str,
+) -> DshVerificationResultV01:
+    path = (
+        Path(manifest.evidence_root)
+        / "dsh-verifications"
+        / f"{digest}.json"
+    )
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError("VERIFICATION_RESULT_UNAVAILABLE")
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise RuntimeError("VERIFICATION_RESULT_UNAVAILABLE") from error
+    if len(raw) > _MAX_VERIFIER_MESSAGE_BYTES or not raw.endswith(b"\n"):
+        raise RuntimeError("VERIFICATION_RESULT_INVALID")
+    try:
+        result = DshVerificationResultV01.model_validate_json(raw)
+    except ValueError as error:
+        raise RuntimeError("VERIFICATION_RESULT_INVALID") from error
+    canonical = canonical_bytes(result)
+    if raw != canonical + b"\n" or hashlib.sha256(canonical).hexdigest() != digest:
+        raise RuntimeError("VERIFICATION_RESULT_INVALID")
+    if (
+        result.case_id != manifest.case_id
+        or result.status != "VERIFIED"
+        or result.work_order_digest != manifest.work_order_digest
+        or result.source_revision != manifest.source_revision
+        or result.test_profile_digest != manifest.test_profile_digest
+    ):
+        raise RuntimeError("VERIFICATION_RESULT_BINDING_INVALID")
+    return result
+
+
 def build_dsh_case_handlers(
     manifest: DshCaseManifestV01,
     decision_tokens: DecisionTokenStore,
@@ -354,14 +569,103 @@ def build_dsh_case_handlers(
         )
         return receipt.digest
 
-    def unavailable(_payload: object) -> str:
-        raise RuntimeError("HANDLER_NOT_IMPLEMENTED")
+    def verify(payload: object) -> str:
+        request = DshVerifyRequestPayloadV01.model_validate(
+            payload.model_dump(mode="json")
+            if isinstance(payload, DshVerifyRequestPayloadV01)
+            else payload
+        )
+        if request.case_id != manifest.case_id:
+            raise RuntimeError("CASE_ID_MISMATCH")
+        now = clock().astimezone(timezone.utc)
+        sidecar_key = _load_private_key(manifest.sidecar_key_path)
+        execution = _verified_patch_execution(
+            manifest,
+            request.action_receipt_digest,
+            sidecar_key,
+        )
+        workspace = repo_tools.load_candidate_workspace(
+            Path(manifest.candidate_runtime_root),
+            manifest.candidate_workspace_id,
+        )
+        exit_code = _committed_verifier_exit_code(
+            manifest,
+            candidate_commit=workspace.head_commit,
+            workspace_manifest_digest=workspace.workspace_manifest_digest,
+        )
+        result = verify_dsh_code_change(
+            DshVerificationCaseV01(
+                case_id=manifest.case_id,
+                repository_root=workspace.worktree,
+                source_revision=manifest.source_revision,
+                allowed_path_roots=manifest.allowed_path_roots,
+                denied_path_roots=manifest.denied_path_roots,
+                test_profile_digest=manifest.test_profile_digest,
+                ledger_path=Path(manifest.ledger_path),
+                evidence_root=Path(manifest.evidence_root),
+                verification_runner=lambda _repository: exit_code,
+                execution=execution,
+                action_receipt_digest=request.action_receipt_digest,
+                git_dir=workspace.git_dir,
+            ),
+            clock=lambda: now,
+        )
+        return _store_result(
+            Path(manifest.evidence_root),
+            "dsh-verifications",
+            result,
+        )
+
+    def acceptance_draft(payload: object) -> str:
+        request = DshAcceptanceDraftPayloadV01.model_validate(
+            payload.model_dump(mode="json")
+            if isinstance(payload, DshAcceptanceDraftPayloadV01)
+            else payload
+        )
+        if request.case_id != manifest.case_id:
+            raise RuntimeError("CASE_ID_MISMATCH")
+        _load_verification_result(manifest, request.verification_digest)
+        draft = prepare_acceptance_decision_binding(
+            Path(manifest.ledger_path),
+            clock=lambda: clock().astimezone(timezone.utc),
+        )
+        return _store_result(
+            Path(manifest.evidence_root),
+            "dsh-acceptance-drafts",
+            json.loads(draft.canonical_payload),
+        )
+
+    def export(payload: object) -> str:
+        request = DshExportRequestPayloadV01.model_validate(
+            payload.model_dump(mode="json")
+            if isinstance(payload, DshExportRequestPayloadV01)
+            else payload
+        )
+        if request.case_id != manifest.case_id:
+            raise RuntimeError("CASE_ID_MISMATCH")
+        destination = Path(request.destination)
+        if (
+            not destination.is_absolute()
+            or destination != Path(os.path.abspath(destination))
+        ):
+            raise RuntimeError("EXPORT_DESTINATION_INVALID")
+        services = OpenWorkProofServices()
+        services.build_delivery(
+            Path(manifest.ledger_path),
+            destination,
+            "customer_private",
+        )
+        audit = services.audit_delivery(destination)
+        manifest_digest = audit.get("manifest_digest")
+        if not isinstance(manifest_digest, str) or len(manifest_digest) != 64:
+            raise RuntimeError("EXPORT_VERIFICATION_FAILED")
+        return manifest_digest
 
     return DshCaseHandlers(
         action=action,
-        verify=unavailable,
-        acceptance_draft=unavailable,
-        export=unavailable,
+        verify=verify,
+        acceptance_draft=acceptance_draft,
+        export=export,
     )
 
 
