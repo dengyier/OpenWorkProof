@@ -26,7 +26,7 @@ OpenWorkProof 不保证 Agent 的结果一定正确，也不替客户作出验�
 ```text
 本地候选版本: 1.4.0, 尚未发布
 core focused: 77 passed / 0 failed / 0 skipped
-plugin: 56 passed / 0 failed / 0 skipped
+plugin: 58 passed / 0 failed / 0 skipped
 candidate: 186 passed / 0 failed / 0 skipped
 required-live: 4333 passed / 0 failed / 0 skipped
 许可证: Apache-2.0
@@ -291,7 +291,8 @@ GitHub Action 的 four-question 对应中文四问报告：
 DeepSeek Harness 适配器当前是外部发布 READY 的本地候选，锁定
 `DeepSeek Harness 0.1.1-rc.2`。Audit 只记录观察事实；Enforce 在工具执行前授权，并阻断
 原生 `write`、`edit`、`bash`、`pwsh`、`str_replace_editor`、`cordis_define` 与
-`cordis_run` 修改面。`/owp-verify` 只消费因果关联后的精确补丁
+`cordis_run`、`cordis_stop`、`cordis_undefine` 修改面。安装后的 bundle 默认关闭并视为
+`NOT_CONFIGURED`；只有显式启用并提供私有 case 后才会记录 Audit 证据。`/owp-verify` 只消费因果关联后的精确补丁
 回执；真实 CLI 进程已完成账本回读、独立验证、无私钥验收草稿与离线导出，并在进程重启
 后恢复同一已提交 receipt。上述本地预检不等于 npm 发布、外部复现、客户采用或
 DeepSeek 官方背书。
@@ -303,7 +304,7 @@ DeepSeek 官方背书。
 | 验证门 | 当前结果 |
 |---|---|
 | core focused | `77 passed / 0 failed / 0 skipped` |
-| plugin | `56 passed / 0 failed / 0 skipped` |
+| plugin | `58 passed / 0 failed / 0 skipped` |
 | candidate | `186 passed / 0 failed / 0 skipped` |
 | required-live | `4333 passed / 0 failed / 0 skipped` |
 | AgentTeams | Manager、Developer、Verifier 三角色 live preflight 已通过（`http://127.0.0.1:18080`） |

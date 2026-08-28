@@ -27,7 +27,7 @@ verification separate from acceptance, and preserves the human ability to accept
 ```text
 Local candidate: 1.4.0, not released
 core focused: 77 passed / 0 failed / 0 skipped
-plugin: 56 passed / 0 failed / 0 skipped
+plugin: 58 passed / 0 failed / 0 skipped
 candidate: 186 passed / 0 failed / 0 skipped
 required-live: 4333 passed / 0 failed / 0 skipped
 License: Apache-2.0
@@ -312,7 +312,9 @@ payment.
 The DeepSeek Harness adapter is currently an external-release READY local candidate pinned to
 `DeepSeek Harness 0.1.1-rc.2`. Audit records observations only. Enforce authorizes before
 execution and blocks the native `write`, `edit`, `bash`, `pwsh`, `str_replace_editor`,
-`cordis_define`, and `cordis_run` mutation surfaces. `/owp-verify` consumes only
+`cordis_define`, `cordis_run`, `cordis_stop`, and `cordis_undefine` mutation surfaces. The
+installed bundle is disabled and is `NOT_CONFIGURED` until an operator explicitly enables it with
+a private case; no Audit evidence is recorded before that point. `/owp-verify` consumes only
 the exact causally correlated patch receipt. Real CLI processes now read committed truth back,
 verify independently, prepare a keyless acceptance draft, export for offline replay, and recover
 the same committed receipt after process restart. These local checks are not npm publication,
@@ -325,7 +327,7 @@ The following facts describe the local candidate. They do not prove customer ado
 | Gate | Current result |
 |---|---|
 | core focused | `77 passed / 0 failed / 0 skipped` |
-| plugin | `56 passed / 0 failed / 0 skipped` |
+| plugin | `58 passed / 0 failed / 0 skipped` |
 | candidate | `186 passed / 0 failed / 0 skipped` |
 | required-live | `4333 passed / 0 failed / 0 skipped` |
 | AgentTeams | Manager, Developer, and Verifier live preflight passed (`http://127.0.0.1:18080`) |

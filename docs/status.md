@@ -10,11 +10,14 @@
 - 锁定 `DeepSeek Harness 0.1.1-rc.2`、插件 `0.1.0`、OpenWorkProof `1.4.0`；
 - 打包后的插件已安装进全新临时 DSH profile，并由 `--dump-config` 确认 bundle 生效；
 - Enforce 的单调最终 guard 阻断原生 `write`、`edit`、`bash`、`pwsh`、
-  `str_replace_editor`、`cordis_define`、`cordis_run` 修改面，OWP patch/test 工具只发送
+  `str_replace_editor`、`cordis_define`、`cordis_run`、`cordis_stop`、
+  `cordis_undefine` 修改面，OWP patch/test 工具只发送
   闭合参数；
+- 安装后的默认 bundle 是关闭状态（`NOT_CONFIGURED`），不会产生 Audit 证据；Audit 与
+  Enforce 均需操作者显式启用并提供私有 case；
 - 一次性 Git 夹具完成授权 patch、冻结测试、独立 Git 回读、外部 Acceptor 签名、
   Acceptance 绑定、交付导出、离线复核与篡改拒绝；
-- Core DSH focused：`77 passed / 0 failed / 0 skipped`；插件：`56 passed / 0 failed /
+- Core DSH focused：`77 passed / 0 failed / 0 skipped`；插件：`58 passed / 0 failed /
   0 skipped`，typecheck、build 与真实打包宿主 live-preflight 均通过；
 - candidate 两套件（artifact root + 强制 live Docker）：`186 passed / 0 failed /
   0 skipped`；required-live 全量门在 `OPENWORKPROOF_AGENTTEAMS_REQUIRED=1`、

@@ -8,12 +8,12 @@
 
 ## 一句话边界
 
-Audit emits ObservationRecord. Enforce denies native write/edit/bash/pwsh/str_replace_editor/cordis_define/cordis_run.
+Disabled means NOT_CONFIGURED. Audit emits ObservationRecord. Enforce denies native write/edit/bash/pwsh/str_replace_editor/cordis_define/cordis_run/cordis_stop/cordis_undefine.
 
 Audit 只记录适配器看见的事实，不能事后把未授权动作升级成 ActionReceipt。Enforce
 要求每次 OWP 变更先取得与执行身份精确绑定的一次性决策令牌，并由单调最终 guard 阻断
 已知原生修改面 `write`、`edit`、`bash`、`pwsh`、`str_replace_editor`、
-`cordis_define` 和 `cordis_run`。
+`cordis_define`、`cordis_run`、`cordis_stop` 和 `cordis_undefine`。
 
 ```text
 VERIFIED != ACCEPTED != PAID/SETTLED/LEGAL AUDIT/ADOPTION
@@ -47,7 +47,7 @@ WorkOrder / CapabilityGrant
 | OpenWorkProof Core | `1.4.0` | 本地源码候选，真实协议夹具闭环 |
 | DSH plugin | `0.1.0` | 本地 tarball，尚未发布 npm |
 | Node.js | `v23.11.0` | 本地预检环境，不是最低兼容范围 |
-| Python | `3.12.13` | 本地预检环境；Core 仍以项目元数据为准 |
+| Python | `3.14.5` | 本地 packed preflight 环境；Core 最低版本仍以项目元数据为准 |
 
 由于 DeepSeek Harness 本身仍处于 Developer Preview，任何升级都必须重新跑兼容性和
 打包预检，不能只放宽版本范围。
@@ -67,8 +67,9 @@ dsh plugin --profile owp-preview add \
 dsh --profile owp-preview --dump-config
 ```
 
-默认 bundle 是 Audit。Enforce 必须显式叠加 profile，并指向一个已经冻结、权限为私有、
-且不含 Manager、Verifier、Acceptor 私钥的 case 目录：
+安装后的 bundle 默认关闭，不产生证据，状态为 `NOT_CONFIGURED`。Audit 或 Enforce 都必须
+由操作者显式启用并指向一个已经冻结、权限为私有、且不含 Manager、Verifier、Acceptor
+私钥的 case 目录；下例启用 Enforce：
 
 ```bash
 export OWP_CASE_DIRECTORY=/absolute/path/to/private-case

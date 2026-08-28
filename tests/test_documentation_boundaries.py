@@ -39,7 +39,8 @@ def test_deepseek_harness_docs_state_exact_security_and_claim_boundaries() -> No
     for literal in (
         "DeepSeek Harness 0.1.1-rc.2",
         "Audit emits ObservationRecord",
-        "Enforce denies native write/edit/bash/pwsh/str_replace_editor/cordis_define/cordis_run",
+        "Disabled means NOT_CONFIGURED",
+        "Enforce denies native write/edit/bash/pwsh/str_replace_editor/cordis_define/cordis_run/cordis_stop/cordis_undefine",
         "VERIFIED != ACCEPTED",
         "Manager and Acceptor private keys remain outside Harness",
         "customer_adoption: not_evidenced",
@@ -519,7 +520,7 @@ def test_readmes_keep_current_release_and_test_boundaries_aligned() -> None:
         for literal in (
             "1.4.0",
             "77 passed",
-            "56 passed",
+            "58 passed",
             "186 passed",
             "4333 passed",
             "0 failed",
