@@ -42,9 +42,16 @@ class DshVerificationResultV01(ProtocolModel):
     work_order_digest: Digest64 | None
     execution_identity_digest: Digest64 | None
     action_receipt_digest: Digest64 | None
+    action_receipt_id: Digest64 | None
+    test_receipt_id: Digest64 | None
+    test_receipt_digest: Digest64 | None
+    core_verification_decision_id: Digest64 | None
+    core_verification_decision_digest: Digest64 | None
     source_revision: ObjectId40
     candidate_revision: ObjectId40 | None
     candidate_tree_digest: Digest64 | None
+    tested_workspace_manifest_digest: Digest64 | None
+    candidate_workspace_manifest_digest: Digest64 | None
     changed_paths: tuple[CanonicalRoot, ...]
     artifact_bindings: tuple[DshArtifactBindingV01, ...]
     test_profile_digest: Digest64
@@ -82,10 +89,23 @@ class DshVerificationResultV01(ProtocolModel):
                 self.work_order_digest,
                 self.execution_identity_digest,
                 self.action_receipt_digest,
+                self.action_receipt_id,
+                self.test_receipt_id,
+                self.test_receipt_digest,
+                self.core_verification_decision_id,
+                self.core_verification_decision_digest,
                 self.candidate_tree_digest,
+                self.tested_workspace_manifest_digest,
+                self.candidate_workspace_manifest_digest,
             )
         ):
             raise ValueError("verified result requires exact execution bindings")
+        if (
+            self.status == "VERIFIED"
+            and self.tested_workspace_manifest_digest
+            != self.candidate_workspace_manifest_digest
+        ):
+            raise ValueError("verified result requires the tested workspace")
         if self.status != "VERIFIED" and not self.reason_codes:
             raise ValueError("non-verified result requires a reason code")
         return self
@@ -105,6 +125,13 @@ class DshVerificationCaseV01:
     execution: DshExecutionIdentityV01 | None = None
     action_receipt_digest: str | None = None
     git_dir: Path | None = None
+    tested_workspace_manifest_digest: str | None = None
+    candidate_workspace_manifest_digest: str | None = None
+    action_receipt_id: str | None = None
+    test_receipt_id: str | None = None
+    test_receipt_digest: str | None = None
+    core_verification_decision_id: str | None = None
+    core_verification_decision_digest: str | None = None
 
 
 def _git(root: Path, *args: str, git_dir: Path | None = None) -> bytes:
@@ -139,6 +166,7 @@ def _result(
     work_order_digest: str | None = None,
     execution_identity_digest: str | None = None,
     action_receipt_digest: str | None = None,
+    action_receipt_id: str | None = None,
     test_exit_code: int | None = None,
     reason_codes: tuple[str, ...],
     now: datetime,
@@ -151,9 +179,24 @@ def _result(
             "work_order_digest": work_order_digest,
             "execution_identity_digest": execution_identity_digest,
             "action_receipt_digest": action_receipt_digest,
+            "action_receipt_id": action_receipt_id,
+            "test_receipt_id": case.test_receipt_id,
+            "test_receipt_digest": case.test_receipt_digest,
+            "core_verification_decision_id": (
+                case.core_verification_decision_id
+            ),
+            "core_verification_decision_digest": (
+                case.core_verification_decision_digest
+            ),
             "source_revision": case.source_revision,
             "candidate_revision": candidate_revision,
             "candidate_tree_digest": candidate_tree_digest,
+            "tested_workspace_manifest_digest": (
+                case.tested_workspace_manifest_digest
+            ),
+            "candidate_workspace_manifest_digest": (
+                case.candidate_workspace_manifest_digest
+            ),
             "changed_paths": sorted(set(changed_paths)),
             "artifact_bindings": [
                 binding.model_dump(mode="json") for binding in artifact_bindings
@@ -298,6 +341,22 @@ def verify_dsh_code_change(
         )
     artifact_bindings = tuple(bindings)
     tree_digest = _candidate_tree_digest(case.source_revision, artifact_bindings)
+    if (
+        case.tested_workspace_manifest_digest is not None
+        and case.candidate_workspace_manifest_digest is not None
+        and case.tested_workspace_manifest_digest
+        != case.candidate_workspace_manifest_digest
+    ):
+        return _result(
+            case,
+            status="REFUTED",
+            candidate_revision=candidate,
+            changed_paths=changed,
+            artifact_bindings=artifact_bindings,
+            candidate_tree_digest=tree_digest,
+            reason_codes=("TESTED_WORKSPACE_DRIFT",),
+            now=now,
+        )
     if case.verification_runner is None:
         return _result(
             case,
@@ -418,6 +477,7 @@ def verify_dsh_code_change(
         or action_receipt.policy_decision != "allow"
         or action_receipt.execution_status != "succeeded"
         or action_receipt.work_order_digest != work_order.digest
+        or case.action_receipt_id != action_receipt.receipt_id
         or not isinstance(action_receipt.request_arguments, ApplyPatchArguments)
         or action_receipt.request_arguments.target_paths != changed
         or action_receipt.correlation_factors is None
@@ -443,6 +503,7 @@ def verify_dsh_code_change(
         work_order_digest=work_order.digest,
         execution_identity_digest=execution_digest,
         action_receipt_digest=action_receipt.digest,
+        action_receipt_id=action_receipt.receipt_id,
         candidate_revision=candidate,
         changed_paths=changed,
         artifact_bindings=artifact_bindings,

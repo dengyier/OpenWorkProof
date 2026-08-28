@@ -260,6 +260,7 @@ class DshBridgeApplication:
         decision_token: str | None = None,
         expires_at: datetime | None = None,
         include_versions: bool = False,
+        case_mode: str | None = None,
     ) -> bytes:
         payload = DshResultPayloadV01.model_validate(
             {
@@ -276,6 +277,7 @@ class DshBridgeApplication:
                 "bridge_version": "0.1.0" if include_versions else None,
                 "openworkproof_version": "1.4.0" if include_versions else None,
                 "host_version": "0.1.1-rc.2" if include_versions else None,
+                "case_mode": case_mode,
             }
         )
         response = DshBridgeResponseV01.model_validate(
@@ -354,6 +356,7 @@ class DshBridgeApplication:
                 message_type="case_status",
                 status="ok",
                 result_digest=manifest.case_id,
+                case_mode=manifest.mode,
             )
         if message_type == "authorization_check":
             manifest = self._cases.get(request.payload.case_id)

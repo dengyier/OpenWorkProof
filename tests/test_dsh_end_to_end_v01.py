@@ -126,13 +126,18 @@ def _run_restarted_bridge(
             )
             process.stdin.write(acceptance_request)
             process.stdin.flush()
-            result["acceptance"] = json.loads(process.stdout.readline())
+            acceptance_response = json.loads(process.stdout.readline())
+            result["acceptance"] = acceptance_response
             export_request = message(
                 5,
                 "export_request",
                 {
                     "case_id": case_id,
                     "destination": str(export_destination),
+                    "verification_digest": verification_digest,
+                    "acceptance_draft_digest": acceptance_response["payload"][
+                        "result_digest"
+                    ],
                 },
             )
             process.stdin.write(export_request)
@@ -211,6 +216,7 @@ def test_verified_code_change_closed_loop(
 
     manifest = SimpleNamespace(
         case_id=case["case_id"],
+        mode="enforce",
         ledger_path=str(case["ledger_path"]),
         work_order_digest=case["work_order_digest"],
         allowed_tools=("owp_apply_patch",),

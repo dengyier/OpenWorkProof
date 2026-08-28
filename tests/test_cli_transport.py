@@ -372,6 +372,7 @@ def test_mcp_owp_repo_read_tool(
             "delivery-build",
         ),
         (["audit-replay", "package"], "audit-replay"),
+        (["dsh-delivery-verify", "package"], "dsh-delivery-verify"),
         (["audit-explain", "package"], "audit-explain"),
         (["audit-compare", "old", "new"], "audit-compare"),
         (["settlement-status", "ledger.sqlite3"], "settlement-status"),

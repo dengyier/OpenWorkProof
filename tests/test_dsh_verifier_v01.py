@@ -138,3 +138,32 @@ def test_artifact_bindings_distinguish_swapped_file_contents(
     assert left_result.model_dump(mode="json") != right_result.model_dump(
         mode="json"
     )
+
+
+def test_verifier_refutes_workspace_bytes_changed_after_frozen_test(
+    tmp_path: Path,
+) -> None:
+    case = _verification_case(tmp_path)
+    (case.repository_root / "src" / "app.py").write_text(
+        "tested\n", encoding="utf-8"
+    )
+    calls: list[Path] = []
+    case = DshVerificationCaseV01(
+        case_id=case.case_id,
+        repository_root=case.repository_root,
+        source_revision=case.source_revision,
+        allowed_path_roots=case.allowed_path_roots,
+        denied_path_roots=case.denied_path_roots,
+        test_profile_digest=case.test_profile_digest,
+        ledger_path=None,
+        evidence_root=None,
+        verification_runner=lambda root: calls.append(root) or 0,
+        tested_workspace_manifest_digest="1" * 64,
+        candidate_workspace_manifest_digest="2" * 64,
+    )
+
+    result = verify_dsh_code_change(case, clock=lambda: NOW)
+
+    assert result.status == "REFUTED"
+    assert result.reason_codes == ("TESTED_WORKSPACE_DRIFT",)
+    assert calls == []

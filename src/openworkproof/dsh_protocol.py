@@ -324,6 +324,8 @@ class DshAcceptanceDraftPayloadV01(ProtocolModel):
 class DshExportRequestPayloadV01(ProtocolModel):
     case_id: Digest64
     destination: str
+    verification_digest: Digest64
+    acceptance_draft_digest: Digest64
 
     @model_validator(mode="after")
     def _validate_destination(self) -> DshExportRequestPayloadV01:
@@ -408,6 +410,7 @@ class DshResultPayloadV01(ProtocolModel):
     bridge_version: Literal["0.1.0"] | None = None
     openworkproof_version: Literal["1.4.0"] | None = None
     host_version: Literal["0.1.1-rc.2"] | None = None
+    case_mode: Literal["audit", "enforce"] | None = None
 
     @model_validator(mode="after")
     def _validate_result(self) -> DshResultPayloadV01:

@@ -3,15 +3,17 @@
 > 为 DeepSeek Harness 的代码变更增加事前授权、执行证据、独立复核与人工验收。
 
 本文对应本地候选 `OpenWorkProof 1.4.0`、插件 `0.1.0` 与
-`DeepSeek Harness 0.1.1-rc.2`。三者目前组成开发者预览，不是已发布的兼容承诺。
+`DeepSeek Harness 0.1.1-rc.2`。三者目前组成尚未公开发布的发行候选，不是已发布的
+兼容承诺。
 
 ## 一句话边界
 
-Audit emits ObservationRecord. Enforce denies native write/edit/bash.
+Audit emits ObservationRecord. Enforce denies known native mutation surfaces.
 
 Audit 只记录适配器看见的事实，不能事后把未授权动作升级成 ActionReceipt。Enforce
 要求每次 OWP 变更先取得与执行身份精确绑定的一次性决策令牌，并由单调最终 guard 阻断
-原生 `write`、`edit` 和不受限 `bash`。
+已知原生修改面 `write`、`edit`、`bash`、`pwsh`、`str_replace_editor`、
+`cordis_define` 和 `cordis_run`。
 
 ```text
 VERIFIED != ACCEPTED != PAID/SETTLED/LEGAL AUDIT/ADOPTION
@@ -87,12 +89,15 @@ pnpm typecheck
 pnpm build
 pnpm pack --pack-destination dist
 node scripts/live-preflight.mjs \
-  dist/openworkproof-dsh-plugin-0.1.0.tgz
+  dist/openworkproof-dsh-plugin-0.1.0.tgz \
+  /absolute/path/openworkproof-1.4.0-py3-none-any.whl \
+  dist/preflight-manifest.json
 ```
 
-预期 `PASS` 并列出：packed profile loaded、native write/edit/bash denied、单调授权、
-闭合 action payload、真实 OWP delivery fixture、offline tamper rejected。该脚本在临时
-DSH_HOME 安装 tarball，结束后删除临时 profile；不会发布包或联系外部服务。
+预期 `PASS` 并列出：packed profile loaded、已知 native mutator denied、单调授权、
+COMMIT-ACK 丢失后的精确回读、真实 Harness patch/test、外部 Verifier、宿主重启、
+组合交付离线复核和篡改拒绝。该脚本在临时全新环境安装精确 tarball 与 wheel，生成绑定
+两个仓库 revision 和产物 SHA-256 的清单；不会发布包或联系外部服务。
 
 ## 验证、外部验收与离线复核
 
@@ -115,11 +120,12 @@ owp dsh-case acceptance-draft CASE_DIR --output acceptance-draft.json
 # 外部 Acceptor 独立签名并按集成流程提交
 owp dsh-case export CASE_DIR --output-directory PUBLIC_DELIVERY_DIR
 # 插件 /owp-export 生成的完整离线证据包：
-owp audit-replay CUSTOMER_PRIVATE_DELIVERY_DIR
+owp dsh-delivery-verify CUSTOMER_PRIVATE_DELIVERY_DIR
 ```
 
 `owp dsh-case export` 的 public 包和插件 `/owp-export` 的 customer-private 包是两种
-明确不同的导出。后者保留完整离线回放所需材料，并使用 `owp audit-replay`。导出后修改
+明确不同的导出。后者保留完整离线回放所需材料，并使用
+`owp dsh-delivery-verify`。导出后修改
 任何受 manifest 约束的文件，复核必须失败。
 
 ## 文件、进程与网络行为

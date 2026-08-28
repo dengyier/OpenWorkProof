@@ -116,6 +116,7 @@ def _open_fake_case(
     evidence_root.mkdir()
     manifest = SimpleNamespace(
         case_id="c" * 64,
+        mode="enforce",
         sidecar_key_path=str(key_path),
         evidence_root=str(evidence_root),
         allowed_tools=("owp_apply_patch", "owp_run_tests"),
@@ -146,6 +147,7 @@ def _open_fake_case(
         )
     )
     assert response["payload"]["result_digest"] == "c" * 64
+    assert response["payload"]["case_mode"] == "enforce"
     return app, private_key, evidence_root
 
 
@@ -243,6 +245,7 @@ def test_stdio_default_wires_production_case_handlers(
 ) -> None:
     manifest = SimpleNamespace(
         case_id="c" * 64,
+        mode="enforce",
         allowed_tools=("owp_apply_patch",),
     )
     monkeypatch.setattr(
@@ -583,7 +586,29 @@ def test_cli_exposes_stdio_and_keyless_case_commands() -> None:
 
     assert parser.parse_args(["dsh-bridge", "--stdio"]).command == "dsh-bridge"
     draft = parser.parse_args(
-        ["dsh-case", "acceptance-draft", "/case", "--output", "/draft"]
+        [
+            "dsh-case",
+            "acceptance-draft",
+            "/case",
+            "--verification-digest",
+            "a" * 64,
+            "--output",
+            "/draft",
+        ]
     )
     assert draft.dsh_case_action == "acceptance-draft"
+    export = parser.parse_args(
+        [
+            "dsh-case",
+            "export",
+            "/case",
+            "--verification-digest",
+            "a" * 64,
+            "--acceptance-draft-digest",
+            "b" * 64,
+            "--output-directory",
+            "/delivery",
+        ]
+    )
+    assert export.dsh_case_action == "export"
     assert not hasattr(draft, "private_key")

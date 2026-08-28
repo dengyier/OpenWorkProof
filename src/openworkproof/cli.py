@@ -477,34 +477,55 @@ def cli_dsh_case_verify(case_directory: str | Path) -> dict[str, object]:
 def cli_dsh_acceptance_draft(
     case_directory: str | Path,
     output: str | Path,
+    verification_digest: str,
 ) -> dict[str, object]:
     import os
 
-    from openworkproof.acceptance import prepare_acceptance_decision_binding
-    from openworkproof.dsh_case import load_dsh_case
+    from openworkproof.dsh_case import DecisionTokenStore, load_dsh_case
+    from openworkproof.dsh_handlers import build_dsh_case_handlers
+    from openworkproof.dsh_protocol import DshAcceptanceDraftPayloadV01
 
     manifest = load_dsh_case(Path(case_directory))
     destination = Path(output)
     if destination.exists() or destination.is_symlink():
         raise CliError("acceptance draft output already exists")
-    draft = prepare_acceptance_decision_binding(
-        Path(manifest.ledger_path),
-        clock=lambda: datetime.now(timezone.utc).replace(microsecond=0),
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    handlers = build_dsh_case_handlers(
+        manifest,
+        DecisionTokenStore(clock=lambda: now),
+        clock=lambda: now,
     )
+    digest = handlers.acceptance_draft(
+        DshAcceptanceDraftPayloadV01(
+            case_id=manifest.case_id,
+            verification_digest=verification_digest,
+        )
+    )
+    source = (
+        Path(manifest.evidence_root)
+        / "dsh-acceptance-drafts"
+        / f"{digest}.json"
+    )
+    payload = source.read_bytes()
     descriptor = os.open(
         destination,
         os.O_WRONLY | os.O_CREAT | os.O_EXCL,
         0o600,
     )
     try:
-        os.write(descriptor, draft.canonical_payload)
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise CliError("acceptance draft write failed")
+            offset += written
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
     return {
         "schema_version": "openworkproof-dsh-acceptance-draft-result/0.1",
         "case_id": manifest.case_id,
-        "binding_id": draft.binding_id,
+        "acceptance_draft_digest": digest,
         "output": str(destination),
         "signed": False,
         "boundary": "draft only; no Acceptor private key or acceptance claim",
@@ -514,16 +535,34 @@ def cli_dsh_acceptance_draft(
 def cli_dsh_case_export(
     case_directory: str | Path,
     output_directory: str | Path,
+    verification_digest: str,
+    acceptance_draft_digest: str,
 ) -> dict[str, object]:
     from openworkproof.dsh_case import load_dsh_case
+    from openworkproof.dsh_delivery import build_dsh_delivery
 
     manifest = load_dsh_case(Path(case_directory))
-    result = cli_delivery_build(
-        manifest.ledger_path,
-        output_directory,
-        "public",
+    digest = build_dsh_delivery(
+        case_id=manifest.case_id,
+        ledger_path=Path(manifest.ledger_path),
+        evidence_root=Path(manifest.evidence_root),
+        destination=Path(output_directory),
+        verification_digest=verification_digest,
+        acceptance_draft_digest=acceptance_draft_digest,
     )
-    return {"case_id": manifest.case_id, **result}
+    return {
+        "schema_version": "openworkproof-dsh-export-result/0.1",
+        "case_id": manifest.case_id,
+        "manifest_digest": digest,
+        "output_directory": str(output_directory),
+        "boundary": "offline package; payment and adoption are separate",
+    }
+
+
+def cli_dsh_delivery_verify(package: str | Path) -> dict[str, object]:
+    from openworkproof.dsh_delivery import audit_dsh_delivery
+
+    return audit_dsh_delivery(Path(package))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -672,6 +711,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_text in (
         ("audit-replay", "offline replay one delivery package"),
         ("audit-explain", "explain one offline replay result"),
+        ("dsh-delivery-verify", "offline verify one composed DSH delivery"),
     ):
         command = sub.add_parser(name, help=help_text)
         command.add_argument("package", help="path to delivery package")
@@ -765,9 +805,12 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("case_directory")
     acceptance_draft = dsh_case_sub.add_parser("acceptance-draft")
     acceptance_draft.add_argument("case_directory")
+    acceptance_draft.add_argument("--verification-digest", required=True)
     acceptance_draft.add_argument("--output", required=True)
     dsh_export = dsh_case_sub.add_parser("export")
     dsh_export.add_argument("case_directory")
+    dsh_export.add_argument("--verification-digest", required=True)
+    dsh_export.add_argument("--acceptance-draft-digest", required=True)
     dsh_export.add_argument("--output-directory", required=True)
     return parser
 
@@ -875,6 +918,8 @@ def app(argv: Sequence[str] | None = None) -> int:
             result = cli_audit_replay(args.package)
         elif args.command == "audit-explain":
             result = cli_audit_explain(args.package)
+        elif args.command == "dsh-delivery-verify":
+            result = cli_dsh_delivery_verify(args.package)
         elif args.command == "audit-compare":
             result = cli_audit_compare(args.old_package, args.new_package)
         elif args.command == "settlement-status":
@@ -897,11 +942,16 @@ def app(argv: Sequence[str] | None = None) -> int:
                 result = cli_dsh_case_verify(args.case_directory)
             elif args.dsh_case_action == "acceptance-draft":
                 result = cli_dsh_acceptance_draft(
-                    args.case_directory, args.output
+                    args.case_directory,
+                    args.output,
+                    args.verification_digest,
                 )
             else:
                 result = cli_dsh_case_export(
-                    args.case_directory, args.output_directory
+                    args.case_directory,
+                    args.output_directory,
+                    args.verification_digest,
+                    args.acceptance_draft_digest,
                 )
         else:
             parser.error(f"unknown command: {args.command}")
@@ -1053,6 +1103,7 @@ def app(argv: Sequence[str] | None = None) -> int:
         "audit-replay",
         "audit-explain",
         "audit-compare",
+        "dsh-delivery-verify",
     } and "current_decision" in result:
         return decision_exit.get(str(result["current_decision"]), 3)
     if args.command == "delivery-case" and args.delivery_case_action == "verify":

@@ -9,8 +9,10 @@ from types import SimpleNamespace
 import pytest
 
 from openworkproof.delivery_package import DeliveryPackageError
+from openworkproof.dsh_bridge import DshHandlerResult
 from openworkproof.dsh_case import DecisionTokenStore
-from openworkproof.dsh_handlers import build_dsh_case_handlers
+from openworkproof.dsh_handlers import _store_result, build_dsh_case_handlers
+from openworkproof.dsh_delivery import audit_dsh_delivery
 from openworkproof.dsh_protocol import (
     DshActionExecutePayloadV01,
     DshAcceptanceDraftPayloadV01,
@@ -22,7 +24,6 @@ from openworkproof.dsh_protocol import (
     sign_dsh_observation,
 )
 from openworkproof.dsh_verifier import DshVerificationResultV01
-from openworkproof.services import OpenWorkProofServices
 from scripts.create_dsh_fixture import create_dsh_fixture
 
 from test_apply_patch_transaction import _apply_patch_case, _src_app_patch
@@ -31,6 +32,21 @@ from test_apply_patch_transaction import _apply_patch_case, _src_app_patch
 def _write_key(path: Path, key) -> None:
     path.write_bytes(key.private_bytes_raw())
     os.chmod(path, 0o600)
+
+
+def test_result_store_rejects_symlinked_kind_directory(tmp_path: Path) -> None:
+    evidence_root = tmp_path / "evidence"
+    outside = tmp_path / "outside"
+    evidence_root.mkdir()
+    outside.mkdir()
+    (evidence_root / "dsh-verifications").symlink_to(
+        outside, target_is_directory=True
+    )
+
+    with pytest.raises(RuntimeError, match="RESULT_DIRECTORY_INVALID"):
+        _store_result(evidence_root, "dsh-verifications", {"status": "x"})
+
+    assert tuple(outside.iterdir()) == ()
 
 
 def test_production_handler_executes_patch_from_durable_case(
@@ -190,6 +206,24 @@ def test_production_verify_handler_binds_observed_patch_and_committed_test(
     result = DshVerificationResultV01.model_validate_json(verification_bytes)
     assert result.status == "VERIFIED"
     assert result.action_receipt_digest == case["patch"].receipt.digest
+    assert result.action_receipt_id == case["patch"].receipt.receipt_id
+    assert result.test_receipt_id == case["test_receipt"].receipt_id
+    assert result.core_verification_decision_id is not None
+    assert result.core_verification_decision_digest is not None
+
+    candidate_path = case["candidate"].worktree / "src/app.py"
+    verified_bytes = candidate_path.read_bytes()
+    candidate_path.write_bytes(b"tampered-after-tests\n")
+    drifted_result = handlers.verify(
+        DshVerifyRequestPayloadV01(
+            case_id=case["case_id"],
+            action_receipt_digest=case["patch"].receipt.digest,
+        )
+    )
+    assert isinstance(drifted_result, DshHandlerResult)
+    assert drifted_result.status == "denied"
+    assert drifted_result.reason_code == "TESTED_WORKSPACE_DRIFT"
+    candidate_path.write_bytes(verified_bytes)
 
     drifted = result.model_copy(
         update={"verified_at": result.verified_at + timedelta(seconds=1)}
@@ -219,18 +253,29 @@ def test_production_verify_handler_binds_observed_patch_and_committed_test(
     )
     assert "signature" not in draft
     assert len(draft["binding_id"]) == 64
+    assert draft["dsh_verification_digest"] == digest
+    assert (
+        draft["core_verification_decision_id"]
+        == result.core_verification_decision_id
+    )
+    assert (
+        draft["core_acceptance_binding"]["verification_decision_digest"]
+        == result.core_verification_decision_digest
+    )
 
     export_root = tmp_path / "handler-export"
     export_digest = handlers.export(
         DshExportRequestPayloadV01(
             case_id=case["case_id"],
             destination=str(export_root),
+            verification_digest=digest,
+            acceptance_draft_digest=draft_digest,
         )
     )
-    audit = OpenWorkProofServices().audit_delivery(export_root)
+    audit = audit_dsh_delivery(export_root)
     assert audit["manifest_digest"] == export_digest
     assert audit["current_decision"] == "VERIFIED"
-    manifest_path = export_root / "manifest.json"
-    manifest_path.write_bytes(manifest_path.read_bytes() + b" ")
+    verification_export = export_root / "dsh-verification.json"
+    verification_export.write_bytes(verification_export.read_bytes() + b" ")
     with pytest.raises(DeliveryPackageError):
-        OpenWorkProofServices().audit_delivery(export_root)
+        audit_dsh_delivery(export_root)

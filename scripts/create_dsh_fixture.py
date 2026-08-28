@@ -13,6 +13,7 @@ import shutil
 import subprocess
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import rfc8785
 
@@ -93,6 +94,7 @@ def create_dsh_fixture(
     now,
     include_action_receipt_binding: bool = True,
     action_receipt_digest_override: str | None = None,
+    action_hook=None,
 ):
     """Close one real ledger from DSH patch through external acceptance."""
 
@@ -157,7 +159,7 @@ def create_dsh_fixture(
     )
     patch_bytes = _src_app_patch()
     patch_execution = DshExecutionIdentityV01(
-        session_id="dsh-e2e",
+        session_id="dsh-e2e-patch",
         call_id="patch-1",
         root_call_id="patch-1",
         tool_name="owp_apply_patch",
@@ -168,24 +170,70 @@ def create_dsh_fixture(
             }
         ),
     )
-    patch_token = tokens.issue(
-        patch_execution,
-        expires_at=now + timedelta(seconds=30),
+    profile = next(
+        item
+        for item in base["work_order"].test_profiles
+        if item.test_mode == "verifier"
     )
-    patch = execute_dsh_patch(
-        runtime,
-        DshApplyPatchInputV01.model_validate(
+    profile_digest = canonical_test_profile_digest(profile)
+
+    def external_receipt(execution):
+        from openworkproof.dsh_protocol import dsh_execution_context_id
+        from openworkproof.models import ToolCallReceipt
+
+        connection = evidence.connect_ledger(base["ledger_path"])
+        try:
+            _, receipts, _, _ = evidence._replay_receipt_publication_ledger(
+                connection
+            )
+        finally:
+            connection.close()
+        matches = tuple(
+            receipt
+            for receipt in receipts
+            if isinstance(receipt, ToolCallReceipt)
+            and receipt.correlation_factors is not None
+            and receipt.correlation_factors.execution_context_id
+            == dsh_execution_context_id(execution)
+        )
+        if len(matches) != 1:
+            raise RuntimeError("DSH_EXTERNAL_ACTION_BINDING_UNAVAILABLE")
+        return matches[0]
+
+    patch = None
+    if action_hook is None:
+        patch_token = tokens.issue(
+            patch_execution,
+            expires_at=now + timedelta(seconds=30),
+        )
+        patch = execute_dsh_patch(
+            runtime,
+            DshApplyPatchInputV01.model_validate(
+                {
+                    "schema_version": "openworkproof-dsh-apply-patch/0.1",
+                    "case_id": runtime.case_id,
+                    "execution": patch_execution.model_dump(mode="json"),
+                    "decision_token": patch_token.token,
+                    "patch_utf8": patch_bytes.decode("utf-8"),
+                    "target_paths": ["src/app.py"],
+                }
+            ),
+            clock=lambda: now,
+        )
+    else:
+        action_hook(
+            "patch",
             {
-                "schema_version": "openworkproof-dsh-apply-patch/0.1",
+                **base,
                 "case_id": runtime.case_id,
-                "execution": patch_execution.model_dump(mode="json"),
-                "decision_token": patch_token.token,
-                "patch_utf8": patch_bytes.decode("utf-8"),
-                "target_paths": ["src/app.py"],
-            }
-        ),
-        clock=lambda: now,
-    )
+                "work_order_digest": base["work_order"].digest,
+                "patch_bytes": patch_bytes,
+                "patch_execution": patch_execution,
+                "profile_digest": profile_digest,
+                "now": now,
+            },
+        )
+        patch = SimpleNamespace(receipt=external_receipt(patch_execution))
 
     verifier = _child_grant(
         base["work_order"],
@@ -210,13 +258,6 @@ def create_dsh_fixture(
         now,
     )
     base.update({"verifier": verifier, "verifier_issuance": verifier_issuance})
-    before_tests = _current_context(base, now)
-    profile = next(
-        item
-        for item in base["work_order"].test_profiles
-        if item.test_mode == "verifier"
-    )
-    profile_digest = canonical_test_profile_digest(profile)
     driver = _FakeRunTestsExecutionDriver(actual_exit_code=0)
 
     def external_verifier(arguments, facts, execution, transaction_time):
@@ -254,6 +295,7 @@ def create_dsh_fixture(
                 role_keys["Verifier"][0],
             )
         )
+        before_tests = _current_context(base, transaction_time)
         checkpoint = before_tests.replay_checkpoint
         snapshot_request = repo_tools.CandidateExecutionSnapshotRequest(
             runtime_root=base["candidate"].runtime_root,
@@ -276,20 +318,8 @@ def create_dsh_fixture(
             clock=lambda: transaction_time,
         )
 
-    test_runtime = DshExecutionCaseV01(
-        case_id=runtime.case_id,
-        ledger_path=base["ledger_path"],
-        evidence_root=base["evidence_root"],
-        context=before_tests,
-        candidate_workspace=base["candidate"],
-        sidecar_private_key=role_keys["Sidecar"][0],
-        developer_private_key=role_keys["Developer"][0],
-        decision_tokens=tokens,
-        test_profile_digest=profile_digest,
-        run_tests_executor=external_verifier,
-    )
     test_execution = DshExecutionIdentityV01(
-        session_id="dsh-e2e",
+        session_id="dsh-e2e-tests",
         call_id="tests-1",
         root_call_id="patch-1",
         tool_name="owp_run_tests",
@@ -297,23 +327,55 @@ def create_dsh_fixture(
             {"test_profile_digest": profile_digest}
         ),
     )
-    test_token = tokens.issue(
-        test_execution,
-        expires_at=now + timedelta(seconds=30),
-    )
-    test_receipt = execute_dsh_tests(
-        test_runtime,
-        DshRunTestsInputV01.model_validate(
+    if action_hook is None:
+        before_tests = _current_context(base, now)
+        test_runtime = DshExecutionCaseV01(
+            case_id=runtime.case_id,
+            ledger_path=base["ledger_path"],
+            evidence_root=base["evidence_root"],
+            context=before_tests,
+            candidate_workspace=base["candidate"],
+            sidecar_private_key=role_keys["Sidecar"][0],
+            developer_private_key=role_keys["Developer"][0],
+            decision_tokens=tokens,
+            test_profile_digest=profile_digest,
+            run_tests_executor=external_verifier,
+        )
+        test_token = tokens.issue(
+            test_execution,
+            expires_at=now + timedelta(seconds=30),
+        )
+        test_receipt = execute_dsh_tests(
+            test_runtime,
+            DshRunTestsInputV01.model_validate(
+                {
+                    "schema_version": "openworkproof-dsh-run-tests/0.1",
+                    "case_id": runtime.case_id,
+                    "execution": test_execution.model_dump(mode="json"),
+                    "decision_token": test_token.token,
+                    "test_profile_digest": profile_digest,
+                }
+            ),
+            clock=lambda: now,
+        )
+    else:
+        action_hook(
+            "tests",
             {
-                "schema_version": "openworkproof-dsh-run-tests/0.1",
+                **base,
                 "case_id": runtime.case_id,
-                "execution": test_execution.model_dump(mode="json"),
-                "decision_token": test_token.token,
-                "test_profile_digest": profile_digest,
+                "work_order_digest": base["work_order"].digest,
+                "patch_bytes": patch_bytes,
+                "patch_execution": patch_execution,
+                "test_execution": test_execution,
+                "profile_digest": profile_digest,
+                "external_verifier": external_verifier,
+                "now": now,
             }
-        ),
-        clock=lambda: now,
-    )
+        )
+        test_receipt = external_receipt(test_execution)
+
+    assert patch is not None
 
     context = _current_context(base, now)
     assert context.current_state == "locally_verified"
@@ -471,6 +533,26 @@ def create_dsh_fixture(
                 else None
             ),
             git_dir=base["candidate"].git_dir,
+            tested_workspace_manifest_digest=(
+                test_receipt.request_arguments.workspace_manifest_digest
+            ),
+            candidate_workspace_manifest_digest=(
+                repo_tools.candidate_workspace_manifest_digest(
+                    repo_tools.load_candidate_workspace(
+                        base["candidate"].runtime_root,
+                        base["candidate"].workspace_id,
+                    )
+                )
+            ),
+            action_receipt_id=patch.receipt.receipt_id,
+            test_receipt_id=test_receipt.receipt_id,
+            test_receipt_digest=test_receipt.digest,
+            core_verification_decision_id=(
+                verification_case["decision"].decision_id
+            ),
+            core_verification_decision_digest=(
+                verification_case["decision"].digest
+            ),
         ),
         clock=lambda: binding_now,
     )
@@ -516,7 +598,14 @@ def create_dsh_fixture(
     }
 
 
-def prepare_dsh_process_case(root: Path, case, role_keys) -> str:
+def prepare_dsh_process_case(
+    root: Path,
+    case,
+    role_keys,
+    *,
+    live_candidate: bool = False,
+    verifier_socket_path: Path | None = None,
+) -> str:
     """Turn a closed developer fixture into one loadable private DSH case."""
 
     from openworkproof import repo_tools
@@ -568,9 +657,13 @@ def prepare_dsh_process_case(root: Path, case, role_keys) -> str:
         "source_revision": case["work_order"].source_commit,
         "allowed_path_roots": ["src"],
         "denied_path_roots": ["secrets"],
-        "allowed_tools": ["owp_apply_patch"],
+        "allowed_tools": (
+            ["owp_apply_patch", "owp_run_tests"]
+            if live_candidate
+            else ["owp_apply_patch"]
+        ),
         "test_profile_digest": case["profile_digest"],
-        "mode": "audit",
+        "mode": "enforce" if live_candidate else "audit",
     }
     case_id = dsh_case_id(stable_manifest)
     manifest = {
@@ -581,7 +674,9 @@ def prepare_dsh_process_case(root: Path, case, role_keys) -> str:
         "evidence_root": str(case["evidence_root"]),
         "candidate_runtime_root": str(case["candidate"].runtime_root),
         "candidate_workspace_id": case["candidate"].workspace_id,
-        "verifier_socket_path": None,
+        "verifier_socket_path": (
+            None if verifier_socket_path is None else str(verifier_socket_path)
+        ),
         "sidecar_key_path": str(sidecar_key),
         "developer_key_path": str(developer_key),
     }

@@ -4061,6 +4061,13 @@ def _candidate_manifest_digest(
         os.close(descriptor)
 
 
+def candidate_workspace_manifest_digest(workspace: CandidateWorkspace) -> str:
+    """Read the current candidate bytes without trusting control.json."""
+
+    _validate_candidate_layout(workspace)
+    return _candidate_manifest_digest(workspace, workspace.head_commit)
+
+
 def _verify_candidate_checkpoint(
     workspace: CandidateWorkspace,
     *,
