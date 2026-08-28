@@ -26,8 +26,10 @@ verification separate from acceptance, and preserves the human ability to accept
 
 ```text
 Local candidate: 1.4.0, not released
-required-live: 4328 passed / 0 failed / 1 environment-gated skipped
-candidate: 185 passed / 0 failed / 0 skipped
+core focused: 77 passed / 0 failed / 0 skipped
+plugin: 56 passed / 0 failed / 0 skipped
+candidate: 186 passed / 0 failed / 0 skipped
+required-live: 4333 passed / 0 failed / 0 skipped
 License: Apache-2.0
 ```
 
@@ -307,9 +309,10 @@ The result is `VERIFIED`, `REFUTED`, or `UNKNOWN`, and states whether the work h
 `READY_FOR_ACCEPTANCE`. It does not report protocol verification as customer acceptance or
 payment.
 
-The DeepSeek Harness adapter is currently a local developer preview pinned to
+The DeepSeek Harness adapter is currently an external-release READY local candidate pinned to
 `DeepSeek Harness 0.1.1-rc.2`. Audit records observations only. Enforce authorizes before
-execution and blocks native `write`, `edit`, and unrestricted `bash`. `/owp-verify` consumes only
+execution and blocks the native `write`, `edit`, `bash`, `pwsh`, `str_replace_editor`,
+`cordis_define`, and `cordis_run` mutation surfaces. `/owp-verify` consumes only
 the exact causally correlated patch receipt. Real CLI processes now read committed truth back,
 verify independently, prepare a keyless acceptance draft, export for offline replay, and recover
 the same committed receipt after process restart. These local checks are not npm publication,
@@ -321,16 +324,18 @@ The following facts describe the local candidate. They do not prove customer ado
 
 | Gate | Current result |
 |---|---|
-| required-live | `4328 passed / 0 failed / 1 environment-gated skipped` |
-| candidate | `185 passed / 0 failed / 0 skipped` |
-| AgentTeams | Manager, Developer, and Verifier live preflight passed |
+| core focused | `77 passed / 0 failed / 0 skipped` |
+| plugin | `56 passed / 0 failed / 0 skipped` |
+| candidate | `186 passed / 0 failed / 0 skipped` |
+| required-live | `4333 passed / 0 failed / 0 skipped` |
+| AgentTeams | Manager, Developer, and Verifier live preflight passed (`http://127.0.0.1:18080`) |
 | Offline verification | Surface, Acceptance, and Human Agency bundles replay independently |
 | Supply chain | Candidate inventory, OCI/Docker artifacts, and hashes passed their binding gate |
 
-The only skip in this required-live run was `live AgentTeams not required` because
-`OPENWORKPROOF_AGENTTEAMS_REQUIRED` was not set. The earlier three-role live preflight remains
-separate evidence; results from two different environments are not combined into a false
-"zero skip in this run" claim.
+The required-live full gate passes with `0 failed / 0 skipped` under
+`OPENWORKPROOF_AGENTTEAMS_REQUIRED=1` and
+`AGENTTEAMS_HOMESERVER=http://127.0.0.1:18080`. The Matrix token is read from the
+local `agentteams-manager` container and is never printed or written to disk.
 
 Rich #4196, Dify #33013, and AgentScope #2239 are project-owned demos and reproductions used to
 exercise the protocol across different project types. They are not customer case studies and

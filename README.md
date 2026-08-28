@@ -25,8 +25,10 @@ OpenWorkProof 不保证 Agent 的结果一定正确，也不替客户作出验�
 
 ```text
 本地候选版本: 1.4.0, 尚未发布
-required-live: 4328 passed / 0 failed / 1 environment-gated skipped
-candidate: 185 passed / 0 failed / 0 skipped
+core focused: 77 passed / 0 failed / 0 skipped
+plugin: 56 passed / 0 failed / 0 skipped
+candidate: 186 passed / 0 failed / 0 skipped
+required-live: 4333 passed / 0 failed / 0 skipped
 许可证: Apache-2.0
 ```
 
@@ -286,9 +288,10 @@ GitHub Action 的 four-question 对应中文四问报告：
 报告结论是 `VERIFIED`、`REFUTED` 或 `UNKNOWN`，并说明是否只达到
 `READY_FOR_ACCEPTANCE`。它不会把协议结论写成客户已经接受或已经付款。
 
-DeepSeek Harness 适配器当前是本地开发者预览，锁定
-`DeepSeek Harness 0.1.1-rc.2`。Audit 只记录观察事实；Enforce 在工具执行前授权，并
-阻断原生 `write`、`edit` 和不受限 `bash`。`/owp-verify` 只消费因果关联后的精确补丁
+DeepSeek Harness 适配器当前是外部发布 READY 的本地候选，锁定
+`DeepSeek Harness 0.1.1-rc.2`。Audit 只记录观察事实；Enforce 在工具执行前授权，并阻断
+原生 `write`、`edit`、`bash`、`pwsh`、`str_replace_editor`、`cordis_define` 与
+`cordis_run` 修改面。`/owp-verify` 只消费因果关联后的精确补丁
 回执；真实 CLI 进程已完成账本回读、独立验证、无私钥验收草稿与离线导出，并在进程重启
 后恢复同一已提交 receipt。上述本地预检不等于 npm 发布、外部复现、客户采用或
 DeepSeek 官方背书。
@@ -299,15 +302,17 @@ DeepSeek 官方背书。
 
 | 验证门 | 当前结果 |
 |---|---|
-| required-live | `4328 passed / 0 failed / 1 environment-gated skipped` |
-| candidate | `185 passed / 0 failed / 0 skipped` |
-| AgentTeams | Manager、Developer、Verifier 三角色 live preflight 已通过 |
+| core focused | `77 passed / 0 failed / 0 skipped` |
+| plugin | `56 passed / 0 failed / 0 skipped` |
+| candidate | `186 passed / 0 failed / 0 skipped` |
+| required-live | `4333 passed / 0 failed / 0 skipped` |
+| AgentTeams | Manager、Developer、Verifier 三角色 live preflight 已通过（`http://127.0.0.1:18080`） |
 | 离线验证 | Surface、Acceptance 与 Human Agency bundle 可独立回放 |
 | 供应链 | candidate inventory、OCI/Docker 工件和哈希绑定已过门 |
 
-本次 required-live 唯一 skip 是未设置 `OPENWORKPROOF_AGENTTEAMS_REQUIRED` 时的
-`live AgentTeams not required`；此前三角色 live preflight 证据仍单独列示，不能把两次
-不同环境的结果合并成“本次零 skip”。
+required-live 全量门在 `OPENWORKPROOF_AGENTTEAMS_REQUIRED=1` 与
+`AGENTTEAMS_HOMESERVER=http://127.0.0.1:18080` 下以 `0 failed / 0 skipped` 通过；
+`AGENTTEAMS_MATRIX_TOKEN` 仅从本机 `agentteams-manager` 容器只读取得，不打印、不落盘。
 
 Rich #4196、Dify #33013 和 AgentScope #2239 是自有演示与复现实验，用于验证不同项目
 类型下的协议路径。它们不是客户案例，也不代表上游项目已经采用 OpenWorkProof。

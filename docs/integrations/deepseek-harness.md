@@ -8,7 +8,7 @@
 
 ## 一句话边界
 
-Audit emits ObservationRecord. Enforce denies known native mutation surfaces.
+Audit emits ObservationRecord. Enforce denies native write/edit/bash/pwsh/str_replace_editor/cordis_define/cordis_run.
 
 Audit 只记录适配器看见的事实，不能事后把未授权动作升级成 ActionReceipt。Enforce
 要求每次 OWP 变更先取得与执行身份精确绑定的一次性决策令牌，并由单调最终 guard 阻断

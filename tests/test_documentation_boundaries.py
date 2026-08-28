@@ -39,7 +39,7 @@ def test_deepseek_harness_docs_state_exact_security_and_claim_boundaries() -> No
     for literal in (
         "DeepSeek Harness 0.1.1-rc.2",
         "Audit emits ObservationRecord",
-        "Enforce denies native write/edit/bash",
+        "Enforce denies native write/edit/bash/pwsh/str_replace_editor/cordis_define/cordis_run",
         "VERIFIED != ACCEPTED",
         "Manager and Acceptor private keys remain outside Harness",
         "customer_adoption: not_evidenced",
@@ -518,17 +518,21 @@ def test_readmes_keep_current_release_and_test_boundaries_aligned() -> None:
     for text in (chinese, english):
         for literal in (
             "1.4.0",
-            "4328 passed",
+            "77 passed",
+            "56 passed",
+            "186 passed",
+            "4333 passed",
             "0 failed",
-            "1 environment-gated skipped",
-            "185 passed",
+            "0 skipped",
         ):
             assert literal in text, f"README release boundary missing: {literal}"
 
     assert "本地候选" in chinese
     assert "尚未发布" in chinese
+    assert "外部发布 READY" in chinese
     assert "local candidate" in english
     assert "not released" in english
+    assert "external-release READY" in english
 
 
 def test_readmes_do_not_turn_the_homepage_into_fundraising_or_market_copy() -> None:
