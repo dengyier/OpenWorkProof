@@ -293,6 +293,25 @@ def test_stdio_default_wires_production_case_handlers(
     assert calls[0][2] == NOW
 
 
+def test_hello_echoes_the_received_host_version_instead_of_a_fixed_one() -> None:
+    app = DshBridgeApplication(clock=lambda: NOW)
+    request = _request(
+        "hello",
+        0,
+        {
+            "host": "deepseek-harness",
+            "host_version": "0.1.0-rc.6",
+            "adapter_version": "0.1.0",
+            "bridge_protocol": "0.1",
+        },
+    )
+
+    response = json.loads(app.handle_line(rfc8785.dumps(request)))
+
+    assert response["message_type"] == "ready"
+    assert response["payload"]["host_version"] == "0.1.0-rc.6"
+
+
 def test_duplicate_request_bytes_return_the_exact_cached_response() -> None:
     app = DshBridgeApplication(clock=lambda: NOW)
     raw = rfc8785.dumps(_hello())

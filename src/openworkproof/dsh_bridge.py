@@ -261,6 +261,7 @@ class DshBridgeApplication:
         expires_at: datetime | None = None,
         include_versions: bool = False,
         case_mode: str | None = None,
+        host_version: str | None = None,
     ) -> bytes:
         payload = DshResultPayloadV01.model_validate(
             {
@@ -276,7 +277,7 @@ class DshBridgeApplication:
                 ),
                 "bridge_version": "0.1.0" if include_versions else None,
                 "openworkproof_version": "1.4.0" if include_versions else None,
-                "host_version": "0.1.1-rc.2" if include_versions else None,
+                "host_version": host_version if include_versions else None,
                 "case_mode": case_mode,
             }
         )
@@ -328,6 +329,7 @@ class DshBridgeApplication:
                     message_type="ready",
                     status="ready",
                     include_versions=True,
+                    host_version=parsed.payload.host_version,
                 )
         elif parsed.session_id != self._session_id:
             response = self._error(parsed, "SESSION_MISMATCH")

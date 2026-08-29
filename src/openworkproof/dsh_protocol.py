@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
-from pydantic import Field, RootModel, model_validator
+from pydantic import AfterValidator, Field, RootModel, model_validator
 
 from openworkproof.models import (
     CanonicalRoot,
@@ -36,6 +36,12 @@ DshToolName = Literal[
     "write",
     "edit",
     "bash",
+    "pwsh",
+    "str_replace_editor",
+    "cordis_define",
+    "cordis_run",
+    "cordis_stop",
+    "cordis_undefine",
 ]
 DshEvidenceGapCode = Literal[
     "AUTHORIZATION_NOT_EVIDENCED",
@@ -43,6 +49,8 @@ DshEvidenceGapCode = Literal[
     "DURABLE_RESULT_MISSING",
     "EVENT_SEQUENCE_CONFLICT",
     "OUT_OF_BAND_EXECUTION",
+    "OBSERVATION_COMMIT_FAILED",
+    "HOST_VERSION_INCOMPATIBLE",
 ]
 
 
@@ -55,6 +63,16 @@ def _bounded_path(value: str, *, field_name: str) -> str:
     if not encoded or len(encoded) > 4096 or "\x00" in value:
         raise ValueError(f"{field_name} must contain 1..4096 UTF-8 bytes")
     return value
+
+
+def _bounded_version(value: str) -> str:
+    encoded = value.encode("utf-8")
+    if not encoded or len(encoded) > 64 or any(ord(char) < 0x20 for char in value):
+        raise ValueError("host version must be 1..64 UTF-8 bytes without controls")
+    return value
+
+
+HostVersion = Annotated[str, AfterValidator(_bounded_version)]
 
 
 def canonical_bytes(value: ProtocolModel | RootModel[Any] | Mapping[str, Any]) -> bytes:
@@ -123,7 +141,7 @@ def dsh_execution_context_id(execution: DshExecutionIdentityV01) -> str:
 class DshObservationDraftV01(ProtocolModel):
     schema_version: Literal["openworkproof-dsh-observation/0.1"]
     host: Literal["deepseek-harness"]
-    host_version: Literal["0.1.1-rc.2"]
+    host_version: HostVersion
     adapter_version: Literal["0.1.0"]
     execution: DshExecutionIdentityV01
     authorization_status: Literal["not_evidenced", "authorized", "denied"]
@@ -168,7 +186,7 @@ class DshObservationRecordV01(SignedProtocolModel):
     schema_version: Literal["openworkproof-dsh-observation/0.1"]
     record_id: Digest64
     host: Literal["deepseek-harness"]
-    host_version: Literal["0.1.1-rc.2"]
+    host_version: HostVersion
     adapter_version: Literal["0.1.0"]
     execution: DshExecutionIdentityV01
     authorization_status: Literal["not_evidenced", "authorized", "denied"]
@@ -253,7 +271,7 @@ class _BridgeMessageV01(ProtocolModel):
 
 class DshHelloPayloadV01(ProtocolModel):
     host: Literal["deepseek-harness"]
-    host_version: Literal["0.1.1-rc.2"]
+    host_version: HostVersion
     adapter_version: Literal["0.1.0"]
     bridge_protocol: Literal["0.1"]
 
@@ -409,7 +427,7 @@ class DshResultPayloadV01(ProtocolModel):
     expires_at: CanonicalUTCTime | None = None
     bridge_version: Literal["0.1.0"] | None = None
     openworkproof_version: Literal["1.4.0"] | None = None
-    host_version: Literal["0.1.1-rc.2"] | None = None
+    host_version: HostVersion | None = None
     case_mode: Literal["audit", "enforce"] | None = None
 
     @model_validator(mode="after")

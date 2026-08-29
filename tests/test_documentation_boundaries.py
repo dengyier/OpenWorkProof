@@ -41,6 +41,7 @@ def test_deepseek_harness_docs_state_exact_security_and_claim_boundaries() -> No
         "Audit emits ObservationRecord",
         "Disabled means NOT_CONFIGURED",
         "Enforce denies native write/edit/bash/pwsh/str_replace_editor/cordis_define/cordis_run/cordis_stop/cordis_undefine",
+        "HOST_VERSION_INCOMPATIBLE",
         "VERIFIED != ACCEPTED",
         "Manager and Acceptor private keys remain outside Harness",
         "customer_adoption: not_evidenced",

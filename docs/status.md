@@ -15,6 +15,10 @@
   闭合参数；
 - 安装后的默认 bundle 是关闭状态（`NOT_CONFIGURED`），不会产生 Audit 证据；Audit 与
   Enforce 均需操作者显式启用并提供私有 case；
+- 插件在握手时读取实际运行 Host（`process.argv[1]` 指向的 `@deepseek-ai/dsh`
+  package.json）而非写死常量，并与兼容矩阵 `0.1.1-rc.2` 比对：Enforce 在版本缺失或
+  不匹配时 fail closed，Audit 会把 `HOST_VERSION_INCOMPATIBLE` 写进证据缺口、绝不静默
+  升级为 CORRELATED；
 - 一次性 Git 夹具完成授权 patch、冻结测试、独立 Git 回读、外部 Acceptor 签名、
   Acceptance 绑定、交付导出、离线复核与篡改拒绝；
 - Core DSH focused：`77 passed / 0 failed / 0 skipped`；插件：`58 passed / 0 failed /
