@@ -520,10 +520,10 @@ def test_readmes_keep_current_release_and_test_boundaries_aligned() -> None:
     for text in (chinese, english):
         for literal in (
             "1.4.0",
-            "77 passed",
-            "58 passed",
+            "97 passed",
+            "80 passed",
             "186 passed",
-            "4333 passed",
+            "4373 passed",
             "0 failed",
             "0 skipped",
         ):

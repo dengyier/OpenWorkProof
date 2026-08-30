@@ -3,7 +3,7 @@
 > 本文档是项目实现状态的权威记录。README 只保留概览，
 > 「已经完成什么」和「尚未完成什么」的完整清单以本文为准。
 
-## DeepSeek Harness 插件 V0.1 外部发布 READY 本地候选（2026-08-29）
+## DeepSeek Harness 插件 V0.1 外部发布 READY 本地候选（2026-08-30）
 
 隔离分支与独立插件仓库已完成外部发布 READY 的本地收口：
 
@@ -15,19 +15,22 @@
   闭合参数；
 - 安装后的默认 bundle 是关闭状态（`NOT_CONFIGURED`），不会产生 Audit 证据；Audit 与
   Enforce 均需操作者显式启用并提供私有 case；
-- 插件在握手时读取实际运行 Host（`process.argv[1]` 指向的 `@deepseek-ai/dsh`
-  package.json）而非写死常量，并与兼容矩阵 `0.1.1-rc.2` 比对：Enforce 在版本缺失或
+- 插件在握手时解析实际运行 Host（包括全局安装的符号链接）所对应的
+  `@deepseek-ai/dsh` package.json，而非读取插件开发依赖或写死常量，并与兼容矩阵
+  `0.1.1-rc.2` 比对：Enforce 在版本缺失或
   不匹配时 fail closed，Audit 会把 `HOST_VERSION_INCOMPATIBLE` 写进证据缺口、绝不静默
   升级为 CORRELATED；
+- `read`、`glob`、`grep`、`web_search` 四类只读工具已纳入闭合 observation 工具集；
+  Core 协议签名、stdio bridge 存活与真实宿主执行预检共同覆盖该路径；
 - 一次性 Git 夹具完成授权 patch、冻结测试、独立 Git 回读、外部 Acceptor 签名、
   Acceptance 绑定、交付导出、离线复核与篡改拒绝；
-- Core DSH focused：`77 passed / 0 failed / 0 skipped`；插件：`58 passed / 0 failed /
+- Core DSH focused：`97 passed / 0 failed / 0 skipped`；插件：`80 passed / 0 failed /
   0 skipped`，typecheck、build 与真实打包宿主 live-preflight 均通过；
 - candidate 两套件（artifact root + 强制 live Docker）：`186 passed / 0 failed /
   0 skipped`；required-live 全量门在 `OPENWORKPROOF_AGENTTEAMS_REQUIRED=1`、
   `AGENTTEAMS_HOMESERVER=http://127.0.0.1:18080` 与只读取自本机 `agentteams-manager`
-  容器的 `AGENTTEAMS_MATRIX_TOKEN` 下以 `4333 passed / 0 failed / 0 skipped`
-  通过（1480.88s，退出码 0）；
+  容器的 `AGENTTEAMS_MATRIX_TOKEN` 下以 `4373 passed / 0 failed / 0 skipped`
+  通过（退出码 0）；
 - 不可变 candidate inventory
   `supply-chain/images/candidates/28e25b839f45260a89c2f0c5ee957723c3d05fc9.json`
   （inventory commit `c7ae9c7`，绑定 source revision `28e25b8`，不改写历史库存）；

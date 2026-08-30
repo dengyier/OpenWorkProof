@@ -26,10 +26,10 @@ verification separate from acceptance, and preserves the human ability to accept
 
 ```text
 Local candidate: 1.4.0, not released
-core focused: 77 passed / 0 failed / 0 skipped
-plugin: 58 passed / 0 failed / 0 skipped
+core focused: 97 passed / 0 failed / 0 skipped
+plugin: 80 passed / 0 failed / 0 skipped
 candidate: 186 passed / 0 failed / 0 skipped
-required-live: 4333 passed / 0 failed / 0 skipped
+required-live: 4373 passed / 0 failed / 0 skipped
 License: Apache-2.0
 ```
 
@@ -320,16 +320,21 @@ verify independently, prepare a keyless acceptance draft, export for offline rep
 the same committed receipt after process restart. These local checks are not npm publication,
 external reproduction, customer adoption, or DeepSeek endorsement.
 
+Host detection resolves the actual executable, including the symlink layout used by global
+installations. The closed observation protocol and real-host preflight also cover the `read`,
+`glob`, `grep`, and `web_search` read-only tools, so an ordinary read-only call cannot terminate
+the evidence bridge.
+
 ## Evidence you can verify
 
 The following facts describe the local candidate. They do not prove customer adoption:
 
 | Gate | Current result |
 |---|---|
-| core focused | `77 passed / 0 failed / 0 skipped` |
-| plugin | `58 passed / 0 failed / 0 skipped` |
+| core focused | `97 passed / 0 failed / 0 skipped` |
+| plugin | `80 passed / 0 failed / 0 skipped` |
 | candidate | `186 passed / 0 failed / 0 skipped` |
-| required-live | `4333 passed / 0 failed / 0 skipped` |
+| required-live | `4373 passed / 0 failed / 0 skipped` |
 | AgentTeams | Manager, Developer, and Verifier live preflight passed (`http://127.0.0.1:18080`) |
 | Offline verification | Surface, Acceptance, and Human Agency bundles replay independently |
 | Supply chain | Candidate inventory, OCI/Docker artifacts, and hashes passed their binding gate |

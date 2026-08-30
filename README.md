@@ -25,10 +25,10 @@ OpenWorkProof 不保证 Agent 的结果一定正确，也不替客户作出验�
 
 ```text
 本地候选版本: 1.4.0, 尚未发布
-core focused: 77 passed / 0 failed / 0 skipped
-plugin: 58 passed / 0 failed / 0 skipped
+core focused: 97 passed / 0 failed / 0 skipped
+plugin: 80 passed / 0 failed / 0 skipped
 candidate: 186 passed / 0 failed / 0 skipped
-required-live: 4333 passed / 0 failed / 0 skipped
+required-live: 4373 passed / 0 failed / 0 skipped
 许可证: Apache-2.0
 ```
 
@@ -297,16 +297,20 @@ DeepSeek Harness 适配器当前是外部发布 READY 的本地候选，锁定
 后恢复同一已提交 receipt。上述本地预检不等于 npm 发布、外部复现、客户采用或
 DeepSeek 官方背书。
 
+宿主版本从实际执行文件解析，包含全局安装常见的符号链接路径；`read`、`glob`、`grep`、
+`web_search` 四类只读工具也进入闭合 observation 协议并由真实宿主预检覆盖，不会因正常
+只读调用使证据 bridge 退出。
+
 ## 当前可以复核的证据
 
 以下是本地候选的工程证据，不是客户采用证明：
 
 | 验证门 | 当前结果 |
 |---|---|
-| core focused | `77 passed / 0 failed / 0 skipped` |
-| plugin | `58 passed / 0 failed / 0 skipped` |
+| core focused | `97 passed / 0 failed / 0 skipped` |
+| plugin | `80 passed / 0 failed / 0 skipped` |
 | candidate | `186 passed / 0 failed / 0 skipped` |
-| required-live | `4333 passed / 0 failed / 0 skipped` |
+| required-live | `4373 passed / 0 failed / 0 skipped` |
 | AgentTeams | Manager、Developer、Verifier 三角色 live preflight 已通过（`http://127.0.0.1:18080`） |
 | 离线验证 | Surface、Acceptance 与 Human Agency bundle 可独立回放 |
 | 供应链 | candidate inventory、OCI/Docker 工件和哈希绑定已过门 |
