@@ -529,11 +529,13 @@ def test_readmes_keep_current_release_and_test_boundaries_aligned() -> None:
         ):
             assert literal in text, f"README release boundary missing: {literal}"
 
-    assert "本地候选" in chinese
-    assert "尚未发布" in chinese
+    assert "Core 公开版本: 1.4.0" in chinese
+    assert "插件候选: 0.1.0" in chinese
+    assert "尚未发布 npm" in chinese
     assert "外部发布 READY" in chinese
+    assert "Public Core release: 1.4.0" in english
     assert "local candidate" in english
-    assert "not released" in english
+    assert "not published to npm" in english
     assert "external-release READY" in english
 
 

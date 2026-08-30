@@ -38,21 +38,22 @@ Core `main` 与独立插件仓库已完成外部发布 READY 的候选收口：
   `owp dsh-bridge --help`；最终 wheel/sdist/插件包 SHA-256 见
   `release-candidates` 目录的 `SHA256SUMS`。
 
-运行候选源码 `7aa5a22` 已 fast-forward 合并并推送到 `origin/main`；供应链与
-required-live 本地门已闭合，技术上达到外部发布 READY。尚未创建插件远端，且 npm、PyPI、
-GitHub Release、MCP Registry 与插件市场均未发布；第二台环境外部复现、客户采用、DeepSeek
-官方背书与生产使用也均未取证。通用案例初始化器和独立 Verifier 服务编排仍需由集成方准备；
-本地夹具不能写成任意仓库零配置交付。修复默认禁用态文档和 Cordis 副作用工具覆盖后，
-DeepSeek Harness 同机只读复审返回 `READY`；该结论仍不能写成第二台环境外部复现、用户采用
-或官方背书。
+运行候选源码 `7aa5a22` 已 fast-forward 合并，发布事实文档提交 `14e9675` 已推送到
+`origin/main`。Core `v1.4.0` 标签绑定 `14e9675`，GitHub Actions run
+`33286827834` 完成构建、`twine check`、PyPI 与 GitHub Release 发布；官方 API 回读确认
+PyPI latest 为 `1.4.0`，MCP Registry 中 `1.4.0` 为 `active / isLatest=true`。插件仍未创建
+独立远端，且 npm 与插件市场尚未发布；第二台环境外部复现、客户采用、DeepSeek 官方背书与
+生产使用也均未取证。通用案例初始化器和独立 Verifier 服务编排仍需由集成方准备；本地夹具
+不能写成任意仓库零配置交付。DeepSeek Harness 同机只读复审返回 `READY`；该结论仍不能写成
+第二台环境外部复现、用户采用或官方背书。
 
 ```yaml
 customer_adoption: not_evidenced
 deepseek_endorsement: not_evidenced
 npm_publication: not_evidenced
-pypi_publication: not_evidenced
-github_release: not_evidenced
-mcp_registry_1_4_0: not_evidenced
+pypi_publication: 1.4.0
+github_release: v1.4.0
+mcp_registry_1_4_0: active_latest
 core_runtime_candidate: 7aa5a22
 core_source_main: evidenced
 external_reproduction: not_evidenced

@@ -24,7 +24,8 @@ OpenWorkProof 不保证 Agent 的结果一定正确，也不替客户作出验�
 [English](README_en.md)
 
 ```text
-源码候选版本: 1.4.0, 已合并并推送 main；发行包尚未发布
+Core 公开版本: 1.4.0
+DeepSeek Harness 插件候选: 0.1.0, 尚未发布 npm
 core focused: 97 passed / 0 failed / 0 skipped
 plugin: 80 passed / 0 failed / 0 skipped
 candidate: 186 passed / 0 failed / 0 skipped
@@ -32,10 +33,11 @@ required-live: 4373 passed / 0 failed / 0 skipped
 许可证: Apache-2.0
 ```
 
-公开发布状态请直接回读 [PyPI](https://pypi.org/project/openworkproof/) 与
-[MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.2.0)。
-源码候选版本、公开源码状态与发行包版本是三件事。当前 `main` 已包含 1.4.0 候选源码，
-PyPI、GitHub Release 与 MCP Registry 的公开发行版本仍以各平台回读结果为准。
+公开发布状态请直接回读 [PyPI](https://pypi.org/project/openworkproof/)、
+[GitHub Release](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.4.0) 与
+[MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.4.0)。
+Core `1.4.0` 已发布到 PyPI、GitHub Release 与 MCP Registry；DeepSeek Harness 插件
+`0.1.0` 仍是本地候选，尚未发布 npm 或插件市场。两者是独立的发布事实。
 
 ## Agent 说 `完成了`，还缺什么
 
@@ -222,9 +224,9 @@ python -m pip install openworkproof
 owp --help
 ```
 
-### 2. 运行本地候选
+### 2. 从源码开发
 
-本仓库中的 `1.4.0` 是尚未发布的本地候选。开发者可以从源码安装：
+需要修改协议或接入适配器时，可以从源码安装当前 `main`：
 
 ```bash
 git clone https://github.com/dengyier/OpenWorkProof.git
