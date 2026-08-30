@@ -25,7 +25,7 @@ verification separate from acceptance, and preserves the human ability to accept
 [Protocol](docs/protocol/human-agency-profile-v0.1.md) · [中文](README.md)
 
 ```text
-Local candidate: 1.4.0, not released
+Source candidate: 1.4.0, merged and pushed to main; distributions not released
 core focused: 97 passed / 0 failed / 0 skipped
 plugin: 80 passed / 0 failed / 0 skipped
 candidate: 186 passed / 0 failed / 0 skipped
@@ -35,7 +35,9 @@ License: Apache-2.0
 
 Read public release state directly from [PyPI](https://pypi.org/project/openworkproof/) and
 the [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.2.0).
-The local candidate and the public release are different facts.
+The source candidate, public source state, and packaged release are three different facts.
+`main` now contains the 1.4.0 candidate source; the public PyPI, GitHub Release, and MCP
+Registry versions remain whatever those services report on readback.
 
 ## What is missing when an agent says `done`
 

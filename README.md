@@ -24,7 +24,7 @@ OpenWorkProof 不保证 Agent 的结果一定正确，也不替客户作出验�
 [English](README_en.md)
 
 ```text
-本地候选版本: 1.4.0, 尚未发布
+源码候选版本: 1.4.0, 已合并并推送 main；发行包尚未发布
 core focused: 97 passed / 0 failed / 0 skipped
 plugin: 80 passed / 0 failed / 0 skipped
 candidate: 186 passed / 0 failed / 0 skipped
@@ -34,7 +34,8 @@ required-live: 4373 passed / 0 failed / 0 skipped
 
 公开发布状态请直接回读 [PyPI](https://pypi.org/project/openworkproof/) 与
 [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.2.0)。
-本地候选版本与公开版本是两件事。
+源码候选版本、公开源码状态与发行包版本是三件事。当前 `main` 已包含 1.4.0 候选源码，
+PyPI、GitHub Release 与 MCP Registry 的公开发行版本仍以各平台回读结果为准。
 
 ## Agent 说 `完成了`，还缺什么
 

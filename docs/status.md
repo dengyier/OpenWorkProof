@@ -3,9 +3,9 @@
 > 本文档是项目实现状态的权威记录。README 只保留概览，
 > 「已经完成什么」和「尚未完成什么」的完整清单以本文为准。
 
-## DeepSeek Harness 插件 V0.1 外部发布 READY 本地候选（2026-08-30）
+## DeepSeek Harness 插件 V0.1 外部发布 READY 源码候选（2026-08-30）
 
-隔离分支与独立插件仓库已完成外部发布 READY 的本地收口：
+Core `main` 与独立插件仓库已完成外部发布 READY 的候选收口：
 
 - 锁定 `DeepSeek Harness 0.1.1-rc.2`、插件 `0.1.0`、OpenWorkProof `1.4.0`；
 - 打包后的插件已安装进全新临时 DSH profile，并由 `--dump-config` 确认 bundle 生效；
@@ -38,10 +38,11 @@
   `owp dsh-bridge --help`；最终 wheel/sdist/插件包 SHA-256 见
   `release-candidates` 目录的 `SHA256SUMS`。
 
-当前仍是本地候选：供应链与 required-live 本地门已闭合、技术上达到外部发布 READY，但未
-创建插件远端、未发布 npm/PyPI、未合并或推送 core、未在第二台环境外部复现、无客户采用、
-无 DeepSeek 官方背书、无生产使用。通用案例初始化器和独立 Verifier 服务编排仍需由集成方
-准备；本地夹具不能写成任意仓库零配置交付。修复默认禁用态文档和 Cordis 副作用工具覆盖后，
+运行候选源码 `7aa5a22` 已 fast-forward 合并并推送到 `origin/main`；供应链与
+required-live 本地门已闭合，技术上达到外部发布 READY。尚未创建插件远端，且 npm、PyPI、
+GitHub Release、MCP Registry 与插件市场均未发布；第二台环境外部复现、客户采用、DeepSeek
+官方背书与生产使用也均未取证。通用案例初始化器和独立 Verifier 服务编排仍需由集成方准备；
+本地夹具不能写成任意仓库零配置交付。修复默认禁用态文档和 Cordis 副作用工具覆盖后，
 DeepSeek Harness 同机只读复审返回 `READY`；该结论仍不能写成第二台环境外部复现、用户采用
 或官方背书。
 
@@ -50,6 +51,10 @@ customer_adoption: not_evidenced
 deepseek_endorsement: not_evidenced
 npm_publication: not_evidenced
 pypi_publication: not_evidenced
+github_release: not_evidenced
+mcp_registry_1_4_0: not_evidenced
+core_runtime_candidate: 7aa5a22
+core_source_main: evidenced
 external_reproduction: not_evidenced
 production_use: not_evidenced
 ```
