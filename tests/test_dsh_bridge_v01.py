@@ -70,6 +70,7 @@ def _shutdown() -> dict[str, object]:
 
 def _observation(
     *,
+    tool_name: str = "owp_run_tests",
     authorization_status: str = "not_evidenced",
     receipt_digest: str | None = None,
     evidence_gap_codes: list[str] | None = None,
@@ -83,7 +84,7 @@ def _observation(
             "session_id": "session-1",
             "call_id": "call-1",
             "root_call_id": "call-1",
-            "tool_name": "owp_run_tests",
+            "tool_name": tool_name,
             "arguments_digest": "b" * 64,
         },
         "authorization_status": authorization_status,
@@ -495,6 +496,42 @@ def test_observation_commit_is_signed_by_bridge_and_stored_immutably(
     )
     assert record.record_id == record_id
     assert verify_dsh_observation(record, private_key.public_key())
+
+
+@pytest.mark.parametrize("tool_name", ("read", "glob", "grep", "web_search"))
+def test_read_only_observation_keeps_stdio_bridge_alive(
+    monkeypatch,
+    tmp_path,
+    tool_name: str,
+) -> None:
+    app, _private_key, _evidence_root = _open_fake_case(monkeypatch, tmp_path)
+    observation = _request(
+        "observation_commit",
+        2,
+        {
+            "case_id": "c" * 64,
+            "observation": _observation(tool_name=tool_name),
+        },
+    )
+    shutdown = _request("shutdown", 3, {"reason": "client_shutdown"})
+    source = "".join(
+        json.dumps(item, separators=(",", ":")) + "\n"
+        for item in (observation, shutdown)
+    )
+    stdout = io.StringIO()
+
+    result = run_stdio_bridge(
+        io.StringIO(source),
+        stdout,
+        io.StringIO(),
+        clock=lambda: NOW,
+        application=app,
+    )
+
+    assert result == 0
+    responses = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert responses[0]["payload"]["status"] == "ok"
+    assert responses[1]["message_type"] == "shutdown"
 
 
 def test_observation_cannot_substitute_an_uncommitted_receipt(

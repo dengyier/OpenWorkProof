@@ -25,6 +25,10 @@ SHA_D = "d" * 64
 DSH_TOOL_NAMES = (
     "owp_apply_patch",
     "owp_run_tests",
+    "read",
+    "glob",
+    "grep",
+    "web_search",
     "write",
     "edit",
     "bash",
@@ -104,7 +108,7 @@ def test_every_closed_tool_name_is_a_valid_execution_identity(tool_name: str) ->
 
 
 @pytest.mark.parametrize("tool_name", DSH_TOOL_NAMES)
-def test_every_native_tool_name_signs_a_closed_observation(tool_name: str) -> None:
+def test_every_closed_tool_name_signs_a_closed_observation(tool_name: str) -> None:
     private_key = Ed25519PrivateKey.generate()
     record = sign_dsh_observation(
         _observation_payload(

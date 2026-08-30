@@ -33,6 +33,10 @@ _SIGNING_FIELDS = frozenset(
 DshToolName = Literal[
     "owp_apply_patch",
     "owp_run_tests",
+    "read",
+    "glob",
+    "grep",
+    "web_search",
     "write",
     "edit",
     "bash",
