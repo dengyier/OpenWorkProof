@@ -24,7 +24,7 @@ OpenWorkProof 不保证 Agent 的结果一定正确，也不替客户作出验�
 [English](README_en.md)
 
 ```text
-Core 公开版本: 1.4.0
+Core 包版本: 1.4.1
 DeepSeek Harness 插件候选: 0.1.0, 尚未发布 npm
 core focused: 97 passed / 0 failed / 0 skipped
 plugin: 80 passed / 0 failed / 0 skipped
@@ -33,10 +33,12 @@ required-live: 4373 passed / 0 failed / 0 skipped
 许可证: Apache-2.0
 ```
 
+以上为 1.4.0 协议基线的既有验证记录；1.4.1 只修复 MCP 启动入口兼容，未改变协议实现。
+
 公开发布状态请直接回读 [PyPI](https://pypi.org/project/openworkproof/)、
-[GitHub Release](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.4.0) 与
-[MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.4.0)。
-Core `1.4.0` 已发布到 PyPI、GitHub Release 与 MCP Registry；DeepSeek Harness 插件
+[GitHub Release](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.4.1) 与
+[MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.4.1)。
+Core `1.4.1` 修复 MCP 目录按包名启动的兼容性；公开发布状态以上述入口回读为准。DeepSeek Harness 插件
 `0.1.0` 仍是本地候选，尚未发布 npm 或插件市场。两者是独立的发布事实。
 
 ## Agent 说 `完成了`，还缺什么
@@ -216,6 +218,10 @@ Verification Integrity v0.5 会冻结合格对象集合和负向控制的预期�
 ## 五分钟开始
 
 ### 1. 从公开包安装
+
+MCP 客户端推荐使用 `uvx --from openworkproof owp-mcp`。从 1.4.1 起，
+目录常用的 `uvx openworkproof` 也启动同一个 MCP 服务。已有缓存可先运行
+`uvx --refresh openworkproof`。完整配置见 [MCP_SERVER.md](MCP_SERVER.md)。
 
 公开 PyPI 页面当前状态应以页面回读为准：
 

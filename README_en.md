@@ -25,7 +25,7 @@ verification separate from acceptance, and preserves the human ability to accept
 [Protocol](docs/protocol/human-agency-profile-v0.1.md) · [中文](README.md)
 
 ```text
-Public Core release: 1.4.0
+Core package version: 1.4.1
 DeepSeek Harness plugin candidate: 0.1.0, not published to npm
 core focused: 97 passed / 0 failed / 0 skipped
 plugin: 80 passed / 0 failed / 0 skipped
@@ -34,10 +34,12 @@ required-live: 4373 passed / 0 failed / 0 skipped
 License: Apache-2.0
 ```
 
+The figures above describe the existing 1.4.0 protocol baseline. Version 1.4.1 only adds MCP startup compatibility; protocol implementation is unchanged.
+
 Read public release state directly from [PyPI](https://pypi.org/project/openworkproof/),
-the [GitHub Release](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.4.0), and
-the [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.4.0).
-Core `1.4.0` is published on PyPI, GitHub Releases, and the MCP Registry. The DeepSeek
+the [GitHub Release](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.4.1), and
+the [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.4.1).
+Core `1.4.1` fixes package-name startup for MCP directories; read back the links above for publication status. The DeepSeek
 Harness plugin `0.1.0` remains a local candidate and is not published to npm or a plugin
 marketplace. These are separate release facts.
 
@@ -235,6 +237,10 @@ adoption remain separate external facts; without separate evidence, their status
 ## Five-minute start
 
 ### 1. Install the public package
+
+For MCP clients, use `uvx --from openworkproof owp-mcp`. Starting with 1.4.1,
+`uvx openworkproof` starts the same server. Refresh an existing uv cache with
+`uvx --refresh openworkproof`. See [MCP_SERVER.md](MCP_SERVER.md) for client configurations.
 
 Read the current public version from PyPI:
 
