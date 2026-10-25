@@ -23,6 +23,10 @@ OpenWorkProof 不保证 Agent 的结果一定正确，也不替客户作出验�
 [协议文档](docs/protocol/human-agency-profile-v0.1.md) ·
 [English](README_en.md)
 
+[![OpenWorkProof MCP on MCPRush](https://mcprush.com/badge/openworkproof-mcp/card.svg)](https://mcprush.com/to/openworkproof-mcp?ref=badge)
+
+MCPRush 动态信息卡片；点击查看评分依据与扫描范围。
+
 ```text
 Core 包版本: 1.4.2
 DeepSeek Harness 插件候选: 0.1.0, 尚未发布 npm
