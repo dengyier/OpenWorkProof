@@ -24,7 +24,7 @@ def test_catalog_package_name_and_legacy_mcp_commands_start_same_server() -> Non
         async with stdio_client(StdioServerParameters(command=str(executable))) as streams:
             async with ClientSession(*streams) as client:
                 initialized = await client.initialize()
-                assert initialized.serverInfo.name == "openworkproof"
+                assert initialized.model_dump(by_alias=True)["serverInfo"]["name"] == "openworkproof"
                 return {tool.name for tool in (await client.list_tools()).tools}
 
     async def check() -> None:

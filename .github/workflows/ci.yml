@@ -18,5 +18,5 @@ jobs:
       - run: python -m pip install -e '.[dev]'
       - run: python -m pip check
       - run: python -m compileall -q src tests
-      - run: python -m pytest -q
       - run: python -m pytest -q tests/test_schema_registry.py tests/test_signing.py tests/test_package.py
+      - run: python -m pytest -q
