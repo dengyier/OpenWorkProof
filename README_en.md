@@ -24,6 +24,10 @@ verification separate from acceptance, and preserves the human ability to accept
 [DeepSeek Harness](docs/integrations/deepseek-harness.md) ·
 [Protocol](docs/protocol/human-agency-profile-v0.1.md) · [中文](README.md)
 
+[![OpenWorkProof MCP on MCPRush](https://mcprush.com/badge/openworkproof-mcp/card.svg)](https://mcprush.com/to/openworkproof-mcp?ref=badge)
+
+Live MCPRush listing card; click for scoring details and scan scope.
+
 ```text
 Core package version: 1.4.2
 DeepSeek Harness plugin candidate: 0.1.0, not published to npm
