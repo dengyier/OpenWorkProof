@@ -178,7 +178,7 @@ def _decode_private_key(private_key_hex: str) -> Ed25519PrivateKey | None:
 
 @mcp.tool()
 def owp_generate_keypair() -> dict[str, Any]:
-    """Generate a new Ed25519 key pair for signing OpenWorkProof objects.
+    """Generate an Ed25519 signing key pair; this tool takes no input parameters.
 
     Returns the private key as a hex string and the public key as
     base64url, along with the derived ``key_id``.
@@ -431,7 +431,7 @@ def owp_verify_nested_claim(
 
 @mcp.tool()
 def owp_list_domains() -> dict[str, Any]:
-    """List all allowed canonical domains for OpenWorkProof objects.
+    """List canonical OpenWorkProof domains; this tool takes no input parameters.
 
     Returns:
         A dict with ``canonical_domains`` (all 9) and ``signed_domains``
@@ -539,10 +539,14 @@ def owp_status(ledger: str) -> dict[str, Any]:
 
 @mcp.tool()
 def owp_run_tests(ledger: str, payload: str) -> dict[str, Any]:
-    """Forward a run-tests execution to the ledger coordinator.
+    """Run tests, write an execution receipt to the ledger, and save test evidence files.
+
+    The ledger coordinator checks the signed request before execution.
+    The configured executor writes execution artifacts under the runtime and
+    evidence roots supplied in the payload.
 
     Args:
-        ledger: Path to the SQLite ledger file.
+        ledger: SQLite ledger file that receives the execution receipt.
         payload: JSON string of the run-tests execution payload (must
             include the signed ``AgentRequest`` and typed arguments).
     """
@@ -566,10 +570,14 @@ def owp_run_verification(
     payload: str,
     operation: str,
 ) -> dict[str, Any]:
-    """Run exactly one explicit v0.2, v0.3, or v0.5 verification operation.
+    """Write verification results or signed decisions to the ledger, or prepare a draft.
 
     ``operation`` must be ``commit_arm``, ``prepare_decision``, or
-    ``commit_decision``.  The tool never retries an indeterminate commit.
+    ``commit_decision``. ``commit_arm`` appends a validated verification
+    result to the SQLite ledger. ``commit_decision`` appends the supplied
+    signed verification decision. ``prepare_decision`` returns an unsigned
+    draft without committing that decision. The tool never retries an
+    indeterminate commit.
     """
     try:
         parsed = _json_object(payload, field="payload")
