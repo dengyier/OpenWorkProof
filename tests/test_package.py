@@ -1,4 +1,5 @@
 import json
+import asyncio
 from importlib.metadata import version
 from pathlib import Path
 import subprocess
@@ -11,12 +12,35 @@ import openworkproof
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_catalog_package_name_and_legacy_mcp_commands_start_same_server() -> None:
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    async def inspect(command: str) -> set[str]:
+        executable = Path(sys.executable).with_name(command)
+        assert executable.is_file(), f"Missing installed MCP command: {command}"
+        async with stdio_client(StdioServerParameters(command=str(executable))) as streams:
+            async with ClientSession(*streams) as client:
+                initialized = await client.initialize()
+                assert initialized.serverInfo.name == "openworkproof"
+                return {tool.name for tool in (await client.list_tools()).tools}
+
+    async def check() -> None:
+        package_named = await inspect("openworkproof")
+        legacy = await inspect("owp-mcp")
+        assert package_named == legacy
+        assert "owp_verify_work_order" in package_named
+        assert "owp_status" in package_named
+
+    asyncio.run(asyncio.wait_for(check(), timeout=30))
+
+
 def test_package_version_is_protocol_version() -> None:
     assert openworkproof.__version__ == version("openworkproof")
 
 
 def test_release_metadata_is_synchronized() -> None:
-    expected_version = "1.4.0"
+    expected_version = "1.4.1"
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
     server = json.loads((ROOT / "server.json").read_text())
     legacy_mcp = json.loads((ROOT / "mcp.json").read_text())

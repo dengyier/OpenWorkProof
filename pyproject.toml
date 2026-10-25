@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openworkproof"
-version = "1.4.0"
+version = "1.4.1"
 description = "Agent work contracts and verifiable execution protocol — Ed25519-signed, offline-verifiable proof-carrying work for AI agents."
 readme = "README.md"
 license = "Apache-2.0"
@@ -44,6 +44,7 @@ dev = [
 ]
 
 [project.scripts]
+openworkproof = "openworkproof.mcp_transport:main"
 owp = "openworkproof.cli:app"
 owp-mcp = "openworkproof.mcp_transport:main"
 
