@@ -8,12 +8,12 @@
   },
   "title": "OpenWorkProof",
   "websiteUrl": "https://github.com/dengyier/OpenWorkProof",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "openworkproof",
-      "version": "1.4.1",
+      "version": "1.4.2",
       "transport": {
         "type": "stdio"
       }

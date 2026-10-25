@@ -519,7 +519,7 @@ def test_readmes_keep_current_release_and_test_boundaries_aligned() -> None:
 
     for text in (chinese, english):
         for literal in (
-            "1.4.1",
+            "1.4.2",
             "97 passed",
             "80 passed",
             "186 passed",
@@ -529,11 +529,11 @@ def test_readmes_keep_current_release_and_test_boundaries_aligned() -> None:
         ):
             assert literal in text, f"README release boundary missing: {literal}"
 
-    assert "Core 包版本: 1.4.1" in chinese
+    assert "Core 包版本: 1.4.2" in chinese
     assert "插件候选: 0.1.0" in chinese
     assert "尚未发布 npm" in chinese
     assert "外部发布 READY" in chinese
-    assert "Core package version: 1.4.1" in english
+    assert "Core package version: 1.4.2" in english
     assert "local candidate" in english
     assert "not published to npm" in english
     assert "external-release READY" in english
