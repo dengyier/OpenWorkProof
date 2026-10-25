@@ -6,11 +6,8 @@
     "url": "https://github.com/dengyier/OpenWorkProof",
     "source": "github"
   },
-  "homepage": "https://github.com/dengyier/OpenWorkProof",
-  "author": {
-    "name": "dengyier"
-  },
-  "license": "Apache-2.0",
+  "title": "OpenWorkProof",
+  "websiteUrl": "https://github.com/dengyier/OpenWorkProof",
   "version": "1.4.1",
   "packages": [
     {
@@ -22,13 +19,21 @@
       }
     }
   ],
-  "keywords": [
-    "ed25519",
-    "verifiable-execution",
-    "proof-carrying",
-    "audit",
-    "signing",
-    "work-contract",
-    "mcp-server"
-  ]
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "author": {
+        "name": "dengyier"
+      },
+      "license": "Apache-2.0",
+      "keywords": [
+        "ed25519",
+        "verifiable-execution",
+        "proof-carrying",
+        "audit",
+        "signing",
+        "work-contract",
+        "mcp-server"
+      ]
+    }
+  }
 }

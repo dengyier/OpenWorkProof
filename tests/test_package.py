@@ -4,6 +4,7 @@ from importlib.metadata import version
 from pathlib import Path
 import subprocess
 import sys
+import sysconfig
 import tomllib
 
 import openworkproof
@@ -17,7 +18,8 @@ def test_catalog_package_name_and_legacy_mcp_commands_start_same_server() -> Non
     from mcp.client.stdio import stdio_client
 
     async def inspect(command: str) -> set[str]:
-        executable = Path(sys.executable).with_name(command)
+        script_name = command + (".exe" if sys.platform == "win32" else "")
+        executable = Path(sysconfig.get_path("scripts")) / script_name
         assert executable.is_file(), f"Missing installed MCP command: {command}"
         async with stdio_client(StdioServerParameters(command=str(executable))) as streams:
             async with ClientSession(*streams) as client:
@@ -57,7 +59,12 @@ def test_release_metadata_is_synchronized() -> None:
     for metadata in (server, legacy_mcp):
         assert metadata["version"] == expected_version
         assert metadata["packages"][0]["version"] == expected_version
-        assert metadata["license"] == "Apache-2.0"
+
+    assert legacy_mcp["license"] == "Apache-2.0"
+    publisher = server["_meta"]["io.modelcontextprotocol.registry/publisher-provided"]
+    assert publisher["license"] == "Apache-2.0"
+    assert server["websiteUrl"] == pyproject["project"]["urls"]["Homepage"]
+    assert not {"homepage", "author", "license", "keywords"} & server.keys()
 
 
 def test_dir_exposes_all_public_names_without_lazy_import() -> None:
