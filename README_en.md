@@ -22,6 +22,7 @@ verification separate from acceptance, and preserves the human ability to accept
 [Install](#five-minute-start) · [How it works](#how-it-works) ·
 [Human Agency](#human-agency-more-capability-must-not-mean-less-human-choice) ·
 [DeepSeek Harness](docs/integrations/deepseek-harness.md) ·
+[Community records](#community-contributions-and-external-records) ·
 [Protocol](docs/protocol/human-agency-profile-v0.1.md) · [中文](README.md)
 
 [![OpenWorkProof MCP on MCPRush](https://mcprush.com/badge/openworkproof-mcp/card.svg)](https://mcprush.com/to/openworkproof-mcp?ref=badge)
@@ -46,6 +47,37 @@ the [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.gith
 Core `1.4.2` clarifies MCP tool inputs and write effects and retains the 1.4.1 startup fix; read back the links above for publication status. The DeepSeek
 Harness plugin `0.1.0` remains a local candidate and is not published to npm or a plugin
 marketplace. These are separate release facts.
+
+## Community contributions and external records
+
+The following public records concern OpenWorkProof and its maintainer,
+[dengyier](https://github.com/dengyier). Status was checked on **2026-10-26**;
+follow the original records for later changes.
+
+| Category | Verifiable achievements and participation |
+|---|---|
+| Community directories | [awesome-mcp-servers PR #11702](https://github.com/punkpeye/awesome-mcp-servers/pull/11702) was merged by its maintainer on 2026-08-29. [awesome-a2a](https://github.com/ai-boost/awesome-a2a) and the [DeepSeek Harness community plugin directory](https://github.com/dshworks/awesome-dsh-plugins/blob/main/lists/observability-evidence.md) also currently list OWP entries. |
+| External research | Judgment Pack's [Study 014](https://github.com/Judgment-Pack/judgment-pack-evaluator-experiments/blob/main/studies/014-openworkproof-binding/ANALYSIS.md) investigates judgment-to-execution binding, offline replay and detection boundaries against pinned OWP commit `8eeca6f`. The study and adapter are the external authors' work. |
+| Cross-project integration experiment | AgentGuard's [OWP integration PR #4](https://github.com/Brodin2001/Agentguard/pull/4) remains open. Its maintainer's [execution-boundary fix PR #5](https://github.com/Brodin2001/Agentguard/pull/5) was merged into `integration/openworkproof-v1.4.0` on 2026-09-11. This is not a merge into its main branch or a completed integration release. |
+| Protocol community discussions | The maintainer contributed to the [AutoGen GuardrailProvider discussion](https://github.com/microsoft/autogen/issues/7405#issuecomment-5226759945) and opened [MCP work-contract discussion #3215](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/3215), now closed, to discuss signed authorization, execution receipts and tool-call boundaries. |
+| DEV technical writing | The maintainer published a [protocol introduction](https://dev.to/dengyier/when-ai-agents-ship-code-a-protocol-for-verifiable-execution-29m3), a [community-feedback retrospective](https://dev.to/dengyier/i-asked-do-you-trust-an-agent-that-says-the-tests-passed-68-comments-later-heres-what-i-40an), and an article on [verifiable human authority](https://dev.to/dengyier/agent-autonomy-has-a-missing-layer-verifiable-human-authority-358f), with public discussions about evidence scope, freshness and judgment binding. |
+| Public discovery and checks | [Glama](https://glama.ai/mcp/servers/dengyier/OpenWorkProof), [MCPRush](https://mcprush.com/dengyier/openworkproof-mcp), and [VerifyMCP](https://verifymcp.io/servers/dengyier-openworkproof/openworkproof) provide OWP pages. Read each platform's details for its current score, scanned version and check scope. |
+
+Directory listings, discussions, integration experiments and automated scores have distinct meanings.
+Study 014 explicitly disclaims an OWP security audit or endorsement; its scope is 39 locked test
+cells and 8 holdout cells, not "47 attacks passed." These records do not establish institutional
+adoption, comprehensive security certification, customer production deployment or paid use.
+
+<details>
+<summary>Other maintainer proposals and pending directory submissions</summary>
+
+| Record | Current status |
+|---|---|
+| OpenClaw channel-diagnostics proposals: [PR #54244](https://github.com/openclaw/openclaw/pull/54244) and [earlier PR #54231](https://github.com/openclaw/openclaw/pull/54231) | Both closed without merging. These record community participation, not accepted upstream contributions. |
+| [awesome-ai-sdks PR #316](https://github.com/e2b-dev/awesome-ai-sdks/pull/316) | Submitted and still open; not merged or listed through this PR. |
+| [awesome-ai-agents PR #5](https://github.com/GopalGB/awesome-ai-agents/pull/5) | Submitted and still open; not merged or listed through this PR. |
+
+</details>
 
 ## What is missing when an agent says `done`
 

@@ -21,6 +21,7 @@ OpenWorkProof 不保证 Agent 的结果一定正确，也不替客户作出验�
 [Human Agency](#human-agency能力越强人的决定权越不能消失) ·
 [DeepSeek Harness](docs/integrations/deepseek-harness.md) ·
 [协议文档](docs/protocol/human-agency-profile-v0.1.md) ·
+[社区记录](#社区贡献与外部记录) ·
 [English](README_en.md)
 
 [![OpenWorkProof MCP on MCPRush](https://mcprush.com/badge/openworkproof-mcp/card.svg)](https://mcprush.com/to/openworkproof-mcp?ref=badge)
@@ -44,6 +45,35 @@ required-live: 4373 passed / 0 failed / 0 skipped
 [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.4.2)。
 Core `1.4.2` 补清 MCP 工具的参数与写入说明，并保留 1.4.1 的启动兼容修复；公开发布状态以上述入口回读为准。DeepSeek Harness 插件
 `0.1.0` 仍是本地候选，尚未发布 npm 或插件市场。两者是独立的发布事实。
+
+## 社区贡献与外部记录
+
+OpenWorkProof 与维护者 [dengyier](https://github.com/dengyier) 的相关公开记录如下。
+状态核对于 **2026-10-26**，后续变化以链接中的原始记录为准。
+
+| 类别 | 可核查的成果与参与记录 |
+|---|---|
+| 社区目录收录 | [awesome-mcp-servers PR #11702](https://github.com/punkpeye/awesome-mcp-servers/pull/11702) 于 2026-08-29 由维护者合并；[awesome-a2a](https://github.com/ai-boost/awesome-a2a) 和 [DeepSeek Harness 社区插件目录](https://github.com/dshworks/awesome-dsh-plugins/blob/main/lists/observability-evidence.md) 当前也列有 OWP 条目。 |
+| 外部研究 | Judgment Pack 的 [Study 014](https://github.com/Judgment-Pack/judgment-pack-evaluator-experiments/blob/main/studies/014-openworkproof-binding/ANALYSIS.md) 以固定 OWP 提交 `8eeca6f` 为对象，公开研究判断与执行的绑定、离线重放及检测边界。研究与适配器由外部作者完成。 |
+| 跨项目集成实验 | AgentGuard 的 [OWP 集成实验 PR #4](https://github.com/Brodin2001/Agentguard/pull/4) 仍开放；其维护者提交的[执行边界修复 PR #5](https://github.com/Brodin2001/Agentguard/pull/5) 于 2026-09-11 合并到 `integration/openworkproof-v1.4.0` 集成分支。尚不表示已合入对方主分支或完成集成发布。 |
+| 协议社区讨论 | 维护者参与 [AutoGen GuardrailProvider 讨论](https://github.com/microsoft/autogen/issues/7405#issuecomment-5226759945)，并发起 [MCP 工作契约层讨论 #3215](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/3215)（已关闭），交流签名授权、执行回执与工具调用边界。 |
+| DEV 技术分享 | 维护者公开发表[协议介绍](https://dev.to/dengyier/when-ai-agents-ship-code-a-protocol-for-verifiable-execution-29m3)、[社区反馈复盘](https://dev.to/dengyier/i-asked-do-you-trust-an-agent-that-says-the-tests-passed-68-comments-later-heres-what-i-40an)及[可验证人类授权](https://dev.to/dengyier/agent-autonomy-has-a-missing-layer-verifiable-human-authority-358f)等文章，并与外部开发者讨论证据范围、时效和判断绑定。 |
+| 公开发现与检查入口 | [Glama](https://glama.ai/mcp/servers/dengyier/OpenWorkProof)、[MCPRush](https://mcprush.com/dengyier/openworkproof-mcp) 和 [VerifyMCP](https://verifymcp.io/servers/dengyier-openworkproof/openworkproof) 均提供 OWP 页面；自动检查的评分、扫描版本与范围请查看各平台详情。 |
+
+目录收录、技术讨论、集成实验与平台评分各有不同含义。Study 014 明确不是 OWP 安全审计或背书，
+其研究范围为 39 个既定测试单元与 8 个留出测试单元，不能称为“通过 47 次攻击”。
+上述记录不表示相关机构正式采纳、全面安全认证、客户生产部署或付费使用。
+
+<details>
+<summary>维护者的其他开源提案与待审收录申请</summary>
+
+| 记录 | 当前状态 |
+|---|---|
+| OpenClaw 通道诊断工具提案：[PR #54244](https://github.com/openclaw/openclaw/pull/54244)、[较早的 PR #54231](https://github.com/openclaw/openclaw/pull/54231) | 均已关闭、未合并；记录维护者的社区参与，不列为已被上游采纳的贡献。 |
+| [awesome-ai-sdks PR #316](https://github.com/e2b-dev/awesome-ai-sdks/pull/316) | 已提交、仍开放，尚未合并收录。 |
+| [awesome-ai-agents PR #5](https://github.com/GopalGB/awesome-ai-agents/pull/5) | 已提交、仍开放，尚未合并收录。 |
+
+</details>
 
 ## Agent 说 `完成了`，还缺什么
 
