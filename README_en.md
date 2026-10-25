@@ -34,6 +34,8 @@ required-live: 4373 passed / 0 failed / 0 skipped
 License: Apache-2.0
 ```
 
+The figures above describe the existing 1.4.0 protocol baseline. Version 1.4.1 only adds MCP startup compatibility; protocol implementation is unchanged.
+
 Read public release state directly from [PyPI](https://pypi.org/project/openworkproof/),
 the [GitHub Release](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.4.1), and
 the [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.4.1).

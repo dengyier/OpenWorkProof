@@ -33,6 +33,8 @@ required-live: 4373 passed / 0 failed / 0 skipped
 许可证: Apache-2.0
 ```
 
+以上为 1.4.0 协议基线的既有验证记录；1.4.1 只修复 MCP 启动入口兼容，未改变协议实现。
+
 公开发布状态请直接回读 [PyPI](https://pypi.org/project/openworkproof/)、
 [GitHub Release](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.4.1) 与
 [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.4.1)。
