@@ -18,6 +18,7 @@ OpenWorkProof 不保证 Agent 的结果一定正确，也不替客户作出验�
 执行有证据、验证与验收不会被混为一谈，并把接受、拒绝、撤销和申诉的权利留给人。
 
 [安装](#五分钟开始) · [工作原理](#工作原理) ·
+[OWP Guard 本地候选](docs/integrations/agent-guard-codex.md) ·
 [Human Agency](#human-agency能力越强人的决定权越不能消失) ·
 [DeepSeek Harness](docs/integrations/deepseek-harness.md) ·
 [协议文档](docs/protocol/human-agency-profile-v0.1.md) ·
@@ -74,6 +75,20 @@ OpenWorkProof 与维护者 [dengyier](https://github.com/dengyier) 的相关公�
 | [awesome-ai-agents PR #5](https://github.com/GopalGB/awesome-ai-agents/pull/5) | 已提交、仍开放，尚未合并收录。 |
 
 </details>
+
+## OWP Guard：在原 Agent 中保护预览目录（本地候选）
+
+用户继续在 Codex 中提任务，OWP 在受支持的工具执行前自动检查：允许读取、增加和
+修改指定预览目录内的普通文件，拒绝越界访问、删除/移动、任意命令和未支持工具。
+首版提供项目级安装、状态检查、显式升级与卸载恢复，适用于 POSIX 本地文本编辑。
+
+这项能力尚未发布到 PyPI，也不会随已有 MCP 配置自动启用。宿主必须实际加载并信任
+Hook；它不是全电脑隔离，在线搜索等宿主未开放的路径不在保护范围。
+安装、验收与完整边界见 [接入说明](docs/integrations/agent-guard-codex.md)。
+
+首次使用可按 `install → enable → doctor → run` 完成项目接入、当前版本授权、真实检查
+和 Codex 任务运行。该入口使用原厂单项 session trust，不跳过 Hook 信任检查，也不修改
+全局配置；详见 [首次启用与受保护启动](docs/integrations/agent-guard-onboarding.md)。
 
 ## Agent 说 `完成了`，还缺什么
 
