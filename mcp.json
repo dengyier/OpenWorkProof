@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.dengyier/OpenWorkProof",
-  "description": "Verifiable execution for AI agents: Ed25519-signed work contracts and audit trails.",
+  "description": "Verifiable agent work contracts; separate opt-in Codex preview-directory guard.",
   "repository": {
     "url": "https://github.com/dengyier/OpenWorkProof",
     "source": "github"
@@ -11,12 +11,12 @@
     "name": "dengyier"
   },
   "license": "Apache-2.0",
-  "version": "1.4.2",
+  "version": "1.5.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "openworkproof",
-      "version": "1.4.2",
+      "version": "1.5.0",
       "transport": {
         "type": "stdio"
       }

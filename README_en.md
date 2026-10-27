@@ -20,6 +20,7 @@ decision for the customer. It gives authority a source, gives execution evidence
 verification separate from acceptance, and preserves the human ability to accept, reject, revoke, and appeal.
 
 [Install](#five-minute-start) · [How it works](#how-it-works) ·
+[OWP Guard (experimental)](docs/integrations/agent-guard-onboarding.md) ·
 [Human Agency](#human-agency-more-capability-must-not-mean-less-human-choice) ·
 [DeepSeek Harness](docs/integrations/deepseek-harness.md) ·
 [Community records](#community-contributions-and-external-records) ·
@@ -30,7 +31,7 @@ verification separate from acceptance, and preserves the human ability to accept
 Live MCPRush listing card; click for scoring details and scan scope.
 
 ```text
-Core package version: 1.4.2
+Core package version: 1.5.0
 DeepSeek Harness plugin candidate: 0.1.0, not published to npm
 core focused: 97 passed / 0 failed / 0 skipped
 plugin: 80 passed / 0 failed / 0 skipped
@@ -39,12 +40,12 @@ required-live: 4373 passed / 0 failed / 0 skipped
 License: Apache-2.0
 ```
 
-The figures above describe the existing 1.4.0 protocol baseline. Version 1.4.1 adds MCP startup compatibility; 1.4.2 clarifies parameterless tools and write effects. Execution and verification implementations are unchanged.
+The test figures above describe the existing 1.4.0 protocol baseline. Version 1.4.1 adds MCP startup compatibility; 1.4.2 clarifies tool descriptions. Version 1.5.0 adds the separately activated experimental Codex Guard. Read the release notes and GitHub Actions for current release checks.
 
 Read public release state directly from [PyPI](https://pypi.org/project/openworkproof/),
-the [GitHub Release](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.4.2), and
-the [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.4.2).
-Core `1.4.2` clarifies MCP tool inputs and write effects and retains the 1.4.1 startup fix; read back the links above for publication status. The DeepSeek
+the [GitHub Release](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.5.0), and
+the [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.5.0).
+Core `1.5.0` includes the `owp-guard` command and retains existing MCP startup and tool descriptions; read back the links above for publication status. The DeepSeek
 Harness plugin `0.1.0` remains a local candidate and is not published to npm or a plugin
 marketplace. These are separate release facts.
 
@@ -78,6 +79,25 @@ adoption, comprehensive security certification, customer production deployment o
 | [awesome-ai-agents PR #5](https://github.com/GopalGB/awesome-ai-agents/pull/5) | Submitted and still open; not merged or listed through this PR. |
 
 </details>
+
+## OWP Guard: Codex preview-directory protection (experimental)
+
+Version 1.5.0 includes `owp-guard` for project-scoped preview editing. The supported
+launch path checks tool requests before execution: it permits reads and text additions
+or edits inside the designated preview directory, while rejecting out-of-scope paths,
+deletes, moves, arbitrary commands, and unsupported tools.
+
+Installing or connecting the MCP server does not activate Guard. Use the separate
+`install -> enable -> doctor -> run` flow to review the current definition, complete a
+live probe, and launch a guarded task with exact native session trust. Ordinary Codex
+windows are not automatically protected. Guard is POSIX-only; the live host evidence
+covers macOS, Python 3.12 and Codex CLI 0.147.0. Builds, deployment, personal MCP/plugin
+configuration, and online search are outside this bounded launch path. It is not
+whole-computer isolation or a cryptographic proof of every tool call.
+
+See [first-time activation](docs/integrations/agent-guard-onboarding.md) and the
+[scope and limitations](docs/integrations/agent-guard-codex.md). WorkBuddy integration
+and enterprise controls remain unverified.
 
 ## What is missing when an agent says `done`
 
