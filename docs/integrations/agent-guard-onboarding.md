@@ -1,6 +1,6 @@
 # OWP Guard 首次启用：当前版本授权与真实检查
 
-本地候选（2026-10-26）：承接已有 Codex 预览目录保护，完成安装后的启用与确认生效。
+1.5.0 实验性命令：承接 Codex 预览目录保护，完成安装后的启用与确认生效；以下实机记录来自 2026-10-26。
 不改现有运行时策略，不重写用户的 Codex 配置，不使用跳过 Hook 信任检查的参数。
 
 ## 用户流程
@@ -34,9 +34,15 @@
 
 ## 使用方法
 
-以下入口来自当前本地源码构建的包，尚未对外发布；已经安装的旧 PyPI 包不含这些命令。
-也可在仓库现有开发环境用 `PYTHONPATH=src .venv/bin/python -m openworkproof.guard_cli`
-代替 `owp-guard`。
+使用 1.5.0 包中的独立命令；旧版包不含这个入口。先安装：
+
+```sh
+uv tool install 'openworkproof==1.5.0'
+```
+
+安装或连接 MCP 不会自动启用 Guard。实机验证环境为 macOS、Python 3.12、Codex CLI 0.147.0；
+其他 POSIX 环境需先核查兼容性。也可在仓库开发环境用
+`PYTHONPATH=src .venv/bin/python -m openworkproof.guard_cli` 代替 `owp-guard`。
 
 ```sh
 owp-guard install --project /absolute/site-project --allow-dir preview --human

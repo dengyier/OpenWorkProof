@@ -18,7 +18,7 @@ OpenWorkProof 不保证 Agent 的结果一定正确，也不替客户作出验�
 执行有证据、验证与验收不会被混为一谈，并把接受、拒绝、撤销和申诉的权利留给人。
 
 [安装](#五分钟开始) · [工作原理](#工作原理) ·
-[OWP Guard 本地候选](docs/integrations/agent-guard-codex.md) ·
+[OWP Guard 实验性保护](docs/integrations/agent-guard-codex.md) ·
 [Human Agency](#human-agency能力越强人的决定权越不能消失) ·
 [DeepSeek Harness](docs/integrations/deepseek-harness.md) ·
 [协议文档](docs/protocol/human-agency-profile-v0.1.md) ·
@@ -30,7 +30,7 @@ OpenWorkProof 不保证 Agent 的结果一定正确，也不替客户作出验�
 MCPRush 动态信息卡片；点击查看评分依据与扫描范围。
 
 ```text
-Core 包版本: 1.4.2
+Core 包版本: 1.5.0
 DeepSeek Harness 插件候选: 0.1.0, 尚未发布 npm
 core focused: 97 passed / 0 failed / 0 skipped
 plugin: 80 passed / 0 failed / 0 skipped
@@ -39,12 +39,12 @@ required-live: 4373 passed / 0 failed / 0 skipped
 许可证: Apache-2.0
 ```
 
-以上为 1.4.0 协议基线的既有验证记录；1.4.1 修复 MCP 启动入口兼容，1.4.2 补清无参数工具与写入行为的说明，未改变执行和验证实现。
+以上测试数字为 1.4.0 协议基线的既有验证记录。1.4.1 修复 MCP 启动入口兼容，1.4.2 补清工具说明；1.5.0 新增独立启用的实验性 Codex Guard。当前发行检查以 GitHub Actions 与发行说明为准。
 
 公开发布状态请直接回读 [PyPI](https://pypi.org/project/openworkproof/)、
-[GitHub Release](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.4.2) 与
-[MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.4.2)。
-Core `1.4.2` 补清 MCP 工具的参数与写入说明，并保留 1.4.1 的启动兼容修复；公开发布状态以上述入口回读为准。DeepSeek Harness 插件
+[GitHub Release](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.5.0) 与
+[MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.5.0)。
+Core `1.5.0` 包含 `owp-guard` 命令，并保留现有 MCP 启动与工具说明；公开发布状态以上述入口回读为准。DeepSeek Harness 插件
 `0.1.0` 仍是本地候选，尚未发布 npm 或插件市场。两者是独立的发布事实。
 
 ## 社区贡献与外部记录
@@ -76,13 +76,13 @@ OpenWorkProof 与维护者 [dengyier](https://github.com/dengyier) 的相关公�
 
 </details>
 
-## OWP Guard：在原 Agent 中保护预览目录（本地候选）
+## OWP Guard：在原 Agent 中保护预览目录（实验性）
 
 用户继续在 Codex 中提任务，OWP 在受支持的工具执行前自动检查：允许读取、增加和
 修改指定预览目录内的普通文件，拒绝越界访问、删除/移动、任意命令和未支持工具。
 首版提供项目级安装、状态检查、显式升级与卸载恢复，适用于 POSIX 本地文本编辑。
 
-这项能力尚未发布到 PyPI，也不会随已有 MCP 配置自动启用。宿主必须实际加载并信任
+从 `1.5.0` 起包内提供 `owp-guard`；安装 MCP 不会自动启用保护。宿主必须实际加载并信任
 Hook；它不是全电脑隔离，在线搜索等宿主未开放的路径不在保护范围。
 安装、验收与完整边界见 [接入说明](docs/integrations/agent-guard-codex.md)。
 

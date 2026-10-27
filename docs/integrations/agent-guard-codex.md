@@ -1,6 +1,6 @@
-# OWP Guard：Codex 本地预览目录保护（首版）
+# OWP Guard：Codex 本地预览目录保护（实验性）
 
-状态：本地开发，尚未发布。首个适配宿主为本机 Codex CLI 0.147.0。
+状态：1.5.0 包内提供实验性 `owp-guard` 命令。实机验证环境为 macOS、Python 3.12 与 Codex CLI 0.147.0；其他宿主组合须先通过兼容检查。
 
 ## 使用目的与验收约定
 
@@ -58,8 +58,8 @@ WorkBuddy 5.8.3 当前尚未核实同等桌面执行前阻断契约，不能标�
 
 ### 从当前源码使用
 
-以下命令在仓库根目录运行，使用已装依赖的开发环境；`owp-guard` 是新增的包入口，
-尚不在已发布的 PyPI 版本中。安装当前源码到独立环境后，也可直接使用该入口。
+1.5.0 提供独立命令，可用 `uv tool install 'openworkproof==1.5.0'` 安装到隔离工具环境。
+随后按[首次启用流程](agent-guard-onboarding.md)使用 `owp-guard`。以下是仓库开发环境的等价调用；安装 MCP 不会自动启用 Guard。
 
 ```sh
 PYTHONPATH=src .venv/bin/python -m openworkproof.guard_cli install \
@@ -113,4 +113,4 @@ PYTHONPATH=src .venv/bin/python -m pytest -q \
 ```
 
 验收使用合成拒绝目标与假密钥；代码审查来自同一 AI 协作团队的另一审查 Agent，
-不是客户独立验收。尚未发布安装包到外部渠道、接入 WorkBuddy 或验证企业部署。
+不是客户独立验收。这组历史实机记录不证明 WorkBuddy 接入、企业部署或客户独立验收；当前包发布状态见发行入口。
