@@ -12,6 +12,8 @@ COPY pyproject.toml requirements-lock.txt ./
 COPY src/ ./src/
 COPY README.md README_en.md ./
 COPY supply-chain/ ./supply-chain/
+COPY LICENSE ./
+COPY LICENSES/ ./LICENSES/
 
 # Install dependencies and package
 RUN pip install --no-cache-dir -r requirements-lock.txt && \
