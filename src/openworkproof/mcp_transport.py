@@ -48,6 +48,7 @@ import base64
 import json
 from pathlib import Path
 from typing import Any, Literal, Mapping
+from mcp.types import ToolAnnotations
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -96,7 +97,7 @@ _SCHEMA = "openworkproof/mcp/0.2"
 _MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False))
 def owp_soc_sample_alerts() -> dict[str, Any]:
     """Return synthetic Slips JSONL and scope for the reference SOC workflow.
 
@@ -107,7 +108,7 @@ def owp_soc_sample_alerts() -> dict[str, Any]:
     return _ok(sample_alerts())
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False))
 def owp_soc_analyze_slips(alerts_jsonl: str, tenant: str = "local-review") -> dict[str, Any]:
     """Review supplied Slips JSONL locally and return cases plus a signed evidence bundle.
 
@@ -123,7 +124,7 @@ def owp_soc_analyze_slips(alerts_jsonl: str, tenant: str = "local-review") -> di
         return _err(str(error))
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False))
 def owp_soc_verify_bundle(
     bundle_json: str, trusted_keys_json: str = "", trusted_checkpoints_json: str = "",
 ) -> dict[str, Any]:
