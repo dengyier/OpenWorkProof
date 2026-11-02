@@ -1,0 +1,13 @@
+{
+  "schema_version": "openworkproof/delivery-package/0.5",
+  "exported_at": "2026-10-31T08:54:55.799893+00:00",
+  "privacy_view": "customer_private",
+  "ledger_state_hash": "placeholder",
+  "components": {
+    "work_order": "work-order.json",
+    "execution_receipt": "execution-receipt.json",
+    "verification_profile": "verification-profile.json",
+    "verification_result": "verification-result.json",
+    "verification_decision": "verification-decision.json"
+  }
+}

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aisoc"
+version = "0.1.0"
+description = "AI-IDPS (dual_model) + constrained Agent sandbox + OpenWorkProof-aligned verifiable evidence chain"
+requires-python = ">=3.10"
+dependencies = ["cryptography>=42"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+aisoc = "aisoc.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["aisoc*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,16 @@
+{
+  "status": "partial-demo",
+  "note": "These are minimal demo files. For full functionality, use OpenWorkProof with real data.",
+  "timestamp": "2026-10-31T08:54:55.799893+00:00",
+  "files": {
+    "environment_fingerprint": "/workspaces/AI-SOC-and-AISandbox/working-demo/environment.json",
+    "delivery_package": "/workspaces/AI-SOC-and-AISandbox/working-demo/test-delivery-package",
+    "ledger": null
+  },
+  "try_commands": [
+    "cd working-demo",
+    "ls -la",
+    "owp surface-build ./test-delivery-package --fingerprint ./environment.json --output ./surface-bundle",
+    "owp surface-verify ./surface-bundle"
+  ]
+}

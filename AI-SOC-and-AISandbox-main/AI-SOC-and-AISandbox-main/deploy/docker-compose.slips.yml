@@ -1,0 +1,28 @@
+# Runs Slips (Stratosphere Linux IPS, GPL-2.0) as a separate container.
+# This project only reads the files Slips writes to ./output; no Slips code is imported.
+#
+#   mkdir -p dataset output && cp capture.pcap dataset/
+#   docker compose -f deploy/docker-compose.slips.yml run --rm slips \
+#       ./slips.py -f dataset/capture.pcap -o output/
+#   python -m aisoc slips-ingest output/<run>/alerts.json \
+#       --conn-log output/<run>/zeek_files/conn.log --out demo-output/slips-run
+#
+# For live capture replace the command with `./slips.py -i <iface> -o output/` and add
+# `network_mode: host` plus `cap_add: [NET_ADMIN, NET_RAW]`; the SOC side needs none of that.
+
+services:
+  slips:
+    image: stratosphereips/slips:latest
+    working_dir: /StratosphereLinuxIPS
+    volumes:
+      - ../dataset:/StratosphereLinuxIPS/dataset:ro
+      - ../output:/StratosphereLinuxIPS/output
+    command: ["./slips.py", "-f", "dataset/capture.pcap", "-o", "output/"]
+    # Slips needs no access to the SOC, the ledger, or any key material. The internal
+    # network also blocks threat-intel feed downloads; drop `internal: true` if you want them.
+    networks: [slips_only]
+
+networks:
+  slips_only:
+    driver: bridge
+    internal: true

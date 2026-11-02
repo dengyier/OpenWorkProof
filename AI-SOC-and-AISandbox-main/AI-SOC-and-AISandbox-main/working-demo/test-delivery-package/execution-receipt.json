@@ -1,0 +1,6 @@
+{
+  "schema_version": "openworkproof/execution-receipt/v0.5",
+  "execution_id": "exec-001",
+  "status": "completed",
+  "exit_code": 0
+}

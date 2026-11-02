@@ -1,0 +1,2 @@
+cryptography>=42
+pytest>=8

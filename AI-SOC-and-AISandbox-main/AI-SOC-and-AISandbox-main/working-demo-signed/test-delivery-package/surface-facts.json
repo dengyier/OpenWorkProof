@@ -1,0 +1,7 @@
+{
+  "schema_version": "openworkproof/surface-facts/0.1",
+  "source_revision": "0000000",
+  "trusted_verifier_subjects": {
+    "verifier-id": "Verifier"
+  }
+}

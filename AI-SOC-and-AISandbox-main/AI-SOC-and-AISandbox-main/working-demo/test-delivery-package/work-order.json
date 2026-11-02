@@ -1,0 +1,6 @@
+{
+  "schema_version": "openworkproof/work-order/v0.5",
+  "work_order_id": "demo-001",
+  "created_at": "2026-10-31T08:54:55.799893+00:00",
+  "task_description": "Demo surface bundle verification"
+}

@@ -1,0 +1,26 @@
+{
+  "workflow": "surface-bundle",
+  "steps": [
+    {
+      "step": 1,
+      "command": "export delivery package from ledger"
+    },
+    {
+      "step": 2,
+      "command": "create environment fingerprints"
+    },
+    {
+      "step": 3,
+      "command": "build surface bundle"
+    },
+    {
+      "step": 4,
+      "command": "verify surface bundle offline"
+    }
+  ],
+  "data_needed": {
+    "ledger": "A complete OpenWorkProof ledger directory",
+    "fingerprints": "Signed environment fingerprint JSON files",
+    "privacy_view": "public|diagnostic|customer_private"
+  }
+}

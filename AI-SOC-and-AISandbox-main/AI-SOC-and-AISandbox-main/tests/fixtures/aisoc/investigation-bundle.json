@@ -1,0 +1,107 @@
+{
+  "integrity": {
+    "algorithm": "HMAC-SHA256",
+    "algorithm_note": "HMAC gives tamper-evidence to key holders only; it is not a non-repudiable signature.",
+    "attestation_list": [
+      {
+        "fingerprint": {
+          "algorithm": "SHA-256",
+          "algorithm_id": 3,
+          "value": "54935f007f5ec1b39d1d37d254a8b7f4af4e5468ad746e5084a94bd60d4c22c6"
+        },
+        "signatures": [
+          {
+            "algorithm": "HMAC-SHA256",
+            "algorithm_id": 99
+          }
+        ]
+      }
+    ],
+    "payload_sha256": "54935f007f5ec1b39d1d37d254a8b7f4af4e5468ad746e5084a94bd60d4c22c6",
+    "signature": "09175f2ee40b4ecc7c566a5690a358a317c448ab48a0c902eb0cc45e1c75cfc2"
+  },
+  "payload": {
+    "alert": {
+      "raw": {
+        "external_id": "case-owp-placeholder",
+        "mitre_techniques": [
+          "T1071"
+        ],
+        "src_ip": "10.0.0.23"
+      },
+      "summary": {
+        "id": "alert-0199",
+        "severity": "high",
+        "title": "[OWP-SOC] KNOWN_SUSPICIOUS on 10.0.0.23"
+      }
+    },
+    "approvals": [
+      {
+        "action": {
+          "resource": "host:10.0.0.23",
+          "type": "block_host"
+        },
+        "approver": "user-7",
+        "decided_at": "2026-10-30T09:26:40Z",
+        "id": "appr-0001",
+        "status": "approved"
+      }
+    ],
+    "artifacts": [
+      {
+        "id": "art-1",
+        "kind": "pcap",
+        "sha256": "7b2c0d4f00000000000000000000000000000000000000000000000000000000",
+        "uri": "evidence/case-aisoc-0042/flow.pcap"
+      }
+    ],
+    "bundle_schema_version": "1.0",
+    "model": {
+      "name": "stub-llm",
+      "provider": "local",
+      "version": "0"
+    },
+    "ocsf": {
+      "ai_operation": {
+        "ai_agent": {
+          "name": "aisoc-investigator",
+          "version": "21.0.0"
+        }
+      },
+      "metadata": {
+        "product": {
+          "name": "AiSOC",
+          "version": "21.0.0"
+        },
+        "version": "1.9.0"
+      }
+    },
+    "run": {
+      "case_id": "case-aisoc-0042",
+      "finished_at": "2026-10-30T09:27:12Z",
+      "id": "run-7f3e2a",
+      "started_at": "2026-10-30T09:25:00Z",
+      "status": "completed",
+      "tenant_id": "tenant-1"
+    },
+    "steps": [
+      {
+        "index": 0,
+        "input": {
+          "ip": "185.199.110.153"
+        },
+        "output": {
+          "match": true,
+          "source": "feodotracker"
+        },
+        "tool": "lookup_ioc",
+        "type": "tool_call"
+      },
+      {
+        "index": 1,
+        "text": "C2 confirmed by TI; recommend containment via SOC approval.",
+        "type": "reasoning"
+      }
+    ]
+  }
+}
