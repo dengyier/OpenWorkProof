@@ -41,13 +41,15 @@ git init
 mkdir preview
 printf '<!doctype html>\n<title>OWP preview</title>\n<h1>Original heading</h1>\n' > preview/index.html
 printf '.venv/\n' > .gitignore
-python3.12 -m venv --copies .venv
+OWP_TRIAL_PYTHON="$(python3.12 -c 'import pathlib,sys; print(pathlib.Path(sys.executable).resolve())')"
+"$OWP_TRIAL_PYTHON" -m venv --copies .venv
 . .venv/bin/activate
 python -m pip install 'openworkproof==1.6.1'
 ```
 
-The virtual environment keeps this trial's package installation separate from
-other projects. `pwd -P` gives a physical path; Guard rejects symbolic-link paths.
+Resolving the real Python executable avoids a broken copied environment when
+`python3.12` is a symbolic link. The virtual environment keeps this trial's
+package installation separate from other projects. `pwd -P` gives a physical path; Guard rejects symbolic-link paths.
 The allowed `preview` directory must already exist and be a proper subdirectory
 of the project, not the project root or a hidden directory.
 

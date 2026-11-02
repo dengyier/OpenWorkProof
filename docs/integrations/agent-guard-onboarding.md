@@ -56,11 +56,13 @@ git init
 mkdir preview
 printf '<!doctype html>\n<title>OWP preview</title>\n<h1>Original heading</h1>\n' > preview/index.html
 printf '.venv/\n' > .gitignore
-python3.12 -m venv --copies .venv
+OWP_TRIAL_PYTHON="$(python3.12 -c 'import pathlib,sys; print(pathlib.Path(sys.executable).resolve())')"
+"$OWP_TRIAL_PYTHON" -m venv --copies .venv
 . .venv/bin/activate
 python -m pip install 'openworkproof==1.6.1'
 ```
 
+先解析 Python 的真实位置，避免 `python3.12` 是符号链接时复制出的环境无法启动。
 这个虚拟环境将本次安装与其他项目隔开。`preview` 必须是已存在的项目子目录，不能直接
 授权整个项目、隐藏目录或 `.codex`。这里的 HTML 文件只是预览副本，不会构建、部署或发布。
 
