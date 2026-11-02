@@ -10,7 +10,7 @@ OpenWorkProof（OWP）是一套面向 Agent 开发者和团队的开源工具。
 
 [开始使用](#通过-mcp-开始使用) · [Codex 目录保护](#试用-codex-预览目录保护) · [文档](#文档入口) · [社区](#社区与参与)
 
-当前版本：**1.6.0** · [PyPI](https://pypi.org/project/openworkproof/1.6.0/) · [发行说明](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.6.0) · [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.6.0)
+当前版本：**1.6.1** · [PyPI](https://pypi.org/project/openworkproof/1.6.1/) · [发行说明](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.6.1) · [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.6.1)
 
 ## 能帮你完成哪些事？
 
@@ -32,7 +32,7 @@ OWP 不会自动监控电脑上所有 Agent 和工具。多个 Agent 的统一�
   "mcpServers": {
     "openworkproof": {
       "command": "uvx",
-      "args": ["openworkproof==1.6.0"]
+      "args": ["openworkproof==1.6.1"]
     }
   }
 }
@@ -73,7 +73,7 @@ Skill 不会自动配置 MCP 或开启 Guard，仍需单独完成前面的 MCP �
 安装 CLI 后，在目标 Git 项目里创建 `preview` 目录和 `preview/index.html` 这样的文本文件，再运行：
 
 ```sh
-uv tool install --python 3.12 'openworkproof==1.6.0'
+uv tool install --python 3.12 'openworkproof==1.6.1'
 owp-guard install --project "$(pwd -P)" --allow-dir preview
 owp-guard enable --project "$(pwd -P)"
 owp-guard doctor --project "$(pwd -P)"

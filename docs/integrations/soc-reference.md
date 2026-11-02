@@ -1,4 +1,4 @@
-# AI-SOC reference integration (OpenWorkProof 1.6.0)
+# AI-SOC reference integration (OpenWorkProof 1.6.1)
 
 This is an experimental reference workflow for **reviewing supplied Slips alerts and checking exported evidence**. It uses a synthetic-trained model release gate, deterministic investigation stub and simulated in-memory execution. It does not install an IDS, protect the whole computer, connect to a real AiSOC service, provide OS isolation/HSM, or perform real host remediation. Installing MCP or this Skill does not activate OWP Guard.
 
@@ -7,7 +7,7 @@ The `aisoc` package originates from Tim / alphatin123's MIT-licensed contributio
 ## Install and connect
 
 ```sh
-uv tool install 'openworkproof==1.6.0'
+uv tool install 'openworkproof==1.6.1'
 ```
 
 An MCP client can start the existing stdio server with:
@@ -17,13 +17,13 @@ An MCP client can start the existing stdio server with:
   "mcpServers": {
     "openworkproof": {
       "command": "uvx",
-      "args": ["openworkproof==1.6.0"]
+      "args": ["openworkproof==1.6.1"]
     }
   }
 }
 ```
 
-The original 29 MCP tools remain; this release adds three reference tools:
+Introduced in 1.6.0, the three reference tools below remain available alongside the original 29 MCP tools:
 
 | Tool | Input and result |
 | --- | --- |

@@ -2,7 +2,7 @@
 
 [English overview](README.md) · [中文说明](README_zh-CN.md) · [SOC guide](docs/integrations/soc-reference.md) · [Guard guide](docs/integrations/agent-guard-onboarding.en.md)
 
-OpenWorkProof exposes **32 local MCP tools in version 1.6.0**. Connect them to an existing Agent when you want to inspect signed work records, review supplied security alerts, or check an exported evidence bundle.
+OpenWorkProof exposes **32 local MCP tools in version 1.6.1**. Connect them to an existing Agent when you want to inspect signed work records, review supplied security alerts, or check an exported evidence bundle.
 
 You can start with the synthetic alert example below without creating signing keys or connecting a production system. Developers integrating a work-contract workflow can then use the schema, signing, execution and verification tools.
 
@@ -27,7 +27,7 @@ For a client that accepts an `mcpServers` configuration, add:
   "mcpServers": {
     "openworkproof": {
       "command": "uvx",
-      "args": ["--from", "openworkproof==1.6.0", "owp-mcp"]
+      "args": ["--from", "openworkproof==1.6.1", "owp-mcp"]
     }
   }
 }
@@ -42,7 +42,7 @@ The configuration location and JSON shape depend on the host. For example, VS Co
 If you prefer to install the command first:
 
 ```sh
-uv tool install 'openworkproof==1.6.0'
+uv tool install 'openworkproof==1.6.1'
 ```
 
 Then configure the MCP client to launch `owp-mcp`, using its absolute executable path if the client's environment cannot find it. An equivalent entry point in an environment where the package is installed is:
@@ -51,7 +51,7 @@ Then configure the MCP client to launch `owp-mcp`, using its absolute executable
 python -m openworkproof.mcp_transport
 ```
 
-`uvx openworkproof==1.6.0` also starts the MCP server. The explicit `owp-mcp` entry point avoids confusing it with `owp`, which is the separate CLI. A manually started stdio server waits for MCP messages; it does not open a web page or a network port.
+`uvx openworkproof==1.6.1` also starts the MCP server. The explicit `owp-mcp` entry point avoids confusing it with `owp`, which is the separate CLI. A manually started stdio server waits for MCP messages; it does not open a web page or a network port.
 
 ## 2. Try one complete alert-review example
 

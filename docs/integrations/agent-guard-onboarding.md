@@ -2,7 +2,7 @@
 
 中文 | [English](agent-guard-onboarding.en.md)
 
-自 1.5.0 起提供的实验性命令：承接 Codex 预览目录保护，完成安装后的启用与确认生效；当前安装示例为 1.6.0，以下 1.5.0 实现实机记录来自 2026-10-26，不代表所有 1.6.0 环境重新完成实机验收。
+自 1.5.0 起提供的实验性命令：承接 Codex 预览目录保护，完成安装后的启用与确认生效；当前安装示例为 1.6.1，以下 1.5.0 实现实机记录来自 2026-10-26，不代表所有 1.6.1 环境重新完成实机验收。
 不改现有运行时策略，不重写用户的 Codex 配置，不使用跳过 Hook 信任检查的参数。
 
 ## 用户流程
@@ -36,7 +36,7 @@
 
 ## 使用方法
 
-使用当前 1.6.0 包中的独立命令；该入口始于 1.5.0。安装或连接 MCP 不会自动启用 Guard。
+使用当前 1.6.1 包中的独立命令；该入口始于 1.5.0。安装或连接 MCP 不会自动启用 Guard。
 先准备已登录的 Codex CLI、Git 和 Python 3.12。已记录的实机基线为 macOS、Python 3.12、
 Codex CLI 0.147.0，其他 POSIX 环境需先核查兼容性。软件包的一般要求是 Python 3.10+，
 不能把它等同于 Guard 的实机验证范围。
@@ -58,7 +58,7 @@ printf '<!doctype html>\n<title>OWP preview</title>\n<h1>Original heading</h1>\n
 printf '.venv/\n' > .gitignore
 python3.12 -m venv --copies .venv
 . .venv/bin/activate
-python -m pip install 'openworkproof==1.6.0'
+python -m pip install 'openworkproof==1.6.1'
 ```
 
 这个虚拟环境将本次安装与其他项目隔开。`preview` 必须是已存在的项目子目录，不能直接
@@ -90,7 +90,7 @@ owp-guard doctor --project "$OWP_TRIAL_PROJECT"
 }
 ```
 
-这是当前程序的预期结果形状，不是一次新的 1.6.0 实机验收回执。若 `ready_for_guarded_run`
+这是当前程序的预期结果形状，不是一次新的 1.6.1 实机验收回执。若 `ready_for_guarded_run`
 为 false，先查看实际原因，不能绕过信任或改用普通 Codex 启动后仍称为已保护。升级、重装、
 范围、配置或宿主变化后，需要重新启用并完成检查。
 
