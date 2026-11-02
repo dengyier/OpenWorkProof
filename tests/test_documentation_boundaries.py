@@ -514,12 +514,13 @@ def test_readmes_preserve_purpose_authority_evidence_and_human_judgment() -> Non
 
 
 def test_readmes_keep_current_release_and_test_boundaries_aligned() -> None:
+    from openworkproof import __version__
     chinese = _text("README.md")
     english = _text("README_en.md")
 
     for text in (chinese, english):
         for literal in (
-            "1.5.0",
+            __version__,
             "97 passed",
             "80 passed",
             "186 passed",
@@ -529,11 +530,11 @@ def test_readmes_keep_current_release_and_test_boundaries_aligned() -> None:
         ):
             assert literal in text, f"README release boundary missing: {literal}"
 
-    assert "Core 包版本: 1.5.0" in chinese
+    assert f"Core 包版本: {__version__}" in chinese
     assert "插件候选: 0.1.0" in chinese
     assert "尚未发布 npm" in chinese
     assert "外部发布 READY" in chinese
-    assert "Core package version: 1.5.0" in english
+    assert f"Core package version: {__version__}" in english
     assert "local candidate" in english
     assert "not published to npm" in english
     assert "external-release READY" in english
