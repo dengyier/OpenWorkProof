@@ -41,7 +41,7 @@ Actual alert data stays in the local server process but becomes part of the MCP 
 
 ## Install the Agent Skill
 
-The actual Skill is [`skills/openworkproof-soc-review/SKILL.md`](../../skills/openworkproof-soc-review/SKILL.md). A listing on AgentSkills.in is a separate MCP directory record.
+The actual Skill is [`skills/openworkproof-soc-review/SKILL.md`](../../skills/openworkproof-soc-review/SKILL.md), also available through the [AgentSkills.in Skill listing](https://www.agentskills.in/marketplace/@dengyier/openworkproof-soc-review). The site's separate MCP directory entry is a different listing.
 
 ```sh
 npx skills add dengyier/OpenWorkProof --skill openworkproof-soc-review
