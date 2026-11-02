@@ -31,7 +31,7 @@ verification separate from acceptance, and preserves the human ability to accept
 Live MCPRush listing card; click for scoring details and scan scope.
 
 ```text
-Core package version: 1.5.0
+Core package version: 1.6.0
 DeepSeek Harness plugin candidate: 0.1.0, not published to npm
 core focused: 97 passed / 0 failed / 0 skipped
 plugin: 80 passed / 0 failed / 0 skipped
@@ -43,11 +43,21 @@ License: Apache-2.0
 The test figures above describe the existing 1.4.0 protocol baseline. Version 1.4.1 adds MCP startup compatibility; 1.4.2 clarifies tool descriptions. Version 1.5.0 adds the separately activated experimental Codex Guard. Read the release notes and GitHub Actions for current release checks.
 
 Read public release state directly from [PyPI](https://pypi.org/project/openworkproof/),
-the [GitHub Release](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.5.0), and
-the [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.5.0).
-Core `1.5.0` includes the `owp-guard` command and retains existing MCP startup and tool descriptions; read back the links above for publication status. The DeepSeek
+the [GitHub Release](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.6.0), and
+the [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.6.0).
+Core `1.6.0` includes `owp-guard`, the experimental `owp-aisoc` command and three reference SOC MCP tools; read back the links above for publication status. The DeepSeek
 Harness plugin `0.1.0` remains a local candidate and is not published to npm or a plugin
 marketplace. These are separate release facts.
+
+## 1.6.0: reference SOC tools and an Agent Skill
+
+Three new MCP tools review supplied Slips alerts, export signed evidence and verify bundles.
+The installable [`openworkproof-soc-review` Skill](skills/openworkproof-soc-review/SKILL.md)
+guides this flow. [Installation and scope](docs/integrations/soc-reference.md).
+Investigation is a deterministic stub and actions are simulated in memory; no real host is controlled.
+Missing externally acquired expected keys/checkpoints returns `UNKNOWN`. MCP/Skill installation
+does not activate Guard. Tim / alphatin123's contributed `aisoc` component retains its
+[MIT notice](LICENSES/MIT-aisoc.txt); Core remains Apache-2.0.
 
 ## Community contributions and external records
 

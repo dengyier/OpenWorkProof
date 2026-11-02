@@ -113,6 +113,7 @@ class UrllibHttpClient:
         self.timeout_s = timeout_s
 
     def request(self, method: str, url: str, headers: Dict[str, str], body: Optional[bytes]) -> Tuple[int, Dict[str, Any]]:
+        import http.client
         import urllib.error
         import urllib.request
 
@@ -127,6 +128,8 @@ class UrllibHttpClient:
                 return exc.code, (json.loads(raw) if raw else {})
             except ValueError:
                 return exc.code, {"detail": raw.decode("utf-8", "replace")}
+        except (OSError, http.client.HTTPException) as exc:
+            raise AiSOCError(f"transport error: {exc}") from exc
 
 
 # ── 【老師註解】AiSOCConfig ───────────────────────────────────────

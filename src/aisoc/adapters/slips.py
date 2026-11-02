@@ -270,8 +270,12 @@ def parse_idmef_record(rec: Dict[str, Any]) -> Union[SlipsEvidence, SlipsInciden
             note = json.loads(raw_note)
         except ValueError:
             note = {}
+        if not isinstance(note, dict):
+            return None
     elif isinstance(raw_note, dict):
         note = raw_note
+    elif raw_note is not None:
+        return None
     # 步驟 3：Analyzer.Model 是 Slips 版本號，之後會記進 model_version 當來源證明
     analyzer = rec.get("Analyzer") or {}
     version = str(analyzer.get("Model", "")) if isinstance(analyzer, dict) else ""
@@ -350,7 +354,11 @@ def parse_alerts_json(lines: Iterable[str]) -> SlipsParseResult:
         except ValueError:
             out.malformed += 1
             continue
-        parsed = parse_idmef_record(rec)
+        try:
+            parsed = parse_idmef_record(rec)
+        except (TypeError, ValueError, OverflowError):
+            out.malformed += 1
+            continue
         if isinstance(parsed, SlipsEvidence):
             out.evidence.append(parsed)
             if parsed.slips_version:
@@ -513,7 +521,7 @@ class SlipsAdapter:
     # 為什麼：論文的已知分支要有「拒絕選項」（reject option）——不夠有把握就說「我不認得」，而不是硬給一個類別。
     # 怎麼看：三種結果——
     #         (a) 沒有任何可查表的證據 → 標籤 unclassified、rejected=True（弱指標不能單獨成案）；
-    #         (b) 有可查表證據，取（信心, 威脅權重）最高的一條；信心 < tau_k 或 威脅權重 < min_threat_weight → rejected=True；
+    #         (b) 先挑同時達到信心與威脅門檻的證據，再取（信心, 威脅權重）最高的一條；沒有合格者才 rejected=True；
     #         (c) 否則接受，標籤就是那條證據的家族。技術若最佳證據沒有，退而取同組其他已映射證據的。
     #         注意分數就是 Slips 的 Confidence 原值，不是校準過的機率（模組開頭已聲明）。
     # 拿掉會怎樣：沒有拒絕選項，一條 low 等級、信心 0.3 的 YOUNG_DOMAIN 也會被當成已知攻擊派 Agent 去查，誤報會淹沒人力。
@@ -526,10 +534,12 @@ class SlipsAdapter:
             best_conf = max((e.confidence for e in group), default=0.0)
             modules = sorted({e.source_module for e in group if e.source_module})
             return ExternalKnown(UNCLASSIFIED, best_conf, True, f"{SLIPS_SOURCE}/{'+'.join(modules) or 'unknown'}", None, ids)
-        # (b)(c) 取最有把握的一條已映射證據，再套兩道門檻決定接受或拒絕
-        best = max(mapped, key=lambda e: (e.confidence, e.threat_level))
-        rejected = best.confidence < self.tau_k or best.threat_level < self.min_threat_weight
-        technique = best.technique or next((e.technique for e in mapped if e.technique), None)
+        # 不合格的高信心弱證據不能取消已經達到兩道門檻的攻擊證據。
+        qualified = [e for e in mapped if e.confidence >= self.tau_k and e.threat_level >= self.min_threat_weight]
+        candidates = qualified or mapped
+        best = max(candidates, key=lambda e: (e.confidence, e.threat_level))
+        rejected = not qualified
+        technique = best.technique or next((e.technique for e in candidates if e.technique), None)
         return ExternalKnown(
             label=best.family or UNCLASSIFIED,
             score=best.confidence,
@@ -687,7 +697,7 @@ class SlipsRunSummary:
 #         → 統計狀態／家族／人審數量 → 回 SlipsRunSummary。
 # 為什麼：這是 Slips 路徑和內建合成路徑（soc.ingest）的匯流點——從 ingest_external 之後，兩條路走的是完全相同的信任鏈。
 # 怎麼看：use_internal_normality 預設 False：合成資料訓練的常態模型不該替真實流量打分，除非你用自己的基線重訓過。
-#         每案之後把時鐘撥快 advance_clock_s 秒，是為了避免 SOC 的去重（同租戶、同主機、同狀態、短時間內）把所有案子疊成一個。
+#         去重使用包含來源 IP 與 Slips 時間窗的 flow_id，不會把不同時間窗當成重複案件；advance_clock_s 只控制模擬時間。
 # 拿掉會怎樣：直接呼叫 soc.ingest 的話，案子會重新經過內部已知模型打分，Slips 的判斷就被丟掉了。
 # 對應：準則 #12、#13；測試 tests/test_slips_adapter.py::test_run_through_soc_statuses_and_untrusted_description、
 #       ::test_internal_normality_only_used_when_opted_in_and_fields_present
@@ -707,12 +717,14 @@ def run_slips_parsed(
     families: Dict[str, int] = {}
     for c in cases:
         # 每個案子走完整信任鏈；source_record 的摘要會被寫進帳本的 detection 項目
-        res = soc.ingest_external(c.flow, c.known, c.anomaly, use_internal_normality, c.source_record)
+        res = soc.ingest_external(c.flow, c.known, c.anomaly, use_internal_normality, c.source_record,
+                                  dedup_key=c.flow.flow_id)
         results.append(res)
         status_counts[res.decision.status.value] = status_counts.get(res.decision.status.value, 0) + 1
         families[c.known.label] = families.get(c.known.label, 0) + 1
-        # 撥快時鐘，避免去重視窗把不同案子合併
-        soc.clock.advance(advance_clock_s)
+        # 保留模擬時間調度；設為 0 時不會把真實時鐘切換為凍結時鐘。
+        if advance_clock_s:
+            soc.clock.advance(advance_clock_s)
     return SlipsRunSummary(
         evidence=len(parsed.evidence),
         incidents=len(parsed.incidents),

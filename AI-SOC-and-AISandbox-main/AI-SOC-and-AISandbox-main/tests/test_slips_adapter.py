@@ -17,6 +17,7 @@ from aisoc.adapters.slips import (
     parse_idmef_record,
     read_alerts_json,
     run_slips_alerts,
+    run_slips_parsed,
     sample_alerts_json_lines,
     threat_level_weight,
 )
@@ -67,6 +68,22 @@ def test_unrecognised_records_are_rejected_not_guessed():
     assert parse_idmef_record({"Version": "2.D.V03", "Status": "Heartbeat"}) is None
     parsed = parse_alerts_json(['{"Version": "2.D.V03", "Status": "Event", "Note": "not json"}'])
     assert len(parsed.evidence) == 1 and parsed.evidence[0].evidence_type == ""
+
+
+@pytest.mark.parametrize("note", ["[]", "null", '"text"', "1", "true"])
+def test_wrong_note_shape_is_counted_and_does_not_discard_later_alerts(note):
+    good = json.loads(sample_alerts_json_lines()[0])
+    bad = dict(good, Note=note)
+    parsed = parse_alerts_json([json.dumps(bad), json.dumps(good)])
+    assert parsed.malformed == 1
+    assert len(parsed.evidence) == 1 and parsed.evidence[0].id == good["ID"]
+
+
+def test_malformed_record_fields_do_not_discard_later_alerts():
+    good = json.loads(sample_alerts_json_lines()[0])
+    bad = dict(good, Source=[{"IP": "10.0.0.23", "Port": [float("inf")]}])
+    parsed = parse_alerts_json([json.dumps(bad), json.dumps(good)])
+    assert parsed.malformed == 1 and len(parsed.evidence) == 1
 
 
 def test_known_family_map_and_anomaly_types_are_disjoint():
@@ -128,6 +145,36 @@ def test_low_confidence_mapped_evidence_is_rejected_by_tau():
     strict = SlipsAdapter("t", tau_k=0.95).build_cases(parsed)
     ps = next(c for c in strict if c.flow.flow_id == "slips:10.0.0.42:tw3")
     assert ps.known.label == "port_scan" and ps.known.rejected
+
+
+def test_low_threat_evidence_does_not_cancel_an_accepted_attack():
+    strong = json.loads(sample_alerts_json_lines()[0])
+    strong["Confidence"] = 0.9
+    weak = dict(strong, ID="weak", Confidence=1.0)
+    note = json.loads(weak["Note"])
+    weak["Note"] = json.dumps(dict(note, evidence_type="HORIZONTAL_PORT_SCAN", threat_level="info"))
+    cases = SlipsAdapter("t").build_cases(parse_alerts_json(map(json.dumps, [strong, weak])))
+    assert len(cases) == 1
+    assert not cases[0].known.rejected and cases[0].known.label == "c2"
+    assert cases[0].known.score == pytest.approx(0.9)
+
+
+@pytest.mark.parametrize("advance_clock_s", [0.0, 7.0])
+def test_distinct_slips_windows_are_investigated_and_reimport_deduplicates(model, advance_clock_s):
+    first = json.loads(sample_alerts_json_lines()[0])
+    first["StartTime"] = "2026-10-01T00:00:00Z"
+    second = dict(first, ID="next-window", StartTime="2026-10-02T00:00:00Z")
+    note = json.loads(second["Note"])
+    second["Note"] = json.dumps(dict(note, timewindow=note["timewindow"] + 1))
+    parsed = parse_alerts_json(map(json.dumps, [first, second]))
+    soc = _soc(model)
+    before = soc.clock.now()
+    results = run_slips_parsed(soc, parsed, advance_clock_s=advance_clock_s).results
+    assert all(r.investigated and not r.deduplicated for r in results)
+    if not advance_clock_s:
+        assert soc.clock.now() == before
+    repeated = run_slips_parsed(soc, parsed, advance_clock_s=advance_clock_s).results
+    assert all(r.deduplicated and not r.investigated for r in repeated)
 
 
 def test_run_through_soc_statuses_and_untrusted_description(model):

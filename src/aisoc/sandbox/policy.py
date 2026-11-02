@@ -59,6 +59,20 @@ class PolicyEngine:
             status = "denied"
             reasons.append(msg)
 
+        for name in ("request_id", "case_id", "tenant", "action", "resource", "idempotency_key", "requested_at"):
+            value = getattr(request, name)
+            if not isinstance(value, str) or not value:
+                deny(f"request {name} must be a non-empty string")
+        if not isinstance(request.evidence_ids, list) or not all(isinstance(item, str) for item in request.evidence_ids):
+            deny("request evidence_ids must be a list of strings")
+        if reasons:
+            return PolicyDecision(
+                decision_id=new_id("pd"), case_id=order.case_id,
+                request_digest=request.digest(), task_digest=order.digest(), grant_id=grant.grant_id,
+                policy_version=self.policy_version, status="denied", reasons=reasons,
+                effective_capability={}, decided_at=self.clock.iso(),
+            )
+
         # C_task: frozen work order
         # 第 1 層 C_task：請求必須落在「凍結的工作單」裡——同一案件、同一租戶、動作在任務詞彙表內、只引用凍結過的證據
         if request.case_id != order.case_id:
@@ -77,8 +91,14 @@ class PolicyEngine:
         now = self.clock.now()
         if grant.case_id != order.case_id or grant.task_digest != order.digest():
             deny("grant is not bound to this work order")
+        if grant.tenant != order.tenant:
+            deny("capability grant tenant mismatch")
         if parse_iso(grant.expires_at) <= now:
             deny("capability grant expired")
+        if type(grant.max_uses) is not int or grant.max_uses <= 0:
+            deny("capability grant has no valid use budget")
+        if grant.usage_mode not in {"single_use", "bounded"}:
+            deny("capability grant has an invalid usage mode")
         if request.action not in grant.allowed_actions:
             deny(f"action {request.action} not in capability grant")
         if not any(fnmatch.fnmatch(request.resource, p) for p in grant.resource_patterns):
@@ -90,24 +110,33 @@ class PolicyEngine:
         self._request_count[request.case_id] = n
         if n > self.runtime.max_requests_per_case:
             deny("per-case request budget exhausted")
+        params = request.params
+        if not isinstance(params, dict):
+            deny("action parameters must be an object")
+            params = {}
         if request.action == ACTION_BLOCK_HOST:
-            ttl = int(request.params.get("ttl_s", 0) or 0)
-            if ttl <= 0 or ttl > self.runtime.max_block_ttl_s:
+            ttl = params.get("ttl_s")
+            if type(ttl) is not int or ttl <= 0 or ttl > self.runtime.max_block_ttl_s:
                 deny(f"block ttl {ttl}s outside runtime ceiling")
         if request.action == ACTION_EGRESS_CONNECT:
-            dest = request.destination or {}
+            dest = request.destination
+            if not isinstance(dest, dict):
+                deny("egress destination must be an object")
+                dest = {}
             try:
                 ip = ipaddress.ip_address(str(dest.get("ip", "")))
             except ValueError:
                 ip = None
-            if ip is None or not dest.get("port"):
+            port = dest.get("port")
+            if ip is None or type(port) is not int or not 1 <= port <= 65535:
                 deny("egress request lacks a precise ip:port destination")
             else:
                 actual_scope = "private" if ip.is_private else "public"  # scope 由程式重新判定，不信 Agent 自稱的 public/private
                 if dest.get("scope") != actual_scope:
                     deny(f"declared scope {dest.get('scope')} does not match resolved {actual_scope}")
-                if not dest.get("ttl_s") or int(dest["ttl_s"]) > 3600:
-                    deny("egress ttl missing or above 3600s")
+                ttl = dest.get("ttl_s")
+                if type(ttl) is not int or not 1 <= ttl <= 3600:
+                    deny("egress ttl must be an integer between 1 and 3600s")
         if self.runtime.high_impact_requires_evidence and request.action in HIGH_IMPACT_ACTIONS and not request.evidence_ids:
             deny("high impact action without cited evidence")
 
@@ -129,6 +158,8 @@ class PolicyEngine:
             "actions": sorted(set(order.allowed_action_types) & set(grant.allowed_actions) - FORBIDDEN_FOR_AGENT),
             "resource_patterns": list(grant.resource_patterns),
             "expires_at": grant.expires_at,
+            "max_uses": grant.max_uses,
+            "usage_mode": grant.usage_mode,
             "max_block_ttl_s": self.runtime.max_block_ttl_s,
             "egress_default_deny": self.runtime.egress_default_deny,
         }

@@ -48,6 +48,7 @@ import base64
 import json
 from pathlib import Path
 from typing import Any, Literal, Mapping
+from mcp.types import ToolAnnotations
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -94,6 +95,51 @@ mcp = _McpServer("openworkproof")
 
 _SCHEMA = "openworkproof/mcp/0.2"
 _MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False))
+def owp_soc_sample_alerts() -> dict[str, Any]:
+    """Return synthetic Slips JSONL and scope for the reference SOC workflow.
+
+    No host scanning, external connections or real remediation is performed.
+    This does not activate Guard or protect other MCP tool calls.
+    """
+    from openworkproof.soc_reference import sample_alerts
+    return _ok(sample_alerts())
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False))
+def owp_soc_analyze_slips(alerts_jsonl: str, tenant: str = "local-review") -> dict[str, Any]:
+    """Review supplied Slips JSONL locally and return cases plus a signed evidence bundle.
+
+    Accepts up to 128 KiB, 500 lines and 50 source windows. Uses a synthetic-trained
+    model, a deterministic investigation stub and in-memory simulated actions.
+    Does not control real hosts, push to AiSOC or upload telemetry. Returned keys
+    and checkpoints are self-supplied evidence, not an independent trust anchor.
+    """
+    from openworkproof.soc_reference import analyze_slips
+    try:
+        return _ok(analyze_slips(alerts_jsonl, tenant))
+    except Exception as error:
+        return _err(str(error))
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False))
+def owp_soc_verify_bundle(
+    bundle_json: str, trusted_keys_json: str = "", trusted_checkpoints_json: str = "",
+) -> dict[str, Any]:
+    """Verify a reference SOC bundle using separately acquired expected trust pins.
+
+    Inputs are JSON strings, each at most 8 MiB. Omitted external keys or checkpoint
+    pins yield UNKNOWN, not trusted acceptance. Copying pins from the same bundle
+    only tests consistency; caller-supplied pins do not prove organizational
+    independence. A FAILED/UNKNOWN status is not acceptance. No filesystem writes.
+    """
+    from openworkproof.soc_reference import verify_soc_bundle
+    try:
+        return _ok(verify_soc_bundle(bundle_json, trusted_keys_json, trusted_checkpoints_json))
+    except Exception as error:
+        return _err(str(error))
 
 
 # ── helpers ──────────────────────────────────────────────────────────

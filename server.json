@@ -1,19 +1,19 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.dengyier/OpenWorkProof",
-  "description": "Verifiable agent work contracts; separate opt-in Codex preview-directory guard.",
+  "description": "Verifiable agent evidence; opt-in Codex guard and reference SOC alert review.",
   "repository": {
     "url": "https://github.com/dengyier/OpenWorkProof",
     "source": "github"
   },
   "title": "OpenWorkProof",
   "websiteUrl": "https://github.com/dengyier/OpenWorkProof",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "openworkproof",
-      "version": "1.5.0",
+      "version": "1.6.0",
       "transport": {
         "type": "stdio"
       }
@@ -24,7 +24,7 @@
       "author": {
         "name": "dengyier"
       },
-      "license": "Apache-2.0",
+      "license": "Apache-2.0 AND MIT",
       "keywords": [
         "ed25519",
         "verifiable-execution",

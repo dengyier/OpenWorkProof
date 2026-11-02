@@ -473,6 +473,8 @@ def _generated_files(
 def _preflight_target(
     directory: Path,
     filenames: frozenset[str] = _FILENAMES,
+    *,
+    inspect_entries: bool = True,
 ) -> tuple[Path, tuple[Path, ...]]:
     requested_target = Path(os.path.abspath(directory))
     if requested_target.is_symlink():
@@ -501,7 +503,7 @@ def _preflight_target(
 
     if target.exists() and not target.is_dir():
         raise ValueError("schema destination must be a real directory")
-    existing = tuple(target.iterdir()) if target.exists() else ()
+    existing = tuple(target.iterdir()) if inspect_entries and target.exists() else ()
     if any(
         path.name not in filenames
         or path.is_symlink()
@@ -780,7 +782,9 @@ def write_authoritative_schemas(
     files = _generated_files(version=version)
     filenames = _FILENAMES_BY_VERSION[version]
     requested = [destination] + ([mirror] if mirror is not None else [])
-    plans = [_preflight_target(path, filenames) for path in requested]
+    # Resolve lock identities first. Another writer may replace the directory
+    # between iterdir() and the entry probes; inspect contents only under locks.
+    plans = [_preflight_target(path, filenames, inspect_entries=False) for path in requested]
     targets = [target for target, _ in plans]
     if len(targets) == 2 and (
         targets[0] == targets[1]

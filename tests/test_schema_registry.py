@@ -1165,3 +1165,48 @@ assert authoritative_schema("work-order")["type"] == "object"
         capture_output=True,
         text=True,
     )
+
+
+def test_writer_waits_for_transaction_before_inspecting_changing_entries(tmp_path):
+    """A second writer must not reject a transient directory snapshot before locking."""
+    import time
+    import openworkproof.schema_registry as registry
+
+    target = tmp_path / "schemas"
+    registry.write_authoritative_schemas(target)
+    marker = tmp_path / "locking"
+    transient = target / "in-progress"
+    script = """
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+import openworkproof.schema_registry as registry
+original = registry._locked_targets
+@contextmanager
+def observed(targets):
+    Path(sys.argv[2]).write_text('ready')
+    with original(targets):
+        yield
+registry._locked_targets = observed
+registry.write_authoritative_schemas(Path(sys.argv[1]))
+"""
+    process = None
+    try:
+        with registry._locked_targets([target]):
+            transient.write_text("temporary during another writer transaction")
+            process = subprocess.Popen([sys.executable, "-c", script, str(target), str(marker)],
+                                       cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       text=True, env={**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")})
+            deadline = time.monotonic() + 5
+            while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            reached_lock = marker.exists()
+            transient.unlink()
+        stdout, stderr = process.communicate(timeout=15)
+        assert reached_lock, f"writer inspected transient contents before locking: {stderr}"
+        assert process.returncode == 0, stderr
+        assert _snapshot(target) == _builtin_bytes()
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()

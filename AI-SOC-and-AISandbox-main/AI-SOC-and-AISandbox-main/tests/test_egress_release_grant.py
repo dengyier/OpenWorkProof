@@ -205,7 +205,7 @@ def test_attenuate_narrows_only():
 def test_cli_slips_ingest_verify_bundle_and_push_dry_run(tmp_path):
     out = tmp_path / "run"
     fx = ROOT / "tests" / "fixtures"
-    env = {"PYTHONPATH": str(ROOT)}
+    env = {"PYTHONPATH": str(ROOT.parents[1] / "src")}
     r = subprocess.run([sys.executable, "-m", "aisoc", "slips-ingest", str(fx / "slips" / "alerts.json"), "--conn-log",
                         str(fx / "slips" / "conn.log"), "--out", str(out), "--seed", "3"], cwd=ROOT, env={**env, "PATH": ""},
                        capture_output=True, text=True, timeout=300)
@@ -213,7 +213,17 @@ def test_cli_slips_ingest_verify_bundle_and_push_dry_run(tmp_path):
     summary = json.loads((out / "slips-summary.json").read_text())
     assert summary["cases"] == 5 and len(summary["case_results"]) == 5 and summary["model_release"]["approved_by"]
     v = subprocess.run([sys.executable, "-m", "aisoc", "verify", str(out)], cwd=ROOT, env={**env, "PATH": ""}, capture_output=True, text=True)
-    assert v.returncode == 0 and json.loads(v.stdout)["status"] == "VERIFIED"
+    assert v.returncode == 1 and json.loads(v.stdout)["status"] == "UNKNOWN"
+    # This local test establishes pins for its generated fixture. In production
+    # these files must be obtained through an independent trusted channel.
+    keys_pin = tmp_path / "pinned-keys.json"
+    checkpoint_pin = tmp_path / "pinned-checkpoints.json"
+    keys_pin.write_text((out / "trusted-keys.json").read_text())
+    checkpoint_pin.write_text((out / "witness-checkpoints.json").read_text())
+    pinned = subprocess.run([sys.executable, "-m", "aisoc", "verify", str(out),
+                             "--trusted-keys", str(keys_pin), "--trusted-checkpoints", str(checkpoint_pin)],
+                            cwd=ROOT, env={**env, "PATH": ""}, capture_output=True, text=True)
+    assert pinned.returncode == 0 and json.loads(pinned.stdout)["status"] == "VERIFIED"
     p = subprocess.run([sys.executable, "-m", "aisoc", "aisoc-push", str(out), "--dry-run"], cwd=ROOT, env={**env, "PATH": ""},
                        capture_output=True, text=True)
     assert p.returncode == 0

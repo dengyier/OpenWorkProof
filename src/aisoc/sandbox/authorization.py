@@ -162,6 +162,16 @@ class AuthorizationSigner:
             raise AuthorizationError(f"unknown policy status {decision.status}")
 
         now = self.clock.now()
+        capability = decision.effective_capability
+        try:
+            grant_expires_at = parse_iso(capability["expires_at"])
+            expires_at = min(now + timedelta(seconds=self.ttl_s), grant_expires_at)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AuthorizationError("capability grant expiry is invalid") from exc
+        if expires_at <= now:
+            raise AuthorizationError("capability grant expired")
+        if approval_digest is not None:
+            expires_at = min(expires_at, parse_iso(approval.payload["expires_at"]))
         env = AuthorizationEnvelope(
             case_id=request.case_id,
             tenant=request.tenant,
@@ -175,12 +185,18 @@ class AuthorizationSigner:
             params_digest=digest(request.params),
             request_digest=request.digest(),
             issued_at=utc_iso(now),
-            expires_at=utc_iso(now + timedelta(seconds=self.ttl_s)),
+            expires_at=utc_iso(expires_at),
             nonce=new_nonce(),
             approval_digest=approval_digest,
             signer_identity=self.signer.key_id,
         )
         payload = env.to_dict()
+        payload.update(
+            grant_id=decision.grant_id,
+            grant_max_uses=capability.get("max_uses"),
+            grant_usage_mode=capability.get("usage_mode"),
+            grant_expires_at=capability["expires_at"],
+        )
         return Signed(payload=payload, signatures=[self.signer.sign_payload(payload)])
 
     # ── 【老師註解】AuthorizationSigner._check_approval ───────────

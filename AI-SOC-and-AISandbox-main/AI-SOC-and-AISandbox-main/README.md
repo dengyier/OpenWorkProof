@@ -1,5 +1,13 @@
 # AI-SOC-and-AISandbox
 
+> OpenWorkProof 1.6.0 integration update: maintained executable source is now in
+> [`src/aisoc`](../../src/aisoc). Install from the repository root; this folder
+> retains the contribution tests/design documents and is not a separate package.
+> [Current MCP/Skill workflow and trust requirements](../../docs/integrations/soc-reference.md)
+> supersede the historical commands and unpinned verification examples in the design documents.
+> Unpinned verification returns UNKNOWN; use separately acquired expected keys and
+> checkpoint pins outside the bundle for trusted verification.
+
 Reference implementation of the architecture in
 **《AI 安全與道德治理：結合 dual_model、Agent 影響限制與 OpenWorkProof 的可驗證 AI SOC 架構》**
 (design paper, v2.0, 2026-11-01 — included in this repository as `.docx`).
@@ -25,17 +33,18 @@ AiSOC is described in [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
 ## Quick start
 
 ```bash
-pip install -r requirements.txt
-python -m pytest -q                                   # 85 tests
+cd ../..  # from this design-document folder to the repository root
+pip install -e ".[dev]"
+python -m pytest -q  # includes Core and SOC tests
 python -m aisoc simulate --out demo-output/aisoc-run  # train, run SOC, scenarios, ablations
-python -m aisoc verify demo-output/aisoc-run          # offline re-verification of the exported run
+python -m aisoc verify demo-output/aisoc-run          # UNKNOWN without independently acquired trust pins
 
 # Slips output through the same pipeline (fixture; see docs/INTEGRATION.md for a real capture)
-python -m aisoc slips-ingest tests/fixtures/slips/alerts.json \
-    --conn-log tests/fixtures/slips/conn.log --out demo-output/slips-run
+python -m aisoc slips-ingest AI-SOC-and-AISandbox-main/AI-SOC-and-AISandbox-main/tests/fixtures/slips/alerts.json \
+    --conn-log AI-SOC-and-AISandbox-main/AI-SOC-and-AISandbox-main/tests/fixtures/slips/conn.log --out demo-output/slips-run
 python -m aisoc verify demo-output/slips-run
 python -m aisoc aisoc-push demo-output/slips-run --dry-run          # events that would go to AiSOC
-python -m aisoc aisoc-bundle-verify tests/fixtures/aisoc/investigation-bundle.json --hmac-key test-key
+python -m aisoc aisoc-bundle-verify AI-SOC-and-AISandbox-main/AI-SOC-and-AISandbox-main/tests/fixtures/aisoc/investigation-bundle.json --hmac-key test-key
 ```
 
 `simulate` writes `report.md` / `report.json` plus the exported `ledger.json`,

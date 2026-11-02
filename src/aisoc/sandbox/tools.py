@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..crypto import Clock
 from ..idps import FlowRecord
+from ..owp.objects import WorkOrder
 from .untrusted import Untrusted, wrap
 
 
@@ -88,6 +89,23 @@ class TelemetryStore:
 #         預算是「每案」計，不是全域，所以一個案件狂查不會把別的案件的額度吃光。
 # 拿掉會怎樣：若 agent 能直接拿到 TelemetryStore 或網路，Untrusted 包裝與租戶範圍都形同虛設。
 # 對應：準則 #1、#11；測試 tests/test_end_to_end.py::test_happy_path_is_fully_recorded_and_verified（間接）
+class BoundReadOnlyTools:
+    """Agent-facing tool interface with scope fixed by the control plane."""
+
+    __slots__ = ("_call", "_names")
+
+    def __init__(self, call: Callable[..., Untrusted[Any]], names: List[str]) -> None:
+        self._call = call
+        self._names = tuple(names)
+
+    @property
+    def names(self) -> List[str]:
+        return list(self._names)
+
+    def call(self, case_id: str, tenant: str, tool: str, **args: Any) -> Untrusted[Any]:
+        return self._call(case_id, tenant, tool, **args)
+
+
 class ReadOnlyTools:
     def __init__(self, store: TelemetryStore, log: ToolSideLog, clock: Clock, max_calls_per_case: int = 20) -> None:
         self.store = store
@@ -105,6 +123,26 @@ class ReadOnlyTools:
     @property
     def names(self) -> List[str]:
         return sorted(self._registry)
+
+    def for_order(self, order: WorkOrder) -> BoundReadOnlyTools:
+        """Freeze the case, tenant and evidence resources before handing tools to an agent."""
+        case_id, tenant = order.case_id, order.tenant
+        evidence_ids = frozenset(order.evidence_ids)
+
+        def call(claimed_case: str, claimed_tenant: str, tool: str, **args: Any) -> Untrusted[Any]:
+            resource = {
+                "get_flow": args.get("flow_id"),
+                "get_host_window": f"hostwin:{args.get('host')}",
+                "get_recent_logins": f"hostwin:{args.get('host')}",
+                "lookup_ioc": f"ioc:{args.get('indicator')}",
+            }.get(tool)
+            if ((claimed_case, claimed_tenant) != (case_id, tenant)
+                    or (tool in self._registry and (not isinstance(resource, str) or resource not in evidence_ids))):
+                self.log.record_call(ToolCallRecord(case_id, tool, args, False, self.clock.iso(), ["outside_work_order"]))
+                raise ToolError("tool request outside bound work order scope")
+            return self.call(case_id, tenant, tool, **args)
+
+        return BoundReadOnlyTools(call, self.names)
 
     # ── 【老師註解】ReadOnlyTools.call ──────────────────────────────
     # 做什麼：agent 呼叫工具的唯一入口。順序固定：查預算 → 查工具名 → 執行（帶 tenant）→ 包成 Untrusted → 記錄到 ToolSideLog → 回傳。

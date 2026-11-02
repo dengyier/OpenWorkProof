@@ -2,6 +2,7 @@
 
 import copy
 import json
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -128,6 +129,37 @@ def test_bridge_transport_failure_fails_closed(model):
     res = soc.ingest(flow)
     reserved = [q for q in res.requests if q.policy_status == "reserved"]
     assert reserved and reserved[0].human_decision == "reject" and "unavailable" in reserved[0].reason
+
+
+@pytest.mark.parametrize("failure_type", [urllib.error.URLError, TimeoutError])
+@pytest.mark.parametrize("phase", ["create", "poll"])
+def test_real_transport_errors_become_signed_rejections(model, monkeypatch, failure_type, phase):
+    soc = _soc(model)
+    client = AiSOCClient(AiSOCConfig(approval_poll_s=0))
+    bridge = AiSOCApprovalBridge(client, soc.keys["approver"], soc.clock)
+    signed = []
+
+    def provider(*args):
+        approval = bridge(*args)
+        signed.append(approval)
+        return approval
+
+    soc.set_approval_provider(provider)
+    if phase == "poll":
+        monkeypatch.setattr(client, "create_approval", lambda **kwargs: {"id": "pending-approval", "status": "pending"})
+
+    def fail_transport(*args, **kwargs):
+        raise failure_type("connection unavailable")
+
+    monkeypatch.setattr("urllib.request.urlopen", fail_transport)
+    flow = _malicious_flow()
+    _seed_ioc(soc, flow)
+    result = soc.ingest(flow)
+    reserved = [q for q in result.requests if q.policy_status == "reserved"]
+    assert reserved and reserved[0].human_decision == "reject" and not reserved[0].executed
+    assert signed and soc.trusted.verify(signed[0].payload, signed[0].signatures[0], expected_role="approver")
+    assert ("unavailable" if phase == "create" else "poll failed") in reserved[0].reason
+    assert not soc.executor.blocked_hosts
 
 
 def test_bridge_rejects_record_about_a_different_request(model):
