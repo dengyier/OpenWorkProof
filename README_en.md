@@ -45,7 +45,7 @@ The test figures above describe the existing 1.4.0 protocol baseline. Version 1.
 Read public release state directly from [PyPI](https://pypi.org/project/openworkproof/),
 the [GitHub Release](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.6.0), and
 the [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.6.0).
-Core `1.5.0` includes the `owp-guard` command and retains existing MCP startup and tool descriptions; read back the links above for publication status. The DeepSeek
+Core `1.6.0` includes `owp-guard`, the experimental `owp-aisoc` command and three reference SOC MCP tools; read back the links above for publication status. The DeepSeek
 Harness plugin `0.1.0` remains a local candidate and is not published to npm or a plugin
 marketplace. These are separate release facts.
 
