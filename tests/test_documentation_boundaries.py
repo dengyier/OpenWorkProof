@@ -13,9 +13,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+ENGLISH_README = "README.md"
+CHINESE_README = "README_zh-CN.md"
+ENGLISH_REFERENCE = "docs/reference/project-overview-en.md"
+CHINESE_REFERENCE = "docs/reference/project-overview-zh-CN.md"
+
 DOCS = (
-    "README.md",
-    "README_en.md",
+    ENGLISH_README,
+    CHINESE_README,
+    ENGLISH_REFERENCE,
+    CHINESE_REFERENCE,
     "docs/offline-verification.md",
     "docs/status.md",
 )
@@ -30,8 +37,10 @@ def test_deepseek_harness_docs_state_exact_security_and_claim_boundaries() -> No
     combined = "\n".join(
         _text(relative)
         for relative in (
-            "README.md",
-            "README_en.md",
+            ENGLISH_README,
+            CHINESE_README,
+            ENGLISH_REFERENCE,
+            CHINESE_REFERENCE,
             "docs/status.md",
             "docs/integrations/deepseek-harness.md",
         )
@@ -70,7 +79,7 @@ def test_docs_forbid_unsupported_claims() -> None:
         "guarantees correctness",
         "production proven",
     )
-    scanned = ("README.md", "README_en.md")
+    scanned = (ENGLISH_README, CHINESE_README, ENGLISH_REFERENCE, CHINESE_REFERENCE)
     for relative in scanned:
         text = _text(relative)
         for phrase in forbidden_affirmative:
@@ -123,8 +132,8 @@ def test_pilot_commercial_fields_are_external() -> None:
 
 
 def test_v13_docs_expose_both_surfaces_without_unearned_claims() -> None:
-    chinese = _text("README.md")
-    english = _text("README_en.md")
+    chinese = _text(CHINESE_REFERENCE)
+    english = _text(ENGLISH_REFERENCE)
     status = _text("docs/status.md")
     pilot = _text("docs/pilot/README.md")
 
@@ -175,9 +184,9 @@ def test_portable_ci_runs_tests_and_frozen_compatibility() -> None:
     assert "OPENWORKPROOF_REQUIRE_LIVE" not in workflow
 
 
-def test_acceptance_bundle_workflow_and_boundaries_are_documented() -> None:
-    chinese = _text("README.md")
-    english = _text("README_en.md")
+def test_linked_reference_documents_acceptance_bundle_workflow_and_boundaries() -> None:
+    chinese = _text(CHINESE_REFERENCE)
+    english = _text(ENGLISH_REFERENCE)
     status = _text("docs/status.md")
 
     for text in (chinese, english):
@@ -252,21 +261,21 @@ def test_verified_delivery_example_json_is_strictly_closed() -> None:
 AGENCY_PROTOCOL_DOC = "docs/protocol/human-agency-profile-v0.1.md"
 
 
-def test_human_agency_readmes_are_authorization_boundaries_not_surveillance() -> None:
-    """Both READMEs state the boundary and deny surveillance/compliance meaning."""
+def test_human_agency_reference_docs_are_authorization_boundaries_not_surveillance() -> None:
+    """The linked bilingual protocol references retain the authority boundary."""
 
-    chinese = _text("README.md")
-    english = _text("README_en.md")
+    chinese = _text(CHINESE_REFERENCE)
+    english = _text(ENGLISH_REFERENCE)
 
     # Chinese: WorkOrder-bound, Acceptor-signed, machine-verifiable.
     for literal in ("Human Agency Profile", "WorkOrder 绑定", "Acceptor 签名", "机器可验证"):
-        assert literal in chinese, f"README.md missing: {literal}"
+        assert literal in chinese, f"Chinese reference missing: {literal}"
     # Chinese negation of unsupported meanings.
     assert "不是员工评分、绩效监控、法律责任转移、自动担责、资金托管或合规认证" in chinese
 
     # English: same three facts.
     for literal in ("Human Agency Profile", "WorkOrder-bound", "Acceptor-signed", "machine-verifiable"):
-        assert literal in english, f"README_en.md missing: {literal}"
+        assert literal in english, f"English reference missing: {literal}"
     assert (
         "not employee scoring, performance monitoring, legal-liability transfer, "
         "automatic accountability, fund custody, or compliance certification"
@@ -278,11 +287,11 @@ def test_human_agency_readmes_are_authorization_boundaries_not_surveillance() ->
         assert "examples/human_agency_profile_v01.py" in text
 
 
-def test_human_agency_appeal_records_but_never_restores() -> None:
+def test_human_agency_reference_appeal_records_but_never_restores() -> None:
     """Appeal is a signed request, not a permission change; only Acceptor transitions."""
 
-    chinese = _text("README.md")
-    english = _text("README_en.md")
+    chinese = _text(CHINESE_REFERENCE)
+    english = _text(ENGLISH_REFERENCE)
     protocol = _text(AGENCY_PROTOCOL_DOC)
 
     assert "不恢复或扩大权限" in chinese
@@ -471,28 +480,34 @@ def test_human_agency_example_describes_application_side_effects_precisely() -> 
 # --- Human-centered README narrative ---
 
 
-def test_readmes_lead_with_human_purpose_and_judgment() -> None:
-    chinese = _text("README.md")
-    english = _text("README_en.md")
+def test_readmes_provide_current_install_configuration_and_language_navigation() -> None:
+    import json
 
-    chinese_lead = "\n".join(chinese.splitlines()[:60])
-    english_lead = "\n".join(english.splitlines()[:60])
+    from openworkproof import __version__
 
-    assert "让智能依人的目的而行动，让每一次行动经得起人的判断。" in chinese_lead
-    assert "OpenWorkProof 是 AI Agent 工作契约与可验证执行协议。" in chinese_lead
-    assert (
-        "Let intelligence act toward human purposes, and let every action "
-        "stand up to human judgment."
-    ) in english_lead
-    assert (
-        "OpenWorkProof is an open work contract and verifiable execution "
-        "protocol for AI agents."
-    ) in english_lead
+    for relative, other_language in (
+        (ENGLISH_README, CHINESE_README),
+        (CHINESE_README, ENGLISH_README),
+    ):
+        text = _text(relative)
+        configs = re.findall(r"```json\n(.*?)\n```", text, flags=re.DOTALL)
+        assert configs, f"{relative} must provide an MCP configuration"
+        server = json.loads(configs[0])["mcpServers"]["openworkproof"]
+        assert server == {"command": "uvx", "args": [f"openworkproof=={__version__}"]}
+        assert f"]({other_language})" in text
+        assert "](MCP_SERVER.md)" in text
+        assert "owp_soc_sample_alerts" in text
+        assert "owp_soc_analyze_slips" in text
+        assert "owp_soc_verify_bundle" in text
+        assert "UNKNOWN" in text
+    legacy = _text("README_en.md")
+    assert "](README.md)" in legacy
+    assert "](README_zh-CN.md)" in legacy
 
 
-def test_readmes_preserve_purpose_authority_evidence_and_human_judgment() -> None:
-    chinese = _text("README.md")
-    english = _text("README_en.md")
+def test_reference_docs_preserve_purpose_authority_evidence_and_human_judgment() -> None:
+    chinese = _text(CHINESE_REFERENCE)
+    english = _text(ENGLISH_REFERENCE)
 
     for literal in (
         "人的目的",
@@ -501,7 +516,7 @@ def test_readmes_preserve_purpose_authority_evidence_and_human_judgment() -> Non
         "接受、拒绝、撤销和申诉",
         "最终判断",
     ):
-        assert literal in chinese, f"README.md missing: {literal}"
+        assert literal in chinese, f"Chinese reference missing: {literal}"
 
     for literal in (
         "human purposes",
@@ -510,34 +525,28 @@ def test_readmes_preserve_purpose_authority_evidence_and_human_judgment() -> Non
         "accept, reject, revoke, and appeal",
         "final judgment",
     ):
-        assert literal in english, f"README_en.md missing: {literal}"
+        assert literal in english, f"English reference missing: {literal}"
 
 
-def test_readmes_keep_current_release_and_test_boundaries_aligned() -> None:
+def test_readmes_keep_release_links_current_and_historical_results_in_reference() -> None:
     from openworkproof import __version__
-    chinese = _text("README.md")
-    english = _text("README_en.md")
 
-    for text in (chinese, english):
-        for literal in (
-            __version__,
-            "97 passed",
-            "80 passed",
-            "186 passed",
-            "4373 passed",
-            "0 failed",
-            "0 skipped",
-        ):
-            assert literal in text, f"README release boundary missing: {literal}"
-
-    assert f"Core 包版本: {__version__}" in chinese
-    assert "插件候选: 0.1.0" in chinese
-    assert "尚未发布 npm" in chinese
-    assert "外部发布 READY" in chinese
-    assert f"Core package version: {__version__}" in english
-    assert "local candidate" in english
-    assert "not published to npm" in english
-    assert "external-release READY" in english
+    for relative in (ENGLISH_README, CHINESE_README):
+        text = _text(relative)
+        assert f"releases/tag/v{__version__}" in text
+        assert f"versions/{__version__}" in text
+        assert "docs/reference/project-overview-" in text
+        for historical in ("97 passed", "80 passed", "186 passed", "4373 passed"):
+            assert historical not in text
+    for relative in (ENGLISH_REFERENCE, CHINESE_REFERENCE):
+        text = _text(relative)
+        for historical in ("97 passed", "80 passed", "186 passed", "4373 passed", "0 failed", "0 skipped"):
+            assert historical in text, f"{relative} lost historical record: {historical}"
+        assert "0.1.0" in text
+    assert "尚未发布 npm" in _text(CHINESE_REFERENCE)
+    assert "not published to npm" in _text(ENGLISH_REFERENCE)
+    assert "外部发布 READY" in _text(CHINESE_REFERENCE)
+    assert "external-release READY" in _text(ENGLISH_REFERENCE)
 
 
 def test_readmes_do_not_turn_the_homepage_into_fundraising_or_market_copy() -> None:
@@ -550,15 +559,15 @@ def test_readmes_do_not_turn_the_homepage_into_fundraising_or_market_copy() -> N
         "百亿美元市场",
         "$10B+ market",
     )
-    for relative in ("README.md", "README_en.md"):
+    for relative in (ENGLISH_README, CHINESE_README):
         text = _text(relative)
         for literal in forbidden:
             assert literal not in text, f"{relative} contains market copy: {literal}"
 
 
-def test_readmes_place_openworkproof_beyond_connection_protocols() -> None:
-    chinese = _text("README.md")
-    english = _text("README_en.md")
+def test_reference_docs_place_openworkproof_beyond_connection_protocols() -> None:
+    chinese = _text(CHINESE_REFERENCE)
+    english = _text(ENGLISH_REFERENCE)
 
     assert "MCP 连接 Agent 与工具，A2A 连接 Agent 与 Agent。" in chinese
     assert "MCP connects agents to tools. A2A connects agents to agents." in english

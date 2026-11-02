@@ -1,74 +1,44 @@
 # OpenWorkProof
 
-> OpenWorkProof is an open protocol for AI agent work contracts and verifiable execution. It answers the question MCP and A2A leave open: under what authority does an agent work, and on what evidence is its result accepted?
+> OpenWorkProof helps developers check what an AI agent was authorized to do, what actions were recorded, and what the available evidence supports. It provides signed work records, local MCP tools and offline bundle verification.
 
-## How It Works
+## Current release
 
-Four signed protocol objects bound into a single verifiable history:
+OpenWorkProof 1.6.0 exposes 32 local stdio MCP tools. The Python package requires Python 3.10 or newer. The package also includes a separately enabled experimental Codex Guard and an experimental SOC reference CLI. Publication, installation, protection, verification and human acceptance are separate facts.
 
-- **WorkOrder** — frozen work contract (target paths, tools, quotas, acceptance conditions)
-- **CapabilityGrant** — attenuating authority: child grants can only shrink, never expand (No-Cloning Authority)
-- **ActionReceipt** — per-action signed evidence with bound authorization decision, quota delta, and evidence references
-- **AcceptanceReceipt** — final acceptance or rejection, one of two mutually exclusive terminal states
+## Start with a concrete task
 
-Six roles (each with independent Ed25519 keys): Maintainer, Manager, Developer, Verifier, Sidecar, Acceptor. The Acceptor role's key is bound in the WorkOrder and can be assigned to the Owner or any authorized party — no mandatory independent natural person.
+- Review supplied Slips alerts: the three reference SOC tools return source-window cases and a signed evidence bundle. Investigation uses a deterministic stub and actions are simulated; there is no real host remediation. A synthetic sample is available for an installation check.
+- Recheck an exported bundle: verify signatures and evidence links within the selected verifier's stated scope. SOC verification returns UNKNOWN without separately obtained expected public keys and witnessed checkpoints. Copying a bundle's own trust materials is only an internal consistency demonstration.
+- Integrate Agent work records: use Core schemas, signed requests, receipts, ledger checks and delivery packages in an existing workflow. A verification result does not replace a person's acceptance decision or prove payment.
+- Restrict a Codex preview task: install and explicitly enable Guard for its supported local text-editing scope, then run its live probe and doctor. Initial live checks used macOS, Python 3.12 and Codex CLI 0.147.0. Generic MCP installation does not enable Guard or protect other Agent tool calls.
 
-State machine: `running → locally_verified → proof_ready → awaiting_human → accepted | rejected`
+## Connect MCP
 
-Core principles: Proof-Carrying Work, No-Cloning Authority, Multi-Scale Proof Composition, Fail Closed, and offline third-party audit via `validate_grant_chain`.
+Use a stdio-capable local MCP client to launch `uvx --from openworkproof==1.6.0 owp-mcp`. The MCP client manages this process. There is no hosted remote endpoint or API key in this setup. `owp` is the separate CLI, not the stdio server.
 
-## Current Status
-
-**v0.1.0 in active development. 2,283 tests passed, 0 failed, 7 skipped.**
-
-What's implemented and verified:
-- Four protocol object models with strict RFC 8785 JCS normalization and Ed25519 signing
-- SQLite authoritative ledger with atomic grant issuance/revocation, quota replay, and crash recovery
-- Pure pre-authorization: tool call / human decision / rollback three PolicyDecision paths
-- Causality replay layer + policy replay layer + five-input offline acceptance bundle verifier
-- Atomic acceptance and rejection (mutually exclusive terminal states, tamper-evident)
-- `produce_deny_receipt` — immutable audit record for denied requests
-- CLI (`owp status / run-tests / repo-read`), MCP stdio transport server, AgentTeams TCP network client
-- Docker production executor with STARTED_UNCONFIRMED crash recovery
-- Supply-chain verifiable build pipeline (docker + OCI archives, candidate inventory)
-
-Two end-to-end demos across the full nine-step five-role evidence chain, each verified with real external Acceptor subprocess TCP signing + offline bundle verification:
-
-1. **M2 — Rich #4196** (developer tool): NBSP line-breaking bug in Textualize/rich, fixed at commit `9d8f9a3`
-2. **M3 — Dify #33013** (AI application platform): TypeError crash in QuestionClassifierNode when `structured_output_schema` was not updated for v1.14.0-rc1 API change, fixed at commit `9f7bea37`
-
-Key remaining: other ToolCall handler closures with evidence publication, competition submission.
-
-OpenWorkProof does not make agents smarter; it gives them the accountability structure needed for deployment in production — work that can be authorized, constrained, verified, accepted, and rejected when evidence is insufficient.
+The optional `openworkproof-soc-review` Agent Skill is installable with `npx skills add dengyier/OpenWorkProof --skill openworkproof-soc-review`. The Skill supplies instructions; it does not configure MCP or grant host permissions.
 
 ## Documentation
 
-- [README](https://github.com/dengyier/OpenWorkProof/blob/main/README.md): Full overview with usage guide (CLI / MCP / Python API / external Acceptor / AgentTeams), value proposition, and implementation status
-- [Protocol Schemas](https://github.com/dengyier/OpenWorkProof/tree/main/specs/v0.1): Authoritative JSON Schemas for WorkOrder, CapabilityGrant, ActionReceipt, and AcceptanceReceipt
-- [Offline Verification](https://github.com/dengyier/OpenWorkProof/blob/main/docs/offline-verification.md): How third parties verify the full signed authorization history without connecting to either party's systems
-- [Status](https://github.com/dengyier/OpenWorkProof/blob/main/docs/status.md): Detailed implementation checklist and boundary declarations
-- [Rich #4196 Demo Log](https://github.com/dengyier/OpenWorkProof/blob/main/docs/superpowers/2026-08-07-rich-4196-demo-log.md)
-- [Dify #33013 Demo Log](https://github.com/dengyier/OpenWorkProof/blob/main/docs/superpowers/2026-08-07-dify-33013-demo-log.md)
-- [Competition Materials](https://github.com/dengyier/OpenWorkProof/tree/main/docs/competition): Agent identity, skill list, and intro for World AI Open Source Competition (Agent Infra track)
+- [English README](https://github.com/dengyier/OpenWorkProof/blob/main/README.md): Who it helps, practical tasks, installation, first-run examples and capability limits.
+- [中文说明](https://github.com/dengyier/OpenWorkProof/blob/main/README_zh-CN.md): Complete Chinese counterpart to the English README.
+- [Legacy English URL](https://github.com/dengyier/OpenWorkProof/blob/main/README_en.md): Compatibility navigation to the canonical English README.
+- [MCP setup and all 32 tools](https://github.com/dengyier/OpenWorkProof/blob/main/MCP_SERVER.md): Local connection configuration, alert-review prompt and tool permissions.
+- [SOC reference workflow](https://github.com/dengyier/OpenWorkProof/blob/main/docs/integrations/soc-reference.md): Supplied-alert review, trust input formats and verification limits.
+- [Codex Guard onboarding](https://github.com/dengyier/OpenWorkProof/blob/main/docs/integrations/agent-guard-onboarding.md): Separate scope review, activation, probe, doctor and guarded execution.
+- [SOC Review Skill](https://github.com/dengyier/OpenWorkProof/blob/main/skills/openworkproof-soc-review/SKILL.md): Instructions for using the three reference SOC MCP tools.
+- [Offline verification](https://github.com/dengyier/OpenWorkProof/blob/main/docs/offline-verification.md): Core signed evidence and acceptance workflows.
+- [Protocol schemas](https://github.com/dengyier/OpenWorkProof/tree/main/specs): Authoritative schema sources.
+- [Detailed project records, English](https://github.com/dengyier/OpenWorkProof/blob/main/docs/reference/project-overview-en.md): Preserved protocol, community and historical validation details.
+- [详细项目记录，中文](https://github.com/dengyier/OpenWorkProof/blob/main/docs/reference/project-overview-zh-CN.md): 保留的协议、社区与历史验证记录。
+- [Status and evidence boundaries](https://github.com/dengyier/OpenWorkProof/blob/main/docs/status.md): Dated implementation and validation records.
 
-## Source
+## Sources and publication
 
-- [models.py](https://github.com/dengyier/OpenWorkProof/blob/main/src/openworkproof/models.py): Four protocol object models with strict JSON/byte-boundary validation and frozen immutability
-- [policy.py](https://github.com/dengyier/OpenWorkProof/blob/main/src/openworkproof/policy.py): Policy replay and pure pre-authorization (authorize_tool_call, validate_human_decision, validate_rollback, validate_grant_chain)
-- [evidence.py](https://github.com/dengyier/OpenWorkProof/blob/main/src/openworkproof/evidence.py): SQLite authoritative ledger, atomic grant issuance/revocation, evidence staging and publication with crash recovery
-- [composition.py](https://github.com/dengyier/OpenWorkProof/blob/main/src/openworkproof/composition.py): Causality replay layer reconstructing immutable causal snapshots per receipt
-- [acceptance.py](https://github.com/dengyier/OpenWorkProof/blob/main/src/openworkproof/acceptance.py): Terminal acceptance/rejection transactions and offline acceptance bundle verifier
-- [mcp_server.py](https://github.com/dengyier/OpenWorkProof/blob/main/src/openworkproof/mcp_server.py): Coordinator — complete_receipt_publication, compose_proof, execute_repo_read, produce_deny_receipt
-- [signing.py](https://github.com/dengyier/OpenWorkProof/blob/main/src/openworkproof/signing.py): Ed25519 signing with RFC 8785 JCS canonical JSON normalization
-- [predicates.py](https://github.com/dengyier/OpenWorkProof/blob/main/src/openworkproof/predicates.py): Predicate registry — path_allowed, tool_allowed, quota_remaining, and select_required_predicates
-- [repo_tools.py](https://github.com/dengyier/OpenWorkProof/blob/main/src/openworkproof/repo_tools.py): Repository pipeline tools (CandidateReadRequest, resolve/render workspace)
-- [cli.py](https://github.com/dengyier/OpenWorkProof/blob/main/src/openworkproof/cli.py): CLI transport — `owp status`, `owp run-tests`, `owp repo-read`
-- [mcp_transport.py](https://github.com/dengyier/OpenWorkProof/blob/main/src/openworkproof/mcp_transport.py): MCP stdio transport server (tools: owp_status, owp_run_tests, owp_repo_read)
-- [execution_adapter.py](https://github.com/dengyier/OpenWorkProof/blob/main/src/openworkproof/execution_adapter.py): AgentTeams execution adapter with team-to-developer task dispatch loop
-- [team_network_client.py](https://github.com/dengyier/OpenWorkProof/blob/main/src/openworkproof/team_network_client.py): TCP network client implementing AgentTeamClient protocol with auth, retry, and reconnect
+- [Source repository](https://github.com/dengyier/OpenWorkProof)
+- [PyPI package](https://pypi.org/project/openworkproof/)
+- [Release notes](https://github.com/dengyier/OpenWorkProof/releases)
+- [Official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/latest)
 
-## Optional
-
-- [pyproject.toml](https://github.com/dengyier/OpenWorkProof/blob/main/pyproject.toml): Packaging metadata and dependencies (Python >=3.12, <3.13)
-- [tests](https://github.com/dengyier/OpenWorkProof/tree/main/tests): 2,283-test conformance suite covering protocol models, policy replay, receipt chains, acceptance, sandbox recovery, supply chain, and end-to-end demos (M1/M2/M3)
-- [supply-chain](https://github.com/dengyier/OpenWorkProof/tree/main/supply-chain): Verifiable build images (docker + OCI) and candidate inventory for reproducible execution
+Core is Apache-2.0; the contributed aisoc component retains its MIT notice. See the repository LICENSE and LICENSES/MIT-aisoc.txt. Directory listings, scores and historical test records do not establish production deployment, customer adoption or payment.

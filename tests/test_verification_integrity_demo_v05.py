@@ -591,11 +591,11 @@ def test_frozen_integrity_demo_bundle_is_offline_verifiable() -> None:
     assert "v0.5 integrity" in completed.stdout
 
 
-def test_readmes_describe_v05_integrity_and_honest_boundaries() -> None:
+def test_linked_reference_docs_describe_v05_integrity_and_honest_boundaries() -> None:
     root = Path(__file__).parent.parent
     cases = (
         (
-            "README.md",
+            "docs/reference/project-overview-zh-CN.md",
             "验证完整性",
             (
                 "支持自动付款",
@@ -609,7 +609,7 @@ def test_readmes_describe_v05_integrity_and_honest_boundaries() -> None:
             ),
         ),
         (
-            "README_en.md",
+            "docs/reference/project-overview-en.md",
             "Verification Integrity",
             (
                 "automatic payment",

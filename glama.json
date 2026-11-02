@@ -1,6 +1,6 @@
 {
   "display_name": "OpenWorkProof",
-  "description": "Verifiable execution for AI agents: Ed25519-signed work contracts and audit trails.",
+  "description": "Check what an AI agent was authorized to do and what its signed evidence supports. Includes reference SOC alert review and a separately enabled Codex preview-directory Guard; installing MCP does not activate Guard.",
   "category": "Security",
   "server": {
     "type": "stdio",

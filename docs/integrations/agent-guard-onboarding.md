@@ -1,6 +1,8 @@
 # OWP Guard 首次启用：当前版本授权与真实检查
 
-1.5.0 实验性命令：承接 Codex 预览目录保护，完成安装后的启用与确认生效；以下实机记录来自 2026-10-26。
+中文 | [English](agent-guard-onboarding.en.md)
+
+自 1.5.0 起提供的实验性命令：承接 Codex 预览目录保护，完成安装后的启用与确认生效；当前安装示例为 1.6.0，以下 1.5.0 实现实机记录来自 2026-10-26，不代表所有 1.6.0 环境重新完成实机验收。
 不改现有运行时策略，不重写用户的 Codex 配置，不使用跳过 Hook 信任检查的参数。
 
 ## 用户流程
@@ -34,32 +36,89 @@
 
 ## 使用方法
 
-使用 1.5.0 包中的独立命令；旧版包不含这个入口。先安装：
+使用当前 1.6.0 包中的独立命令；该入口始于 1.5.0。安装或连接 MCP 不会自动启用 Guard。
+先准备已登录的 Codex CLI、Git 和 Python 3.12。已记录的实机基线为 macOS、Python 3.12、
+Codex CLI 0.147.0，其他 POSIX 环境需先核查兼容性。软件包的一般要求是 Python 3.10+，
+不能把它等同于 Guard 的实机验证范围。
+
+`enable` 会通过真实 Codex 运行探针，`run` 会执行真实 Agent 任务，两者都使用你已有的
+登录和模型额度。`doctor` 不调用模型。下面先用独立项目体验，不读取真实网站或敏感资料。
+
+### 1. 新建独立预览项目并安装
+
+在你拥有的工作目录里运行，保持同一终端打开。第一行创建唯一的新目录，不覆盖已有项目；
+`pwd -P` 使用物理路径，因为 Guard 拒绝符号链接路径。
 
 ```sh
-uv tool install 'openworkproof==1.5.0'
+OWP_TRIAL_PROJECT="$(mktemp -d "$(pwd -P)/owp-guard-trial.XXXXXX")"
+cd "$OWP_TRIAL_PROJECT"
+git init
+mkdir preview
+printf '<!doctype html>\n<title>OWP preview</title>\n<h1>Original heading</h1>\n' > preview/index.html
+printf '.venv/\n' > .gitignore
+python3.12 -m venv --copies .venv
+. .venv/bin/activate
+python -m pip install 'openworkproof==1.6.0'
 ```
 
-安装或连接 MCP 不会自动启用 Guard。实机验证环境为 macOS、Python 3.12、Codex CLI 0.147.0；
-其他 POSIX 环境需先核查兼容性。也可在仓库开发环境用
-`PYTHONPATH=src .venv/bin/python -m openworkproof.guard_cli` 代替 `owp-guard`。
+这个虚拟环境将本次安装与其他项目隔开。`preview` 必须是已存在的项目子目录，不能直接
+授权整个项目、隐藏目录或 `.codex`。这里的 HTML 文件只是预览副本，不会构建、部署或发布。
+
+### 2. 安装接入、本人审阅并检查
 
 ```sh
-owp-guard install --project /absolute/site-project --allow-dir preview --human
-owp-guard enable --project /absolute/site-project --human
-owp-guard doctor --project /absolute/site-project --human
-owp-guard run --project /absolute/site-project --prompt "修改预览首页的标题，先预览不发布" --human
-owp-guard uninstall --project /absolute/site-project --human
+owp-guard install --project "$OWP_TRIAL_PROJECT" --allow-dir preview
+owp-guard enable --project "$OWP_TRIAL_PROJECT"
+owp-guard doctor --project "$OWP_TRIAL_PROJECT"
 ```
 
-`enable` 展示授权目录、限制、检查版本与 Codex 程序位置，用户输入“确认”后才授权
-当前这一条检查并运行真实探针。非交互自动化只有明确传 `--trust-own-hook` 才会继续。
-取消不会更改现有授权；不以安装成功或模型自报完成当作启用成功。
+`install` 只安装项目接入。`enable` 会展示授权目录、限制、当前检查版本和 Codex 程序位置。
+本人审阅并确认理解后，交互输入小写 `yes`（也接受“确认”）才授权当前这一条检查并运行
+真实探针；回车取消。这个上手流程不使用非交互信任参数代替审阅。取消不会更改现有授权，
+安装成功或模型自报完成也不等于启用成功。
+
+`doctor` 的关键字段应如下；其他字段在这里省略：
+
+```json
+{
+  "configured": true,
+  "review_status": "current",
+  "host_trust_status": "trusted",
+  "probe_status": "passed",
+  "ready_for_guarded_run": true,
+  "ordinary_startup_verified": false
+}
+```
+
+这是当前程序的预期结果形状，不是一次新的 1.6.0 实机验收回执。若 `ready_for_guarded_run`
+为 false，先查看实际原因，不能绕过信任或改用普通 Codex 启动后仍称为已保护。升级、重装、
+范围、配置或宿主变化后，需要重新启用并完成检查。
+
+### 3. 修改预览标题，再检查结果
+
+只有 readiness 为 true 后才运行：
+
+```sh
+owp-guard run --project "$OWP_TRIAL_PROJECT" --prompt "仅将 preview/index.html 的 Original heading 改为 Reviewed preview，其他内容不变。只预览，不发布。"
+```
+
+每次受保护任务最多运行 300 秒；不载入个人 MCP/插件配置，在线搜索关闭。构建、部署、
+任意命令和未支持工具不属于这条入口。结束后在编辑器或浏览器打开 `preview/index.html`，
+由你决定是否保留修改。`completed` 不代表你已经验收结果，逐工具会话级证明仍为
+`per_tool_session_proof=false`。
+
+### 4. 结束时卸载项目接入
+
+```sh
+owp-guard uninstall --project "$OWP_TRIAL_PROJECT"
+```
+
+卸载移除本项目的 OWP 接入，保留本地记录与事件，不删除预览项目，也不修改全局宿主信任。
 
 使用自定义 `--state-dir` 时，每个命令都须带同一路径。`--codex` 可以指定 Codex 程序；
 授权同时绑定其解析后的绝对路径、文件摘要和版本。替换程序后须重新启用。
-标准输出默认 JSON，`--human` 为中文。doctor 不会调用模型，只检查安装和原厂清单；
-enable 和 run 使用已有 Codex 登录运行真实 Agent。
+标准输出默认 JSON，`--human` 为中文；即使使用默认 JSON，当前授权审阅与交互提示仍为中文。
+也可在仓库开发环境用 `PYTHONPATH=src .venv/bin/python -m openworkproof.guard_cli` 代替 `owp-guard`。
 
 ## 已验证与限制
 
