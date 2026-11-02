@@ -93,3 +93,13 @@ The bundle's similarly named files show the data shape, but remain untrusted
 candidates. Do not promote them to trusted configuration just to make a green
 status appear. CLI takes file paths to the same mapping and array; MCP takes
 serialized JSON strings.
+
+### Core pytest collector compatibility
+
+The existing Core pytest-population verifier uses a frozen private collection
+layout supported through pytest 9.1.x. Pytest 9.2 removes that layout; the Core
+collector therefore returns an indeterminate selector result rather than trusting
+a changed report. Development/test installations are constrained to `pytest>=8,<9.2`.
+This limitation is in the separate Core pytest-collection workflow, not the three
+SOC reference tools. A future collector update requires its own protocol/evidence
+review; this release preserves the frozen collector.
