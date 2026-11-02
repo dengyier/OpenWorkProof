@@ -77,3 +77,19 @@ Real Slips/AiSOC deployment, real model quality, isolated signing and enforcemen
 The SOC verifier checks signed authorization/receipt links and that their task/policy digests point to earlier same-case ledger records. Its returned `verification_scope` explicitly excludes reconstructing the original work-order/policy payload, recomputing the underlying evidence meaning, proving wall-clock truth, and replaying frozen OWP Core semantics. Do not describe the reference verifier as complete Core protocol verification.
 
 MCP case summaries label prototype statuses as `simulated_acceptance_status` and `internal_reference_verification_status`, with `human_acceptance_obtained=false`. The raw `cases.json` artifact keeps the prototype field names, whose ACCEPTED/VERIFIED values are simulated/internal results. They do not override a human-review requirement or an independent verifier's UNKNOWN.
+
+### Trust input formats
+
+`trusted_keys_json` uses the same public mapping format as `TrustedKeys.export()`:
+keys are expected Ed25519 key IDs, each value is an object with `role` (for example
+`ledger`, `authorizer`, or `executor`) and `public_raw_hex` (the 32-byte public key
+encoded as 64 hex characters). `trusted_checkpoints_json` is a JSON array of
+signed checkpoint objects with `payload` and `signatures`; the payload contains
+`length`, `merkle_root`, `head_hash` and its recorded timestamp. Obtain these
+exact values from the expected signers/witness through a separate trusted route.
+These are public verification materials; private keys are never needed.
+
+The bundle's similarly named files show the data shape, but remain untrusted
+candidates. Do not promote them to trusted configuration just to make a green
+status appear. CLI takes file paths to the same mapping and array; MCP takes
+serialized JSON strings.
