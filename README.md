@@ -30,7 +30,7 @@ OpenWorkProof 不保证 Agent 的结果一定正确，也不替客户作出验�
 MCPRush 动态信息卡片；点击查看评分依据与扫描范围。
 
 ```text
-Core 包版本: 1.5.0
+Core 包版本: 1.6.0
 DeepSeek Harness 插件候选: 0.1.0, 尚未发布 npm
 core focused: 97 passed / 0 failed / 0 skipped
 plugin: 80 passed / 0 failed / 0 skipped
@@ -42,10 +42,18 @@ required-live: 4373 passed / 0 failed / 0 skipped
 以上测试数字为 1.4.0 协议基线的既有验证记录。1.4.1 修复 MCP 启动入口兼容，1.4.2 补清工具说明；1.5.0 新增独立启用的实验性 Codex Guard。当前发行检查以 GitHub Actions 与发行说明为准。
 
 公开发布状态请直接回读 [PyPI](https://pypi.org/project/openworkproof/)、
-[GitHub Release](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.5.0) 与
-[MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.5.0)。
-Core `1.5.0` 包含 `owp-guard` 命令，并保留现有 MCP 启动与工具说明；公开发布状态以上述入口回读为准。DeepSeek Harness 插件
+[GitHub Release](https://github.com/dengyier/OpenWorkProof/releases/tag/v1.6.0) 与
+[MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dengyier%2FOpenWorkProof/versions/1.6.0)。
+Core `1.6.0` 包含 `owp-guard` 与实验性 `owp-aisoc` 命令，新增参考 SOC MCP 工具；公开发布状态以上述入口回读为准。DeepSeek Harness 插件
 `0.1.0` 仍是本地候选，尚未发布 npm 或插件市场。两者是独立的发布事实。
+
+## 1.6.0：AI-SOC 参考接入与 Agent Skill
+
+新增三个 MCP 工具：导入 Slips 告警、生成调查与签名证据包、离线核验；并提供可安装的
+[`openworkproof-soc-review` Skill](skills/openworkproof-soc-review/SKILL.md)。
+[安装与完整流程](docs/integrations/soc-reference.md)。调查使用确定性 stub，处置仅在内存中模拟，
+不控制真实主机；缺少包外可信公钥与检查点时返回 `UNKNOWN`。MCP/Skill 安装不会启用 Guard。
+贡献者 Tim / alphatin123 的 `aisoc` 组件采用 MIT 许可证，保留于 [LICENSES](LICENSES/MIT-aisoc.txt)；Core 继续采用 Apache-2.0。
 
 ## 社区贡献与外部记录
 

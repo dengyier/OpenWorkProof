@@ -42,7 +42,7 @@ def test_package_version_is_protocol_version() -> None:
 
 
 def test_release_metadata_is_synchronized() -> None:
-    expected_version = "1.5.0"
+    expected_version = "1.6.0"
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
     server = json.loads((ROOT / "server.json").read_text())
     legacy_mcp = json.loads((ROOT / "mcp.json").read_text())
@@ -50,7 +50,7 @@ def test_release_metadata_is_synchronized() -> None:
     assert openworkproof.__version__ == expected_version
     assert version("openworkproof") == expected_version
     assert pyproject["project"]["version"] == expected_version
-    assert pyproject["project"]["license"] == "Apache-2.0"
+    assert pyproject["project"]["license"] == "Apache-2.0 AND MIT"
     assert not any(
         classifier.startswith("License ::")
         for classifier in pyproject["project"]["classifiers"]
@@ -60,9 +60,9 @@ def test_release_metadata_is_synchronized() -> None:
         assert metadata["version"] == expected_version
         assert metadata["packages"][0]["version"] == expected_version
 
-    assert legacy_mcp["license"] == "Apache-2.0"
+    assert legacy_mcp["license"] == "Apache-2.0 AND MIT"
     publisher = server["_meta"]["io.modelcontextprotocol.registry/publisher-provided"]
-    assert publisher["license"] == "Apache-2.0"
+    assert publisher["license"] == "Apache-2.0 AND MIT"
     assert server["websiteUrl"] == pyproject["project"]["urls"]["Homepage"]
     assert not {"homepage", "author", "license", "keywords"} & server.keys()
 

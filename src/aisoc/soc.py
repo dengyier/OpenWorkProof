@@ -195,12 +195,13 @@ class AISOC:
         self.signer = AuthorizationSigner(self.keys["authorizer"], self.trusted, self.clock)
         self.executor = BoundedExecutor(self.keys["executor"], self.clock)
         self.pep = PolicyEnforcementPoint(self.trusted, self.executor, self.tool_log, self.clock, pep_config)
-        self.verifier = Verifier(self.keys["verifier"], self.trusted, self.clock)
+        self.authorizations: List[Signed] = []
+        self.verifier = Verifier(self.keys["verifier"], self.trusted, self.clock, self.authorizations)
 
         # The sandbox's only channel out. Identity is bound to the channel, not claimed by the agent.
         self.egress = ControlledEgressProxy(self.ledger, getattr(agent, "name", type(agent).__name__), self.clock, egress_config or EgressConfig())
 
-        self._recent: Dict[Tuple[str, str, str], Any] = {}
+        self._recent: Dict[Tuple[str, str, str, Optional[str]], Any] = {}
         self.results: List[CaseResult] = []
         # Introspection hooks used by scenarios/tests; they expose no extra authority.
         self.last_order_grant: Optional[Tuple[WorkOrder, CapabilityGrant]] = None
@@ -249,6 +250,7 @@ class AISOC:
         anomaly: Optional[ExternalAnomaly] = None,
         use_internal_normality: bool = False,
         source_record: Optional[Dict[str, Any]] = None,
+        dedup_key: Optional[str] = None,
     ) -> CaseResult:
         """Run a case whose known branch comes from an external detector (e.g. Slips).
 
@@ -260,7 +262,7 @@ class AISOC:
         refs = {"flow_id": flow.flow_id, "detector": known.source}
         if source_record is not None:
             refs["source_record_digest"] = digest(source_record)
-        return self._run_case(flow, decision, refs)
+        return self._run_case(flow, decision, refs, dedup_key)
 
     # ── 【老師註解】AISOC._run_case ───────────────────────────────
     # 做什麼：一個案件的完整生命週期，順序固定：
@@ -270,7 +272,8 @@ class AISOC:
     # 怎麼看：egress.forward 回 ok=False 時「什麼都不做」，只把原因記到 result.egress_dropped——這就是 fail-closed。
     #         每個案件結束都呼叫 ledger.checkpoint()，所以案件數 = 檢查點數。
     # 對應：準則 #1、#2、#7、#8；測試 tests/test_end_to_end.py::test_compromised_agent_cannot_cause_side_effects
-    def _run_case(self, flow: FlowRecord, decision: CaseDecision, refs: Optional[Dict[str, str]] = None) -> CaseResult:
+    def _run_case(self, flow: FlowRecord, decision: CaseDecision, refs: Optional[Dict[str, str]] = None,
+                  dedup_key: Optional[str] = None) -> CaseResult:
         case_id = new_id("case")
         self.ledger.append("detection", case_id, decision.to_dict(), refs or {"flow_id": flow.flow_id})  # 步驟 1：偵測先上帳
         result = CaseResult(case_id=case_id, flow_id=flow.flow_id, decision=decision, investigated=False)
@@ -279,7 +282,7 @@ class AISOC:
             self.results.append(result)  # 步驟 2：低風險觀察／證據不足等狀態不派 Agent
             return result
 
-        key = (flow.tenant, flow.src_host, decision.status.value)
+        key = (flow.tenant, flow.src_host, decision.status.value, dedup_key)
         last = self._recent.get(key)
         now = self.clock.now()
         if last is not None and (now - last).total_seconds() < self.dedup_window_s:
@@ -290,7 +293,7 @@ class AISOC:
         self._recent[key] = now
 
         order, grant = self._freeze_task(case_id, flow, decision)  # 步驟 4：凍結工作單與最小能力授予
-        report = self.agent.investigate(order, decision, self.tools)  # 步驟 5：Agent 在沙箱內調查（只讀工具）
+        report = self.agent.investigate(order, decision, self.tools.for_order(order))  # 工具由控制面綁定工單與租戶
         result.investigated = True
 
         fwd = self.egress.forward(MSG_INVESTIGATION_REPORT, report.to_dict(), case_id)  # 步驟 6：報告必須經出口代理
@@ -316,6 +319,7 @@ class AISOC:
 
         acc = self._accept(case_id, vd)  # 步驟 11：接受決定（VERIFIED→ACCEPTED／UNKNOWN→DEFERRED／FAILED→REJECTED）
         self.ledger.append("acceptance_decision", case_id, acc.payload)
+        self.ledger.checkpoint()  # 最終核驗／接受決定也必須被見證覆蓋
         result.acceptance_status = acc.payload["status"]
         self.results.append(result)
         return result
@@ -397,6 +401,7 @@ class AISOC:
             out.reason = f"signer refused: {exc}"
             return out
         out.authorized = True
+        self.authorizations.append(auth)
         self.ledger.append("authorization", case_id, auth.payload, {"request_digest": pd.request_digest, "nonce": auth.payload["nonce"]})
 
         outcome = self.pep.execute(req, auth)  # 閘門 4：PEP 重驗一遍再執行
@@ -462,14 +467,28 @@ class AISOC:
         import json
 
         out_dir.mkdir(parents=True, exist_ok=True)
-        self.ledger.export(out_dir / "ledger.json")
-        (out_dir / "trusted-keys.json").write_text(json.dumps(self.trusted.export(), indent=2, sort_keys=True))
-        (out_dir / "tool-side-receipts.json").write_text(
-            json.dumps([r.to_dict() for r in self.tool_log.receipts], indent=2, sort_keys=True)
-        )
-        (out_dir / "tool-calls.json").write_text(
-            json.dumps([c.__dict__ for c in self.tool_log.calls], indent=2, sort_keys=True)
-        )
-        (out_dir / "witness-checkpoints.json").write_text(json.dumps(self.witness.checkpoints(), indent=2, sort_keys=True))
-        (out_dir / "cases.json").write_text(json.dumps([r.to_dict() for r in self.results], indent=2, sort_keys=True))
-        (out_dir / "model-card.json").write_text(json.dumps(self.model.describe(), indent=2, sort_keys=True))
+        for name, value in self.export_bundle().items():
+            (out_dir / name).write_text(json.dumps(value, indent=2, sort_keys=True))
+
+    def export_bundle(self) -> Dict[str, Any]:
+        """Return the same data as directory export, without writing files.
+
+        Keys and checkpoints included here are evidence, not an independently
+        obtained trust anchor. Offline callers must pin those separately.
+        """
+        import json
+
+        cps = self.ledger.witness.checkpoints() if self.ledger.witness is not None else []
+        if not cps or cps[-1]["payload"]["length"] != len(self.ledger.entries):
+            self.ledger.checkpoint()
+        bundle = {
+            "ledger.json": [e.to_dict() for e in self.ledger.entries],
+            "trusted-keys.json": self.trusted.export(),
+            "tool-side-receipts.json": [r.to_dict() for r in self.tool_log.receipts],
+            "authorizations.json": [a.to_dict() for a in self.authorizations],
+            "tool-calls.json": [c.__dict__ for c in self.tool_log.calls],
+            "witness-checkpoints.json": self.ledger.witness.checkpoints() if self.ledger.witness is not None else [],
+            "cases.json": [r.to_dict() for r in self.results],
+            "model-card.json": self.model.describe(),
+        }
+        return json.loads(json.dumps(bundle))

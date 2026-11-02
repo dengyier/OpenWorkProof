@@ -272,76 +272,36 @@ def _flow_stub(case: Dict[str, Any]):
                       observed_at=f.get("observed_at", ""))
 
 
-# ── 【老師註解】cmd_verify ───────────────────────────────────────
-# 做什麼：`python -m aisoc verify <dir>`：離線、獨立地重驗一個匯出的 run。只讀四個檔案（ledger.json、trusted-keys.json、
-#         witness-checkpoints.json、tool-side-receipts.json），做五項檢查：①哈希鏈 ②見證簽名與 Merkle 根 ③出口中介 ④收據簽名與繞過對賬 ⑤給出狀態。
-# 為什麼：帳本是產生方自己寫的，自己說自己對沒有意義；驗證器必須能在另一台機器、不 import SOC 物件、只靠公鑰就重算出同樣結論。
-# 怎麼看：這個函式刻意「自己重寫」檢查邏輯，而不是呼叫 aisoc.owp.verifier——這樣讀者可以逐行對照兩邊是否一致；
-#         狀態只有三種：有任何問題 ⇒ FAILED；沒問題但沒有任何見證檢查點 ⇒ UNKNOWN（不是 VERIFIED！）；否則 VERIFIED。
-#         「無見證 ⇒ UNKNOWN」是準則 #8 的精神：沒人見證過的鏈，就算內部一致，也可能是整本重寫的。
-# 拿掉會怎樣：所有「可驗證」的宣稱都退化成「請相信我們的 JSON」。
-# 對應：準則 #2、#7、#8、#9；測試 tests/test_egress_release_grant.py::test_cli_slips_ingest_verify_bundle_and_push_dry_run（verify 子命令）、
-#       tests/test_ledger_verifier.py::test_verifier_unknown_without_witness（同一規則在 verifier 模組的對照）
 def cmd_verify(args: argparse.Namespace) -> int:
-    """Offline re-verification of an exported run: chain, witness, receipts."""
-    from .canonical import digest
-    from .crypto import TrustedKeys
-    from .owp.ledger import GENESIS, merkle_root
+    """Verify an export using the same pure validator as the in-process verifier.
 
-    d = Path(args.dir)
-    entries = json.loads((d / "ledger.json").read_text())
-    keys = json.loads((d / "trusted-keys.json").read_text())
-    cps = json.loads((d / "witness-checkpoints.json").read_text())
-    receipts = json.loads((d / "tool-side-receipts.json").read_text())
-    # 步驟 0：只載入「公鑰 + 角色」；驗證器手上沒有任何私鑰，所以它不可能偽造，也不需要被信任
-    trusted = TrustedKeys()
-    for kid, info in keys.items():
-        trusted.trust_raw(kid, info["role"], bytes.fromhex(info["public_raw_hex"]))
+    Files inside the run are untrusted evidence. Optional pins must be supplied
+    from outside that directory and obtained through the caller's trust process.
+    """
+    from .owp.verifier import verify_bundle
 
-    problems: List[str] = []
-    prev = GENESIS
-    # 步驟 1：哈希鏈——每筆的 prev_hash 要等於前一筆的 entry_hash；entry_hash 要等於自己內容的摘要；index 要連號
-    for i, e in enumerate(entries):
-        body = {k: e[k] for k in e if k != "entry_hash"}
-        if e["prev_hash"] != prev or digest(body) != e["entry_hash"] or e["index"] != i:
-            problems.append(f"chain broken at {i}")
-        prev = e["entry_hash"]
-    hashes = [e["entry_hash"] for e in entries]
-    # 步驟 2：見證檢查點——簽名必須來自 ledger 角色的鑰匙（角色錯 ⇒ 無效）；帳本不能比見證過的長度短（截斷）；
-    #         重算前 length 筆的 Merkle 根必須和見證時一致（改動／分叉）
-    for cp in cps:
-        p = cp["payload"]
-        if not any(trusted.verify(p, s, expected_role="ledger") for s in cp["signatures"]):
-            problems.append("checkpoint signature invalid")
-        elif p["length"] > len(hashes):
-            problems.append(f"truncated below witnessed length {p['length']}")
-        elif merkle_root(hashes[: p["length"]]) != p["merkle_root"]:
-            problems.append(f"merkle mismatch at witnessed length {p['length']}")
-    # 步驟 3：出口中介——每個 action_request 的摘要，必須「先」出現在某筆 agent_egress 的 msg_digest 裡；
-    #         否則這張請求不是從受控出口進來的（有人繞過出口代理直接塞請求）
-    egress_seen: Dict[str, int] = {}
-    for e in entries:
-        if e["entry_type"] == "agent_egress":
-            egress_seen.setdefault(e["refs"].get("msg_digest", ""), e["index"])
-        elif e["entry_type"] == "action_request":
-            idx = egress_seen.get(e["object_digest"])
-            if idx is None or idx > e["index"]:
-                problems.append(f"entry {e['index']}: action_request without a prior audited egress record")
-    # 步驟 4：收據對賬——收據要由 executor 角色簽名；凡是「executed」的收據，帳本裡必須同時有這張收據的摘要
-    #         和對應請求的 authorization，缺一就是「有做卻沒授權／沒記帳」= 繞過（bypass）
-    recorded = {e["object_digest"] for e in entries if e["entry_type"] == "action_receipt"}
-    authorized = {e["refs"].get("request_digest") for e in entries if e["entry_type"] == "authorization"}
-    for r in receipts:
-        p = r["payload"]
-        if not any(trusted.verify(p, s, expected_role="executor") for s in r["signatures"]):
-            problems.append(f"receipt {p['receipt_id']} signature invalid")
-        if p["outcome"] == "executed" and (digest(p) not in recorded or p["request_digest"] not in authorized):
-            problems.append(f"receipt {p['receipt_id']} executed without ledger authorization (bypass)")
-
-    # 步驟 5：定案——有問題 ⇒ FAILED；沒有見證檢查點 ⇒ UNKNOWN（不敢說 VERIFIED）；都好 ⇒ VERIFIED。只有 VERIFIED 回傳 0
-    status = "FAILED" if problems else ("UNKNOWN" if not cps else "VERIFIED")
-    print(json.dumps({"status": status, "entries": len(entries), "checkpoints": len(cps), "receipts": len(receipts), "problems": problems}, indent=2))
-    return 0 if status == "VERIFIED" else 1
+    directory = Path(args.dir).resolve()
+    try:
+        bundle = {name: json.loads((directory / name).read_text())
+                  for name in ("ledger.json", "trusted-keys.json", "witness-checkpoints.json",
+                               "tool-side-receipts.json")}
+        auth_file = directory / "authorizations.json"
+        bundle["authorizations.json"] = json.loads(auth_file.read_text()) if auth_file.exists() else []
+        pins = []
+        for name in ("trusted_keys", "trusted_checkpoints"):
+            value = getattr(args, name, None)
+            if value is None:
+                pins.append(None)
+                continue
+            path = Path(value).resolve()
+            if path == directory or directory in path.parents:
+                raise ValueError("trust pins must be provided from outside the run directory")
+            pins.append(json.loads(path.read_text()))
+        result = verify_bundle(bundle, pins[0], pins[1])
+    except (OSError, ValueError, TypeError) as exc:
+        result = {"status": "FAILED", "problems": [str(exc)]}
+    print(json.dumps(result, indent=2))
+    return 0 if result["status"] == "VERIFIED" else 1
 
 
 # ── 【老師註解】_seed_synthetic_context ──────────────────────────
@@ -413,6 +373,8 @@ def main(argv: List[str] | None = None) -> int:
     # verify：唯一參數是匯出目錄
     v = sub.add_parser("verify", help="offline verification of an exported run directory")
     v.add_argument("dir")
+    v.add_argument("--trusted-keys", help="caller-pinned identity keys obtained outside the run directory")
+    v.add_argument("--trusted-checkpoints", help="caller-pinned witnessed checkpoints obtained outside the run directory")
     v.set_defaults(fn=cmd_verify)
     # slips-ingest：alerts.json 必填；conn.log 選填（補流量數值）；--tau-k 是已知分支的信心門檻；--internal-normality 預設關
     si = sub.add_parser("slips-ingest", help="run a Slips alerts.json (IDMEFv2) through the SOC as the external detector branch")

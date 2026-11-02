@@ -165,6 +165,8 @@ class PolicyEnforcementPoint:
         self.revocations = revocations or RevocationList()
         self.nonces = NonceStore()
         self._idem: Dict[str, Signed] = {}
+        self._grant_uses: Dict[tuple[str, str, str], int] = {}
+        self._execution_lock = threading.Lock()
         self.rejections: List[Dict[str, str]] = []
 
     # ── 【老師註解】PolicyEnforcementPoint.execute ────────────────
@@ -199,26 +201,41 @@ class PolicyEnforcementPoint:
                 return reject("action/resource/tenant differ from envelope")
             if env.get("destination") != request.destination:
                 return reject("destination differs from authorized destination")
-        if c.verify_expiry and parse_iso(env["expires_at"]) <= self.clock.now():
-            return reject("authorization expired")  # 檢查 ③
-        if c.verify_revocation and self.revocations.is_revoked(env):
-            return reject("authorization revoked")  # 檢查 ④
-        if c.require_approval_for_high_impact and request.action in HIGH_IMPACT_ACTIONS and not env.get("approval_digest"):
-            return reject("high impact action lacks bound human approval")  # 檢查 ⑤
-        if c.idempotency and request.idempotency_key in self._idem:
-            prior = self._idem[request.idempotency_key]
-            return ExecutionOutcome(False, "idempotent replay: returning prior receipt, no new side effect", prior)  # 檢查 ⑥
-        if c.single_use_nonce and not self.nonces.consume(env["nonce"]):
-            return reject("nonce already consumed (replay)")  # 檢查 ⑦：同一張票第二次進來
+        with self._execution_lock:
+            if c.verify_expiry:
+                try:
+                    expired = min(parse_iso(env["expires_at"]), parse_iso(env["grant_expires_at"])) <= self.clock.now()
+                except (KeyError, TypeError, ValueError):
+                    return reject("authorization expiry invalid")
+                if expired:
+                    return reject("authorization expired")  # 檢查 ③
+            if c.verify_revocation and self.revocations.is_revoked(env):
+                return reject("authorization revoked")  # 檢查 ④
+            if c.require_approval_for_high_impact and request.action in HIGH_IMPACT_ACTIONS and not env.get("approval_digest"):
+                return reject("high impact action lacks bound human approval")  # 檢查 ⑤
+            if c.idempotency and request.idempotency_key in self._idem:
+                prior = self._idem[request.idempotency_key]
+                return ExecutionOutcome(False, "idempotent replay: returning prior receipt, no new side effect", prior)  # 檢查 ⑥
+            grant_id, max_uses, mode = env.get("grant_id"), env.get("grant_max_uses"), env.get("grant_usage_mode")
+            if not isinstance(grant_id, str) or not grant_id or type(max_uses) is not int or max_uses <= 0 or mode not in {"single_use", "bounded"}:
+                return reject("authorization lacks a valid capability grant budget")
+            grant_key = (request.tenant, request.case_id, grant_id)
+            uses = self._grant_uses.get(grant_key, 0)
+            limit = 1 if mode == "single_use" else max_uses
+            if uses >= limit:
+                return reject("capability grant use budget exhausted")
+            if c.single_use_nonce and not self.nonces.consume(env["nonce"]):
+                return reject("nonce already consumed (replay)")  # 檢查 ⑦：同一張票第二次進來
+            self._grant_uses[grant_key] = uses + 1
 
-        try:
-            effect = self.executor.run(request, env, c.egress_default_deny)  # 檢查 ⑧：受限執行
-        except Exception as exc:
-            return reject(f"executor error: {type(exc).__name__}: {exc}")
-        receipt = self._receipt(request, env, "executed", str(effect))
-        if c.idempotency:
-            self._idem[request.idempotency_key] = receipt
-        return ExecutionOutcome(True, "executed", receipt, effect)
+            try:
+                effect = self.executor.run(request, env, c.egress_default_deny)  # 檢查 ⑧：受限執行
+            except Exception as exc:
+                return reject(f"executor error: {type(exc).__name__}: {exc}")
+            receipt = self._receipt(request, env, "executed", str(effect))
+            if c.idempotency:
+                self._idem[request.idempotency_key] = receipt
+            return ExecutionOutcome(True, "executed", receipt, effect)
 
     # ── 【老師註解】PolicyEnforcementPoint._receipt ───────────────
     # 做什麼：產生一張 ActionReceipt（執行或拒絕都有），用 executor 鑰匙簽名，並且同時寫進獨立的 ToolSideLog。
