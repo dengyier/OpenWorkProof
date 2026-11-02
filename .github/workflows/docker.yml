@@ -7,6 +7,17 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: Optional release image tag; must match pyproject.toml
+        required: false
+        type: string
+        default: ''
+      update_aliases:
+        description: Also update latest and major.minor image aliases
+        required: false
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
@@ -25,6 +36,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Validate release image version
+        id: release-version
+        if: github.event_name == 'workflow_dispatch' && inputs.release_version != ''
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import tomllib
+
+          with open("pyproject.toml", "rb") as source:
+              expected = tomllib.load(source)["project"]["version"]
+          if os.environ["RELEASE_VERSION"] != expected:
+              raise SystemExit(f"release_version must equal pyproject.toml version {expected}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"series={'.'.join(expected.split('.')[:2])}", file=output)
+          PY
+
       - name: Log in to Container Registry
         uses: docker/login-action@v3
         with:
@@ -42,6 +71,11 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=,suffix=,format=short
+            type=raw,value=${{ inputs.release_version }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.release_version != '' }}
+            type=raw,value=${{ steps.release-version.outputs.series }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.release_version != '' && inputs.update_aliases }}
+            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' && inputs.release_version != '' && inputs.update_aliases }}
+          labels: |
+            org.opencontainers.image.licenses=Apache-2.0 AND MIT
 
       - name: Build and push Docker image
         id: push
