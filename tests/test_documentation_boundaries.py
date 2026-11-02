@@ -482,6 +482,7 @@ def test_human_agency_example_describes_application_side_effects_precisely() -> 
 
 def test_readmes_provide_current_install_configuration_and_language_navigation() -> None:
     import json
+    from urllib.parse import urljoin, urlsplit
 
     from openworkproof import __version__
 
@@ -494,8 +495,17 @@ def test_readmes_provide_current_install_configuration_and_language_navigation()
         assert configs, f"{relative} must provide an MCP configuration"
         server = json.loads(configs[0])["mcpServers"]["openworkproof"]
         assert server == {"command": "uvx", "args": [f"openworkproof=={__version__}"]}
-        assert f"]({other_language})" in text
-        assert "](MCP_SERVER.md)" in text
+        repository_docs = "https://github.com/dengyier/OpenWorkProof/blob/main/"
+        links = re.findall(r"\]\(([^)]+)\)", text)
+        resolved_links = {urljoin(repository_docs, link) for link in links}
+        assert repository_docs + other_language in resolved_links
+        assert repository_docs + "MCP_SERVER.md" in resolved_links
+        if relative == ENGLISH_README:
+            # PyPI renders this file at a package URL, so relative file links break.
+            assert all(
+                link.startswith("#") or urlsplit(link).scheme in {"https", "http"}
+                for link in links
+            )
         assert "owp_soc_sample_alerts" in text
         assert "owp_soc_analyze_slips" in text
         assert "owp_soc_verify_bundle" in text

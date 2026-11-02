@@ -16,8 +16,8 @@ ordinary Codex window is not automatically protected.
 - Use a local POSIX environment, a working Git installation and Python 3.12.
   The recorded real-host baseline is **macOS, Python 3.12 and Codex CLI 0.147.0**.
   That live record was obtained for the 1.5.0 Guard implementation; the current
-  installation example uses package 1.6.0. It is not a new live acceptance claim
-  for every 1.6.0 environment. Check compatibility before using another host or
+  installation example uses package 1.6.1. It is not a new live acceptance claim
+  for every 1.6.1 environment. Check compatibility before using another host or
   version. Windows and WorkBuddy are not verified for this Guard workflow.
 - Have Codex CLI installed and signed in with your own account. `enable` runs a
   real Codex probe, and `run` executes a real Agent task. Both use your existing
@@ -41,13 +41,15 @@ git init
 mkdir preview
 printf '<!doctype html>\n<title>OWP preview</title>\n<h1>Original heading</h1>\n' > preview/index.html
 printf '.venv/\n' > .gitignore
-python3.12 -m venv --copies .venv
+OWP_TRIAL_PYTHON="$(python3.12 -c 'import pathlib,sys; print(pathlib.Path(sys.executable).resolve())')"
+"$OWP_TRIAL_PYTHON" -m venv --copies .venv
 . .venv/bin/activate
-python -m pip install 'openworkproof==1.6.0'
+python -m pip install 'openworkproof==1.6.1'
 ```
 
-The virtual environment keeps this trial's package installation separate from
-other projects. `pwd -P` gives a physical path; Guard rejects symbolic-link paths.
+Resolving the real Python executable avoids a broken copied environment when
+`python3.12` is a symbolic link. The virtual environment keeps this trial's
+package installation separate from other projects. `pwd -P` gives a physical path; Guard rejects symbolic-link paths.
 The allowed `preview` directory must already exist and be a proper subdirectory
 of the project, not the project root or a hidden directory.
 

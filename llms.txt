@@ -4,7 +4,7 @@
 
 ## Current release
 
-OpenWorkProof 1.6.0 exposes 32 local stdio MCP tools. The Python package requires Python 3.10 or newer. The package also includes a separately enabled experimental Codex Guard and an experimental SOC reference CLI. Publication, installation, protection, verification and human acceptance are separate facts.
+OpenWorkProof 1.6.1 exposes 32 local stdio MCP tools. The Python package requires Python 3.10 or newer. The package also includes a separately enabled experimental Codex Guard and an experimental SOC reference CLI. Publication, installation, protection, verification and human acceptance are separate facts.
 
 ## Start with a concrete task
 
@@ -15,7 +15,7 @@ OpenWorkProof 1.6.0 exposes 32 local stdio MCP tools. The Python package require
 
 ## Connect MCP
 
-Use a stdio-capable local MCP client to launch `uvx --from openworkproof==1.6.0 owp-mcp`. The MCP client manages this process. There is no hosted remote endpoint or API key in this setup. `owp` is the separate CLI, not the stdio server.
+Use a stdio-capable local MCP client to launch `uvx --from openworkproof==1.6.1 owp-mcp`. The MCP client manages this process. There is no hosted remote endpoint or API key in this setup. `owp` is the separate CLI, not the stdio server.
 
 The optional `openworkproof-soc-review` Agent Skill is installable with `npx skills add dengyier/OpenWorkProof --skill openworkproof-soc-review`. The Skill supplies instructions; it does not configure MCP or grant host permissions.
 
