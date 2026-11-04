@@ -7,10 +7,7 @@
 ## 1. 已儲存的記憶（原文）
 
 ### 使用者檔案
-- 學習網絡安全（CISSP 筆記）；以 Web3 賞金計劃的 bug bounty 累積實戰經驗，不走 OSCP
-- 6 月做出 AI 求職 Agent，已上線跨平台 AI 求職平台（截至 2026 年 10 月）
-- 計劃：申請 CCMF、成立公司、申請 CIP；已申請龍華創業基地（結果預計 1 月）；創業同時兼職 STEAM 老師
-- 以粵語／繁體中文書寫
+- 
 
 ### 專案：AI SOC + OpenWorkProof（AI sign）
 - 想把 AI sign（OpenWorkProof，github.com/dengyier/OpenWorkProof）加到 AI SOC，讓 AI Agent 偵測到疑似零日時必須通知人類做人工檢核
