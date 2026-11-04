@@ -6,7 +6,7 @@
 ## 1. 已儲存的記憶（原文）
 
 ### 使用者檔案
-- 
+
 
 ### 專案：AI SOC + OpenWorkProof（AI sign）
 - 想把 AI sign（OpenWorkProof，github.com/dengyier/OpenWorkProof）加到 AI SOC，讓 AI Agent 偵測到疑似零日時必須通知人類做人工檢核
