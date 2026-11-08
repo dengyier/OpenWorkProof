@@ -60,7 +60,7 @@ The Skill gives your agent a repeatable procedure for using those tools. With No
 npx skills add dengyier/OpenWorkProof --skill openworkproof-soc-review
 ```
 
-Choose your agent and install scope in the installer. [Read the instructions first](https://github.com/dengyier/OpenWorkProof/blob/main/skills/openworkproof-soc-review/SKILL.md), or use the [release ZIP](https://github.com/dengyier/OpenWorkProof/releases/download/v1.6.0/openworkproof-soc-review-1.6.0.zip).
+Choose your agent and install scope in the installer. [Read the instructions first](https://github.com/dengyier/OpenWorkProof/blob/main/skills/openworkproof-soc-review/SKILL.md), or use the [Skill ZIP with the 2026-11-09 credit revision](https://github.com/dengyier/OpenWorkProof/releases/download/v1.6.1/openworkproof-soc-review-1.6.1-credits-20261109.zip).
 
 The Skill does not configure MCP or enable Guard. Configure the MCP server above separately. Your client's usual model charges still apply.
 

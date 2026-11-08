@@ -58,7 +58,7 @@ Skill 为 Agent 提供一套调用这些工具的操作步骤。安装了 Node.j
 npx skills add dengyier/OpenWorkProof --skill openworkproof-soc-review
 ```
 
-在安装器里选择 Agent 和安装范围。可以先[阅读 Skill 内容](skills/openworkproof-soc-review/SKILL.md)，也可使用[发行包中的 ZIP](https://github.com/dengyier/OpenWorkProof/releases/download/v1.6.0/openworkproof-soc-review-1.6.0.zip)。
+在安装器里选择 Agent 和安装范围。可以先[阅读 Skill 内容](skills/openworkproof-soc-review/SKILL.md)，也可使用[2026-11-09 署名修订版 Skill ZIP](https://github.com/dengyier/OpenWorkProof/releases/download/v1.6.1/openworkproof-soc-review-1.6.1-credits-20261109.zip)。
 
 Skill 不会自动配置 MCP 或开启 Guard，仍需单独完成前面的 MCP 配置。客户端原有的模型费用由对应服务商收取。
 
