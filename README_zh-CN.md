@@ -2,6 +2,8 @@
 
 [English](README.md) · **简体中文**
 
+Contributors: dengyier & Tim Shing（成孝添）
+
 **核对 AI Agent 被允许做什么、记录了什么，以及这些证据能否经得起检查。**
 
 OpenWorkProof（OWP）是一套面向 Agent 开发者和团队的开源工具。你可以用它检查签名工作记录、核验导出的证据包，或让 Codex 在指定的预览目录内完成受限的文本修改。安全工程师还可以使用参考流程，整理和复核 Slips 告警。
@@ -129,4 +131,4 @@ OWP 是开源项目，当前软件包和 Skill 可按各自许可证免费使用
 
 ## 许可证
 
-OWP Core：[Apache-2.0](LICENSE)。Tim / alphatin123 贡献的 `aisoc` 组件：[MIT](LICENSES/MIT-aisoc.txt)。组合软件包的元数据使用 `Apache-2.0 AND MIT`。
+OWP Core：[Apache-2.0](LICENSE)。Tim Shing（成孝添），GitHub 账号 `alphatin123`，贡献的 `aisoc` 组件：[MIT](LICENSES/MIT-aisoc.txt)。组合软件包的元数据使用 `Apache-2.0 AND MIT`。
