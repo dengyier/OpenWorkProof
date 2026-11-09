@@ -4,6 +4,8 @@
 
 **English** · [简体中文](https://github.com/dengyier/OpenWorkProof/blob/main/README_zh-CN.md)
 
+Contributors: dengyier & Tim Shing（成孝添）
+
 **Check what an AI agent was allowed to do, what it recorded, and whether its evidence holds up.**
 
 OpenWorkProof (OWP) is an open-source toolkit for developers and teams using AI agents. Use it to review signed work records, check exported evidence, or run a bounded Codex preview-editing task. Security engineers can also try a reference workflow for reviewing Slips alerts.
@@ -58,7 +60,7 @@ The Skill gives your agent a repeatable procedure for using those tools. With No
 npx skills add dengyier/OpenWorkProof --skill openworkproof-soc-review
 ```
 
-Choose your agent and install scope in the installer. [Read the instructions first](https://github.com/dengyier/OpenWorkProof/blob/main/skills/openworkproof-soc-review/SKILL.md), or use the [release ZIP](https://github.com/dengyier/OpenWorkProof/releases/download/v1.6.0/openworkproof-soc-review-1.6.0.zip).
+Choose your agent and install scope in the installer. [Read the instructions first](https://github.com/dengyier/OpenWorkProof/blob/main/skills/openworkproof-soc-review/SKILL.md), or use the [Skill ZIP with the 2026-11-09 credit revision](https://github.com/dengyier/OpenWorkProof/releases/download/v1.6.1/openworkproof-soc-review-1.6.1-credits-20261109.zip).
 
 The Skill does not configure MCP or enable Guard. Configure the MCP server above separately. Your client's usual model charges still apply.
 
@@ -131,4 +133,4 @@ Contribute a reproducible bug report, an integration, or a documentation improve
 
 ## License
 
-OWP Core: [Apache-2.0](https://github.com/dengyier/OpenWorkProof/blob/main/LICENSE). Tim / alphatin123's contributed `aisoc` component: [MIT](https://github.com/dengyier/OpenWorkProof/blob/main/LICENSES/MIT-aisoc.txt). The combined package metadata uses `Apache-2.0 AND MIT`.
+OWP Core: [Apache-2.0](https://github.com/dengyier/OpenWorkProof/blob/main/LICENSE). Tim Shing（成孝添）, GitHub `alphatin123`, contributed the `aisoc` component under [MIT](https://github.com/dengyier/OpenWorkProof/blob/main/LICENSES/MIT-aisoc.txt). The combined package metadata uses `Apache-2.0 AND MIT`.

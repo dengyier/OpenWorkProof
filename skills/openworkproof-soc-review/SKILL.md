@@ -1,9 +1,13 @@
 ---
 name: openworkproof-soc-review
 description: Review supplied Slips alerts with OpenWorkProof's reference SOC workflow and verify its signed evidence bundle. Use for alert investigation and evidence review; connecting MCP alone does not activate endpoint protection.
+metadata:
+  author: "dengyier & Tim Shing（成孝添）"
 ---
 
 # OpenWorkProof SOC review
+
+Contributors: dengyier & Tim Shing（成孝添）
 
 Use an installed OpenWorkProof 1.6.0+ MCP server. The three reference tools are `owp_soc_sample_alerts`, `owp_soc_analyze_slips`, and `owp_soc_verify_bundle`. If they are absent, report the installed version/available tools and ask the user to upgrade their MCP package; do not invent results or replace verification with model judgment.
 

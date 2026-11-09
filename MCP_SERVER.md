@@ -1,5 +1,7 @@
 # Use OpenWorkProof through MCP
 
+Contributors: dengyier & Tim Shing（成孝添）
+
 [English overview](README.md) · [中文说明](README_zh-CN.md) · [SOC guide](docs/integrations/soc-reference.md) · [Guard guide](docs/integrations/agent-guard-onboarding.en.md)
 
 OpenWorkProof exposes **32 local MCP tools in version 1.6.1**. Connect them to an existing Agent when you want to inspect signed work records, review supplied security alerts, or check an exported evidence bundle.

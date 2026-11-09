@@ -2,6 +2,8 @@
 
 [English](README.md) · **简体中文**
 
+Contributors: dengyier & Tim Shing（成孝添）
+
 **核对 AI Agent 被允许做什么、记录了什么，以及这些证据能否经得起检查。**
 
 OpenWorkProof（OWP）是一套面向 Agent 开发者和团队的开源工具。你可以用它检查签名工作记录、核验导出的证据包，或让 Codex 在指定的预览目录内完成受限的文本修改。安全工程师还可以使用参考流程，整理和复核 Slips 告警。
@@ -56,7 +58,7 @@ Skill 为 Agent 提供一套调用这些工具的操作步骤。安装了 Node.j
 npx skills add dengyier/OpenWorkProof --skill openworkproof-soc-review
 ```
 
-在安装器里选择 Agent 和安装范围。可以先[阅读 Skill 内容](skills/openworkproof-soc-review/SKILL.md)，也可使用[发行包中的 ZIP](https://github.com/dengyier/OpenWorkProof/releases/download/v1.6.0/openworkproof-soc-review-1.6.0.zip)。
+在安装器里选择 Agent 和安装范围。可以先[阅读 Skill 内容](skills/openworkproof-soc-review/SKILL.md)，也可使用[2026-11-09 署名修订版 Skill ZIP](https://github.com/dengyier/OpenWorkProof/releases/download/v1.6.1/openworkproof-soc-review-1.6.1-credits-20261109.zip)。
 
 Skill 不会自动配置 MCP 或开启 Guard，仍需单独完成前面的 MCP 配置。客户端原有的模型费用由对应服务商收取。
 
@@ -129,4 +131,4 @@ OWP 是开源项目，当前软件包和 Skill 可按各自许可证免费使用
 
 ## 许可证
 
-OWP Core：[Apache-2.0](LICENSE)。Tim / alphatin123 贡献的 `aisoc` 组件：[MIT](LICENSES/MIT-aisoc.txt)。组合软件包的元数据使用 `Apache-2.0 AND MIT`。
+OWP Core：[Apache-2.0](LICENSE)。Tim Shing（成孝添），GitHub 账号 `alphatin123`，贡献的 `aisoc` 组件：[MIT](LICENSES/MIT-aisoc.txt)。组合软件包的元数据使用 `Apache-2.0 AND MIT`。
