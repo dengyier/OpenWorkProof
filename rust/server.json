@@ -1,19 +1,20 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.dengyier/OpenWorkProof-Rust",
-  "title": "OpenWorkProof Rust",
-  "description": "Native Rust MCP server with six tools for evidence digests, signature checks, keys and schemas.",
+  "title": "OpenWorkProof Rust (Apple Silicon)",
+  "description": "Six local Rust tools for evidence digests, signature checks, keys and schemas on Apple Silicon.",
   "repository": {
     "url": "https://github.com/dengyier/OpenWorkProof",
     "source": "github",
     "subfolder": "rust"
   },
-  "websiteUrl": "https://github.com/dengyier/OpenWorkProof/tree/owp-rust-v0.1.0/rust",
+  "websiteUrl": "https://github.com/dengyier/OpenWorkProof/tree/rust-v0.1.0/rust",
   "version": "0.1.0",
   "packages": [
     {
-      "registryType": "oci",
-      "identifier": "ghcr.io/dengyier/openworkproof:rust-0.1.0",
+      "registryType": "mcpb",
+      "identifier": "https://github.com/dengyier/OpenWorkProof/releases/download/rust-v0.1.0/openworkproof-rust-macos-arm64.mcpb",
+      "fileSha256": "40cd5d5532f25b187c13e45e169484f519fb70873a83ad9d80b4fcb547365712",
       "transport": {
         "type": "stdio"
       }

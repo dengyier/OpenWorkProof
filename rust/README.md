@@ -4,25 +4,27 @@
 
 ## Install the Rust MCP server
 
-OpenWorkProof Rust 0.1.0 runs locally with Docker on x86-64 and ARM64. It
-provides six read-only tools for evidence digests, signature checks, public key
+OpenWorkProof Rust 0.1.0 runs locally on Apple Silicon Macs with macOS 11 or later.
+It provides six read-only tools for evidence digests, signature checks, public key
 fingerprints, signing domains, and schema lookup. The [Python MCP server](../MCP_SERVER.md)
 provides the complete tool set, including the SOC tools.
 
-Start Docker, then add the following to your MCP client's configuration:
+Download the [MCP bundle](https://github.com/dengyier/OpenWorkProof/releases/download/rust-v0.1.0/openworkproof-rust-macos-arm64.mcpb).
+Open it in a client that supports MCPB binary extensions. For clients with manual
+configuration, unzip the bundle and use the absolute path to the extracted binary:
 
 ```json
 {
   "mcpServers": {
     "openworkproof-rust": {
-      "command": "docker",
-      "args": ["run", "--rm", "-i", "--network", "none", "ghcr.io/dengyier/openworkproof:rust-0.1.0"]
+      "command": "/absolute/path/to/server/owp-rust",
+      "args": ["mcp"]
     }
   }
 }
 ```
 
-已安装 Docker 的用户可按上面的配置启动 Rust MCP。首次运行会从 GitHub 下载镜像，工具调用在本地执行。连接后调用 `owp_list_domains` 即可检查服务是否正常。使用验签工具时，请从自己的信任来源获取公钥。
+Apple Silicon Mac 用户可下载 MCPB 安装包，在支持该格式的客户端中打开。也可解压后按上述方式配置。连接后调用 `owp_list_domains` 即可检查服务是否正常。使用验签工具时，请从自己的信任来源获取公钥。
 
 ## 构建与运行
 
@@ -71,4 +73,4 @@ Rust 对可解析负载执行 8 MiB、10,000 节点和 128 层容器深度限制
 | 应用入口 | Rust CLI 和 6 个原生 MCP 工具可运行。原有 Python 应用 CLI 和其余 26 个 MCP 工具待迁移 |
 | 协议验证与工作流 | Schema 查询与固定摘要已迁移。数据模型与实例校验、身份绑定、权限判断、证据包、账本及验收流程待迁移 |
 | AI-SOC 和 Guard | SOC 具有独立的 JSON 与签名规则；SOC、Guard、执行适配器与外部集成待迁移 |
-| 运行环境 | 原生构建已验证 macOS arm64；容器发布在 Linux x86-64 和 ARM64 上运行 MCP 对照测试 |
+| 运行环境 | 原生构建及 MCP 安装包验证于 macOS arm64 |

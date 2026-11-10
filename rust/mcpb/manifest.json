@@ -1,0 +1,27 @@
+{
+  "manifest_version": "0.3",
+  "name": "openworkproof-rust",
+  "display_name": "OpenWorkProof Rust (Apple Silicon)",
+  "version": "0.1.0",
+  "description": "Six tools for evidence digests, signature checks, keys and schemas on Apple Silicon Macs.",
+  "author": {
+    "name": "dengyier & Tim Shing（成孝添）"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dengyier/OpenWorkProof"
+  },
+  "homepage": "https://github.com/dengyier/OpenWorkProof/tree/rust-v0.1.0/rust",
+  "license": "Apache-2.0",
+  "server": {
+    "type": "binary",
+    "entry_point": "server/owp-rust",
+    "mcp_config": {
+      "command": "${__dirname}/server/owp-rust",
+      "args": ["mcp"]
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin"]
+  }
+}
