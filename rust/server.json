@@ -1,0 +1,30 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.dengyier/OpenWorkProof-Rust",
+  "title": "OpenWorkProof Rust",
+  "description": "Native Rust MCP server with six tools for evidence digests, signature checks, keys and schemas.",
+  "repository": {
+    "url": "https://github.com/dengyier/OpenWorkProof",
+    "source": "github",
+    "subfolder": "rust"
+  },
+  "websiteUrl": "https://github.com/dengyier/OpenWorkProof/tree/owp-rust-v0.1.0/rust",
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/dengyier/openworkproof:rust-0.1.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ],
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "author": {
+        "name": "dengyier & Tim Shing（成孝添）"
+      },
+      "license": "Apache-2.0"
+    }
+  }
+}

@@ -1,0 +1,69 @@
+name: Release Rust MCP image
+
+on:
+  push:
+    tags: ['owp-rust-v*']
+
+env:
+  IMAGE: ghcr.io/dengyier/openworkproof
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build and test the Rust image
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#owp-rust-v}
+          python -c 'import sys,tomllib; assert tomllib.load(open("rust/Cargo.toml","rb"))["package"]["version"] == sys.argv[1]' "$version"
+          image="$IMAGE:rust-$version-${{ matrix.arch }}"
+          docker build --platform "linux/${{ matrix.arch }}" -f rust/Dockerfile -t "$image" .
+          printf 'RUST_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
+      - name: Verify the image through MCP stdio
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install .
+          launcher="$RUNNER_TEMP/owp-rust-container"
+          printf '#!/bin/sh\nexec docker run --rm -i --network none "%s"\n' "$RUST_IMAGE" > "$launcher"
+          chmod +x "$launcher"
+          python rust/tests/mcp_parity.py --python-mcp "$(command -v owp-mcp)" "$launcher"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: docker push "$RUST_IMAGE"
+  manifest:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish both tested architectures
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="$IMAGE:rust-${GITHUB_REF_NAME#owp-rust-v}"
+          docker buildx imagetools create -t "$image" "$image-amd64" "$image-arm64"
+          docker buildx imagetools inspect "$image"

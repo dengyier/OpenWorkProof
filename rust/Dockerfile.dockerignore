@@ -1,0 +1,9 @@
+*
+!LICENSE
+!rust/Cargo.toml
+!rust/Cargo.lock
+!rust/src/
+!rust/src/**
+!rust/tests/contracts.rs
+!src/openworkproof/schemas/
+!src/openworkproof/schemas/**
